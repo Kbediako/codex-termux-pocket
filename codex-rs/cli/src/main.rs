@@ -31,6 +31,8 @@ use codex_tui::update_action::UpdateAction;
 use codex_tui2 as tui2;
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
 use supports_color::Stream;
 
 mod mcp_cmd;
@@ -134,6 +136,10 @@ enum Subcommand {
 
     /// Inspect feature flags.
     Features(FeaturesCli),
+
+    /// Update Codex from source on Termux.
+    #[clap(name = "self-update", visible_alias = "update-self")]
+    SelfUpdate,
 }
 
 #[derive(Debug, Parser)]
@@ -654,6 +660,9 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 }
             }
         },
+        Some(Subcommand::SelfUpdate) => {
+            run_self_update()?;
+        }
     }
 
     Ok(())
@@ -789,33 +798,108 @@ fn print_completion(cmd: CompletionCommand) {
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 
+fn run_self_update() -> anyhow::Result<()> {
+    let prefix = std::env::var("PREFIX").unwrap_or_default();
+    if !prefix.contains("com.termux") {
+        anyhow::bail!(
+            "self-update is supported only on Termux (PREFIX must contain \"com.termux\")"
+        );
+    }
+
+    let src_dir = resolve_codex_src_dir()?;
+    if !src_dir.is_dir() {
+        anyhow::bail!(
+            "codex source directory does not exist: {}",
+            src_dir.display()
+        );
+    }
+
+    let workspace_dir = src_dir.join("codex-rs");
+    if !workspace_dir.is_dir() {
+        anyhow::bail!(
+            "codex workspace directory does not exist: {}",
+            workspace_dir.display()
+        );
+    }
+
+    let cli_dir = workspace_dir.join("cli");
+    if !cli_dir.is_dir() {
+        anyhow::bail!("codex CLI directory does not exist: {}", cli_dir.display());
+    }
+
+    let mut git_fetch = Command::new("git");
+    git_fetch.args(["fetch"]).current_dir(&src_dir);
+    run_command(&mut git_fetch, "git fetch")?;
+
+    let mut git_pull = Command::new("git");
+    git_pull.args(["pull", "--ff-only"]).current_dir(&src_dir);
+    run_command(&mut git_pull, "git pull --ff-only")?;
+
+    let mut cargo_install = Command::new("cargo");
+    cargo_install
+        .arg("install")
+        .arg("--path")
+        .arg(&cli_dir)
+        .arg("--root")
+        .arg(&prefix)
+        .arg("--force")
+        .current_dir(&workspace_dir);
+    run_command(
+        &mut cargo_install,
+        "cargo install --path <cli> --root <prefix> --force",
+    )?;
+
+    Ok(())
+}
+
+fn resolve_codex_src_dir() -> anyhow::Result<PathBuf> {
+    match std::env::var("CODEX_SRC_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => expand_home_dir(&dir),
+        _ => {
+            let home = std::env::var("HOME")
+                .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
+            Ok(PathBuf::from(home).join("codex"))
+        }
+    }
+}
+
+fn expand_home_dir(path: &str) -> anyhow::Result<PathBuf> {
+    if path == "~" {
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
+        return Ok(PathBuf::from(home));
+    }
+
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
+        return Ok(PathBuf::from(home).join(rest));
+    }
+
+    Ok(PathBuf::from(path))
+}
+
+fn run_command(command: &mut Command, label: &str) -> anyhow::Result<()> {
+    let status = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to run {label}: {err}"))?;
+
+    if !status.success() {
+        anyhow::bail!("{label} failed with status {status}");
+    }
+
+    Ok(())
+}
+
 fn command_with_version() -> clap::Command {
     MultitoolCli::command().version(resolve_cli_version())
 }
 
 fn resolve_cli_version() -> &'static str {
-    git_describe_version()
-        .map(|version| Box::leak(version.into_boxed_str()) as &str)
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-}
-
-fn git_describe_version() -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let version = String::from_utf8_lossy(&output.stdout);
-    let version = version.trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
+    option_env!("CODEX_CLI_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]
