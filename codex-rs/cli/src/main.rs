@@ -928,10 +928,29 @@ fn run_self_update() -> anyhow::Result<()> {
         .arg(&prefix)
         .arg("--force")
         .current_dir(&workspace_dir);
-    run_command(
+    if let Err(err) = run_command(
         &mut cargo_install,
         "cargo install --path <cli> --root <prefix> --force",
-    )?;
+    ) {
+        eprintln!(
+            "cargo install failed: {err}. Retrying with low-memory settings..."
+        );
+        let mut cargo_install = Command::new("cargo");
+        cargo_install
+            .arg("install")
+            .arg("--path")
+            .arg(&cli_dir)
+            .arg("--root")
+            .arg(&prefix)
+            .arg("--force")
+            .env("CARGO_PROFILE_RELEASE_LTO", "false")
+            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
+            .current_dir(&workspace_dir);
+        run_command(
+            &mut cargo_install,
+            "cargo install --path <cli> --root <prefix> --force (low-mem)",
+        )?;
+    }
 
     Ok(())
 }
