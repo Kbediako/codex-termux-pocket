@@ -43,6 +43,27 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+/// Best-effort attempt to open a URL in the user's browser.
+///
+/// On Android/Termux we prefer Termux's `termux-open-url` (Android intent wrapper).
+/// If this isn't available, we simply fall back to printing the URL in the UI.
+fn open_auth_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+
+    // Termux sets PREFIX like /data/data/com.termux/files/usr
+    let is_termux = std::env::var("PREFIX")
+        .map(|p| p.contains("com.termux"))
+        .unwrap_or(false);
+
+    if is_termux {
+        let _ = std::process::Command::new("termux-open-url")
+            .arg(url)
+            .spawn();
+    }
+}
+
 use super::onboarding_screen::StepState;
 
 mod headless_chatgpt_login;
@@ -692,6 +713,7 @@ impl AuthModeWidget {
                 let auth_manager = self.auth_manager.clone();
                 tokio::spawn(async move {
                     let auth_url = child.auth_url.clone();
+                    open_auth_url(&auth_url);
                     {
                         *sign_in_state.write().unwrap() =
                             SignInState::ChatGptContinueInBrowser(ContinueInBrowserState {
