@@ -17,6 +17,22 @@ use tokio::sync::Notify;
 use crate::shimmer::shimmer_spans;
 use crate::tui::FrameRequester;
 
+fn open_auth_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+
+    let is_termux = std::env::var("PREFIX")
+        .map(|p| p.contains("com.termux"))
+        .unwrap_or(false);
+
+    if is_termux {
+        let _ = std::process::Command::new("termux-open-url")
+            .arg(url)
+            .spawn();
+    }
+}
+
 use super::AuthModeWidget;
 use super::ContinueInBrowserState;
 use super::ContinueWithDeviceCodeState;
@@ -54,6 +70,7 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget, mut opts
                                     });
                             }
                             request_frame.schedule_frame();
+                            open_auth_url(&auth_url);
                             let r = child.block_until_done().await;
                             match r {
                                 Ok(()) => {
