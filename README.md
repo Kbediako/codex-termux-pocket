@@ -9,6 +9,24 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
+## Android / Termux (this fork)
+
+This fork is tuned for running Codex on Android with Termux:
+
+- Adds `codex self-update` (alias `update-self`) to pull upstream and rebuild locally.
+- Embeds the build version so `codex --version` reflects the git describe.
+- If a build runs out of memory, `self-update` retries with low-memory settings.
+
+Quick Termux flow:
+
+```shell
+git clone https://github.com/Kbediako/codex-termux-pocket.git ~/codex
+cd ~/codex
+codex self-update
+```
+
+You can set `CODEX_SRC_DIR` to point at a different source checkout.
+
 ## Quickstart
 
 ### Installing and running Codex CLI
