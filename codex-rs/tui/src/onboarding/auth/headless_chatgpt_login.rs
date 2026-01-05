@@ -12,6 +12,22 @@ use uuid::Uuid;
 
 use crate::shimmer::shimmer_spans;
 
+fn open_auth_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+
+    let is_termux = std::env::var("PREFIX")
+        .map(|p| p.contains("com.termux"))
+        .unwrap_or(false);
+
+    if is_termux {
+        let _ = std::process::Command::new("termux-open-url")
+            .arg(url)
+            .spawn();
+    }
+}
+
 use super::AuthModeWidget;
 use super::ContinueWithDeviceCodeState;
 use super::SignInState;
@@ -49,11 +65,12 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
                     ContinueWithDeviceCodeState::ready(
                         request_id.clone(),
                         login_id.clone(),
-                        verification_url,
+                        verification_url.clone(),
                         user_code,
                     ),
                 );
                 if updated {
+                    open_auth_url(&verification_url);
                     *error.write().unwrap() = None;
                 } else {
                     cancel_login_attempt(&request_handle, login_id).await;
