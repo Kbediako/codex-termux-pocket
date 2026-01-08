@@ -1,5 +1,9 @@
 # Rust/codex-rs
 
+## ExecPlans
+
+When writing complex features, long-running tasks, or significant refactors, use an ExecPlan as described in `PLANS.md`. If the user asks for an ExecPlan (or the work is clearly multi‑step and risky), create or update the ExecPlan and follow it from design through implementation, keeping it current as decisions and progress change.
+
 In the codex-rs folder where the rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`
