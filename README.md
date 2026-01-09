@@ -25,6 +25,23 @@ cd ~/codex
 codex self-update
 ```
 
+Latest alpha helper (optional):
+
+```shell
+mkdir -p ~/bin
+cp ~/codex/scripts/termux/codex-update-alpha ~/bin/
+chmod 700 ~/bin/codex-update-alpha
+
+# update to newest alpha tag (skips rebuild if already current)
+codex-update-alpha
+
+# check only
+codex-update-alpha --check
+
+# force rebuild
+codex-update-alpha --force
+```
+
 You can set `CODEX_SRC_DIR` to point at a different source checkout.
 
 ## Quickstart
