@@ -1,0 +1,118 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+CODEX_SRC_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/codex-target}"
+PUSH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.pushRemote || true)"
+stashed="no"
+force="no"
+check_only="no"
+
+usage() {
+  cat <<'USAGE'
+Usage: codex-update-alpha [--check] [--force]
+  --check  Only report whether a newer alpha tag exists.
+  --force  Rebuild even if already on the latest alpha tag.
+USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --check) check_only="yes" ;;
+    --force) force="yes" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [ ! -d "$CODEX_SRC_DIR/.git" ]; then
+  echo "Not a git repo: $CODEX_SRC_DIR" >&2
+  exit 1
+fi
+
+if [ -d "$CODEX_SRC_DIR/.git/rebase-merge" ] || [ -d "$CODEX_SRC_DIR/.git/rebase-apply" ]; then
+  echo "Rebase in progress in $CODEX_SRC_DIR; finish it first." >&2
+  exit 1
+fi
+
+branch="$(git -C "$CODEX_SRC_DIR" rev-parse --abbrev-ref HEAD)"
+if [ "$branch" != "main" ]; then
+  echo "Not on main (current: $branch). Switch to main before updating." >&2
+  exit 1
+fi
+
+git -C "$CODEX_SRC_DIR" fetch --prune --tags
+latest_tag="$(git -C "$CODEX_SRC_DIR" tag -l 'rust-v*-alpha.*' --sort=-v:refname | grep -v '^rust-vrust-' | head -n 1)"
+base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
+
+if [ -z "$latest_tag" ]; then
+  echo "No rust-v*-alpha.* tags found." >&2
+  exit 1
+fi
+
+echo "Latest alpha tag: $latest_tag"
+if [ -n "$base_tag" ]; then
+  echo "Current base tag: $base_tag"
+fi
+
+if [ "$check_only" = "yes" ]; then
+  if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ]; then
+    echo "Already on the latest alpha tag."
+    exit 0
+  fi
+  echo "Update available."
+  exit 1
+fi
+
+if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
+  echo "Already on latest alpha; skipping rebase/build. Use --force to rebuild."
+  codex --version || true
+  git -C "$CODEX_SRC_DIR" describe --tags --always || true
+  exit 0
+fi
+
+trap 'if [ "$stashed" = "yes" ]; then echo "Note: your changes are stashed; run: git -C \"$CODEX_SRC_DIR\" stash list" >&2; fi' EXIT
+
+if [ -n "$(git -C "$CODEX_SRC_DIR" status --porcelain)" ]; then
+  echo "Working tree dirty; stashing changes." >&2
+  git -C "$CODEX_SRC_DIR" stash push -u -m "auto-stash before alpha update $(date +%Y-%m-%d)"
+  stashed="yes"
+fi
+
+if [ -n "$base_tag" ]; then
+  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$base_tag"
+else
+  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" origin/main
+fi
+
+if [ -z "$PUSH_REMOTE" ]; then
+  if git -C "$CODEX_SRC_DIR" remote | grep -q '^termux-pocket$'; then
+    PUSH_REMOTE="termux-pocket"
+    git -C "$CODEX_SRC_DIR" config branch.main.pushRemote "$PUSH_REMOTE"
+  fi
+fi
+
+if [ -n "$PUSH_REMOTE" ]; then
+  git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
+else
+  echo "No pushRemote set; skipping push." >&2
+fi
+
+cd "$CODEX_SRC_DIR/codex-rs"
+CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+  CARGO_PROFILE_RELEASE_LTO=false \
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+  CARGO_BUILD_JOBS=1 \
+  cargo install --path cli --root "$PREFIX" --force
+
+codex --version
+git -C "$CODEX_SRC_DIR" describe --tags --always
+
+if [ "$stashed" = "yes" ]; then
+  if git -C "$CODEX_SRC_DIR" stash pop; then
+    stashed="no"
+  else
+    echo "Stash pop had conflicts; stash kept." >&2
+    exit 1
+  fi
+fi
