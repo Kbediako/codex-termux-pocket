@@ -4,6 +4,8 @@
 
 When writing complex features, long-running tasks, or significant refactors, use an ExecPlan as described in `PLANS.md`. If the user asks for an ExecPlan (or the work is clearly multi‑step and risky), create or update the ExecPlan and follow it from design through implementation, keeping it current as decisions and progress change.
 
+If this repo lacks `PLANS.md` or an ExecPlans section in `AGENTS.md`, add them by copying `~/.codex/PLANS.md` and noting the change. `~/.codex/PLANS.md` is the global template only; if the user requests a cross-repo/global plan, use `~/.codex/EXEC_PLAN.md`.
+
 In the codex-rs folder where the rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`
