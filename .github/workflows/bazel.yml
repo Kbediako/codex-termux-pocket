@@ -40,6 +40,7 @@ jobs:
           #- os: windows-latest
           #  target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
+    if: github.repository == 'openai/codex'
 
     # Configure a human readable name for each job
     name: Local Bazel build on ${{ matrix.os }} for ${{ matrix.target }}
