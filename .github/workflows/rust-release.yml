@@ -18,6 +18,7 @@ concurrency:
 jobs:
   tag-check:
     runs-on: ubuntu-latest
+    if: github.repository == 'openai/codex'
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.92
@@ -58,6 +59,7 @@ jobs:
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    if: github.repository == 'openai/codex'
     timeout-minutes: 60
     permissions:
       contents: read
