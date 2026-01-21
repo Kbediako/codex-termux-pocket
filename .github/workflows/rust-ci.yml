@@ -8,6 +8,7 @@ jobs:
   changed:
     name: Detect changed areas
     runs-on: ubuntu-24.04
+    if: github.repository == 'openai/codex'
     outputs:
       argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
       argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
@@ -56,7 +57,7 @@ jobs:
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -72,7 +73,7 @@ jobs:
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -190,7 +191,7 @@ jobs:
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
-    if: always()
+    if: ${{ github.repository == 'openai/codex' && always() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize

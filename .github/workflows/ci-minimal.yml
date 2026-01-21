@@ -1,0 +1,26 @@
+name: ci-minimal
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+jobs:
+  rust:
+    name: Rust checks (fork)
+    runs-on: ubuntu-latest
+    if: github.repository != 'openai/codex'
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.92
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        run: cargo fmt -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo test
+        run: cargo test --all-features
