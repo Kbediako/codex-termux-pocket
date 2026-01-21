@@ -13,6 +13,7 @@ jobs:
   changed:
     name: Detect changed areas
     runs-on: ubuntu-24.04
+    if: github.repository == 'openai/codex'
     outputs:
       argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
       argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
@@ -61,7 +62,7 @@ jobs:
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -77,7 +78,7 @@ jobs:
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -136,7 +137,7 @@ jobs:
     timeout-minutes: 30
     needs: changed
     # Keep job-level if to avoid spinning up runners when not needed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -501,7 +502,7 @@ jobs:
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 30
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -705,7 +706,7 @@ jobs:
     name: CI results (required)
     needs:
       [changed, general, cargo_shear, argument_comment_lint, lint_build, tests]
-    if: always()
+    if: ${{ github.repository == 'openai/codex' && always() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize
