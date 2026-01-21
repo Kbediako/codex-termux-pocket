@@ -44,6 +44,7 @@ jobs:
           #   target: aarch64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
+    if: github.repository == 'openai/codex'
 
     # Configure a human readable name for each job
     name: Bazel test on ${{ matrix.os }} for ${{ matrix.target }}
