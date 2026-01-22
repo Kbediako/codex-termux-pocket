@@ -58,6 +58,7 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
                 verification_url,
                 user_code,
             }) => {
+                open_auth_url(&verification_url);
                 let updated = set_device_code_state_for_active_attempt(
                     &sign_in_state,
                     &request_frame,
@@ -70,7 +71,6 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
                     ),
                 );
                 if updated {
-                    open_auth_url(&verification_url);
                     *error.write().unwrap() = None;
                 } else {
                     cancel_login_attempt(&request_handle, login_id).await;
