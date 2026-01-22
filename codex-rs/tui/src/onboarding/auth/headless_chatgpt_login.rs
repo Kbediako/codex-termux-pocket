@@ -62,6 +62,7 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget, mut opts
                     match run_login_server(opts) {
                         Ok(child) => {
                             let auth_url = child.auth_url.clone();
+                            open_auth_url(&auth_url);
                             {
                                 *sign_in_state.write().unwrap() =
                                     SignInState::ChatGptContinueInBrowser(ContinueInBrowserState {
@@ -70,7 +71,6 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget, mut opts
                                     });
                             }
                             request_frame.schedule_frame();
-                            open_auth_url(&auth_url);
                             let r = child.block_until_done().await;
                             match r {
                                 Ok(()) => {
