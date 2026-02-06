@@ -211,7 +211,19 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.try_lock()?;
+    match lock_file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "arg0 helper directory lock is already held",
+            ));
+        }
+        // Android/Termux can report file-locking as unsupported; proceed without
+        // locking so PATH helper aliases still work.
+        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(std::fs::TryLockError::Error(err)) => return Err(err),
+    }
 
     for filename in &[
         APPLY_PATCH_ARG0,
@@ -305,7 +317,12 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
     match lock_file.try_lock() {
         Ok(()) => Ok(Some(lock_file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(err) => Err(err.into()),
+        // If locking is unsupported on this platform, avoid deleting dirs that
+        // might be in use by another process.
+        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+            Ok(None)
+        }
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
     }
 }
 
