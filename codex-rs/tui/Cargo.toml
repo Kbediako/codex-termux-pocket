@@ -120,7 +120,7 @@ codex-windows-sandbox = { workspace = true }
 tokio-util = { workspace = true, features = ["time"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-cpal = "0.15"
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
