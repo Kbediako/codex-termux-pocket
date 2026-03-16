@@ -1,12 +1,12 @@
 <p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.</p>
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+
+If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE</a>.<br />
+If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.<br />
+If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.
 
 ---
 
@@ -14,25 +14,27 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 This fork is tuned for running Codex on Android with Termux:
 
-- Adds `codex self-update` (alias `update-self`) to pull upstream and rebuild locally.
+- Adds `codex self-update` (alias `update-self`) to rebuild from a local source checkout on Termux.
 - Embeds the build version so `codex --version` reflects the git describe.
 - If a build runs out of memory, `self-update` retries with low-memory settings.
 
-Quick Termux flow:
+Recommended Termux flow for this fork:
 
 ```shell
 git clone https://github.com/Kbediako/codex-termux-pocket.git ~/codex
-cd ~/codex
-codex self-update
-```
-
-Latest alpha helper (optional):
-
-```shell
 mkdir -p ~/bin
 cp ~/codex/scripts/termux/codex-update-alpha ~/bin/
 chmod 700 ~/bin/codex-update-alpha
+codex-update-alpha
+```
 
+`codex-update-alpha` is the preferred updater for this rebased fork. It fetches the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, and rebuilds with the low-memory install settings this device needs.
+
+`codex self-update` is still useful when your local checkout can fast-forward cleanly and you only want to rebuild from source without the alpha-tag rebase workflow.
+
+Alpha helper commands:
+
+```shell
 # update to newest alpha tag (skips rebuild if already current)
 codex-update-alpha
 
@@ -43,7 +45,7 @@ codex-update-alpha --check
 codex-update-alpha --force
 ```
 
-You can set `CODEX_SRC_DIR` to point at a different source checkout.
+By default, both update paths expect the source checkout at `~/codex`. You can set `CODEX_SRC_DIR` to point at a different source tree.
 
 ## Quickstart
 
