@@ -4,6 +4,7 @@ set -eu
 CODEX_SRC_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/codex-target}"
 PUSH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.pushRemote || true)"
+FETCH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.remote || printf '%s' origin)"
 stashed="no"
 force="no"
 check_only="no"
@@ -41,9 +42,35 @@ if [ "$branch" != "main" ]; then
   exit 1
 fi
 
-git -C "$CODEX_SRC_DIR" fetch --prune --tags
-latest_tag="$(git -C "$CODEX_SRC_DIR" tag -l 'rust-v*-alpha.*' --sort=-v:refname | grep -v '^rust-vrust-' | head -n 1)"
 base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
+
+if [ "$check_only" = "yes" ]; then
+  latest_tag="$(
+    git -C "$CODEX_SRC_DIR" ls-remote --tags "$FETCH_REMOTE" 'rust-v*-alpha.*' \
+      | awk '{print $2}' \
+      | sed 's#refs/tags/##; s#\^{}##' \
+      | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' \
+      | sort -V \
+      | tail -n 1
+  )"
+  if [ -z "$latest_tag" ]; then
+    echo "No rust-v*-alpha.* tags found on $FETCH_REMOTE." >&2
+    exit 1
+  fi
+  echo "Latest alpha tag: $latest_tag"
+  if [ -n "$base_tag" ]; then
+    echo "Current base tag: $base_tag"
+  fi
+  if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ]; then
+    echo "Already on the latest alpha tag."
+    exit 0
+  fi
+  echo "Update available."
+  exit 1
+fi
+
+git -C "$CODEX_SRC_DIR" fetch --prune "$FETCH_REMOTE" main 'refs/tags/rust-v*:refs/tags/rust-v*'
+latest_tag="$(git -C "$CODEX_SRC_DIR" tag -l 'rust-v*-alpha.*' --sort=-v:refname | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' | head -n 1)"
 
 if [ -z "$latest_tag" ]; then
   echo "No rust-v*-alpha.* tags found." >&2
@@ -53,15 +80,6 @@ fi
 echo "Latest alpha tag: $latest_tag"
 if [ -n "$base_tag" ]; then
   echo "Current base tag: $base_tag"
-fi
-
-if [ "$check_only" = "yes" ]; then
-  if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ]; then
-    echo "Already on the latest alpha tag."
-    exit 0
-  fi
-  echo "Update available."
-  exit 1
 fi
 
 if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
@@ -82,7 +100,7 @@ fi
 if [ -n "$base_tag" ]; then
   git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$base_tag"
 else
-  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" origin/main
+  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$FETCH_REMOTE/main"
 fi
 
 if [ -z "$PUSH_REMOTE" ]; then

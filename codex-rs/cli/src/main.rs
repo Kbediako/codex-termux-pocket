@@ -1310,6 +1310,9 @@ fn run_self_update() -> anyhow::Result<()> {
     if !cli_dir.is_dir() {
         anyhow::bail!("codex CLI directory does not exist: {}", cli_dir.display());
     }
+    let home =
+        std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
+    let cargo_target_dir = PathBuf::from(home).join(".cache").join("codex-target");
 
     let mut git_fetch = Command::new("git");
     git_fetch.args(["fetch"]).current_dir(&src_dir);
@@ -1327,30 +1330,15 @@ fn run_self_update() -> anyhow::Result<()> {
         .arg("--root")
         .arg(&prefix)
         .arg("--force")
+        .env("CARGO_TARGET_DIR", &cargo_target_dir)
+        .env("CARGO_PROFILE_RELEASE_LTO", "false")
+        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
+        .env("CARGO_BUILD_JOBS", "1")
         .current_dir(&workspace_dir);
-    if let Err(err) = run_command(
+    run_command(
         &mut cargo_install,
-        "cargo install --path <cli> --root <prefix> --force",
-    ) {
-        eprintln!(
-            "cargo install failed: {err}. Retrying with low-memory settings..."
-        );
-        let mut cargo_install = Command::new("cargo");
-        cargo_install
-            .arg("install")
-            .arg("--path")
-            .arg(&cli_dir)
-            .arg("--root")
-            .arg(&prefix)
-            .arg("--force")
-            .env("CARGO_PROFILE_RELEASE_LTO", "false")
-            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
-            .current_dir(&workspace_dir);
-        run_command(
-            &mut cargo_install,
-            "cargo install --path <cli> --root <prefix> --force (low-mem)",
-        )?;
-    }
+        "cargo install --path <cli> --root <prefix> --force (termux low-mem)",
+    )?;
 
     Ok(())
 }
