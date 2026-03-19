@@ -16,7 +16,7 @@ This fork is tuned for running Codex on Android with Termux:
 
 - Adds `codex self-update` (alias `update-self`) to rebuild from a local source checkout on Termux.
 - Embeds the build version so `codex --version` reflects the git describe.
-- If a build runs out of memory, `self-update` retries with low-memory settings.
+- `self-update` uses the low-memory Termux build profile by default.
 
 Recommended Termux flow for this fork:
 
@@ -28,9 +28,9 @@ chmod 700 ~/bin/codex-update-alpha
 codex-update-alpha
 ```
 
-`codex-update-alpha` is the preferred updater for this rebased fork. It fetches the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, and rebuilds with the low-memory install settings this device needs.
+`codex-update-alpha` is the preferred updater for this rebased fork. It checks the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, and rebuilds with the low-memory install settings this device needs.
 
-`codex self-update` is still useful when your local checkout can fast-forward cleanly and you only want to rebuild from source without the alpha-tag rebase workflow.
+`codex self-update` is still useful when your local checkout can fast-forward cleanly and you only want to rebuild from source without the alpha-tag rebase workflow. On Termux it now uses the same low-memory target-dir/build-job settings up front.
 
 Alpha helper commands:
 
@@ -38,7 +38,7 @@ Alpha helper commands:
 # update to newest alpha tag (skips rebuild if already current)
 codex-update-alpha
 
-# check only
+# check only (tag query only; no full branch fetch)
 codex-update-alpha --check
 
 # force rebuild
