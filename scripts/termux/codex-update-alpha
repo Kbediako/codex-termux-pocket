@@ -205,6 +205,13 @@ ensure_push_remote() {
 lookup_patch_classification() {
   commit_subject="$1"
 
+  case "$commit_subject" in
+    termux:\ audit\ *)
+      printf 'tooling\tPatch-audit maintenance only.\n'
+      return
+      ;;
+  esac
+
   if [ ! -f "$PATCH_AUDIT_FILE" ]; then
     printf 'unknown\tMissing patch audit file: %s\n' "$PATCH_AUDIT_FILE"
     return
