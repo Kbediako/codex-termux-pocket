@@ -4,9 +4,9 @@ This fork now supports three install paths for mobile updates:
 
 - `artifact`: install the upstream ARM64 musl alpha binary when the local patch audit says it is safe.
 - `remote-artifact`: download a fork-built ARM64 musl artifact from GitHub Actions.
-- `source`: fall back to the local low-memory Cargo build.
+- `source`: retry the local low-memory Cargo build only when explicitly opted in.
 
-`codex-update-alpha --mode auto` picks the quickest safe path in that order.
+`codex-update-alpha --mode auto` picks the quickest safe path in that order, but the source path is disabled by default on Termux because the Android-targeted Cargo build still fails at the final V8 link.
 
 ## Why the patch audit exists
 
@@ -18,7 +18,7 @@ diverge from the checked-out fork in ways that matter on device.
 The file [`scripts/termux/patch_audit.tsv`](/data/data/com.termux/files/home/codex/scripts/termux/patch_audit.tsv)
 classifies local commits after the current alpha base as:
 
-- `runtime-critical`: upstream artifacts are blocked; use the fork remote artifact or source build.
+- `runtime-critical`: upstream artifacts are blocked; use the fork remote artifact.
 - `build-only`: only affects local source builds.
 - `tooling` / `docs`: helper or documentation changes only.
 
@@ -44,10 +44,10 @@ Force an upstream release-asset install when the patch audit allows it:
 codex-update-alpha --mode artifact --force
 ```
 
-Force a local source rebuild:
+Retry the local source rebuild experimentally:
 
 ```sh
-codex-update-alpha --mode source --force
+CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 codex-update-alpha --mode source --force
 ```
 
 Build and install a fork artifact for a branch, tag, or commit SHA:
@@ -86,7 +86,17 @@ and waits for the matching run before installing the resulting binary.
 
 ## Recovery
 
-- If `artifact` mode fails in `auto`, the helper falls back to `source`.
-- If `remote-artifact` mode fails in `auto`, the helper falls back to `source`.
+- If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available.
+- If no artifact path is usable, the helper refuses the local source build by default and tells you to use `remote-artifact` or opt into `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
 - The helper validates candidate binaries before replacing `$PREFIX/bin/codex`.
 - Dirty working trees are auto-stashed before the rebase/update path and restored afterward.
+
+## Source fallback status
+
+A fresh benchmark on 2026-04-10 established the current boundary:
+
+- unlocked local `cargo install --path cli` drifted to incompatible crate versions after about 5997 seconds
+- `--locked` without V8 overrides failed earlier because upstream no longer publishes the Android-targeted `rusty_v8` archive URL that `v8` expects
+- `--locked` with the pinned OpenAI musl archive and binding pair reached the final `codex` binary link, then failed on unresolved V8/ABI symbols (`bcmp`, `__errno_location`) against the Android target
+
+That means the source path is still useful as an experimental diagnostic tool, but it is no longer part of the default fast-path story for Termux.

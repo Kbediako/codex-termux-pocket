@@ -30,11 +30,17 @@ Usage: codex-update-alpha [--check] [--force] [--mode auto|artifact|source|remot
   --check                 Only report whether a newer alpha tag exists.
   --force                 Reinstall even if already on the selected alpha tag.
   --mode MODE            auto chooses the quickest safe path:
-                         upstream artifact -> fork remote artifact -> source build.
+                         upstream artifact -> fork remote artifact -> experimental source build.
   --tag TAG              Install or build a specific rust-vX.Y.Z-alpha.N tag.
   --remote-ref REF       Build and install a fork artifact for REF via GitHub Actions.
                          This is valid only with --mode remote-artifact.
   --remote-timeout SEC   Wait time for remote artifact builds (default: 1800).
+
+Environment:
+  CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1
+                         Retry the local Cargo source fallback experimentally.
+                         By default it is disabled on Termux because the Android
+                         target still fails at the final V8 link.
 USAGE
 }
 
@@ -113,6 +119,62 @@ if [ "$check_only" != "yes" ]; then
     exit 1
   fi
 fi
+
+TERMUX_V8_ARCHIVE_URL=""
+TERMUX_V8_BINDING_PATH=""
+
+resolve_termux_v8_version() {
+  awk '
+    $0 == "[[package]]" { in_v8 = 0; next }
+    $0 == "name = \"v8\"" { in_v8 = 1; next }
+    in_v8 && $0 ~ /^version = "/ {
+      sub(/^version = "/, "", $0)
+      sub(/"$/, "", $0)
+      print
+      exit
+    }
+  ' "$CODEX_SRC_DIR/codex-rs/Cargo.lock"
+}
+
+prepare_termux_v8_musl_overrides() {
+  v8_version="$(resolve_termux_v8_version)"
+  if [ -z "$v8_version" ]; then
+    echo "Failed to resolve the pinned v8 crate version from codex-rs/Cargo.lock." >&2
+    exit 1
+  fi
+
+  v8_target="aarch64-unknown-linux-musl"
+  v8_release_tag="rusty-v8-v${v8_version}"
+  v8_cache_dir="$CARGO_TARGET_DIR/v8/v${v8_version}"
+  TERMUX_V8_BINDING_PATH="$v8_cache_dir/src_binding_release_${v8_target}.rs"
+  TERMUX_V8_ARCHIVE_URL="https://github.com/openai/codex/releases/download/${v8_release_tag}/librusty_v8_release_${v8_target}.a.gz"
+  v8_binding_url="https://github.com/openai/codex/releases/download/${v8_release_tag}/src_binding_release_${v8_target}.rs"
+
+  mkdir -p "$v8_cache_dir"
+  if [ ! -f "$TERMUX_V8_BINDING_PATH" ]; then
+    curl -fsSL "$v8_binding_url" -o "$TERMUX_V8_BINDING_PATH"
+  fi
+
+  echo "Using OpenAI musl rusty_v8 release pair ${v8_release_tag}."
+}
+
+termux_source_fallback_allowed() {
+  [ "${CODEX_TERMUX_ALLOW_SOURCE_FALLBACK:-0}" = "1" ]
+}
+
+termux_source_fallback_message() {
+  cat >&2 <<'EOF'
+Local Termux source fallback is disabled by default.
+
+Benchmark on 2026-04-10 reached the final `codex` link and failed with V8/ABI
+symbols that are still unavailable to the Android target (`bcmp`,
+`__errno_location`) even when using the pinned OpenAI musl rusty_v8 pair.
+
+Use `codex-update-alpha --mode remote-artifact` for fork changes, or set
+`CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` to retry the local Cargo build
+experimentally.
+EOF
+}
 
 resolve_latest_tag_remote() {
   git -C "$CODEX_SRC_DIR" ls-remote --tags "$FETCH_REMOTE" 'rust-v*-alpha.*' \
@@ -440,13 +502,21 @@ install_remote_artifact_from_run() {
 }
 
 run_source_build() {
+  if ! termux_source_fallback_allowed; then
+    termux_source_fallback_message
+    return 1
+  fi
+
   echo "Building from source with the low-memory Termux profile."
+  prepare_termux_v8_musl_overrides
   cd "$CODEX_SRC_DIR/codex-rs"
   CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     CARGO_PROFILE_RELEASE_LTO=false \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
     CARGO_BUILD_JOBS=1 \
-    cargo install --path cli --root "$PREFIX" --force
+    RUSTY_V8_ARCHIVE="$TERMUX_V8_ARCHIVE_URL" \
+    RUSTY_V8_SRC_BINDING_PATH="$TERMUX_V8_BINDING_PATH" \
+    cargo install --locked --path cli --root "$PREFIX" --force
   echo "Installed via source build."
   codex --version
 }
