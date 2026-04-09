@@ -1,34 +1,485 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+. "$SCRIPT_DIR/termux-mobile-lib.sh"
+
 CODEX_SRC_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/codex-target}"
-PUSH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.pushRemote || true)"
-FETCH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.remote || printf '%s' origin)"
+PATCH_AUDIT_FILE="${PATCH_AUDIT_FILE:-$SCRIPT_DIR/patch_audit.tsv}"
+REMOTE_WORKFLOW_FILE="termux-mobile-artifact.yml"
+REMOTE_ARTIFACT_NAME="codex-termux-aarch64-unknown-linux-musl"
+PUSH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.pushRemote 2>/dev/null || true)"
+FETCH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.remote 2>/dev/null || printf '%s' origin)"
 stashed="no"
 force="no"
 check_only="no"
+mode="auto"
+target_tag=""
+remote_timeout="1800"
+remote_ref=""
+selected_mode=""
+latest_tag=""
+base_tag=""
+branch=""
 
 usage() {
   cat <<'USAGE'
-Usage: codex-update-alpha [--check] [--force]
-  --check  Only report whether a newer alpha tag exists.
-  --force  Rebuild even if already on the latest alpha tag.
+Usage: codex-update-alpha [--check] [--force] [--mode auto|artifact|source|remote-artifact] [--tag TAG] [--remote-ref REF] [--remote-timeout SECONDS]
+  --check                 Only report whether a newer alpha tag exists.
+  --force                 Reinstall even if already on the selected alpha tag.
+  --mode MODE            auto chooses the quickest safe path:
+                         upstream artifact -> fork remote artifact -> source build.
+  --tag TAG              Install or build a specific rust-vX.Y.Z-alpha.N tag.
+  --remote-ref REF       Build and install a fork artifact for REF via GitHub Actions.
+                         This is valid only with --mode remote-artifact.
+  --remote-timeout SEC   Wait time for remote artifact builds (default: 1800).
 USAGE
 }
 
-for arg in "$@"; do
-  case "$arg" in
-    --check) check_only="yes" ;;
-    --force) force="yes" ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown argument: $arg" >&2; usage; exit 2 ;;
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check)
+      check_only="yes"
+      shift 1
+      ;;
+    --force)
+      force="yes"
+      shift 1
+      ;;
+    --mode)
+      mode="${2:-}"
+      shift 2
+      ;;
+    --tag)
+      target_tag="${2:-}"
+      shift 2
+      ;;
+    --remote-ref)
+      remote_ref="${2:-}"
+      shift 2
+      ;;
+    --remote-timeout)
+      remote_timeout="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
   esac
 done
+
+case "$mode" in
+  auto|artifact|source|remote-artifact) ;;
+  *)
+    echo "Unknown mode: $mode" >&2
+    usage
+    exit 2
+    ;;
+esac
+
+case "$remote_timeout" in
+  *[!0-9]*|'')
+    echo "--remote-timeout must be an integer number of seconds." >&2
+    exit 2
+    ;;
+esac
+
+if [ -n "$remote_ref" ] && [ "$mode" != "remote-artifact" ]; then
+  echo "--remote-ref is supported only with --mode remote-artifact." >&2
+  exit 2
+fi
+
+if [ "$check_only" = "yes" ] && [ -n "$remote_ref" ]; then
+  echo "--check cannot be combined with --remote-ref." >&2
+  exit 2
+fi
 
 if [ ! -d "$CODEX_SRC_DIR/.git" ]; then
   echo "Not a git repo: $CODEX_SRC_DIR" >&2
   exit 1
+fi
+
+if [ "$check_only" != "yes" ]; then
+  if [ -z "${PREFIX:-}" ] || ! printf '%s\n' "$PREFIX" | grep -q 'com.termux'; then
+    echo "PREFIX must point at a Termux installation." >&2
+    exit 1
+  fi
+fi
+
+resolve_latest_tag_remote() {
+  git -C "$CODEX_SRC_DIR" ls-remote --tags "$FETCH_REMOTE" 'rust-v*-alpha.*' \
+    | awk '{print $2}' \
+    | sed 's#refs/tags/##; s#\^{}##' \
+    | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' \
+    | sort -V \
+    | tail -n 1
+}
+
+resolve_target_tag() {
+  if [ -n "$target_tag" ]; then
+    printf '%s\n' "$target_tag"
+    return
+  fi
+  resolve_latest_tag_remote
+}
+
+ensure_push_remote() {
+  if [ -z "$PUSH_REMOTE" ]; then
+    if git -C "$CODEX_SRC_DIR" remote | grep -q '^termux-pocket$'; then
+      PUSH_REMOTE="termux-pocket"
+      git -C "$CODEX_SRC_DIR" config branch.main.pushRemote "$PUSH_REMOTE"
+    fi
+  fi
+}
+
+lookup_patch_classification() {
+  commit_subject="$1"
+
+  if [ ! -f "$PATCH_AUDIT_FILE" ]; then
+    printf 'unknown\tMissing patch audit file: %s\n' "$PATCH_AUDIT_FILE"
+    return
+  fi
+
+  while IFS="$(printf '\t')" read -r match_kind match_value classification reason; do
+    case "$match_kind" in
+      ''|'#'*) continue ;;
+    esac
+    if [ "$match_kind" = "subject" ] && [ "$match_value" = "$commit_subject" ]; then
+      printf '%s\t%s\n' "$classification" "$reason"
+      return
+    fi
+  done < "$PATCH_AUDIT_FILE"
+
+  printf 'unknown\tNo audit entry for commit subject.\n'
+}
+
+audit_patch_stack() {
+  audit_subjects_file="$(mktemp)"
+  git -C "$CODEX_SRC_DIR" log --format=%s "${latest_tag}..HEAD" > "$audit_subjects_file"
+
+  if [ ! -s "$audit_subjects_file" ]; then
+    echo "Patch audit: no local commits beyond ${latest_tag}."
+    rm -f "$audit_subjects_file"
+    return 0
+  fi
+
+  echo "Patch audit for local commits beyond ${latest_tag}:"
+  allow_upstream_artifact="yes"
+
+  while IFS= read -r commit_subject; do
+    lookup_result="$(lookup_patch_classification "$commit_subject")"
+    classification="${lookup_result%%	*}"
+    reason="${lookup_result#*	}"
+    echo "  - ${classification}: ${commit_subject}"
+    echo "    ${reason}"
+
+    case "$classification" in
+      runtime-critical|unknown)
+        allow_upstream_artifact="no"
+        ;;
+    esac
+  done < "$audit_subjects_file"
+
+  rm -f "$audit_subjects_file"
+
+  if [ "$allow_upstream_artifact" = "yes" ]; then
+    return 0
+  fi
+  return 1
+}
+
+resolve_remote_repo_slug() {
+  ensure_push_remote
+  if [ -z "$PUSH_REMOTE" ]; then
+    return 1
+  fi
+  git_remote_repo_slug "$CODEX_SRC_DIR" "$PUSH_REMOTE"
+}
+
+resolve_remote_ref_sha() {
+  ref_name="$1"
+  resolved_sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${ref_name}^{commit}" 2>/dev/null || true)"
+  if [ -n "$resolved_sha" ]; then
+    printf '%s\n' "$resolved_sha"
+    return
+  fi
+
+  ensure_push_remote
+  if [ -z "$PUSH_REMOTE" ]; then
+    return 1
+  fi
+
+  git -C "$CODEX_SRC_DIR" ls-remote "$PUSH_REMOTE" "$ref_name" "refs/heads/$ref_name" "refs/tags/$ref_name" \
+    | awk 'NR == 1 { print $1 }'
+}
+
+wait_for_remote_run() {
+  repo_slug="$1"
+  expected_sha="$2"
+  expected_event="$3"
+  timeout_seconds="$4"
+
+  started_at="$(date +%s)"
+
+  while :; do
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,headSha,status,conclusion,event --template '{{range .}}{{.databaseId}}{{"\t"}}{{.headSha}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+
+    matched_run_id=""
+    matched_status=""
+    matched_conclusion=""
+
+    if [ -n "$run_lines" ]; then
+      old_ifs="$IFS"
+      IFS='
+'
+      for run_line in $run_lines; do
+        IFS="$(printf '\t')"
+        set -- $run_line
+        IFS='
+'
+        run_id="${1:-}"
+        run_sha="${2:-}"
+        run_status="${3:-}"
+        run_conclusion="${4:-}"
+        run_event="${5:-}"
+
+        if [ "$run_sha" = "$expected_sha" ] && [ "$run_event" = "$expected_event" ]; then
+          matched_run_id="$run_id"
+          matched_status="$run_status"
+          matched_conclusion="$run_conclusion"
+          break
+        fi
+      done
+      IFS="$old_ifs"
+    fi
+
+    if [ -n "$matched_run_id" ]; then
+      case "$matched_status" in
+        completed)
+          if [ "$matched_conclusion" = "success" ]; then
+            printf '%s\n' "$matched_run_id"
+            return 0
+          fi
+          echo "Remote artifact workflow failed for ${expected_sha} (run ${matched_run_id}, conclusion=${matched_conclusion:-unknown})." >&2
+          return 1
+          ;;
+        *)
+          echo "Waiting for remote artifact workflow run ${matched_run_id} (${matched_status})..."
+          ;;
+      esac
+    else
+      echo "Waiting for remote artifact workflow to appear for ${expected_sha}..."
+    fi
+
+    now="$(date +%s)"
+    if [ $((now - started_at)) -ge "$timeout_seconds" ]; then
+      echo "Timed out waiting for remote artifact workflow for ${expected_sha}." >&2
+      return 1
+    fi
+
+    sleep 15
+  done
+}
+
+wait_for_remote_run_since() {
+  repo_slug="$1"
+  expected_event="$2"
+  earliest_created_at="$3"
+  timeout_seconds="$4"
+
+  started_at="$(date +%s)"
+
+  while :; do
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,createdAt,status,conclusion,event --template '{{range .}}{{.databaseId}}{{"\t"}}{{.createdAt}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+
+    matched_run_id=""
+    matched_status=""
+    matched_conclusion=""
+
+    if [ -n "$run_lines" ]; then
+      old_ifs="$IFS"
+      IFS='
+'
+      for run_line in $run_lines; do
+        IFS="$(printf '\t')"
+        set -- $run_line
+        IFS='
+'
+        run_id="${1:-}"
+        run_created_at="${2:-}"
+        run_status="${3:-}"
+        run_conclusion="${4:-}"
+        run_event="${5:-}"
+
+        if [ "$run_event" = "$expected_event" ] && [ "$run_created_at" \> "$earliest_created_at" ]; then
+          matched_run_id="$run_id"
+          matched_status="$run_status"
+          matched_conclusion="$run_conclusion"
+          break
+        fi
+      done
+      IFS="$old_ifs"
+    fi
+
+    if [ -n "$matched_run_id" ]; then
+      case "$matched_status" in
+        completed)
+          if [ "$matched_conclusion" = "success" ]; then
+            printf '%s\n' "$matched_run_id"
+            return 0
+          fi
+          echo "Remote artifact workflow failed after dispatch (run ${matched_run_id}, conclusion=${matched_conclusion:-unknown})." >&2
+          return 1
+          ;;
+        *)
+          echo "Waiting for dispatched remote artifact workflow run ${matched_run_id} (${matched_status})..."
+          ;;
+      esac
+    else
+      echo "Waiting for dispatched remote artifact workflow to appear..."
+    fi
+
+    now="$(date +%s)"
+    if [ $((now - started_at)) -ge "$timeout_seconds" ]; then
+      echo "Timed out waiting for the dispatched remote artifact workflow." >&2
+      return 1
+    fi
+
+    sleep 15
+  done
+}
+
+install_candidate_binary() {
+  candidate_binary="$1"
+  mode_name="$2"
+
+  run_codex_smoke_checks "$candidate_binary"
+  install_codex_binary "$candidate_binary" "$PREFIX/bin/codex"
+  echo "Installed via ${mode_name}."
+  codex --version
+}
+
+install_upstream_artifact() {
+  temp_dir="$(mktemp -d)"
+  cleanup_artifact() {
+    rm -rf "$temp_dir"
+  }
+  trap cleanup_artifact EXIT INT TERM
+
+  candidate_binary="$(download_upstream_release_binary "$latest_tag" "$temp_dir")"
+  install_candidate_binary "$candidate_binary" "upstream release artifact"
+
+  trap - EXIT INT TERM
+  cleanup_artifact
+}
+
+dispatch_remote_artifact_workflow() {
+  repo_slug="$1"
+  source_ref="$2"
+  echo "Dispatching remote artifact build for ${source_ref} on ${repo_slug}."
+  gh workflow run "$REMOTE_WORKFLOW_FILE" --repo "$repo_slug" --ref main -f source_ref="$source_ref" >/dev/null
+}
+
+install_remote_artifact_from_run() {
+  repo_slug="$1"
+  run_id="$2"
+  expected_sha="${3:-}"
+
+  temp_dir="$(mktemp -d)"
+  cleanup_artifact() {
+    rm -rf "$temp_dir"
+  }
+  trap cleanup_artifact EXIT INT TERM
+
+  gh run download "$run_id" --repo "$repo_slug" --name "$REMOTE_ARTIFACT_NAME" --dir "$temp_dir" >/dev/null
+  archive_path="${temp_dir}/${REMOTE_ARTIFACT_NAME}.tar.gz"
+  metadata_path="${temp_dir}/metadata.json"
+
+  if [ ! -f "$archive_path" ]; then
+    echo "Missing downloaded remote artifact archive: $archive_path" >&2
+    exit 1
+  fi
+
+  tar -xzf "$archive_path" -C "$temp_dir"
+  candidate_binary="${temp_dir}/codex"
+  if [ ! -f "$candidate_binary" ]; then
+    echo "Remote artifact archive did not contain codex." >&2
+    exit 1
+  fi
+  chmod 700 "$candidate_binary"
+
+  if [ -n "$expected_sha" ] && [ ! -f "$metadata_path" ]; then
+    echo "Remote artifact metadata is missing; refusing to install without commit verification." >&2
+    exit 1
+  fi
+
+  if [ -f "$metadata_path" ]; then
+    metadata_sha="$(sed -n 's/.*"head_sha":"\([^"]*\)".*/\1/p' "$metadata_path" | head -n 1)"
+    metadata_describe="$(sed -n 's/.*"git_describe":"\([^"]*\)".*/\1/p' "$metadata_path" | head -n 1)"
+    echo "Remote artifact metadata: ${metadata_describe}"
+    if [ -n "$expected_sha" ] && [ -n "$metadata_sha" ] && [ "$metadata_sha" != "$expected_sha" ]; then
+      echo "Remote artifact SHA mismatch: expected ${expected_sha}, got ${metadata_sha}." >&2
+      exit 1
+    fi
+  fi
+
+  install_candidate_binary "$candidate_binary" "fork remote artifact"
+
+  trap - EXIT INT TERM
+  cleanup_artifact
+}
+
+run_source_build() {
+  echo "Building from source with the low-memory Termux profile."
+  cd "$CODEX_SRC_DIR/codex-rs"
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    CARGO_BUILD_JOBS=1 \
+    cargo install --path cli --root "$PREFIX" --force
+  echo "Installed via source build."
+  codex --version
+}
+
+run_remote_artifact_install() {
+  repo_slug="$1"
+  expected_sha="$2"
+  expected_event="$3"
+  wait_mode="${4:-sha}"
+  verify_sha="${5:-$expected_sha}"
+  if [ "$wait_mode" = "since" ]; then
+    run_id="$(wait_for_remote_run_since "$repo_slug" "$expected_event" "$expected_sha" "$remote_timeout")"
+    install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
+    return
+  fi
+  run_id="$(wait_for_remote_run "$repo_slug" "$expected_sha" "$expected_event" "$remote_timeout")"
+  install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
+}
+
+if [ -n "$remote_ref" ]; then
+  repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
+  if [ -z "$repo_slug" ]; then
+    echo "Remote artifact mode needs a GitHub fork remote configured as branch.main.pushRemote or termux-pocket." >&2
+    exit 1
+  fi
+  expected_sha="$(resolve_remote_ref_sha "$remote_ref")"
+  if [ -z "$expected_sha" ]; then
+    echo "Unable to resolve remote ref: $remote_ref" >&2
+    exit 1
+  fi
+  dispatch_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  dispatch_remote_artifact_workflow "$repo_slug" "$remote_ref"
+  sleep 5
+  run_remote_artifact_install "$repo_slug" "$dispatch_started_at" "workflow_dispatch" "since" "$expected_sha"
+  exit 0
 fi
 
 if [ -d "$CODEX_SRC_DIR/.git/rebase-merge" ] || [ -d "$CODEX_SRC_DIR/.git/rebase-apply" ]; then
@@ -43,20 +494,14 @@ if [ "$branch" != "main" ]; then
 fi
 
 base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
+latest_tag="$(resolve_target_tag)"
+
+if [ -z "$latest_tag" ]; then
+  echo "No rust-v*-alpha.* tags found on $FETCH_REMOTE." >&2
+  exit 1
+fi
 
 if [ "$check_only" = "yes" ]; then
-  latest_tag="$(
-    git -C "$CODEX_SRC_DIR" ls-remote --tags "$FETCH_REMOTE" 'rust-v*-alpha.*' \
-      | awk '{print $2}' \
-      | sed 's#refs/tags/##; s#\^{}##' \
-      | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' \
-      | sort -V \
-      | tail -n 1
-  )"
-  if [ -z "$latest_tag" ]; then
-    echo "No rust-v*-alpha.* tags found on $FETCH_REMOTE." >&2
-    exit 1
-  fi
   echo "Latest alpha tag: $latest_tag"
   if [ -n "$base_tag" ]; then
     echo "Current base tag: $base_tag"
@@ -70,10 +515,9 @@ if [ "$check_only" = "yes" ]; then
 fi
 
 git -C "$CODEX_SRC_DIR" fetch --prune "$FETCH_REMOTE" main 'refs/tags/rust-v*:refs/tags/rust-v*'
-latest_tag="$(git -C "$CODEX_SRC_DIR" tag -l 'rust-v*-alpha.*' --sort=-v:refname | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' | head -n 1)"
 
-if [ -z "$latest_tag" ]; then
-  echo "No rust-v*-alpha.* tags found." >&2
+if ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{tag}" >/dev/null 2>&1 && ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{commit}" >/dev/null 2>&1; then
+  echo "Requested tag is not available locally after fetch: $latest_tag" >&2
   exit 1
 fi
 
@@ -83,13 +527,18 @@ if [ -n "$base_tag" ]; then
 fi
 
 if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
-  echo "Already on latest alpha; skipping rebase/build. Use --force to rebuild."
+  echo "Already on latest alpha; skipping rebase/install. Use --force to reinstall."
   codex --version || true
   git -C "$CODEX_SRC_DIR" describe --tags --always || true
   exit 0
 fi
 
-trap 'if [ "$stashed" = "yes" ]; then echo "Note: your changes are stashed; run: git -C \"$CODEX_SRC_DIR\" stash list" >&2; fi' EXIT
+cleanup_stash_notice() {
+  if [ "$stashed" = "yes" ]; then
+    echo "Note: your changes are stashed; run: git -C \"$CODEX_SRC_DIR\" stash list" >&2
+  fi
+}
+trap cleanup_stash_notice EXIT
 
 if [ -n "$(git -C "$CODEX_SRC_DIR" status --porcelain)" ]; then
   echo "Working tree dirty; stashing changes." >&2
@@ -103,28 +552,85 @@ else
   git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$FETCH_REMOTE/main"
 fi
 
-if [ -z "$PUSH_REMOTE" ]; then
-  if git -C "$CODEX_SRC_DIR" remote | grep -q '^termux-pocket$'; then
-    PUSH_REMOTE="termux-pocket"
-    git -C "$CODEX_SRC_DIR" config branch.main.pushRemote "$PUSH_REMOTE"
-  fi
+allow_upstream_artifact="no"
+if audit_patch_stack; then
+  allow_upstream_artifact="yes"
 fi
 
+repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
+can_remote_artifact="no"
+if [ -n "$repo_slug" ] && command -v gh >/dev/null 2>&1; then
+  can_remote_artifact="yes"
+fi
+
+case "$mode" in
+  artifact)
+    if [ "$allow_upstream_artifact" != "yes" ]; then
+      echo "Upstream artifact mode is blocked by the local patch audit." >&2
+      exit 1
+    fi
+    selected_mode="artifact"
+    ;;
+  source)
+    selected_mode="source"
+    ;;
+  remote-artifact)
+    if [ "$can_remote_artifact" != "yes" ]; then
+      echo "Remote artifact mode requires a GitHub fork remote plus gh authentication." >&2
+      exit 1
+    fi
+    selected_mode="remote-artifact"
+    ;;
+  auto)
+    if [ "$allow_upstream_artifact" = "yes" ]; then
+      selected_mode="artifact"
+    elif [ "$can_remote_artifact" = "yes" ]; then
+      selected_mode="remote-artifact"
+    else
+      selected_mode="source"
+    fi
+    ;;
+esac
+
+echo "Selected install mode: $selected_mode"
+
+ensure_push_remote
 if [ -n "$PUSH_REMOTE" ]; then
   git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
 else
   echo "No pushRemote set; skipping push." >&2
 fi
 
-cd "$CODEX_SRC_DIR/codex-rs"
-CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-  CARGO_PROFILE_RELEASE_LTO=false \
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-  CARGO_BUILD_JOBS=1 \
-  cargo install --path cli --root "$PREFIX" --force
+install_failed="no"
+case "$selected_mode" in
+  artifact)
+    if ! install_upstream_artifact; then
+      install_failed="yes"
+    fi
+    ;;
+  remote-artifact)
+    expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
+    if ! run_remote_artifact_install "$repo_slug" "$expected_sha" "push"; then
+      install_failed="yes"
+    fi
+    ;;
+  source)
+    run_source_build
+    ;;
+esac
 
-codex --version
-git -C "$CODEX_SRC_DIR" describe --tags --always
+if [ "$install_failed" = "yes" ]; then
+  if [ "$mode" = "auto" ]; then
+    echo "Falling back to source build after ${selected_mode} install failed." >&2
+    run_source_build
+  else
+    exit 1
+  fi
+fi
+
+echo "Repo describe: $(git -C "$CODEX_SRC_DIR" describe --tags --always --dirty)"
+echo "Repo dirty state:"
+git -C "$CODEX_SRC_DIR" status --short
 
 if [ "$stashed" = "yes" ]; then
   if git -C "$CODEX_SRC_DIR" stash pop; then
@@ -134,3 +640,5 @@ if [ "$stashed" = "yes" ]; then
     exit 1
   fi
 fi
+
+trap - EXIT
