@@ -1,0 +1,14 @@
+# match_kind<TAB>match_value<TAB>classification<TAB>reason
+subject	Termux: use shared C++ runtime for Android audio build	runtime-critical	Android audio support needs the shared libc++ runtime on Termux.
+subject	arg0: tolerate unsupported file locks on Android	runtime-critical	Android file lock behavior differs and needs the local runtime fix.
+subject	tui: silence Android clipboard warnings	runtime-critical	Prevents noisy Android clipboard failures in normal TUI usage.
+subject	tui: open auth URL before state update	runtime-critical	Keeps the local auth flow behavior consistent on device.
+subject	Termux: retry self-update on low memory	build-only	Only affects the local source rebuild path.
+subject	Termux: add self-update and build version env	build-only	Only affects build metadata and the local Termux update path.
+subject	Termux: auto-open auth URL; show git describe in --version	runtime-critical	Changes on-device auth UX and local version reporting.
+subject	termux: add alpha update helper script	tooling	Helper-only change; does not affect the shipped binary.
+subject	termux: streamline alpha update flow	tooling	Helper-only change; does not affect the shipped binary.
+subject	ci: make fork workflows lightweight	tooling	Fork workflow change only.
+subject	Restore local AGENTS.md after alpha update	tooling	Local maintenance change only.
+subject	docs: refresh Termux README guidance	docs	Documentation only.
+subject	docs: update local plans	docs	Documentation only.
