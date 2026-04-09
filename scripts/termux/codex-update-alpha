@@ -230,7 +230,7 @@ wait_for_remote_run() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,headSha,status,conclusion,event --template '{{range .}}{{.databaseId}}{{"\t"}}{{.headSha}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,headSha,status,conclusion,event --jq '.[] | [.databaseId|tostring, .headSha, .status, .conclusion, .event] | @tsv' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
@@ -298,7 +298,7 @@ wait_for_remote_run_since() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,createdAt,status,conclusion,event --template '{{range .}}{{.databaseId}}{{"\t"}}{{.createdAt}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,createdAt,status,conclusion,event --jq '.[] | [.databaseId|tostring, .createdAt, .status, .conclusion, .event] | @tsv' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
