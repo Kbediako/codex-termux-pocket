@@ -230,7 +230,7 @@ wait_for_remote_run() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,headSha,status,conclusion,event --jq '.[] | [.databaseId|tostring, .headSha, .status, .conclusion, .event] | @tsv' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}{{"\t"}}{{.headSha}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
@@ -245,11 +245,12 @@ wait_for_remote_run() {
         set -- $run_line
         IFS='
 '
-        run_id="${1:-}"
+        run_url="${1:-}"
         run_sha="${2:-}"
         run_status="${3:-}"
         run_conclusion="${4:-}"
         run_event="${5:-}"
+        run_id="${run_url##*/}"
 
         if [ "$run_sha" = "$expected_sha" ] && [ "$run_event" = "$expected_event" ]; then
           matched_run_id="$run_id"
@@ -298,7 +299,7 @@ wait_for_remote_run_since() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json databaseId,createdAt,status,conclusion,event --jq '.[] | [.databaseId|tostring, .createdAt, .status, .conclusion, .event] | @tsv' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}{{"\t"}}{{.createdAt}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
@@ -313,11 +314,12 @@ wait_for_remote_run_since() {
         set -- $run_line
         IFS='
 '
-        run_id="${1:-}"
+        run_url="${1:-}"
         run_created_at="${2:-}"
         run_status="${3:-}"
         run_conclusion="${4:-}"
         run_event="${5:-}"
+        run_id="${run_url##*/}"
 
         if [ "$run_event" = "$expected_event" ] && [ "$run_created_at" \> "$earliest_created_at" ]; then
           matched_run_id="$run_id"
