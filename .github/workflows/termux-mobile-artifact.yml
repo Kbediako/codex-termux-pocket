@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build-termux-artifact:
     if: ${{ github.repository != 'openai/codex' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     permissions:
       contents: read
