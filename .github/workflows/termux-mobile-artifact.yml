@@ -1,0 +1,193 @@
+name: termux-mobile-artifact
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref to build for Termux (branch, tag, or commit SHA)
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build-termux-artifact:
+    if: ${{ github.repository != 'openai/codex' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      TARGET: aarch64-unknown-linux-musl
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
+
+    steps:
+      - name: Checkout requested ref
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref != '' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Checkout triggering commit
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.source_ref == '' }}
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libubsan1 python3
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Use hermetic Cargo home (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.14.0
+
+      - name: Install musl build tools
+        env:
+          TARGET: aarch64-unknown-linux-musl
+          APT_INSTALL_ARGS: --no-install-recommends
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Configure rustc UBSan wrapper (musl host)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper_root="${RUNNER_TEMP:-/tmp}"
+          wrapper="${wrapper_root}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+          sanitize_flags() {
+            local input="$1"
+            input="${input//-fsanitize=undefined/}"
+            input="${input//-fno-sanitize-recover=undefined/}"
+            input="${input//-fno-sanitize-trap=undefined/}"
+            echo "$input"
+          }
+
+          cflags="$(sanitize_flags "${CFLAGS-}")"
+          cxxflags="$(sanitize_flags "${CXXFLAGS-}")"
+          echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
+
+      - name: Configure musl rusty_v8 artifact overrides
+        env:
+          TARGET: aarch64-unknown-linux-musl
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
+          base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
+          archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
+          binding_dir="${RUNNER_TEMP}/rusty_v8"
+          binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
+          mkdir -p "${binding_dir}"
+          curl -fsSL "${base_url}/src_binding_release_${TARGET}.rs" -o "${binding_path}"
+          echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
+
+      - name: Build Codex for Termux
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target "${TARGET}" --release --bin codex
+
+      - name: Stage Termux artifact
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_root="${GITHUB_WORKSPACE}/dist/termux-mobile"
+          mkdir -p "${artifact_root}"
+          cp "target/${TARGET}/release/codex" "${artifact_root}/codex"
+          chmod 0755 "${artifact_root}/codex"
+          tar -C "${artifact_root}" -czf "${artifact_root}/codex-termux-aarch64-unknown-linux-musl.tar.gz" codex
+
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          artifact_root = Path(os.environ["GITHUB_WORKSPACE"]) / "dist" / "termux-mobile"
+          head_sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+          describe = subprocess.check_output(
+              ["git", "describe", "--tags", "--always", "--dirty"],
+              text=True,
+          ).strip()
+          payload = {
+              "head_sha": head_sha,
+              "git_describe": describe,
+              "target": "aarch64-unknown-linux-musl",
+              "source_ref": os.environ.get("SOURCE_REF", ""),
+          }
+          (artifact_root / "metadata.json").write_text(
+              json.dumps(payload, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Termux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-termux-aarch64-unknown-linux-musl
+          path: |
+            dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
+            dist/termux-mobile/metadata.json

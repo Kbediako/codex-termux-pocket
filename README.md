@@ -16,7 +16,8 @@ This fork is tuned for running Codex on Android with Termux:
 
 - Adds `codex self-update` (alias `update-self`) to rebuild from a local source checkout on Termux.
 - Embeds the build version so `codex --version` reflects the git describe.
-- `self-update` uses the low-memory Termux build profile by default.
+- `codex-update-alpha --mode auto` now prefers verified ARM64 artifacts before falling back to local Cargo builds.
+- `self-update` still uses the low-memory Termux build profile by default.
 
 Recommended Termux flow for this fork:
 
@@ -28,7 +29,11 @@ chmod 700 ~/bin/codex-update-alpha
 codex-update-alpha
 ```
 
-`codex-update-alpha` is the preferred updater for this rebased fork. It checks the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, and rebuilds with the low-memory install settings this device needs.
+`codex-update-alpha` is the preferred updater for this rebased fork. It checks the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, then installs using the quickest safe path:
+
+- upstream ARM64 musl alpha artifact when the local patch audit allows it
+- fork-built remote artifact from GitHub Actions when local runtime patches still matter
+- low-memory local source build as the final fallback
 
 `codex self-update` is still useful when your local checkout can fast-forward cleanly and you only want to rebuild from source without the alpha-tag rebase workflow. On Termux it now uses the same low-memory target-dir/build-job settings up front.
 
@@ -41,11 +46,22 @@ codex-update-alpha
 # check only (tag query only; no full branch fetch)
 codex-update-alpha --check
 
-# force rebuild
+# force the source build path
+codex-update-alpha --mode source --force
+
+# force the upstream artifact path when the patch audit allows it
+codex-update-alpha --mode artifact --force
+
+# build and install a fork artifact for a branch or commit
+codex-update-alpha --mode remote-artifact --remote-ref main
+
+# force reinstall using whichever mode auto selects
 codex-update-alpha --force
 ```
 
 By default, both update paths expect the source checkout at `~/codex`. You can set `CODEX_SRC_DIR` to point at a different source tree.
+
+See [Termux Mobile Update Flow](./docs/termux-mobile-update.md) for patch-audit behavior, remote artifact prerequisites, and recovery rules.
 
 ## Quickstart
 
