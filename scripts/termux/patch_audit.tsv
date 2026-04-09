@@ -12,3 +12,8 @@ subject	ci: make fork workflows lightweight	tooling	Fork workflow change only.
 subject	Restore local AGENTS.md after alpha update	tooling	Local maintenance change only.
 subject	docs: refresh Termux README guidance	docs	Documentation only.
 subject	docs: update local plans	docs	Documentation only.
+subject	termux: add artifact-first mobile alpha updates	tooling	Helper, workflow, and documentation changes only.
+subject	termux: fix remote mobile artifact builds	tooling	Fork workflow fix only.
+subject	termux: fix remote artifact workflow	tooling	Fork workflow and lockfile maintenance only.
+subject	termux: harden remote artifact run polling	tooling	Helper polling fix only.
+subject	termux: disable source fallback by default	runtime-critical	Preserves the safe Termux self-update behavior in the shipped CLI binary.
