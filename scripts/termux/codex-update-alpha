@@ -230,7 +230,7 @@ wait_for_remote_run() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}{{"\t"}}{{.headSha}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
@@ -241,7 +241,7 @@ wait_for_remote_run() {
       IFS='
 '
       for run_line in $run_lines; do
-        IFS="$(printf '\t')"
+        IFS='|'
         set -- $run_line
         IFS='
 '
@@ -273,11 +273,11 @@ wait_for_remote_run() {
           return 1
           ;;
         *)
-          echo "Waiting for remote artifact workflow run ${matched_run_id} (${matched_status})..."
+          echo "Waiting for remote artifact workflow run ${matched_run_id} (${matched_status})..." >&2
           ;;
       esac
     else
-      echo "Waiting for remote artifact workflow to appear for ${expected_sha}..."
+      echo "Waiting for remote artifact workflow to appear for ${expected_sha}..." >&2
     fi
 
     now="$(date +%s)"
@@ -299,7 +299,7 @@ wait_for_remote_run_since() {
   started_at="$(date +%s)"
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}{{"\t"}}{{.createdAt}}{{"\t"}}{{.status}}{{"\t"}}{{.conclusion}}{{"\t"}}{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}|{{.createdAt}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
     matched_run_id=""
     matched_status=""
@@ -310,7 +310,7 @@ wait_for_remote_run_since() {
       IFS='
 '
       for run_line in $run_lines; do
-        IFS="$(printf '\t')"
+        IFS='|'
         set -- $run_line
         IFS='
 '
@@ -342,11 +342,11 @@ wait_for_remote_run_since() {
           return 1
           ;;
         *)
-          echo "Waiting for dispatched remote artifact workflow run ${matched_run_id} (${matched_status})..."
+          echo "Waiting for dispatched remote artifact workflow run ${matched_run_id} (${matched_status})..." >&2
           ;;
       esac
     else
-      echo "Waiting for dispatched remote artifact workflow to appear..."
+      echo "Waiting for dispatched remote artifact workflow to appear..." >&2
     fi
 
     now="$(date +%s)"
