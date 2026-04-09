@@ -555,7 +555,7 @@ if [ -n "$remote_ref" ]; then
     exit 1
   fi
   dispatch_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  dispatch_remote_artifact_workflow "$repo_slug" "$remote_ref"
+  dispatch_remote_artifact_workflow "$repo_slug" "$expected_sha"
   sleep 5
   run_remote_artifact_install "$repo_slug" "$dispatch_started_at" "workflow_dispatch" "since" "$expected_sha"
   exit 0
