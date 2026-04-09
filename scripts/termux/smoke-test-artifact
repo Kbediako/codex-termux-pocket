@@ -1,0 +1,80 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+. "$SCRIPT_DIR/termux-mobile-lib.sh"
+
+binary_path=""
+tag=""
+keep_temp="no"
+work_dir=""
+
+usage() {
+  cat <<'USAGE'
+Usage: smoke-test-artifact [--binary PATH] [--tag rust-vX.Y.Z-alpha.N] [--keep-temp]
+  --binary PATH  Validate an already-downloaded Codex binary.
+  --tag TAG      Download the upstream ARM64 musl release binary for TAG and validate it.
+  --keep-temp    Keep the temporary download directory when using --tag.
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --binary)
+      binary_path="${2:-}"
+      shift 2
+      ;;
+    --tag)
+      tag="${2:-}"
+      shift 2
+      ;;
+    --keep-temp)
+      keep_temp="yes"
+      shift 1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -n "$binary_path" ] && [ -n "$tag" ]; then
+  echo "Use either --binary or --tag, not both." >&2
+  exit 2
+fi
+
+if [ -z "$binary_path" ] && [ -z "$tag" ]; then
+  echo "Provide --binary or --tag." >&2
+  exit 2
+fi
+
+cleanup() {
+  if [ -n "$work_dir" ] && [ "$keep_temp" != "yes" ]; then
+    rm -rf "$work_dir"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [ -n "$tag" ]; then
+  work_dir="$(mktemp -d)"
+  binary_path="$(download_upstream_release_binary "$tag" "$work_dir")"
+fi
+
+if [ ! -f "$binary_path" ]; then
+  echo "Binary not found: $binary_path" >&2
+  exit 1
+fi
+
+run_codex_smoke_checks "$binary_path"
+"$binary_path" --version
+
+if [ "$keep_temp" = "yes" ] && [ -n "$work_dir" ]; then
+  echo "Kept temp directory: $work_dir"
+fi
