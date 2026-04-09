@@ -25,7 +25,7 @@ The observable user outcome is:
 - [x] (2026-04-09 14:00 AEST) Added `scripts/termux/smoke-test-artifact` and shared artifact/install helpers in `scripts/termux/termux-mobile-lib.sh`.
 - [x] (2026-04-09 14:00 AEST) Extended `codex-update-alpha` with `artifact`, `source`, `remote-artifact`, and `auto` modes, with upstream-artifact and remote-artifact fallback logic.
 - [x] (2026-04-09 14:00 AEST) Added `.github/workflows/termux-mobile-artifact.yml` so the fork can build Linux ARM64 musl artifacts off-device for Termux installs.
-- [ ] Benchmark source fallback paths and document the remaining budget when Cargo is unavoidable.
+- [x] (2026-04-10 02:20 AEST) Benchmarked the remaining source fallback paths and codified the result: Termux source builds now fail fast by default, with remote artifacts as the supported fork/mobile path.
 
 
 ## Surprises & Discoveries
@@ -39,8 +39,11 @@ The observable user outcome is:
 - Observation: the current fork still carries local Termux/runtime patches, so artifact-only updates cannot replace the source path blindly.
   Evidence: `git log origin/main..main` contains Android-specific commits such as `Termux: use shared C++ runtime for Android audio build`, `arg0: tolerate unsupported file locks on Android`, and `tui: silence Android clipboard warnings`.
 
-- Observation: the current Termux update flows still end in a local Cargo release build.
-  Evidence: both `scripts/termux/codex-update-alpha` and `codex-rs/cli/src/main.rs` run `cargo install --path cli --root "$PREFIX" --force` with `CARGO_TARGET_DIR`, `CARGO_PROFILE_RELEASE_LTO=false`, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`, and `CARGO_BUILD_JOBS=1`.
+- Observation: the original local source path had two earlier failure modes before reaching the final linker.
+  Evidence: an unlocked `cargo install --path cli --root "$PREFIX" --force` ran for 5997 seconds before failing in `temporal_rs` / `icu_calendar` version drift, and a locked rerun without overrides failed earlier because `v8` tried to download the missing upstream Android archive `librusty_v8_release_aarch64-linux-android.a.gz`.
+
+- Observation: even the repaired locked source path is still not shippable on Termux.
+  Evidence: a locked rerun with the pinned OpenAI musl archive and binding pair reached the final `codex` binary link and then failed with unresolved `bcmp` and `__errno_location` symbols from `libv8` while targeting Android.
 
 - Observation: the CLI build graph is large enough that "just rebuild the CLI" is still expensive on-device.
   Evidence: `cargo tree -p codex-cli --prefix none | wc -l` returned `3222`, and `cargo tree -p codex-cli -i v8 --target aarch64-linux-android` shows `v8 -> codex-code-mode -> codex-core -> codex-cli`.
@@ -67,9 +70,9 @@ The observable user outcome is:
   Rationale: the repo already uses `cargo-chef`, sccache, musl tooling, and V8 overrides in CI; Termux should consume those outputs rather than reproducing them locally for every fork change.
   Date/Author: 2026-04-09 / Codex
 
-- Decision: do not promise a `cargo build` vs `cargo install` source-path rewrite until timing data exists.
-  Rationale: the build graph is large and the current helper already overrides target dir, LTO, codegen units, and job count; benchmarking should drive any further local build changes.
-  Date/Author: 2026-04-09 / Codex
+- Decision: disable Termux source fallback by default and require explicit opt-in for future retries.
+  Rationale: benchmarking is now complete, and the remaining blocker is a deterministic final-link V8/ABI mismatch rather than a missing performance tweak. Remote artifacts are the supported path for fork/mobile updates.
+  Date/Author: 2026-04-10 / Codex
 
 
 ## Outcomes & Retrospective
@@ -85,7 +88,7 @@ Completed work:
 
 Remaining work:
 
-- benchmark the source fallback path and decide whether `cargo install` should remain the fallback implementation
+- upstream or replace the Termux/V8 source-build story if local Android-targeted Cargo builds need to become supported again
 
 
 ## Context and Orientation
@@ -93,10 +96,10 @@ Remaining work:
 Relevant repo files and what they currently do:
 
 - `/data/data/com.termux/files/home/codex/scripts/termux/codex-update-alpha`
-  Rebase local `main` onto the newest `rust-v*-alpha.*` tag, push the fork, then run a local `cargo install` with low-memory settings.
+  Rebase local `main` onto the newest `rust-v*-alpha.*` tag, push the fork, then choose between upstream release assets, fork remote artifacts, or an explicit opt-in source retry.
 
 - `/data/data/com.termux/files/home/codex/codex-rs/cli/src/main.rs`
-  Implements `codex self-update` for Termux; it currently does a local `git fetch`, `git pull --ff-only`, then the same low-memory `cargo install` path.
+  Implements `codex self-update` for Termux; it currently does a local `git fetch`, `git pull --ff-only`, then refuses the known-bad Android Cargo rebuild unless `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set.
 
 - `/data/data/com.termux/files/home/codex/scripts/install/install.sh`
   Generic binary installer that already knows how to download Linux ARM64 musl Codex release artifacts.
@@ -160,7 +163,7 @@ Phase 1 is compatibility and decision logic, not installer churn.
    - consult the patch audit
    - run the artifact smoke suite
    - install the published ARM64 artifact only when the patch audit and smoke suite say it is safe
-   - otherwise fall back to the existing source rebase/build flow or the fork remote artifact path
+   - otherwise prefer the fork remote artifact path and refuse the local Termux source build by default unless explicitly opted in
 
    The helper output must always state:
    - selected alpha tag
@@ -184,12 +187,12 @@ Phase 1 is compatibility and decision logic, not installer churn.
 
 5. Benchmark and tighten the source fallback.
    Only after the artifact path exists, benchmark the remaining source path and decide whether to:
-   - keep `cargo install`
-   - switch to `cargo build` plus explicit binary copy/install
-   - prefetch dependencies or pre-stage local caches
-   - keep current low-memory flags unchanged
+   - keep an explicit experimental retry path
+   - disable the default local Cargo rebuild if the final Android link is still broken
+   - preserve the low-memory flags and musl V8 override pair for future diagnostics
+   - redirect normal users to remote artifacts when local runtime patches still matter
 
-   The source path is no longer the mainline experience, so optimize it only where the data says it matters.
+   The source path is no longer the mainline experience, so use it only where the data says it is still worth retrying.
 
 
 ## Concrete Steps
@@ -249,15 +252,16 @@ This plan is successful when all of the following are true:
    - The helper prints the exact installed alpha tag and `codex --version`.
 
 2. Fork-aware safety
-   - When local runtime-critical patches are still required, `codex-update-alpha --mode auto` refuses the artifact path and explains why before falling back to source or remote-branch artifact mode.
+   - When local runtime-critical patches are still required, `codex-update-alpha --mode auto` refuses the artifact path and explains why before using the fork remote-artifact path or an explicitly opted-in source retry.
    - No required Termux runtime behavior is silently dropped.
 
 3. Remote branch path
    - A fork branch or commit can produce Linux ARM64 musl artifacts in CI.
    - Termux can install that artifact by branch or SHA and verify the resulting version.
 
-4. Source fallback remains healthy
-   - `codex-update-alpha --mode source` still completes end to end on this device using the low-memory settings.
+4. Source fallback is handled explicitly
+   - `codex-update-alpha --mode source` no longer silently burns hours on a known-bad Termux build by default.
+   - The helper explains the final V8/ABI linker blocker and points users to `remote-artifact` unless they opt in to `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
    - Benchmarks for artifact mode vs source mode are recorded in docs.
 
 5. Documentation
@@ -272,8 +276,8 @@ This plan is successful when all of the following are true:
 - If artifact validation fails, the helper must:
   - leave the existing installed Codex binary untouched
   - print the failed tag and validation step
-  - offer or automatically take the source fallback path depending on mode
-- If a remote branch artifact is unavailable, the helper must fail closed and tell the user whether to retry later or use `--mode source`.
+  - prefer the remote-artifact path, and otherwise point users at the explicit `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` retry
+- If a remote branch artifact is unavailable, the helper must fail closed and tell the user whether to retry later or use `--mode source` with explicit opt-in.
 - Any benchmark scripts should write timestamped output files so repeated runs do not destroy earlier evidence.
 
 

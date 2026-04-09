@@ -14,10 +14,10 @@ If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex
 
 This fork is tuned for running Codex on Android with Termux:
 
-- Adds `codex self-update` (alias `update-self`) to rebuild from a local source checkout on Termux.
+- Keeps `codex self-update` (alias `update-self`) for local checkout syncs, but local Cargo rebuilds are disabled by default until the Termux V8 link issue is resolved.
 - Embeds the build version so `codex --version` reflects the git describe.
-- `codex-update-alpha --mode auto` now prefers verified ARM64 artifacts before falling back to local Cargo builds.
-- `self-update` still uses the low-memory Termux build profile by default.
+- `codex-update-alpha --mode auto` now prefers verified ARM64 artifacts and fork remote artifacts before any experimental local Cargo rebuild.
+- `self-update` can still retry the low-memory Termux build profile with `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`, but the default path is artifact-first.
 
 Recommended Termux flow for this fork:
 
@@ -33,9 +33,9 @@ codex-update-alpha
 
 - upstream ARM64 musl alpha artifact when the local patch audit allows it
 - fork-built remote artifact from GitHub Actions when local runtime patches still matter
-- low-memory local source build as the final fallback
+- experimental low-memory local source build only when `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set
 
-`codex self-update` is still useful when your local checkout can fast-forward cleanly and you only want to rebuild from source without the alpha-tag rebase workflow. On Termux it now uses the same low-memory target-dir/build-job settings up front.
+`codex self-update` still syncs the local checkout, but on Termux it now refuses the local Cargo rebuild by default because the Android-targeted V8 link remains broken. Set `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` only if you want to retry that build experimentally.
 
 Alpha helper commands:
 
@@ -46,8 +46,8 @@ codex-update-alpha
 # check only (tag query only; no full branch fetch)
 codex-update-alpha --check
 
-# force the source build path
-codex-update-alpha --mode source --force
+# retry the local source build experimentally
+CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 codex-update-alpha --mode source --force
 
 # force the upstream artifact path when the patch audit allows it
 codex-update-alpha --mode artifact --force

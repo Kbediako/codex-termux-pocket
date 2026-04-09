@@ -1643,11 +1643,25 @@ fn run_self_update() -> anyhow::Result<()> {
     git_pull.args(["pull", "--ff-only"]).current_dir(&src_dir);
     run_command(&mut git_pull, "git pull --ff-only")?;
 
+    if std::env::var("CODEX_TERMUX_ALLOW_SOURCE_FALLBACK")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        anyhow::bail!(
+            "Termux source self-update is disabled by default: the local Android Cargo build still fails at the final V8 link (undefined symbols bcmp and __errno_location). Use codex-update-alpha --mode remote-artifact, or set CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 to retry it experimentally."
+        );
+    }
+
+    let (rusty_v8_archive, rusty_v8_binding_path) =
+        prepare_termux_v8_musl_overrides(&workspace_dir, &cargo_target_dir)?;
+
     let mut cargo_install = Command::new("cargo");
     cargo_install
         .arg("install")
         .arg("--path")
         .arg(&cli_dir)
+        .arg("--locked")
         .arg("--root")
         .arg(&prefix)
         .arg("--force")
@@ -1655,13 +1669,80 @@ fn run_self_update() -> anyhow::Result<()> {
         .env("CARGO_PROFILE_RELEASE_LTO", "false")
         .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
         .env("CARGO_BUILD_JOBS", "1")
+        .env("RUSTY_V8_ARCHIVE", &rusty_v8_archive)
+        .env("RUSTY_V8_SRC_BINDING_PATH", &rusty_v8_binding_path)
         .current_dir(&workspace_dir);
     run_command(
         &mut cargo_install,
-        "cargo install --path <cli> --root <prefix> --force (termux low-mem)",
+        "cargo install --locked --path <cli> --root <prefix> --force (termux low-mem)",
     )?;
 
     Ok(())
+}
+
+fn locked_package_version(
+    lockfile: &std::path::Path,
+    package_name: &str,
+) -> anyhow::Result<String> {
+    let contents = std::fs::read_to_string(lockfile)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", lockfile.display()))?;
+    let package_line = format!("name = \"{package_name}\"");
+    let mut name_matches = false;
+
+    for line in contents.lines() {
+        if line == "[[package]]" {
+            name_matches = false;
+            continue;
+        }
+        if line == package_line {
+            name_matches = true;
+            continue;
+        }
+        if name_matches {
+            if let Some(version) = line
+                .strip_prefix("version = \"")
+                .and_then(|value| value.strip_suffix('\"'))
+            {
+                return Ok(version.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to find a pinned version for package {package_name:?} in {}",
+        lockfile.display()
+    )
+}
+
+fn prepare_termux_v8_musl_overrides(
+    workspace_dir: &std::path::Path,
+    cargo_target_dir: &std::path::Path,
+) -> anyhow::Result<(String, PathBuf)> {
+    let v8_version = locked_package_version(&workspace_dir.join("Cargo.lock"), "v8")?;
+    let v8_target = "aarch64-unknown-linux-musl";
+    let release_tag = format!("rusty-v8-v{v8_version}");
+    let binding_dir = cargo_target_dir.join("v8").join(format!("v{v8_version}"));
+    let binding_path = binding_dir.join(format!("src_binding_release_{v8_target}.rs"));
+    let binding_url = format!(
+        "https://github.com/openai/codex/releases/download/{release_tag}/src_binding_release_{v8_target}.rs"
+    );
+    let archive_url = format!(
+        "https://github.com/openai/codex/releases/download/{release_tag}/librusty_v8_release_{v8_target}.a.gz"
+    );
+
+    std::fs::create_dir_all(&binding_dir)
+        .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", binding_dir.display()))?;
+
+    if !binding_path.is_file() {
+        let mut curl = Command::new("curl");
+        curl.arg("-fsSL")
+            .arg(&binding_url)
+            .arg("-o")
+            .arg(&binding_path);
+        run_command(&mut curl, "download Termux musl rusty_v8 binding")?;
+    }
+
+    Ok((archive_url, binding_path))
 }
 
 fn resolve_codex_src_dir() -> anyhow::Result<PathBuf> {
