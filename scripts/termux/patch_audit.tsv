@@ -17,3 +17,4 @@ subject	termux: fix remote mobile artifact builds	tooling	Fork workflow fix only
 subject	termux: fix remote artifact workflow	tooling	Fork workflow and lockfile maintenance only.
 subject	termux: harden remote artifact run polling	tooling	Helper polling fix only.
 subject	termux: disable source fallback by default	runtime-critical	Preserves the safe Termux self-update behavior in the shipped CLI binary.
+subject	termux: audit mobile updater commits	tooling	Patch-audit maintenance only.
