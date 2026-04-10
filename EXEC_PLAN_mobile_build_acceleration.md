@@ -123,11 +123,13 @@ Phase 1 is compatibility and decision logic, not installer churn.
 
 1. Audit fork-only commits.
    Create a short machine-readable manifest in the repo that classifies each local Termux commit as one of:
+
    - `runtime-critical`: upstream alpha binaries cannot replace the source-built fork until this lands upstream or is retired.
    - `build-only`: only affects local source builds and does not block upstream artifact installs.
    - `tooling/docs`: helper scripts, docs, or AGENTS changes that do not affect the shipped binary.
 
    Expected files:
+
    - `/data/data/com.termux/files/home/codex/scripts/termux/patch_audit.tsv`
    - `/data/data/com.termux/files/home/codex/docs/termux-mobile-update.md` for the human-readable explanation
 
@@ -135,10 +137,12 @@ Phase 1 is compatibility and decision logic, not installer churn.
    Implement a script that downloads a specified ARM64 alpha artifact into a temp directory, runs a small non-interactive smoke suite, and records pass/fail plus version.
 
    Expected files:
+
    - `/data/data/com.termux/files/home/codex/scripts/termux/smoke-test-artifact`
    - optional supporting shell helpers under `/data/data/com.termux/files/home/codex/scripts/termux/`
 
    Initial smoke scope should stay simple and restartable:
+
    - `codex --version`
    - `codex --help`
    - `codex exec --help`
@@ -146,12 +150,14 @@ Phase 1 is compatibility and decision logic, not installer churn.
 
 3. Extend the updater into explicit modes.
    Evolve `codex-update-alpha` into:
+
    - `--mode artifact`
    - `--mode source`
    - `--mode auto`
    - `--mode remote-artifact`
 
    `auto` should:
+
    - resolve the latest alpha tag
    - consult the patch audit
    - run the artifact smoke suite
@@ -159,6 +165,7 @@ Phase 1 is compatibility and decision logic, not installer churn.
    - otherwise prefer the fork remote artifact path and refuse the local Termux source build by default unless explicitly opted in
 
    The helper output must always state:
+
    - selected alpha tag
    - install mode used
    - installed version
@@ -169,17 +176,20 @@ Phase 1 is compatibility and decision logic, not installer churn.
    Create a lightweight workflow that can build Linux ARM64 musl artifacts for a branch or commit on the fork and publish them as downloadable artifacts or prerelease assets. Then extend the Termux helper to install by branch or commit SHA.
 
    Expected files:
+
    - a new workflow under `/data/data/com.termux/files/home/codex/.github/workflows/`
    - helper updates in `/data/data/com.termux/files/home/codex/scripts/termux/codex-update-alpha`
    - documentation in `/data/data/com.termux/files/home/codex/README.md` or `/data/data/com.termux/files/home/codex/docs/termux-mobile-update.md`
 
    This path is the answer for:
+
    - local runtime patches not yet upstreamed
    - branch testing on mobile
    - avoiding multi-hour on-device rebuilds after every fork change
 
 5. Benchmark and tighten the source fallback.
    Only after the artifact path exists, benchmark the remaining source path and decide whether to:
+
    - keep an explicit experimental retry path
    - disable the default local Cargo rebuild if the final Android link is still broken
    - preserve the low-memory flags and musl V8 override pair for future diagnostics
@@ -203,6 +213,7 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
    curl -fsSL https://api.github.com/repos/openai/codex/releases?per_page=5
 
    Expected result:
+
    - latest release object is the newest `rust-v*-alpha.*`
    - assets include `codex-aarch64-unknown-linux-musl.tar.gz`
    - the release includes an ARM64 Linux artifact for the resolved alpha
@@ -212,6 +223,7 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
    curl -fsSL https://registry.npmjs.org/@openai%2fcodex
 
    Expected result:
+
    - `dist-tags.alpha` points at the newest upstream alpha
    - `dist-tags.alpha-linux-arm64` points at the Linux ARM64 companion tag
 
@@ -222,6 +234,7 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
    ~/codex/scripts/termux/smoke-test-artifact --tag rust-v<latest-alpha>
 
    Expected result:
+
    - `codex-cli <latest-alpha-version>`
 
 5. Measure source-path complexity before changing it.
@@ -231,6 +244,7 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
    cargo tree -p codex-cli -i v8 --target aarch64-linux-android
 
    Expected result:
+
    - dependency tree output is large
    - V8 reaches the CLI through `codex-code-mode` and `codex-core`
 
@@ -239,18 +253,22 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
 This plan is successful when all of the following are true:
 
 1. Upstream alpha consumer path
+
    - On a clean Termux device with no required fork runtime patches, `codex-update-alpha --mode auto` installs the latest alpha without running Cargo.
    - The helper prints the exact installed alpha tag and `codex --version`.
 
 2. Fork-aware safety
+
    - When local runtime-critical patches are still required, `codex-update-alpha --mode auto` refuses the artifact path and explains why before using the fork remote-artifact path or an explicitly opted-in source retry.
    - No required Termux runtime behavior is silently dropped.
 
 3. Remote branch path
+
    - A fork branch or commit can produce Linux ARM64 musl artifacts in CI.
    - Termux can install that artifact by branch or SHA and verify the resulting version.
 
 4. Source fallback is handled explicitly
+
    - `codex-update-alpha --mode source` no longer silently burns hours on a known-bad Termux build by default.
    - The helper explains the final V8/ABI linker blocker and points users to `remote-artifact` unless they opt in to `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
    - Benchmarks for artifact mode vs source mode are recorded in docs.

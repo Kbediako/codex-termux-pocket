@@ -5,3 +5,4 @@ pnpm-lock.yaml
 prompt.md
 *_prompt.md
 *_instructions.md
+codex-rs/core/src/tools/js_repl/meriyah.umd.min.js
