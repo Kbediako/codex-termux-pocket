@@ -514,6 +514,12 @@ run_source_build() {
     return 1
   fi
 
+  build_root="$(mktemp -d)"
+  cleanup_build_root() {
+    rm -rf "$build_root"
+  }
+  trap cleanup_build_root EXIT INT TERM
+
   echo "Building from source with the low-memory Termux profile."
   prepare_termux_v8_musl_overrides
   cd "$CODEX_SRC_DIR/codex-rs"
@@ -523,9 +529,13 @@ run_source_build() {
     CARGO_BUILD_JOBS=1 \
     RUSTY_V8_ARCHIVE="$TERMUX_V8_ARCHIVE_URL" \
     RUSTY_V8_SRC_BINDING_PATH="$TERMUX_V8_BINDING_PATH" \
-    cargo install --locked --path cli --root "$PREFIX" --force
+    cargo install --locked --path cli --root "$build_root" --force
+  install_codex_binary "$build_root/bin/codex" "$PREFIX/bin/codex"
   echo "Installed via source build."
   codex --version
+
+  trap - EXIT INT TERM
+  cleanup_build_root
 }
 
 run_remote_artifact_install() {
