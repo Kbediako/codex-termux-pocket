@@ -12,14 +12,14 @@ If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex
 
 ## Android / Termux (this fork)
 
-This fork is tuned for running Codex on Android with Termux:
+This fork keeps the mobile update path artifact-first:
 
-- Keeps `codex self-update` (alias `update-self`) for local checkout syncs, but local Cargo rebuilds are disabled by default until the Termux V8 link issue is resolved.
-- Embeds the build version so `codex --version` reflects the git describe.
-- `codex-update-alpha --mode auto` now prefers verified ARM64 artifacts and fork remote artifacts before any experimental local Cargo rebuild.
-- `self-update` can still retry the low-memory Termux build profile with `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`, but the default path is artifact-first.
+- `codex-update-alpha` is the default updater.
+- `--mode auto` prefers the upstream ARM64 musl alpha artifact, then a fork-built remote artifact, and only allows a local source retry when `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set.
+- On this device, that replaced a measured 5997-second failing local Cargo install with a successful remote-artifact install in about 20 minutes.
+- `codex self-update` still syncs the checkout, but it refuses the broken local Termux Cargo rebuild by default.
 
-Recommended Termux flow for this fork:
+Quick Termux setup:
 
 ```shell
 git clone https://github.com/Kbediako/codex-termux-pocket.git ~/codex
@@ -29,39 +29,15 @@ chmod 700 ~/bin/codex-update-alpha
 codex-update-alpha
 ```
 
-`codex-update-alpha` is the preferred updater for this rebased fork. It checks the newest upstream alpha tag, rebases the local Termux patch stack onto it, pushes `main` to your configured fork remote when available, then installs using the quickest safe path:
-
-- upstream ARM64 musl alpha artifact when the local patch audit allows it
-- fork-built remote artifact from GitHub Actions when local runtime patches still matter
-- experimental low-memory local source build only when `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set
-
-`codex self-update` still syncs the local checkout, but on Termux it now refuses the local Cargo rebuild by default because the Android-targeted V8 link remains broken. Set `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` only if you want to retry that build experimentally.
-
-Alpha helper commands:
+Useful commands:
 
 ```shell
-# update to newest alpha tag (skips rebuild if already current)
 codex-update-alpha
-
-# check only (tag query only; no full branch fetch)
 codex-update-alpha --check
-
-# retry the local source build experimentally
-CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 codex-update-alpha --mode source --force
-
-# force the upstream artifact path when the patch audit allows it
-codex-update-alpha --mode artifact --force
-
-# build and install a fork artifact for a branch or commit
 codex-update-alpha --mode remote-artifact --remote-ref main
-
-# force reinstall using whichever mode auto selects
-codex-update-alpha --force
 ```
 
-By default, both update paths expect the source checkout at `~/codex`. You can set `CODEX_SRC_DIR` to point at a different source tree.
-
-See [Termux Mobile Update Flow](./docs/termux-mobile-update.md) for patch-audit behavior, remote artifact prerequisites, and recovery rules.
+Details, recovery rules, and the experimental source fallback are documented in [Termux Mobile Update Flow](./docs/termux-mobile-update.md).
 
 ## Quickstart
 
