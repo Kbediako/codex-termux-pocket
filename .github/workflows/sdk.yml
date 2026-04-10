@@ -44,9 +44,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   sdks:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    runs-on: ${{ fromJSON(github.repository == 'openai/codex' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     environment:
       name: bazel
