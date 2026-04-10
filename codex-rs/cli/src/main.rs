@@ -1698,13 +1698,12 @@ fn locked_package_version(
             name_matches = true;
             continue;
         }
-        if name_matches {
-            if let Some(version) = line
+        if name_matches
+            && let Some(version) = line
                 .strip_prefix("version = \"")
                 .and_then(|value| value.strip_suffix('\"'))
-            {
-                return Ok(version.to_string());
-            }
+        {
+            return Ok(version.to_string());
         }
     }
 
