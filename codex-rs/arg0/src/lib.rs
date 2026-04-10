@@ -374,7 +374,8 @@ fn prepare_path_entry_for_codex_aliases(
         }
         // Android/Termux can report file-locking as unsupported; proceed without
         // locking so PATH helper aliases still work.
-        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {
+        }
         Err(std::fs::TryLockError::Error(err)) => return Err(err),
     }
 

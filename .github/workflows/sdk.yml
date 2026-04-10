@@ -42,9 +42,7 @@ jobs:
             '
 
   sdks:
-    runs-on:
-      group: codex-runners
-      labels: codex-linux-x64
+    runs-on: ${{ fromJSON(github.repository == 'openai/codex' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout repository
