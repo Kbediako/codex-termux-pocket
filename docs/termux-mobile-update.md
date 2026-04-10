@@ -63,6 +63,15 @@ Validate an upstream alpha binary without installing it:
 ~/codex/scripts/termux/smoke-test-artifact --tag rust-v<latest-alpha>
 ```
 
+## Measured improvement
+
+On this device, the new supported path already reduced alpha update/install time materially:
+
+- the remote-artifact install completed in about 20 minutes
+- the benchmarked local `cargo install` path took 5997 seconds and still failed
+
+Upstream release-asset installs should be faster again when the patch audit allows them.
+
 ## Remote artifact workflow
 
 The fork workflow [`termux-mobile-artifact.yml`](/data/data/com.termux/files/home/codex/.github/workflows/termux-mobile-artifact.yml)
