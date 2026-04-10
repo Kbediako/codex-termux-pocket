@@ -6,6 +6,13 @@ When writing complex features, long-running tasks, or significant refactors, use
 
 If this repo lacks `PLANS.md` or an ExecPlans section in `AGENTS.md`, add them by copying `~/.codex/PLANS.md` and noting the change. `~/.codex/PLANS.md` is the global template only; if the user requests a cross-repo/global plan, use `~/.codex/EXEC_PLAN.md`.
 
+## Termux Fork Notes
+
+- Prefer `codex-update-alpha` for Android/Termux alpha maintenance; do not default to ad-hoc local Cargo rebuilds.
+- The supported update order on Termux is: upstream ARM64 musl artifact, then fork `remote-artifact`, then explicit source retry with `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
+- If helper or workflow commits are added on this fork, update `scripts/termux/patch_audit.tsv` in the same change so `auto` mode can classify them correctly.
+- Keep the main `README.md` short. Put operational detail in `docs/termux-mobile-update.md`.
+
 In the codex-rs folder where the rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`
