@@ -93,6 +93,19 @@ and waits for the matching run before installing the resulting binary.
 - `gh auth status` must be healthy for remote-artifact mode.
 - The fork remote should be configured as `branch.main.pushRemote`, or be named `termux-pocket`.
 
+## Runtime bridge
+
+Termux installs now keep a small launcher at `$PREFIX/bin/codex` and place the real
+binary under `$PREFIX/libexec/codex-termux/codex`.
+
+The launcher does three Termux-specific things before execing the real binary:
+
+- bind-mounts Termux `resolv.conf` to `/etc/resolv.conf` through `proot`
+- bind-mounts the Termux CA bundle to `/etc/ssl/certs/ca-certificates.crt`
+- exports `BROWSER=termux-open-url` when available so `codex login` can hand off to the Android browser without a manual alias
+
+Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that bridge for debugging.
+
 ## Recovery
 
 - If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available.
