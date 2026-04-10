@@ -374,10 +374,17 @@ else
   #   clear remote cache/execution endpoints configured in .bazelrc.
   #   https://bazel.build/reference/command-line-reference#common_options-flag--remote_cache
   #   https://bazel.build/reference/command-line-reference#common_options-flag--remote_executor
+  # --experimental_remote_downloader= and --bes_backend=:
+  #   clear the remaining remote downloader / Build Event Service endpoints from
+  #   .bazelrc so fork CI does not fail locally before Bazel can execute.
+  #   https://bazel.build/reference/command-line-reference#common_options-flag--experimental_remote_downloader
+  #   https://bazel.build/reference/command-line-reference#common_options-flag--bes_backend
   bazel_run_args=(
     "${bazel_args[@]}"
     --remote_cache=
     --remote_executor=
+    --experimental_remote_downloader=
+    --bes_backend=
   )
   if (( ${#post_config_bazel_args[@]} > 0 )); then
     bazel_run_args+=("${post_config_bazel_args[@]}")

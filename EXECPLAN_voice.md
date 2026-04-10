@@ -2,11 +2,9 @@
 
 This ExecPlan is a living document. The sections Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective must be kept current. If PLANS.md exists in this repo, this plan follows it.
 
-
 ## Purpose / Big Picture
 
 Make the hands‑free Codex voice assistant in Termux feel snappy and reliable. The wake word should trigger quickly without yelling, notifications should reflect the actual wake phrase, and only one listener process should run at a time.
-
 
 ## Progress
 
@@ -28,7 +26,6 @@ Make the hands‑free Codex voice assistant in Termux feel snappy and reliable. 
 - [x] (2026-01-07 02:39) Add token-based wake matching and accept "decks" as a wake variant.
 - [ ] (2026-01-07 02:39) Validate: one process, fast wake, successful command loop.
 
-
 ## Surprises & Discoveries
 
 - Observation: Multiple `codex-voice` processes exist simultaneously, causing slow or missed wake detection.
@@ -37,7 +34,6 @@ Make the hands‑free Codex voice assistant in Termux feel snappy and reliable. 
   Evidence: `timeout 6 termux-speech-to-text` exited with 124 (timeout).
 - Observation: Recent whisper wake transcripts show mostly noise words (“buzzing”, “inaudible”), even when “codex” is spoken.
   Evidence: `tail -n 200 ~/.codex/device/voice_debug.log`.
-
 
 ## Decision Log
 
@@ -57,11 +53,9 @@ Make the hands‑free Codex voice assistant in Termux feel snappy and reliable. 
   Rationale: Wake transcripts show "decks"; token matching avoids broad substring false positives.
   Date/Author: 2026-01-07 / Codex
 
-
 ## Outcomes & Retrospective
 
 Pending. Will update after validation.
-
 
 ## Context and Orientation
 
@@ -70,14 +64,12 @@ Pending. Will update after validation.
 - Current symptoms: Wake word often doesn’t trigger; recent transcripts look like noise and miss “codex.”
 - Constraints: Must run on Android/Termux, offline by default, no lingering background processes.
 
-
 ## Plan of Work
 
-1) Capture baseline: verify how many listeners exist, inspect recent log lines, and verify microphone state.
-2) Ensure single instance: hard stop lingering listeners and tighten lock behavior so only one process can run.
-3) Make wake path fast and consistent: set the wake phrase in notifications to match actual trigger, tune wake capture durations and thresholds, and choose the fastest reliable wake engine (preferring tiny whisper unless Android STT is both fast and reliable).
-4) Validate end‑to‑end: confirm one listener process, fast wake response, and successful command response with no hangs.
-
+1. Capture baseline: verify how many listeners exist, inspect recent log lines, and verify microphone state.
+2. Ensure single instance: hard stop lingering listeners and tighten lock behavior so only one process can run.
+3. Make wake path fast and consistent: set the wake phrase in notifications to match actual trigger, tune wake capture durations and thresholds, and choose the fastest reliable wake engine (preferring tiny whisper unless Android STT is both fast and reliable).
+4. Validate end‑to‑end: confirm one listener process, fast wake response, and successful command response with no hangs.
 
 ## Concrete Steps
 
@@ -94,7 +86,6 @@ Pending. Will update after validation.
   - `rm -rf ~/.codex/device/voice.lock`
   - `~/bin/codex-voice-on`
 
-
 ## Validation and Acceptance
 
 - Exactly one `codex-voice` process is running.
@@ -102,17 +93,14 @@ Pending. Will update after validation.
 - Saying “codex” at normal volume triggers “Listening.” within ~1–2 seconds.
 - Command is transcribed and response spoken without getting stuck.
 
-
 ## Idempotence and Recovery
 
 - All stop/start steps are safe to repeat. If anything gets stuck, re‑run the clean restart steps above.
 - If wake detection regresses, revert to tiny whisper for wake and base for commands via environment overrides.
 
-
 ## Artifacts and Notes
 
 - Log snippet and process list will be recorded here after validation.
-
 
 ## Interfaces and Dependencies
 

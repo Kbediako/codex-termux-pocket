@@ -40,6 +40,7 @@ If you use milestones, make each one independently verifiable and narrative: wha
 ## Required living sections
 
 Every ExecPlan must include and maintain these sections:
+
 - **Progress** (checkboxes with timestamps)
 - **Surprises & Discoveries**
 - **Decision Log**

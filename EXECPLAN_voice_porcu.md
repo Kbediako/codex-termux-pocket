@@ -26,17 +26,17 @@ Google-style wake performance requires a tiny always-on wake model. Whisper is e
 
 ## Planned Steps
 
-1) Install build tooling in Termux:
+1. Install build tooling in Termux:
    - OpenJDK, Gradle, Android SDK command-line tools.
-2) Clone Porcupine repo and start from their `porcupine-demo-service` Android example.
-3) Add Termux RUN_COMMAND intent wiring:
+2. Clone Porcupine repo and start from their `porcupine-demo-service` Android example.
+3. Add Termux RUN_COMMAND intent wiring:
    - Request `com.termux.permission.RUN_COMMAND`.
    - Send intent with `com.termux.RUN_COMMAND` and command path.
-4) Add wake keyword:
+4. Add wake keyword:
    - Built-in keyword or custom `.ppn` in `assets/`.
-5) Build APK on-device and install.
-6) Create Termux script for command capture + `codex exec`.
-7) Validate: wake latency, command accuracy, no background leaks.
+5. Build APK on-device and install.
+6. Create Termux script for command capture + `codex exec`.
+7. Validate: wake latency, command accuracy, no background leaks.
 
 ## Notes / Constraints
 
@@ -50,4 +50,3 @@ Google-style wake performance requires a tiny always-on wake model. Whisper is e
 - Wake triggers within ~300–700 ms, no false wake while silent.
 - Reliable command capture and execution.
 - Single persistent service + clean stop/start control.
-
