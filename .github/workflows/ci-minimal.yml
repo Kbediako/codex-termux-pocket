@@ -18,6 +18,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92
         with:
           components: rustfmt, clippy
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
       - name: cargo fmt
         run: cargo fmt -- --check
       - name: cargo clippy
