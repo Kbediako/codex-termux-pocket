@@ -2,7 +2,6 @@
 
 This ExecPlan is a living document. The sections Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective must be kept current. If PLANS.md exists in this repo, this plan follows it.
 
-
 ## Purpose / Big Picture
 
 Termux updates to the latest Codex alpha should stop depending on repeated on-device Rust release builds for the common case. A user on this Samsung/Termux device should be able to move from one upstream alpha to the next by downloading a published ARM64 artifact, verifying it locally, and keeping source builds only for fork-specific changes or emergency fallback.
@@ -13,7 +12,6 @@ The observable user outcome is:
 - The helper reports the exact alpha tag, install source (`release-asset` or `source-build`), and verification output.
 - Fork-only runtime changes are handled explicitly instead of being silently lost.
 - Source-build fallback remains available and benchmarked.
-
 
 ## Progress
 
@@ -26,7 +24,6 @@ The observable user outcome is:
 - [x] (2026-04-09 14:00 AEST) Extended `codex-update-alpha` with `artifact`, `source`, `remote-artifact`, and `auto` modes, with upstream-artifact and remote-artifact fallback logic.
 - [x] (2026-04-09 14:00 AEST) Added `.github/workflows/termux-mobile-artifact.yml` so the fork can build Linux ARM64 musl artifacts off-device for Termux installs.
 - [x] (2026-04-10 02:20 AEST) Benchmarked the remaining source fallback paths and codified the result: Termux source builds now fail fast by default, with remote artifacts as the supported fork/mobile path.
-
 
 ## Surprises & Discoveries
 
@@ -51,7 +48,6 @@ The observable user outcome is:
 - Observation: npm alpha platform delivery is exposed through `@openai/codex` dist-tags, not a standalone `@openai/codex-linux-arm64` package.
   Evidence: `https://registry.npmjs.org/@openai%2fcodex-linux-arm64` returned 404, while `https://registry.npmjs.org/@openai%2fcodex` exposes `alpha`, `alpha-linux-arm64`, and related dist-tags.
 
-
 ## Decision Log
 
 - Decision: prioritize an artifact-first Termux updater before deeper local Rust build optimization.
@@ -74,7 +70,6 @@ The observable user outcome is:
   Rationale: benchmarking is now complete, and the remaining blocker is a deterministic final-link V8/ABI mismatch rather than a missing performance tweak. Remote artifacts are the supported path for fork/mobile updates.
   Date/Author: 2026-04-10 / Codex
 
-
 ## Outcomes & Retrospective
 
 Implementation is now in place for the artifact-first mobile update path. The biggest shift is that the primary mobile problem is no longer "how do we make Cargo slightly less painful on Android" but "how do we safely adopt published ARM64 alpha artifacts without dropping fork-specific fixes."
@@ -89,7 +84,6 @@ Completed work:
 Remaining work:
 
 - upstream or replace the Termux/V8 source-build story if local Android-targeted Cargo builds need to become supported again
-
 
 ## Context and Orientation
 
@@ -122,7 +116,6 @@ Current state at research time:
 Termux-specific constraint:
 
 - This fork is ahead of upstream with Android fixes. The updater must never silently swap in an upstream artifact if that would remove required local runtime behavior.
-
 
 ## Plan of Work
 
@@ -194,21 +187,20 @@ Phase 1 is compatibility and decision logic, not installer churn.
 
    The source path is no longer the mainline experience, so use it only where the data says it is still worth retrying.
 
-
 ## Concrete Steps
 
 All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless stated otherwise.
 
 1. Record current baseline and fork delta.
 
-    git status --short
-    git describe --tags --always --dirty
-    git log --oneline origin/main..main
+   git status --short
+   git describe --tags --always --dirty
+   git log --oneline origin/main..main
 
 2. Verify current upstream alpha release assets.
 
-    curl -fsSL 'https://api.github.com/repos/openai/codex/releases?per_page=5'
-    curl -fsSL https://api.github.com/repos/openai/codex/releases?per_page=5
+   curl -fsSL 'https://api.github.com/repos/openai/codex/releases?per_page=5'
+   curl -fsSL https://api.github.com/repos/openai/codex/releases?per_page=5
 
    Expected result:
    - latest release object is the newest `rust-v*-alpha.*`
@@ -225,23 +217,22 @@ All commands below assume `cwd=/data/data/com.termux/files/home/codex` unless st
 
 4. Reproduce the successful Termux artifact execution.
 
-    tmpdir=$(mktemp -d)
+   tmpdir=$(mktemp -d)
     cd "$tmpdir"
-    ~/codex/scripts/termux/smoke-test-artifact --tag rust-v<latest-alpha>
+   ~/codex/scripts/termux/smoke-test-artifact --tag rust-v<latest-alpha>
 
    Expected result:
    - `codex-cli <latest-alpha-version>`
 
 5. Measure source-path complexity before changing it.
 
-    cd /data/data/com.termux/files/home/codex/codex-rs
-    cargo tree -p codex-cli --prefix none | wc -l
-    cargo tree -p codex-cli -i v8 --target aarch64-linux-android
+   cd /data/data/com.termux/files/home/codex/codex-rs
+   cargo tree -p codex-cli --prefix none | wc -l
+   cargo tree -p codex-cli -i v8 --target aarch64-linux-android
 
    Expected result:
    - dependency tree output is large
    - V8 reaches the CLI through `codex-code-mode` and `codex-core`
-
 
 ## Validation and Acceptance
 
@@ -268,7 +259,6 @@ This plan is successful when all of the following are true:
    - README or dedicated Termux docs explain when each mode is used.
    - The recovery path is explicit.
 
-
 ## Idempotence and Recovery
 
 - Artifact mode must install into a temp directory first and only overwrite the live binary after the smoke suite passes.
@@ -279,7 +269,6 @@ This plan is successful when all of the following are true:
   - prefer the remote-artifact path, and otherwise point users at the explicit `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` retry
 - If a remote branch artifact is unavailable, the helper must fail closed and tell the user whether to retry later or use `--mode source` with explicit opt-in.
 - Any benchmark scripts should write timestamped output files so repeated runs do not destroy earlier evidence.
-
 
 ## Artifacts and Notes
 
@@ -305,7 +294,6 @@ Short evidence captured during research:
 
     cd codex-rs && cargo tree -p codex-cli --prefix none | wc -l
     3222
-
 
 ## Interfaces and Dependencies
 
