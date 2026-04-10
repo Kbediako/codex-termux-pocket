@@ -17,6 +17,7 @@ This fork keeps the mobile update path artifact-first:
 - `codex-update-alpha` is the default updater.
 - `--mode auto` prefers the upstream ARM64 musl alpha artifact, then a fork-built remote artifact, and only allows a local source retry when `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set.
 - On this device, that replaced a measured 5997-second failing local Cargo install with a successful remote-artifact install in about 20 minutes.
+- The installed `codex` command is a Termux launcher wrapper that bridges DNS and CA bundle paths through `proot` and sets `termux-open-url` for browser-based login flows.
 - `codex self-update` still syncs the checkout, but it refuses the broken local Termux Cargo rebuild by default.
 
 Quick Termux setup:

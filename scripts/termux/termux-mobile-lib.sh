@@ -49,16 +49,81 @@ run_codex_smoke_checks() {
   "$binary_path" completion zsh >/dev/null
 }
 
+codex_runtime_dir() {
+  prefix_dir="$1"
+  printf '%s/libexec/codex-termux\n' "$prefix_dir"
+}
+
+codex_runtime_binary_path() {
+  prefix_dir="$1"
+  runtime_dir="$(codex_runtime_dir "$prefix_dir")"
+  printf '%s/codex\n' "$runtime_dir"
+}
+
+write_codex_wrapper() {
+  dest_binary="$1"
+  prefix_dir="$2"
+  runtime_binary="$3"
+  tmp_wrapper="${dest_binary}.new.$$"
+
+  cat > "$tmp_wrapper" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+PREFIX_DIR="${prefix_dir}"
+RUNTIME_BINARY="${runtime_binary}"
+TERMUX_RESOLV_CONF="\${PREFIX_DIR}/etc/resolv.conf"
+TERMUX_CA_BUNDLE="\${PREFIX_DIR}/etc/tls/cert.pem"
+TERMUX_BROWSER="\${PREFIX_DIR}/bin/termux-open-url"
+TERMUX_PROOT="\${PREFIX_DIR}/bin/proot"
+
+if [ ! -x "\$RUNTIME_BINARY" ]; then
+  echo "Codex runtime missing: \$RUNTIME_BINARY" >&2
+  exit 1
+fi
+
+if [ -z "\${BROWSER:-}" ] && [ -x "\$TERMUX_BROWSER" ]; then
+  export BROWSER="\$TERMUX_BROWSER"
+fi
+
+if [ "\${CODEX_TERMUX_DISABLE_PROOT:-0}" != "1" ] \
+  && [ -x "\$TERMUX_PROOT" ] \
+  && [ -f "\$TERMUX_RESOLV_CONF" ] \
+  && [ -f "\$TERMUX_CA_BUNDLE" ]; then
+  exec "\$TERMUX_PROOT" \
+    -b "\$TERMUX_RESOLV_CONF:/etc/resolv.conf" \
+    -b "\$TERMUX_CA_BUNDLE:/etc/ssl/certs/ca-certificates.crt" \
+    "\$RUNTIME_BINARY" "\$@"
+fi
+
+if [ -f "\$TERMUX_CA_BUNDLE" ]; then
+  export SSL_CERT_FILE="\${SSL_CERT_FILE:-\$TERMUX_CA_BUNDLE}"
+  export CURL_CA_BUNDLE="\${CURL_CA_BUNDLE:-\$TERMUX_CA_BUNDLE}"
+fi
+
+exec "\$RUNTIME_BINARY" "\$@"
+EOF
+
+  chmod 755 "$tmp_wrapper"
+  mv "$tmp_wrapper" "$dest_binary"
+}
+
 install_codex_binary() {
   src_binary="$1"
   dest_binary="$2"
+  prefix_dir="$(dirname "$dest_binary")"
+  prefix_dir="$(dirname "$prefix_dir")"
   dest_dir="$(dirname "$dest_binary")"
-  tmp_binary="${dest_binary}.new.$$"
+  runtime_dir="$(codex_runtime_dir "$prefix_dir")"
+  runtime_binary="$(codex_runtime_binary_path "$prefix_dir")"
+  tmp_runtime_binary="${runtime_binary}.new.$$"
 
   mkdir -p "$dest_dir"
-  cp "$src_binary" "$tmp_binary"
-  chmod 755 "$tmp_binary"
-  mv "$tmp_binary" "$dest_binary"
+  mkdir -p "$runtime_dir"
+  cp "$src_binary" "$tmp_runtime_binary"
+  chmod 755 "$tmp_runtime_binary"
+  mv "$tmp_runtime_binary" "$runtime_binary"
+  write_codex_wrapper "$dest_binary" "$prefix_dir" "$runtime_binary"
 }
 
 git_remote_repo_slug() {
