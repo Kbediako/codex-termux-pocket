@@ -145,6 +145,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-gnullvm
     runs-on: ${{ github.repository == 'openai/codex' && matrix.os || matrix.hosted_os || matrix.os }}
+    if: github.repository == 'openai/codex'
     name: Bazel clippy on ${{ matrix.os }} for ${{ matrix.target }}
 
     steps:
@@ -225,6 +226,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
+    if: github.repository == 'openai/codex'
     name: Verify release build on ${{ matrix.os }} for ${{ matrix.target }}
 
     steps:
