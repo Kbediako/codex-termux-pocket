@@ -355,7 +355,7 @@ wait_for_remote_run() {
       return 1
     fi
 
-    sleep 15
+    sleep 10
   done
 }
 
@@ -390,7 +390,7 @@ wait_for_remote_run_since() {
         run_event="${5:-}"
         run_id="${run_url##*/}"
 
-        if [ "$run_event" = "$expected_event" ] && [ "$run_created_at" \> "$earliest_created_at" ]; then
+        if [ "$run_event" = "$expected_event" ] && ! [ "$run_created_at" \< "$earliest_created_at" ]; then
           matched_run_id="$run_id"
           matched_status="$run_status"
           matched_conclusion="$run_conclusion"
@@ -424,7 +424,7 @@ wait_for_remote_run_since() {
       return 1
     fi
 
-    sleep 15
+    sleep 10
   done
 }
 
@@ -566,7 +566,6 @@ if [ -n "$remote_ref" ]; then
   fi
   dispatch_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   dispatch_remote_artifact_workflow "$repo_slug" "$expected_sha"
-  sleep 5
   run_remote_artifact_install "$repo_slug" "$dispatch_started_at" "workflow_dispatch" "since" "$expected_sha"
   exit 0
 fi
@@ -603,6 +602,15 @@ if [ "$check_only" = "yes" ]; then
   exit 1
 fi
 
+if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
+  echo "Latest alpha tag: $latest_tag"
+  echo "Current base tag: $base_tag"
+  echo "Already on latest alpha; skipping rebase/install. Use --force to reinstall."
+  codex --version || true
+  git -C "$CODEX_SRC_DIR" describe --tags --always || true
+  exit 0
+fi
+
 git -C "$CODEX_SRC_DIR" fetch --prune "$FETCH_REMOTE" main 'refs/tags/rust-v*:refs/tags/rust-v*'
 
 if ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{tag}" >/dev/null 2>&1 && ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{commit}" >/dev/null 2>&1; then
@@ -613,13 +621,6 @@ fi
 echo "Latest alpha tag: $latest_tag"
 if [ -n "$base_tag" ]; then
   echo "Current base tag: $base_tag"
-fi
-
-if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
-  echo "Already on latest alpha; skipping rebase/install. Use --force to reinstall."
-  codex --version || true
-  git -C "$CODEX_SRC_DIR" describe --tags --always || true
-  exit 0
 fi
 
 cleanup_stash_notice() {
@@ -683,11 +684,13 @@ esac
 
 echo "Selected install mode: $selected_mode"
 
-ensure_push_remote
-if [ -n "$PUSH_REMOTE" ]; then
-  git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
-else
-  echo "No pushRemote set; skipping push." >&2
+if [ "$selected_mode" = "remote-artifact" ]; then
+  ensure_push_remote
+  if [ -n "$PUSH_REMOTE" ]; then
+    git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
+  else
+    echo "No pushRemote set; skipping push." >&2
+  fi
 fi
 
 install_failed="no"
