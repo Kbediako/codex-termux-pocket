@@ -18,5 +18,9 @@ subject	termux: fix remote artifact workflow	tooling	Fork workflow and lockfile 
 subject	termux: harden remote artifact run polling	tooling	Helper polling fix only.
 subject	termux: disable source fallback by default	runtime-critical	Preserves the safe Termux self-update behavior in the shipped CLI binary.
 subject	termux: audit mobile updater commits	tooling	Patch-audit maintenance only.
+subject	termux: audit alpha.122 lockfile refresh	tooling	Patch-audit maintenance only.
 subject	termux: resolve remote artifact refs to full sha	tooling	Helper dispatch fix only.
 subject	termux: restore launcher runtime bridge	runtime-critical	Restores the Termux launcher wrapper so DNS, CA bundle, and browser handoff work without a manual proot alias.
+subject	termux: refresh lockfile after alpha.30 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
+subject	termux: refresh lockfile after alpha.121 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
+subject	termux: refresh lockfile after alpha.122 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
