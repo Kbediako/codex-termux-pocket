@@ -1,0 +1,122 @@
+# Speed Up Termux Mobile Codex Install
+
+This ExecPlan is a living document. The sections Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective must be kept current. If PLANS.md exists in this repo, this plan follows it.
+
+
+## Purpose / Big Picture
+
+Reduce the end-to-end mobile install/update time for Codex on Termux, with the immediate focus on the supported fast path driven by `scripts/termux/codex-update-alpha`. Today the documented remote-artifact path takes about 20 minutes on this device. The outcome should be a measurably faster install path without regressing the Termux runtime bridge or ChatGPT-login behavior on Android.
+
+
+## Progress
+
+- [x] (2026-04-16 23:28) Collected the current benchmark and helper/workflow entry points from `docs/termux-mobile-update.md`, `scripts/termux/codex-update-alpha`, and `.github/workflows/termux-mobile-artifact.yml`.
+- [x] (2026-04-16 23:43) Baselined recent workflow durations and isolated the dominant time sink in the current remote-artifact path.
+- [x] (2026-04-16 23:47) Deliberated on candidate speedups with subagents and chose the highest-leverage safe set.
+- [ ] (2026-04-16 23:28) Implement the selected optimizations in the helper/workflow/docs/audit files.
+- [ ] (2026-04-16 23:28) Validate the new path and compare runtime against the current ~20 minute baseline.
+
+
+## Surprises & Discoveries
+
+- Observation: The documented supported path is already artifact-first; the remaining ~20 minute cost is not the old on-device source fallback.
+  Evidence: `docs/termux-mobile-update.md` states the remote-artifact install completes in about 20 minutes while the local source path took 5997 seconds and still failed.
+
+- Observation: `codex-update-alpha` currently waits on the GitHub Actions workflow `termux-mobile-artifact.yml` and polls every 15 seconds; any major speedup likely comes from reducing remote build latency, not helper polling alone.
+  Evidence: `scripts/termux/codex-update-alpha` uses `wait_for_remote_run*()` with `sleep 15`.
+
+- Observation: Recent successful `termux-mobile-artifact` runs spend about 93-94% of total job time inside `Build Codex for Termux`.
+  Evidence: Run `24492815727` took about 20m14s total with `Build Codex for Termux` running about 18m50s; run `24294222401` took about 18m48s total with `Build Codex for Termux` running about 17m47s.
+
+- Observation: The helper has smaller but still real avoidable latency in remote-artifact mode: a fixed post-dispatch sleep and 15 second polling loops.
+  Evidence: `scripts/termux/codex-update-alpha` has an explicit `sleep 5` after dispatch and uses `sleep 15` in both remote workflow wait functions.
+
+
+## Decision Log
+
+- Decision: Treat the remote-artifact path as the optimization target first.
+  Rationale: It is the supported fast path on Termux today; the local source path remains experimental and still fails on the Android-targeted V8 link.
+  Date/Author: 2026-04-16 / Codex
+
+- Decision: Keep runtime-critical Termux/login behavior out of scope for optimization changes unless we can prove a speedup requires touching it.
+  Rationale: The user explicitly asked not to regress key fixes such as ChatGPT login on Android.
+  Date/Author: 2026-04-16 / Codex
+
+- Decision: Prioritize workflow-side cache reuse for hermetic Cargo home data and musl tool bootstrap state, then land smaller helper-side latency cleanup in parallel.
+  Rationale: The measured bottleneck is the remote Rust build step, while helper-side waits are smaller but cheap wins. Both changes are tooling-scoped and can be implemented without touching runtime-critical Termux behavior.
+  Date/Author: 2026-04-16 / Codex
+
+
+## Outcomes & Retrospective
+
+In progress. The current implementation plan is to add safe repeat-run cache reuse in `termux-mobile-artifact.yml` and trim avoidable helper-side waiting/network actions in `codex-update-alpha`, then validate with fresh workflow runs and updated timing notes.
+
+
+## Context and Orientation
+
+The current mobile update/install entry point is `scripts/termux/codex-update-alpha`. In `--mode auto`, it chooses among three paths:
+
+- `artifact`: upstream release artifact when the patch audit says the local patch stack is safe.
+- `remote-artifact`: fork-built GitHub Actions artifact for `aarch64-unknown-linux-musl`.
+- `source`: experimental on-device Cargo build, disabled by default on Termux.
+
+Relevant files:
+
+- `/data/data/com.termux/files/home/codex/scripts/termux/codex-update-alpha`
+- `/data/data/com.termux/files/home/codex/.github/workflows/termux-mobile-artifact.yml`
+- `/data/data/com.termux/files/home/codex/docs/termux-mobile-update.md`
+- `/data/data/com.termux/files/home/codex/scripts/termux/patch_audit.tsv`
+- `/data/data/com.termux/files/home/codex/scripts/termux/termux-mobile-lib.sh`
+
+Terms:
+
+- “remote-artifact path” means: rebase local fork to the selected alpha, push `main` to the fork, wait for `termux-mobile-artifact.yml`, download the produced tarball, validate it, and install it into Termux.
+- “runtime bridge” means the launcher and proot/browser-handoff behavior used by the installed Termux binary.
+
+
+## Plan of Work
+
+First, measure where the current remote-artifact time is going: helper-side polling/waiting, workflow scheduling, dependency setup, or the actual Rust build. Second, compare safe optimization candidates such as workflow caching, runner changes, helper-side reuse of existing artifacts, and tighter polling/dispatch logic. Third, implement the smallest set of changes that plausibly reduces end-to-end time without altering runtime-critical Termux behavior. Finally, validate by triggering the supported path again and comparing elapsed time against the current ~20 minute baseline.
+
+
+## Concrete Steps
+
+1. Inspect recent `termux-mobile-artifact` workflow runs and extract job timing for setup, dependency installation, and `Build Codex for Termux`.
+2. Inspect helper-side waits in `codex-update-alpha`, especially dispatch, polling, artifact download, and verification.
+3. Deliberate on candidate speedups with subagents, including build-cache options and helper-side reuse.
+4. Edit the selected files with `apply_patch`.
+5. Run targeted validation:
+   - `git diff --check`
+   - workflow/job inspection for the new run(s)
+   - any targeted script smoke checks that are cheap and safe
+6. Update this ExecPlan with actual timings and outcomes.
+
+
+## Validation and Acceptance
+
+Success means:
+
+- the supported mobile install path is faster than the current documented ~20 minute remote-artifact baseline, or we can show a concrete reduction in the dominant step with new measured timings;
+- the helper still selects the same safe install modes and preserves patch-audit protections;
+- no change regresses the Termux runtime bridge or the assumptions behind Android ChatGPT login;
+- the changed workflow/script path completes or advances further/faster with no new failures.
+
+
+## Idempotence and Recovery
+
+Workflow-only and helper-only changes should be safe to retry. If a new optimization fails, revert just the affected workflow/helper patch and keep the runtime bridge/auth patches intact. Any new commit subject added to the fork patch stack must be classified in `scripts/termux/patch_audit.tsv` so future updates do not get blocked as unknown.
+
+
+## Artifacts and Notes
+
+- Baseline from docs: remote-artifact about 20 minutes; local source fallback about 5997 seconds and failed.
+- Current remote artifact workflow: `termux-mobile-artifact.yml`.
+- Current helper polling cadence: 15 second loops in `wait_for_remote_run()` and `wait_for_remote_run_since()`.
+
+
+## Interfaces and Dependencies
+
+- GitHub Actions workflow dispatch/download through `gh`
+- Termux install helpers in `scripts/termux/termux-mobile-lib.sh`
+- `actions/checkout`, `dtolnay/rust-toolchain`, `mlugg/setup-zig`, and the musl build tooling script
+- `patch_audit.tsv` classifications for any new fork-only optimization commits
