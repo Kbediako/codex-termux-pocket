@@ -9,6 +9,7 @@ subject	Termux: auto-open auth URL; show git describe in --version	runtime-criti
 subject	termux: add alpha update helper script	tooling	Helper-only change; does not affect the shipped binary.
 subject	termux: streamline alpha update flow	tooling	Helper-only change; does not affect the shipped binary.
 subject	ci: make fork workflows lightweight	tooling	Fork workflow change only.
+subject	ci: gate remaining Bazel jobs on upstream	tooling	Fork workflow change only.
 subject	Restore local AGENTS.md after alpha update	tooling	Local maintenance change only.
 subject	docs: refresh Termux README guidance	docs	Documentation only.
 subject	docs: update local plans	docs	Documentation only.
