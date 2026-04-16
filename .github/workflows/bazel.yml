@@ -356,7 +356,8 @@ jobs:
             runs_on:
               group: codex-runners
               labels: codex-windows-x64
-    runs-on: ${{ github.repository == 'openai/codex' && matrix.runs_on || matrix.hosted_os || matrix.os }}
+    runs-on: ${{ matrix.runs_on || matrix.os }}
+    if: github.repository == 'openai/codex'
     name: Bazel clippy on ${{ matrix.os }} for ${{ matrix.target }}
 
     steps:
@@ -450,6 +451,7 @@ jobs:
               group: codex-runners
               labels: codex-windows-x64
     runs-on: ${{ matrix.runs_on || matrix.os }}
+    if: github.repository == 'openai/codex'
     name: Verify release build on ${{ matrix.os }} for ${{ matrix.target }}
 
     steps:
