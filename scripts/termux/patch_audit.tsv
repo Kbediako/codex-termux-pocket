@@ -14,6 +14,7 @@ subject	Restore local AGENTS.md after alpha update	tooling	Local maintenance cha
 subject	docs: refresh Termux README guidance	docs	Documentation only.
 subject	docs: update local plans	docs	Documentation only.
 subject	termux: add artifact-first mobile alpha updates	runtime-critical	The artifact-first helper started writing the shipped Termux launcher path directly, so local runtime shims can be lost on update.
+subject	termux: speed up mobile artifact updates	tooling	Helper/workflow speedup only.
 subject	termux: fix remote mobile artifact builds	tooling	Fork workflow fix only.
 subject	termux: fix remote artifact workflow	tooling	Fork workflow and lockfile maintenance only.
 subject	termux: harden remote artifact run polling	tooling	Helper polling fix only.

@@ -63,10 +63,31 @@ jobs:
           echo "${cargo_home}/bin" >> "$GITHUB_PATH"
           : > "${cargo_home}/config.toml"
 
+      - name: Restore cargo home cache
+        id: cache_cargo_home_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
+          restore-keys: |
+            termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-
+
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.0
+
+      - name: Restore musl tools cache
+        id: cache_musl_tools_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
+          key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
+          restore-keys: |
+            termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-
 
       - name: Install musl build tools
         env:
@@ -191,3 +212,22 @@ jobs:
           path: |
             dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
             dist/termux-mobile/metadata.json
+
+      - name: Save cargo home cache
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
+
+      - name: Save musl tools cache
+        if: always() && !cancelled() && steps.cache_musl_tools_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
+          key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
