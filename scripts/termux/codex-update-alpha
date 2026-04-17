@@ -290,6 +290,89 @@ resolve_remote_ref_sha() {
     | awk 'NR == 1 { print $1 }'
 }
 
+classification_allows_remote_artifact_reuse() {
+  case "$1" in
+    tooling|docs|build-only)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+find_successful_remote_run_id_for_sha() {
+  repo_slug="$1"
+  expected_sha="$2"
+
+  run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 50 --json url,headSha,status,conclusion --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+
+  if [ -z "$run_lines" ]; then
+    return 1
+  fi
+
+  old_ifs="$IFS"
+  IFS='
+'
+  for run_line in $run_lines; do
+    IFS='|'
+    set -- $run_line
+    IFS='
+'
+    run_url="${1:-}"
+    run_sha="${2:-}"
+    run_status="${3:-}"
+    run_conclusion="${4:-}"
+    run_id="${run_url##*/}"
+
+    if [ "$run_sha" = "$expected_sha" ] && [ "$run_status" = "completed" ] && [ "$run_conclusion" = "success" ]; then
+      printf '%s\n' "$run_id"
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+
+  return 1
+}
+
+resolve_reusable_remote_artifact_run() {
+  repo_slug="$1"
+  target_sha="$2"
+
+  run_id="$(find_successful_remote_run_id_for_sha "$repo_slug" "$target_sha" || true)"
+  if [ -n "$run_id" ]; then
+    printf '%s|%s\n' "$target_sha" "$run_id"
+    return 0
+  fi
+
+  if ! git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_sha}^{commit}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  current_sha="$target_sha"
+  while :; do
+    current_subject="$(git -C "$CODEX_SRC_DIR" show -s --format=%s "$current_sha")"
+    lookup_result="$(lookup_patch_classification "$current_subject")"
+    classification="${lookup_result%%	*}"
+
+    if ! classification_allows_remote_artifact_reuse "$classification"; then
+      return 1
+    fi
+
+    parent_sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${current_sha}^" 2>/dev/null || true)"
+    if [ -z "$parent_sha" ]; then
+      return 1
+    fi
+
+    run_id="$(find_successful_remote_run_id_for_sha "$repo_slug" "$parent_sha" || true)"
+    if [ -n "$run_id" ]; then
+      printf '%s|%s\n' "$parent_sha" "$run_id"
+      return 0
+    fi
+
+    current_sha="$parent_sha"
+  done
+}
+
 wait_for_remote_run() {
   repo_slug="$1"
   expected_sha="$2"
@@ -564,6 +647,18 @@ if [ -n "$remote_ref" ]; then
     echo "Unable to resolve remote ref: $remote_ref" >&2
     exit 1
   fi
+  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
+  if [ -n "$reusable_run" ]; then
+    reusable_sha="${reusable_run%%|*}"
+    reusable_run_id="${reusable_run#*|}"
+    if [ "$reusable_sha" = "$expected_sha" ]; then
+      echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
+    else
+      echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
+    fi
+    install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
+    exit 0
+  fi
   dispatch_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   dispatch_remote_artifact_workflow "$repo_slug" "$expected_sha"
   run_remote_artifact_install "$repo_slug" "$dispatch_started_at" "workflow_dispatch" "since" "$expected_sha"
@@ -684,7 +779,18 @@ esac
 
 echo "Selected install mode: $selected_mode"
 
+reusable_run_id=""
+reusable_sha=""
 if [ "$selected_mode" = "remote-artifact" ]; then
+  expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
+  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
+  if [ -n "$reusable_run" ]; then
+    reusable_sha="${reusable_run%%|*}"
+    reusable_run_id="${reusable_run#*|}"
+  fi
+fi
+
+if [ "$selected_mode" = "remote-artifact" ] && [ -z "$reusable_run_id" ]; then
   ensure_push_remote
   if [ -n "$PUSH_REMOTE" ]; then
     git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
@@ -701,8 +807,14 @@ case "$selected_mode" in
     fi
     ;;
   remote-artifact)
-    expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
-    if ! run_remote_artifact_install "$repo_slug" "$expected_sha" "push"; then
+    if [ -n "$reusable_run_id" ]; then
+      if [ "$reusable_sha" = "$expected_sha" ]; then
+        echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
+      else
+        echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
+      fi
+      install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
+    elif ! run_remote_artifact_install "$repo_slug" "$expected_sha" "push"; then
       install_failed="yes"
     fi
     ;;
