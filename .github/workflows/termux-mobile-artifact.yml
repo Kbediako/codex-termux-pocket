@@ -138,7 +138,7 @@ jobs:
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
-      - name: Configure rustc UBSan+sccache wrapper (musl host)
+      - name: Configure rustc UBSan runtime (musl host)
         shell: bash
         run: |
           set -euo pipefail
@@ -146,19 +146,8 @@ jobs:
           if command -v ldconfig >/dev/null 2>&1; then
             ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
           fi
-          sccache_bin="$(command -v sccache)"
-          wrapper_root="${RUNNER_TEMP:-/tmp}"
-          wrapper="${wrapper_root}/rustc-musl-wrapper"
-          cat > "${wrapper}" <<EOF
-          #!/usr/bin/env bash
-          set -euo pipefail
-          if [[ -n "${ubsan}" ]]; then
-            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
-          fi
-          exec "${sccache_bin}" "\$@"
-          EOF
-          chmod +x "${wrapper}"
-          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "MUSL_HOST_LD_PRELOAD=${ubsan}" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Clear sanitizer flags (musl)
@@ -207,6 +196,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sccache --stop-server >/dev/null 2>&1 || true
+          if [[ -n "${MUSL_HOST_LD_PRELOAD:-}" ]]; then
+            export LD_PRELOAD="${MUSL_HOST_LD_PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}"
+          fi
           cargo build --locked --target "${TARGET}" --release --bin codex --timings
 
       - name: Upload Cargo timings
