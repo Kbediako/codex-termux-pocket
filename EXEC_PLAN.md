@@ -15,6 +15,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-16 23:47) Deliberated on candidate speedups with subagents and chose the highest-leverage safe set.
 - [x] (2026-04-17 00:44) Implemented workflow/helper optimizations: tighter helper flow, cache reuse for Cargo home and musl tools, and remote artifact reuse for exact-SHA and runtime-equivalent commits.
 - [x] (2026-04-17 00:50) Validated the new path against the old baseline with fresh-build and reuse benchmarks on device.
+- [x] (2026-04-17 02:25) Deliberated on true cold-build acceleration with subagents and constrained the safe zone to workflow-only changes plus `patch_audit.tsv`.
+- [x] (2026-04-17 02:34) Implemented a first cold-build experiment in `termux-mobile-artifact.yml`: musl-safe `sccache` enablement plus timing uploads and cache stats.
+- [ ] (2026-04-17 02:34) Validate whether the new workflow materially reduces fresh-run build time on the fork, and fall back to selective `target/` reuse if it does not.
 
 
 ## Surprises & Discoveries
@@ -40,6 +43,12 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: Runtime-equivalent ancestor reuse also collapses tooling-only follow-up installs to about 22.151 seconds end to end on this device.
   Evidence: Local benchmark against `e88346898340c06edd5ab36f3c6f49ab16d450a9` reused successful run `24540772912` from `77881cd57e2e9b4e3280e5baebcec12f5f664fec` because the newer tail was tooling-only, then completed in `22.151` seconds.
 
+- Observation: The repo already disables `sccache` on musl in `rust-ci-full`, but the disabling reason is wrapper-slot conflict, not a documented musl incompatibility.
+  Evidence: `rust-ci-full.yml` enables `RUSTC_WRAPPER=sccache`, then clears it for musl before installing the musl `rustc-ubsan-wrapper`.
+
+- Observation: Subagent research split on the best cold-build experiment: `sccache` is the lower-risk first step, while selective `target/` reuse likely has a higher ceiling but materially larger cache-size and staleness risk.
+  Evidence: the musl-wrapper feasibility stream found a safe combined `RUSTC_WRAPPER` shape for `sccache`, while the alternatives stream argued for `target/` reuse due to native/build-script output reuse.
+
 
 ## Decision Log
 
@@ -59,10 +68,16 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: Warmed dependency caches did not materially reduce compile time, while exact-SHA artifact reuse cut repeat install time from minutes to seconds. The patch-audit classifications already provide the safety boundary for reusing runtime-equivalent artifacts.
   Date/Author: 2026-04-17 / Codex
 
+- Decision: For true cold-build acceleration, try musl-safe `sccache` in `termux-mobile-artifact.yml` before selective `target/` reuse.
+  Rationale: `sccache` stays inside existing repo patterns, has lower cache-bloat/staleness risk than `target/` caching, and can be added without leaving the workflow-only safe zone. If it does not materially move the build step, `target/` reuse becomes the next experiment.
+  Date/Author: 2026-04-17 / Codex
+
 
 ## Outcomes & Retrospective
 
-The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That meets the immediate goal of getting the common mobile install path well below 20 minutes without touching the Termux runtime bridge or Android ChatGPT-login behavior.
+The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That met the first-phase goal without touching the Termux runtime bridge or Android ChatGPT-login behavior.
+
+The second phase is now in flight: keep the safe zone to workflow-only changes, enable musl-safe `sccache` in the fork artifact workflow, and benchmark whether compiler-output reuse lowers the ~18m49s build step on fresh runners. If it does not, the next experiment is selective `target/` reuse for the `aarch64-unknown-linux-musl` release path.
 
 
 ## Context and Orientation
