@@ -65,12 +65,14 @@ Validate an upstream alpha binary without installing it:
 
 ## Measured improvement
 
-On this device, the new supported path already reduced alpha update/install time materially:
+On this device, the supported mobile paths now split cleanly into two timing bands:
 
-- the remote-artifact install completed in about 20 minutes
-- the benchmarked local `cargo install` path took 5997 seconds and still failed
+- on 2026-04-17, a fresh fork `remote-artifact` build still took about 20 minutes end to end, with about 18 minutes 49 seconds spent in `Build Codex for Termux`
+- on 2026-04-17, a repeat install for the exact same SHA completed in 20.654 seconds by reusing the existing successful fork artifact
+- on 2026-04-17, a tooling-only follow-up commit installed in 22.151 seconds by reusing the newest runtime-equivalent ancestor artifact
+- the benchmarked local `cargo install` path still took 5997 seconds and failed
 
-Upstream release-asset installs should be faster again when the patch audit allows them.
+Upstream release-asset installs should still be faster when the patch audit allows them, but the fork path is no longer forced to rebuild every tooling-only or repeat install.
 
 ## Remote artifact workflow
 
@@ -85,7 +87,13 @@ builds `codex` for `aarch64-unknown-linux-musl` and uploads an Actions artifact 
 - `gh` is installed and authenticated.
 
 Explicit `--mode remote-artifact --remote-ref ...` dispatches the workflow on the fork
-and waits for the matching run before installing the resulting binary.
+only when no reusable successful artifact already exists. The helper now prefers:
+
+- an exact successful artifact for the requested commit SHA
+- otherwise, the newest successful ancestor artifact whose newer commits are all classified as `tooling`, `docs`, or `build-only`
+- otherwise, a new workflow dispatch and build
+
+That reuse logic is what collapses repeat or tooling-only installs from about 20 minutes to about 20-22 seconds on this device.
 
 ## Requirements
 
