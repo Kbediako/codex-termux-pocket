@@ -26,3 +26,4 @@ subject	termux: restore launcher runtime bridge	runtime-critical	Restores the Te
 subject	termux: refresh lockfile after alpha.30 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
 subject	termux: refresh lockfile after alpha.121 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
 subject	termux: refresh lockfile after alpha.122 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
+subject	termux: reuse equivalent mobile artifacts	tooling	Helper-only artifact reuse logic; installed runtime may come from an equivalent earlier commit.
