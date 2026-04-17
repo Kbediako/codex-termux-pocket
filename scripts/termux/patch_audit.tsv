@@ -28,3 +28,4 @@ subject	termux: refresh lockfile after alpha.121 rebase	build-only	Refreshes wor
 subject	termux: refresh lockfile after alpha.122 rebase	build-only	Refreshes workspace package versions in Cargo.lock so fork remote artifact builds can run with --locked.
 subject	termux: reuse equivalent mobile artifacts	tooling	Helper-only artifact reuse logic; installed runtime may come from an equivalent earlier commit.
 subject	docs: note mobile artifact reuse speedups	docs	Documentation and plan update only.
+subject	termux: add sccache to mobile artifact builds	tooling	Fork workflow cold-build optimization only.
