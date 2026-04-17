@@ -31,6 +31,12 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: The helper has smaller but still real avoidable latency in remote-artifact mode: a fixed post-dispatch sleep and 15 second polling loops.
   Evidence: `scripts/termux/codex-update-alpha` has an explicit `sleep 5` after dispatch and uses `sleep 15` in both remote workflow wait functions.
 
+- Observation: Cargo-home and musl-tools cache reuse only shaved seconds, not minutes. The warmed workflow run still spent about 18m49s in `Build Codex for Termux` and finished in about 20m07s overall.
+  Evidence: Warmed run `24540772912` restored both caches successfully, but its compile time remained essentially flat relative to cold run `24539677807`.
+
+- Observation: Reusing an already-successful remote artifact for the same SHA collapses repeat `--mode remote-artifact --remote-ref <sha>` installs to about 20.654 seconds end to end on this device.
+  Evidence: Local benchmark after adding artifact reuse logic completed in `20.654` seconds and installed `codex-cli 77881cd` without dispatching a new workflow.
+
 
 ## Decision Log
 
@@ -46,10 +52,14 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: The measured bottleneck is the remote Rust build step, while helper-side waits are smaller but cheap wins. Both changes are tooling-scoped and can be implemented without touching runtime-critical Termux behavior.
   Date/Author: 2026-04-16 / Codex
 
+- Decision: Prefer artifact reuse over deeper compile caching as the next optimization step when the target SHA already has a successful artifact, or when newer commits are classified as tooling/docs/build-only.
+  Rationale: Warmed dependency caches did not materially reduce compile time, while exact-SHA artifact reuse cut repeat install time from minutes to seconds. The patch-audit classifications already provide the safety boundary for reusing runtime-equivalent artifacts.
+  Date/Author: 2026-04-17 / Codex
+
 
 ## Outcomes & Retrospective
 
-In progress. The current implementation plan is to add safe repeat-run cache reuse in `termux-mobile-artifact.yml` and trim avoidable helper-side waiting/network actions in `codex-update-alpha`, then validate with fresh workflow runs and updated timing notes.
+In progress. The current implementation plan has expanded from cache reuse to artifact reuse: keep the safe workflow/helper cache improvements, then prefer existing successful artifacts when the commit SHA or its tooling-only tail makes a rebuild unnecessary.
 
 
 ## Context and Orientation
