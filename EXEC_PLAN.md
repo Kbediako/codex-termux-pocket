@@ -17,6 +17,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-17 00:50) Validated the new path against the old baseline with fresh-build and reuse benchmarks on device.
 - [x] (2026-04-17 02:25) Deliberated on true cold-build acceleration with subagents and constrained the safe zone to workflow-only changes plus `patch_audit.tsv`.
 - [x] (2026-04-17 02:34) Implemented a first cold-build experiment in `termux-mobile-artifact.yml`: musl-safe `sccache` enablement plus timing uploads and cache stats.
+- [x] (2026-04-17 02:42) Ran the first `sccache` build on the fork; the workflow reached cache save/stats but failed in `Build Codex for Termux` due to a musl UBSan preload regression while loading `sqlx_macros`.
+- [x] (2026-04-17 02:50) Adjusted the `sccache` experiment to move the musl UBSan preload to the build environment and force a fresh `sccache` server start before the build.
 - [ ] (2026-04-17 02:34) Validate whether the new workflow materially reduces fresh-run build time on the fork, and fall back to selective `target/` reuse if it does not.
 
 
@@ -49,6 +51,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: Subagent research split on the best cold-build experiment: `sccache` is the lower-risk first step, while selective `target/` reuse likely has a higher ceiling but materially larger cache-size and staleness risk.
   Evidence: the musl-wrapper feasibility stream found a safe combined `RUSTC_WRAPPER` shape for `sccache`, while the alternatives stream argued for `target/` reuse due to native/build-script output reuse.
 
+- Observation: The first `sccache`-enabled fork run seeded a real compiler cache but failed because the musl UBSan preload no longer reached the rustc proc-macro load path.
+  Evidence: run `24543089388` compiled until `sqlx`, then failed with `libsqlx_macros-...so: undefined symbol: __ubsan_handle_type_mismatch_v1`; `sccache --show-stats` reported `807` Rust misses, `0` hits, and `639 MiB` cached.
+
 
 ## Decision Log
 
@@ -72,12 +77,18 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: `sccache` stays inside existing repo patterns, has lower cache-bloat/staleness risk than `target/` caching, and can be added without leaving the workflow-only safe zone. If it does not materially move the build step, `target/` reuse becomes the next experiment.
   Date/Author: 2026-04-17 / Codex
 
+- Decision: After the first failed `sccache` run, keep the `sccache` experiment alive for one narrower fix by moving the musl UBSan preload into the build environment and restarting the `sccache` server at build time.
+  Rationale: the failure was specific to wrapper composition, while the failed run still saved a reusable `.sccache` payload. One narrow follow-up rerun can prove whether the cache actually buys cold-run speed; if it still fails or yields no meaningful hits, move on to selective `target/` reuse.
+  Date/Author: 2026-04-17 / Codex
+
 
 ## Outcomes & Retrospective
 
 The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That met the first-phase goal without touching the Termux runtime bridge or Android ChatGPT-login behavior.
 
 The second phase is now in flight: keep the safe zone to workflow-only changes, enable musl-safe `sccache` in the fork artifact workflow, and benchmark whether compiler-output reuse lowers the ~18m49s build step on fresh runners. If it does not, the next experiment is selective `target/` reuse for the `aarch64-unknown-linux-musl` release path.
+
+The first fork run of that experiment partially validated the direction: the workflow reached `sccache` save/stats and stored about `639 MiB`, but the combined wrapper shape was wrong for musl proc-macro loading and broke on `sqlx_macros`. The current follow-up keeps the cache scaffolding, moves `LD_PRELOAD` to the build step, and forces a fresh `sccache` server before the build so the rerun is a clean yes/no test.
 
 
 ## Context and Orientation
