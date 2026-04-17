@@ -13,8 +13,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-16 23:28) Collected the current benchmark and helper/workflow entry points from `docs/termux-mobile-update.md`, `scripts/termux/codex-update-alpha`, and `.github/workflows/termux-mobile-artifact.yml`.
 - [x] (2026-04-16 23:43) Baselined recent workflow durations and isolated the dominant time sink in the current remote-artifact path.
 - [x] (2026-04-16 23:47) Deliberated on candidate speedups with subagents and chose the highest-leverage safe set.
-- [ ] (2026-04-16 23:28) Implement the selected optimizations in the helper/workflow/docs/audit files.
-- [ ] (2026-04-16 23:28) Validate the new path and compare runtime against the current ~20 minute baseline.
+- [x] (2026-04-17 00:44) Implemented workflow/helper optimizations: tighter helper flow, cache reuse for Cargo home and musl tools, and remote artifact reuse for exact-SHA and runtime-equivalent commits.
+- [x] (2026-04-17 00:50) Validated the new path against the old baseline with fresh-build and reuse benchmarks on device.
 
 
 ## Surprises & Discoveries
@@ -36,6 +36,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 
 - Observation: Reusing an already-successful remote artifact for the same SHA collapses repeat `--mode remote-artifact --remote-ref <sha>` installs to about 20.654 seconds end to end on this device.
   Evidence: Local benchmark after adding artifact reuse logic completed in `20.654` seconds and installed `codex-cli 77881cd` without dispatching a new workflow.
+
+- Observation: Runtime-equivalent ancestor reuse also collapses tooling-only follow-up installs to about 22.151 seconds end to end on this device.
+  Evidence: Local benchmark against `e88346898340c06edd5ab36f3c6f49ab16d450a9` reused successful run `24540772912` from `77881cd57e2e9b4e3280e5baebcec12f5f664fec` because the newer tail was tooling-only, then completed in `22.151` seconds.
 
 
 ## Decision Log
@@ -59,7 +62,7 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 
 ## Outcomes & Retrospective
 
-In progress. The current implementation plan has expanded from cache reuse to artifact reuse: keep the safe workflow/helper cache improvements, then prefer existing successful artifacts when the commit SHA or its tooling-only tail makes a rebuild unnecessary.
+The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That meets the immediate goal of getting the common mobile install path well below 20 minutes without touching the Termux runtime bridge or Android ChatGPT-login behavior.
 
 
 ## Context and Orientation
@@ -120,6 +123,12 @@ Workflow-only and helper-only changes should be safe to retry. If a new optimiza
 ## Artifacts and Notes
 
 - Baseline from docs: remote-artifact about 20 minutes; local source fallback about 5997 seconds and failed.
+- Measured fresh-build runs after the helper/workflow speedups:
+  - `24539677807`: about 20m23s total, about 18m51s in `Build Codex for Termux`
+  - `24540772912`: about 20m02s total, about 18m49s in `Build Codex for Termux`
+- Measured reuse-path installs after artifact reuse:
+  - exact-SHA reuse: `20.654` seconds
+  - runtime-equivalent ancestor reuse: `22.151` seconds
 - Current remote artifact workflow: `termux-mobile-artifact.yml`.
 - Current helper polling cadence: 15 second loops in `wait_for_remote_run()` and `wait_for_remote_run_since()`.
 
