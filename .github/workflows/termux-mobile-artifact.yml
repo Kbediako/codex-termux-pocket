@@ -27,8 +27,6 @@ jobs:
         working-directory: codex-rs
     env:
       TARGET: aarch64-unknown-linux-musl
-      USE_SCCACHE: "true"
-      SCCACHE_CACHE_SIZE: 10G
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
@@ -55,13 +53,24 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Compute lockfile hash
-        id: lockhash
+      - name: Compute release cache key
+        id: release_cache_key
         shell: bash
         run: |
           set -euo pipefail
-          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          mapfile -t manifest_files < <(find "${GITHUB_WORKSPACE}/codex-rs" -name Cargo.toml -print | LC_ALL=C sort)
+          cache_key_files=(
+            "${GITHUB_WORKSPACE}/.github/workflows/termux-mobile-artifact.yml"
+            "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+            "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py"
+            "${GITHUB_WORKSPACE}/codex-rs/.cargo/config.toml"
+            "${GITHUB_WORKSPACE}/codex-rs/Cargo.lock"
+            "${GITHUB_WORKSPACE}/codex-rs/rust-toolchain.toml"
+            "${manifest_files[@]}"
+          )
+          mapfile -t cache_key_files < <(printf '%s\n' "${cache_key_files[@]}" | LC_ALL=C sort -u)
+          cache_hash="$(sha256sum "${cache_key_files[@]}" | sha256sum | cut -d' ' -f1)"
+          echo "dependency_tooling_hash=${cache_hash}" >> "$GITHUB_OUTPUT"
 
       - name: Use hermetic Cargo home (musl)
         shell: bash
@@ -85,38 +94,6 @@ jobs:
           restore-keys: |
             termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-
 
-      - name: Install sccache
-        if: ${{ env.USE_SCCACHE == 'true' }}
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
-        with:
-          tool: sccache
-          version: 0.7.5
-
-      - name: Configure sccache backend
-        if: ${{ env.USE_SCCACHE == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-            echo "Using sccache GitHub backend"
-          else
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
-            echo "Using sccache local disk + actions/cache fallback"
-          fi
-
-      - name: Restore sccache cache (fallback)
-        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
-        id: cache_sccache_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
-        with:
-          path: ${{ github.workspace }}/.sccache/
-          key: sccache-termux-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}-${{ github.run_id }}
-          restore-keys: |
-            sccache-termux-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}-
-            sccache-termux-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-
-
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
@@ -138,7 +115,7 @@ jobs:
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
-      - name: Configure rustc UBSan runtime (musl host)
+      - name: Configure rustc UBSan wrapper (musl host)
         shell: bash
         run: |
           set -euo pipefail
@@ -146,8 +123,18 @@ jobs:
           if command -v ldconfig >/dev/null 2>&1; then
             ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
           fi
-          echo "MUSL_HOST_LD_PRELOAD=${ubsan}" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          wrapper_root="${RUNNER_TEMP:-/tmp}"
+          wrapper="${wrapper_root}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Clear sanitizer flags (musl)
@@ -192,14 +179,38 @@ jobs:
           echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
+      - name: Restore host release cache
+        id: cache_host_release_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            codex-rs/target/.rustc_info.json
+            codex-rs/target/release/.cargo-lock
+            codex-rs/target/release/.fingerprint/
+            codex-rs/target/release/build/
+            codex-rs/target/release/deps/
+          key: termux-host-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
+          restore-keys: |
+            termux-host-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-
+
+      - name: Restore target release cache
+        id: cache_target_release_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            codex-rs/target/${{ env.TARGET }}/.rustc_info.json
+            codex-rs/target/${{ env.TARGET }}/release/.cargo-lock
+            codex-rs/target/${{ env.TARGET }}/release/.fingerprint/
+            codex-rs/target/${{ env.TARGET }}/release/build/
+            codex-rs/target/${{ env.TARGET }}/release/deps/
+          key: termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
+          restore-keys: |
+            termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-
+
       - name: Build Codex for Termux
         shell: bash
         run: |
           set -euo pipefail
-          sccache --stop-server >/dev/null 2>&1 || true
-          if [[ -n "${MUSL_HOST_LD_PRELOAD:-}" ]]; then
-            export LD_PRELOAD="${MUSL_HOST_LD_PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}"
-          fi
           cargo build --locked --target "${TARGET}" --release --bin codex --timings
 
       - name: Upload Cargo timings
@@ -268,31 +279,31 @@ jobs:
             ${{ github.workspace }}/.cargo-home/git/db/
           key: termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
 
-      - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+      - name: Save host release cache
+        if: success() && !cancelled() && steps.cache_host_release_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
-          path: ${{ github.workspace }}/.sccache/
-          key: sccache-termux-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}-${{ github.run_id }}
+          path: |
+            codex-rs/target/.rustc_info.json
+            codex-rs/target/release/.cargo-lock
+            codex-rs/target/release/.fingerprint/
+            codex-rs/target/release/build/
+            codex-rs/target/release/deps/
+          key: termux-host-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
 
-      - name: sccache stats
-        if: always() && env.USE_SCCACHE == 'true'
+      - name: Save target release cache
+        if: success() && !cancelled() && steps.cache_target_release_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        shell: bash
-        run: sccache --show-stats || true
-
-      - name: sccache summary
-        if: always() && env.USE_SCCACHE == 'true'
-        shell: bash
-        run: |
-          {
-            echo "### sccache stats - ${{ env.TARGET }}";
-            echo;
-            echo '```';
-            sccache --show-stats || true;
-            echo '```';
-          } >> "$GITHUB_STEP_SUMMARY"
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            codex-rs/target/${{ env.TARGET }}/.rustc_info.json
+            codex-rs/target/${{ env.TARGET }}/release/.cargo-lock
+            codex-rs/target/${{ env.TARGET }}/release/.fingerprint/
+            codex-rs/target/${{ env.TARGET }}/release/build/
+            codex-rs/target/${{ env.TARGET }}/release/deps/
+          key: termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
 
       - name: Save musl tools cache
         if: always() && !cancelled() && steps.cache_musl_tools_restore.outputs.cache-hit != 'true'
