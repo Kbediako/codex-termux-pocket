@@ -20,7 +20,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-17 02:42) Ran the first `sccache` build on the fork; the workflow reached cache save/stats but failed in `Build Codex for Termux` due to a musl UBSan preload regression while loading `sqlx_macros`.
 - [x] (2026-04-17 02:50) Adjusted the `sccache` experiment to move the musl UBSan preload to the build environment and force a fresh `sccache` server start before the build.
 - [x] (2026-04-17 03:18) Rejected the musl `sccache` path after the second run failed on the same proc-macro UBSan symbol resolution and redirected the workflow to selective release-target caching with the known-good direct rustc wrapper.
-- [ ] (2026-04-17 03:18) Validate whether the release-target cache materially reduces repeat cold-build time on the fork without changing the artifact/update contract.
+- [x] (2026-04-17 03:41) Restored correctness with the direct musl wrapper, validated the updater/artifact contract against run `24544435578`, and reproduced the first warm-cache failure on `rusty_v8`.
+- [ ] (2026-04-17 03:44) Re-run the warm-cache experiment after adding the missing `target/${TARGET}/release/gn_out/obj` path used by the prebuilt `rusty_v8` archive.
 
 
 ## Surprises & Discoveries
@@ -61,6 +62,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: The repo’s own musl CI already treats `sccache` and the musl UBSan wrapper as mutually exclusive, which is a stronger signal than the raw cache-hit numbers.
   Evidence: `rust-ci-full.yml` enables `RUSTC_WRAPPER=sccache`, then explicitly clears it for musl before installing the direct `rustc-ubsan-wrapper`.
 
+- Observation: The first release-target cache attempt was correct for a cold run and for artifact installation, but the warm rerun failed because the `rusty_v8` native archive lives under `target/${TARGET}/release/gn_out/obj`, which was outside the cached path set.
+  Evidence: push run `24544435578` succeeded and the updater reinstalled its artifact in `19.802` seconds, but warm rerun `24545305708` restored both host and target caches and then failed in about `54` seconds with `could not find native static library 'rusty_v8'`; the `v8` build logic downloads the prebuilt archive into `build_dir()/gn_out/obj`.
+
 
 ## Decision Log
 
@@ -92,14 +96,18 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: the second rerun kept the same proc-macro UBSan failure even with strong Rust cache hits, and the upstream repo already disables `sccache` on musl before applying the wrapper. Selective `target/` reuse stays inside the workflow-only safe zone without depending on the `sccache` daemon boundary.
   Date/Author: 2026-04-17 / Codex
 
+- Decision: Keep the selective release-target cache experiment, but widen the target cache to include `target/${TARGET}/release/gn_out/obj` before judging the approach.
+  Rationale: the first rerun isolated a concrete missing native-output directory rather than a general fingerprint or correctness problem. Adding the `rusty_v8` archive path is a narrow workflow-only fix that preserves the restored green path from run `24544435578`.
+  Date/Author: 2026-04-17 / Codex
+
 
 ## Outcomes & Retrospective
 
 The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That met the first-phase goal without touching the Termux runtime bridge or Android ChatGPT-login behavior.
 
-The second phase narrowed the viable path. `sccache` clearly accelerated repeated Rust crate compilation on the fork, but it still broke the musl proc-macro load path twice, which makes it unacceptable for this job. The current candidate replaces `sccache` with selective caching of host and target release dependency outputs while restoring the direct `rustc-ubsan-wrapper` pattern that the repo already uses for musl CI.
+The second phase narrowed the viable path. `sccache` clearly accelerated repeated Rust crate compilation on the fork, but it still broke the musl proc-macro load path twice, which makes it unacceptable for this job. The next candidate replaced `sccache` with selective caching of host and target release dependency outputs while restoring the direct `rustc-ubsan-wrapper` pattern that the repo already uses for musl CI.
 
-The next validation step is to push that workflow-only target-cache change, confirm that `termux-mobile-artifact` is green again, and then rerun the workflow on the same dependency graph to measure how much of the ~18m49s build step can be eliminated by reusing the cached release outputs.
+That candidate cleared the correctness bar on its cold run: `termux-mobile-artifact` run `24544435578` succeeded, uploaded the artifact, and the updater reinstalled it in `19.802` seconds by reusing the exact-SHA run. The first warm rerun then exposed a narrower cache gap rather than a broad regression: `v8` expects its prebuilt archive under `target/${TARGET}/release/gn_out/obj`, and that directory was not cached. The immediate follow-up is to add that path and rerun the warm-cache test before deciding whether release-target caching is worth keeping.
 
 
 ## Context and Orientation
