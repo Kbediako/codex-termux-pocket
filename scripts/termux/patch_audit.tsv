@@ -31,3 +31,4 @@ subject	docs: note mobile artifact reuse speedups	docs	Documentation and plan up
 subject	termux: add sccache to mobile artifact builds	tooling	Fork workflow cold-build optimization only.
 subject	termux: fix musl sccache preload	tooling	Fork workflow-only follow-up for the mobile build cache experiment.
 subject	termux: cache mobile release targets	tooling	Fork workflow-only cold-build cache tuning; runtime/install/auth behavior unchanged.
+subject	termux: cache mobile rusty_v8 outputs	tooling	Fork workflow-only follow-up to include the prebuilt rusty_v8 archive path in the mobile target cache.
