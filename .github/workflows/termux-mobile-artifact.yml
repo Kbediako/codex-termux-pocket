@@ -203,6 +203,7 @@ jobs:
             codex-rs/target/${{ env.TARGET }}/release/.fingerprint/
             codex-rs/target/${{ env.TARGET }}/release/build/
             codex-rs/target/${{ env.TARGET }}/release/deps/
+            codex-rs/target/${{ env.TARGET }}/release/gn_out/obj/
           key: termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
           restore-keys: |
             termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-
@@ -303,6 +304,7 @@ jobs:
             codex-rs/target/${{ env.TARGET }}/release/.fingerprint/
             codex-rs/target/${{ env.TARGET }}/release/build/
             codex-rs/target/${{ env.TARGET }}/release/deps/
+            codex-rs/target/${{ env.TARGET }}/release/gn_out/obj/
           key: termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
 
       - name: Save musl tools cache
