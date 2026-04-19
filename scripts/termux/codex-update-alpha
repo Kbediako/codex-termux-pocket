@@ -628,11 +628,15 @@ run_remote_artifact_install() {
   wait_mode="${4:-sha}"
   verify_sha="${5:-$expected_sha}"
   if [ "$wait_mode" = "since" ]; then
-    run_id="$(wait_for_remote_run_since "$repo_slug" "$expected_event" "$expected_sha" "$remote_timeout")"
+    if ! run_id="$(wait_for_remote_run_since "$repo_slug" "$expected_event" "$expected_sha" "$remote_timeout")" || [ -z "$run_id" ]; then
+      return 1
+    fi
     install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
     return
   fi
-  run_id="$(wait_for_remote_run "$repo_slug" "$expected_sha" "$expected_event" "$remote_timeout")"
+  if ! run_id="$(wait_for_remote_run "$repo_slug" "$expected_sha" "$expected_event" "$remote_timeout")" || [ -z "$run_id" ]; then
+    return 1
+  fi
   install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
 }
 
