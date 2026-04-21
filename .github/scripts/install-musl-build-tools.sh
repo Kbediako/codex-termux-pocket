@@ -206,6 +206,7 @@ fi
 if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
   mkdir -p "${libcap_src_root}" "${libcap_prefix}/lib" "${libcap_prefix}/include/sys" "${libcap_prefix}/include/linux" "${libcap_pkgconfig_dir}"
   libcap_tarball="${libcap_root}/${libcap_tarball_name}"
+  build_cc="$(command -v cc || command -v gcc || command -v clang)"
 
   curl -fsSL "${libcap_download_url}" -o "${libcap_tarball}"
   echo "${libcap_sha256}  ${libcap_tarball}" | sha256sum -c -
@@ -214,6 +215,7 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
   libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
   make -C "${libcap_source_dir}/libcap" -j"$(nproc)" \
     CC="${musl_linker}" \
+    BUILD_CC="${build_cc}" \
     AR=ar \
     RANLIB=ranlib
 
