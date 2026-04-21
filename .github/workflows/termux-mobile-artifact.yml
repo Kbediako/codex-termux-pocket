@@ -154,6 +154,17 @@ jobs:
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
+      - name: Normalize host compiler env for x64 benchmarks
+        if: ${{ runner.arch == 'X64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Leave target-scoped CC/CXX vars intact for the aarch64 musl build,
+          # but stop forcing host proc-macro/build-dependency compilations
+          # through the target compiler on x64 runners.
+          echo "CC=" >> "$GITHUB_ENV"
+          echo "CXX=" >> "$GITHUB_ENV"
+
       - name: Configure rustc UBSan wrapper (musl host)
         shell: bash
         run: |
