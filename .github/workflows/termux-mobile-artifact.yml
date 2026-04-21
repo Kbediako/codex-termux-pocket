@@ -159,11 +159,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Leave target-scoped CC/CXX vars intact for the aarch64 musl build,
+          # Leave target-scoped tool vars intact for the aarch64 musl build,
           # but stop forcing host proc-macro/build-dependency compilations
-          # through the target compiler on x64 runners.
+          # through target-only compiler and warning-flag settings on x64.
+          target_cflags="${CFLAGS-}"
+          target_cxxflags="${CXXFLAGS-}"
           echo "CC=" >> "$GITHUB_ENV"
           echo "CXX=" >> "$GITHUB_ENV"
+          echo "CFLAGS=" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=" >> "$GITHUB_ENV"
+          echo "CFLAGS_aarch64_unknown_linux_musl=${target_cflags}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS_aarch64_unknown_linux_musl=${target_cxxflags}" >> "$GITHUB_ENV"
 
       - name: Configure rustc UBSan wrapper (musl host)
         shell: bash
