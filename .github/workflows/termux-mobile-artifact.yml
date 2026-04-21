@@ -27,6 +27,7 @@ jobs:
         working-directory: codex-rs
     env:
       TARGET: aarch64-unknown-linux-musl
+      ZIG_VERSION: "0.14.0"
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
@@ -78,6 +79,7 @@ jobs:
           set -euo pipefail
           mapfile -t manifest_files < <(find "${GITHUB_WORKSPACE}/codex-rs" -name Cargo.toml -print | LC_ALL=C sort)
           cache_key_files=(
+            "${GITHUB_WORKSPACE}/.github/scripts/install-zig.sh"
             "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
             "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py"
             "${GITHUB_WORKSPACE}/codex-rs/.cargo/config.toml"
@@ -89,6 +91,7 @@ jobs:
           cache_fingerprint_lines=(
             "release_cache_version=${TERMUX_RELEASE_CACHE_VERSION}"
             "target=${TARGET}"
+            "zig_version=${ZIG_VERSION}"
             "cargo_profile_release_lto=${CARGO_PROFILE_RELEASE_LTO}"
             "cargo_profile_release_codegen_units=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}"
             "aws_lc_sys_no_jitter_entropy=${AWS_LC_SYS_NO_JITTER_ENTROPY}"
@@ -125,9 +128,8 @@ jobs:
             termux-cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-
 
       - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.14.0
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-zig.sh"
 
       - name: Restore musl tools cache
         id: cache_musl_tools_restore
