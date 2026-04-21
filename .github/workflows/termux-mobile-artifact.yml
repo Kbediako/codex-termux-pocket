@@ -10,15 +10,19 @@ on:
         description: Git ref to build for Termux (branch, tag, or commit SHA)
         required: false
         default: ""
+      runner_label:
+        description: Dispatch-only runner benchmark label (leave empty for shipping arm runner)
+        required: false
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}-{1}', inputs.source_ref != '' && inputs.source_ref || github.ref_name, inputs.runner_label != '' && inputs.runner_label || 'ubuntu-24.04-arm') || format('push-{0}', github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
   build-termux-artifact:
     if: ${{ github.repository != 'openai/codex' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label != '' && inputs.runner_label || 'ubuntu-24.04-arm' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -27,6 +31,7 @@ jobs:
         working-directory: codex-rs
     env:
       TARGET: aarch64-unknown-linux-musl
+      RUNNER_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label != '' && inputs.runner_label || 'ubuntu-24.04-arm' }}
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
@@ -89,6 +94,7 @@ jobs:
           cache_fingerprint_lines=(
             "release_cache_version=${TERMUX_RELEASE_CACHE_VERSION}"
             "target=${TARGET}"
+            "runner_label=${RUNNER_LABEL}"
             "cargo_profile_release_lto=${CARGO_PROFILE_RELEASE_LTO}"
             "cargo_profile_release_codegen_units=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}"
             "aws_lc_sys_no_jitter_entropy=${AWS_LC_SYS_NO_JITTER_ENTROPY}"
@@ -144,6 +150,24 @@ jobs:
           APT_INSTALL_ARGS: --no-install-recommends
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Normalize host compiler env for x64 benchmarks
+        if: ${{ runner.arch == 'X64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cflags="${CFLAGS-}"
+          cxxflags="${CXXFLAGS-}"
+          echo "CC=" >> "$GITHUB_ENV"
+          echo "CXX=" >> "$GITHUB_ENV"
+          echo "CFLAGS=" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=" >> "$GITHUB_ENV"
+          if [[ -n "${cflags}" ]]; then
+            echo "CFLAGS_aarch64_unknown_linux_musl=${cflags}" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "${cxxflags}" ]]; then
+            echo "CXXFLAGS_aarch64_unknown_linux_musl=${cxxflags}" >> "$GITHUB_ENV"
+          fi
 
       - name: Configure rustc UBSan wrapper (musl host)
         shell: bash
