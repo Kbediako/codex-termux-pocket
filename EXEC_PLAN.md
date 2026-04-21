@@ -29,6 +29,7 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-21 07:07 UTC) Reopened hosted x64 only as a dispatch-only zig-linker benchmark: restore an opt-in x64 runner path, keep push builds on arm, and validate whether the existing Zig wrapper could replace the missing hosted x64 aarch64 musl linker without touching Android runtime/auth behavior.
 - [x] (2026-04-21 07:13 UTC) Closed the zig-linker x64 spike and reverted it from head after two setup-time `libcap` failures on hosted x64 (`_makenames` host exec format under target `CC`, then `__CAP_BITS` compile failures under the zig fallback). The benchmark never reached Cargo and did not justify further workflow churn.
 - [x] (2026-04-21 07:47 UTC) Narrowed the APT cache paths to `archives/*.deb` after the green cleanup run exposed a `Permission denied` warning while saving `/var/cache/apt/archives/partial`; re-ran the arm shipping workflow to confirm the warning is gone.
+- [x] (2026-04-21 08:18 UTC) Replaced the remaining `mlugg/setup-zig` Node 20 action usage with a repo-local Zig installer script pinned to `0.14.0`, updated the mobile release-cache fingerprint to include the Zig installer input, and re-ran the arm shipping workflow to remove the last Node 20 annotation from that path.
 
 
 ## Surprises & Discoveries
@@ -83,6 +84,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 
 - Observation: the APT archive cache scaffolding restored cleanly, but the save path was too broad and still tried to tar `/var/cache/apt/archives/partial`, which remains unreadable to the cache action on the runner.
   Evidence: green cleanup run `24709347811` succeeded overall, but `Save APT cache` logged `Cannot open: Permission denied` for `../../../../../var/cache/apt/archives/partial` and then `Cache save failed`.
+
+- Observation: the latest `mlugg/setup-zig` release does not solve the GitHub Node 24 migration warning, because its published action metadata still declares `runs.using: node20`.
+  Evidence: the upstream GitHub mirror showed `v2.2.1` as the latest release while `action.yml` on the mirror still declared `runs: using: 'node20'`, so merely bumping the pinned ref would preserve the warning.
 
 - Observation: The current release-cache key still includes the whole workflow file, so any workflow-only edit cold-soaks the warm release caches even when the dependency graph and build semantics stay the same.
   Evidence: `termux-mobile-artifact.yml` hashes the workflow file itself into `dependency_tooling_hash`, and the same workflow already showed a roughly `5` minute compile-step improvement once its release caches were allowed to warm.
@@ -147,6 +151,10 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: the reusable payload is the downloaded package archive set. Excluding `partial/` removes the save-time permission warning without changing build inputs, runtime behavior, or the Android auth bridge.
   Date/Author: 2026-04-21 / Codex
 
+- Decision: Replace `mlugg/setup-zig` with a repo-local installer script pinned to the same Zig version.
+  Rationale: the current upstream action release still targets Node 20, so changing SHAs would not remove the GitHub runtime deprecation warning. A small local installer keeps the `0.14.0` pin, removes the external Node action dependency, and keeps the Android shipping workflow behavior in our control.
+  Date/Author: 2026-04-21 / Codex
+
 
 ## Outcomes & Retrospective
 
@@ -161,6 +169,8 @@ The hosted x64 branch of the experiment was useful only as a negative result. It
 The later zig-linker spike reinforced the same conclusion. It was the smallest reasonable attempt to salvage hosted x64 without touching the Android shipping path, but it failed twice in `libcap` bootstrap before Cargo could even start. That is no longer a workflow-hygiene problem. Repo head should stay on the arm shipping path, and any future x64 work should start from a different builder image or a purpose-built toolchain plan.
 
 The APT cache follow-up was worth taking. The first green cleanup run proved the workflow was back on the supported shipping path, but the cache save annotation showed the path was broader than it needed to be. Restricting it to `archives/*.deb` preserves the intended package-download reuse and keeps otherwise healthy runs clean.
+
+The remaining GitHub-hosted warning was different: `mlugg/setup-zig` itself still publishes as a Node 20 action. The correct fix was not another ref bump. Replacing that action with a repo-local installer script kept the exact Zig pin, let the mobile release cache key track the Zig installer input explicitly, and removed the last Node 20 annotation from the Android shipping workflow.
 
 
 ## Context and Orientation
