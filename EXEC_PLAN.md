@@ -26,6 +26,7 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-21 03:26 UTC) Validated the next workflow-only iteration with three subagents and narrowed it to APT archive reuse, release-cache key hygiene, and a controlled x64 runner benchmark while keeping the Android runtime/auth path untouched.
 - [x] (2026-04-21 06:13 UTC) Validated the release-cache-key change on the real arm shipping path: run `24702957227` restored both release caches across a workflow-only edit and held `Build Codex for Termux` at about `13m50s`, then run `24706188602` stayed green at about `14m07s`.
 - [x] (2026-04-21 06:14 UTC) Closed the hosted x64 benchmark as non-viable for this workflow after three benchmark attempts exposed host/target env leaks and finally a fundamental linker mismatch (`musl-gcc` on hosted x64 cannot link the `aarch64-unknown-linux-musl` CRT objects).
+- [ ] (2026-04-21 07:24 UTC) Reopened hosted x64 only as a dispatch-only zig-linker benchmark: restore an opt-in x64 runner path, keep push builds on arm, and validate whether the existing Zig wrapper can replace the missing hosted x64 aarch64 musl linker without touching Android runtime/auth behavior.
 
 
 ## Surprises & Discoveries
@@ -128,6 +129,10 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 
 - Decision: Keep the real shipping workflow pinned to `ubuntu-24.04-arm` and treat hosted x64 as closed for now.
   Rationale: the arm path is now measurably faster and green, while hosted x64 proved slower and exposed a fundamental missing cross-linker/toolchain issue on the GitHub-hosted image. Leaving an optional broken runner path in the workflow is not worth the repo hygiene cost.
+  Date/Author: 2026-04-21 / Codex
+
+- Decision: Any reopened x64 work stays dispatch-only until it is both green and demonstrably better than the current arm shipping path.
+  Rationale: the user approved the next lever, but the subagent review and prior runs still make the safe boundary clear: keep the shipping Android artifact path on arm, treat x64 as an isolated benchmark, and do not widen the blast radius until the x64 linker story is proven end to end.
   Date/Author: 2026-04-21 / Codex
 
 
