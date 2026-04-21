@@ -26,7 +26,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-21 03:26 UTC) Validated the next workflow-only iteration with three subagents and narrowed it to APT archive reuse, release-cache key hygiene, and a controlled x64 runner benchmark while keeping the Android runtime/auth path untouched.
 - [x] (2026-04-21 06:13 UTC) Validated the release-cache-key change on the real arm shipping path: run `24702957227` restored both release caches across a workflow-only edit and held `Build Codex for Termux` at about `13m50s`, then run `24706188602` stayed green at about `14m07s`.
 - [x] (2026-04-21 06:14 UTC) Closed the hosted x64 benchmark as non-viable for this workflow after three benchmark attempts exposed host/target env leaks and finally a fundamental linker mismatch (`musl-gcc` on hosted x64 cannot link the `aarch64-unknown-linux-musl` CRT objects).
-- [ ] (2026-04-21 07:24 UTC) Reopened hosted x64 only as a dispatch-only zig-linker benchmark: restore an opt-in x64 runner path, keep push builds on arm, and validate whether the existing Zig wrapper can replace the missing hosted x64 aarch64 musl linker without touching Android runtime/auth behavior.
+- [x] (2026-04-21 07:07 UTC) Reopened hosted x64 only as a dispatch-only zig-linker benchmark: restore an opt-in x64 runner path, keep push builds on arm, and validate whether the existing Zig wrapper could replace the missing hosted x64 aarch64 musl linker without touching Android runtime/auth behavior.
+- [x] (2026-04-21 07:13 UTC) Closed the zig-linker x64 spike and reverted it from head after two setup-time `libcap` failures on hosted x64 (`_makenames` host exec format under target `CC`, then `__CAP_BITS` compile failures under the zig fallback). The benchmark never reached Cargo and did not justify further workflow churn.
 
 
 ## Surprises & Discoveries
@@ -75,6 +76,9 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 
 - Observation: After adding `target/${TARGET}/release/gn_out/obj`, the warm rerun succeeded and materially shortened the compile step, so the release-target cache path is already paying off for repeat builds on the same dependency graph.
   Evidence: push run `24545827350` built `Build Codex for Termux` in about `18m55s`, while warm rerun `24546776031` on the same SHA restored both release caches and finished `Build Codex for Termux` in about `13m49s`.
+
+- Observation: the hosted x64 zig-linker spike failed before Cargo and exposed `libcap` as another blocker on this path. First the build used the target compiler for the `_makenames` host helper and hit an `Exec format error`; after forcing `BUILD_CC` back to the host compiler, the zig cross compile still failed in `cap_alloc.c` with `__CAP_BITS` undeclared.
+  Evidence: dispatch runs `24709051877` and `24709162889` both failed in `Install musl build tools`, first at `./_makenames`, then at `cap_alloc.c:28:10: error: use of undeclared identifier '__CAP_BITS'`.
 
 - Observation: The current release-cache key still includes the whole workflow file, so any workflow-only edit cold-soaks the warm release caches even when the dependency graph and build semantics stay the same.
   Evidence: `termux-mobile-artifact.yml` hashes the workflow file itself into `dependency_tooling_hash`, and the same workflow already showed a roughly `5` minute compile-step improvement once its release caches were allowed to warm.
@@ -131,8 +135,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: the arm path is now measurably faster and green, while hosted x64 proved slower and exposed a fundamental missing cross-linker/toolchain issue on the GitHub-hosted image. Leaving an optional broken runner path in the workflow is not worth the repo hygiene cost.
   Date/Author: 2026-04-21 / Codex
 
-- Decision: Any reopened x64 work stays dispatch-only until it is both green and demonstrably better than the current arm shipping path.
-  Rationale: the user approved the next lever, but the subagent review and prior runs still make the safe boundary clear: keep the shipping Android artifact path on arm, treat x64 as an isolated benchmark, and do not widen the blast radius until the x64 linker story is proven end to end.
+- Decision: Do not keep the zig-linker x64 benchmark path in head.
+  Rationale: the follow-up benchmark never reached Cargo, exposed two more `libcap`-bootstrap incompatibilities on hosted x64, and still lacked any evidence that it would beat the current arm shipping path on cold builds. Any future x64 attempt needs a different toolchain image or deeper build-surface redesign, not another small workflow tweak.
   Date/Author: 2026-04-21 / Codex
 
 
@@ -145,6 +149,8 @@ The second phase narrowed the viable path. `sccache` clearly accelerated repeate
 That candidate cleared the correctness bar on its cold run, then cleared the warm-rerun bar once `target/${TARGET}/release/gn_out/obj` was added. With that path present, warm rerun `24546776031` cut `Build Codex for Termux` to about `13m49s` on the same SHA. The later cache-key hygiene change then held that gain across workflow-only edits on the real arm shipping path: runs `24702957227` and `24706188602` stayed green at about `13m50s` and `14m07s`.
 
 The hosted x64 branch of the experiment was useful only as a negative result. It surfaced three distinct host/target separation problems and still ended slower than arm before failing at final link. The conclusion is straightforward: keep the supported shipping path on `ubuntu-24.04-arm`, keep the release-cache-key change and APT-cache scaffolding, and do not spend more workflow complexity on hosted x64 until there is a proper aarch64 musl cross-linker/toolchain story for that runner.
+
+The later zig-linker spike reinforced the same conclusion. It was the smallest reasonable attempt to salvage hosted x64 without touching the Android shipping path, but it failed twice in `libcap` bootstrap before Cargo could even start. That is no longer a workflow-hygiene problem. Repo head should stay on the arm shipping path, and any future x64 work should start from a different builder image or a purpose-built toolchain plan.
 
 
 ## Context and Orientation
