@@ -57,8 +57,8 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
-            /var/cache/apt
-          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v1
+            /var/cache/apt/archives/*.deb
+          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v2
 
       - name: Install Linux build dependencies
         shell: bash
@@ -343,8 +343,8 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
-            /var/cache/apt
-          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v1
+            /var/cache/apt/archives/*.deb
+          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v2
 
       - name: Save musl tools cache
         if: always() && !cancelled() && steps.cache_musl_tools_restore.outputs.cache-hit != 'true'
