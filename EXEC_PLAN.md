@@ -2,11 +2,9 @@
 
 This ExecPlan is a living document. The sections Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective must be kept current. If PLANS.md exists in this repo, this plan follows it.
 
-
 ## Purpose / Big Picture
 
 Reduce the end-to-end mobile install/update time for Codex on Termux, with the immediate focus on the supported fast path driven by `scripts/termux/codex-update-alpha`. Today the documented remote-artifact path takes about 20 minutes on this device. The outcome should be a measurably faster install path without regressing the Termux runtime bridge or ChatGPT-login behavior on Android.
-
 
 ## Progress
 
@@ -30,7 +28,6 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-21 07:13 UTC) Closed the zig-linker x64 spike and reverted it from head after two setup-time `libcap` failures on hosted x64 (`_makenames` host exec format under target `CC`, then `__CAP_BITS` compile failures under the zig fallback). The benchmark never reached Cargo and did not justify further workflow churn.
 - [x] (2026-04-21 07:47 UTC) Narrowed the APT cache paths to `archives/*.deb` after the green cleanup run exposed a `Permission denied` warning while saving `/var/cache/apt/archives/partial`; re-ran the arm shipping workflow to confirm the warning is gone.
 - [x] (2026-04-21 08:18 UTC) Replaced the remaining `mlugg/setup-zig` Node 20 action usage with a repo-local Zig installer script pinned to `0.14.0`, updated the mobile release-cache fingerprint to include the Zig installer input, and re-ran the arm shipping workflow to remove the last Node 20 annotation from that path.
-
 
 ## Surprises & Discoveries
 
@@ -100,7 +97,6 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: Hosted `ubuntu-24.04` x64 is not a useful cold-build accelerator for this aarch64-musl workflow in its current tooling model.
   Evidence: x64 runs `24702518505`, `24702960510`, and `24706196165` failed in sequence on three different host/target separation problems, and the last one still spent about `27m19s` in `Build Codex for Termux` before failing at final link because `/usr/bin/musl-gcc` on x64 cannot link the aarch64 musl CRT objects.
 
-
 ## Decision Log
 
 - Decision: Treat the remote-artifact path as the optimization target first.
@@ -155,7 +151,6 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: the current upstream action release still targets Node 20, so changing SHAs would not remove the GitHub runtime deprecation warning. A small local installer keeps the `0.14.0` pin, removes the external Node action dependency, and keeps the Android shipping workflow behavior in our control.
   Date/Author: 2026-04-21 / Codex
 
-
 ## Outcomes & Retrospective
 
 The deeper compile bottleneck did not move much with dependency/tool bootstrap caching alone: fresh remote builds still land around 20 minutes and still spend almost all of that time in the actual Rust build step. The meaningful win came from not rebuilding when the runtime payload is already known-good. Exact-SHA artifact reuse cut repeat installs to about 20.654 seconds, and runtime-equivalent ancestor reuse cut tooling-only tip installs to about 22.151 seconds. That met the first-phase goal without touching the Termux runtime bridge or Android ChatGPT-login behavior.
@@ -171,7 +166,6 @@ The later zig-linker spike reinforced the same conclusion. It was the smallest r
 The APT cache follow-up was worth taking. The first green cleanup run proved the workflow was back on the supported shipping path, but the cache save annotation showed the path was broader than it needed to be. Restricting it to `archives/*.deb` preserves the intended package-download reuse and keeps otherwise healthy runs clean.
 
 The remaining GitHub-hosted warning was different: `mlugg/setup-zig` itself still publishes as a Node 20 action. The correct fix was not another ref bump. Replacing that action with a repo-local installer script kept the exact Zig pin, let the mobile release cache key track the Zig installer input explicitly, and removed the last Node 20 annotation from the Android shipping workflow.
-
 
 ## Context and Orientation
 
@@ -194,11 +188,9 @@ Terms:
 - “remote-artifact path” means: rebase local fork to the selected alpha, push `main` to the fork, wait for `termux-mobile-artifact.yml`, download the produced tarball, validate it, and install it into Termux.
 - “runtime bridge” means the launcher and proot/browser-handoff behavior used by the installed Termux binary.
 
-
 ## Plan of Work
 
 First, measure where the current remote-artifact time is going: helper-side polling/waiting, workflow scheduling, dependency setup, or the actual Rust build. Second, compare safe optimization candidates such as workflow caching, runner changes, helper-side reuse of existing artifacts, and tighter polling/dispatch logic. Third, implement the smallest set of changes that plausibly reduces end-to-end time without altering runtime-critical Termux behavior. Finally, validate by triggering the supported path again and comparing elapsed time against the current ~20 minute baseline.
-
 
 ## Concrete Steps
 
@@ -212,7 +204,6 @@ First, measure where the current remote-artifact time is going: helper-side poll
    - any targeted script smoke checks that are cheap and safe
 6. Update this ExecPlan with actual timings and outcomes.
 
-
 ## Validation and Acceptance
 
 Success means:
@@ -222,11 +213,9 @@ Success means:
 - no change regresses the Termux runtime bridge or the assumptions behind Android ChatGPT login;
 - the changed workflow/script path completes or advances further/faster with no new failures.
 
-
 ## Idempotence and Recovery
 
 Workflow-only and helper-only changes should be safe to retry. If a new optimization fails, revert just the affected workflow/helper patch and keep the runtime bridge/auth patches intact. Any new commit subject added to the fork patch stack must be classified in `scripts/termux/patch_audit.tsv` so future updates do not get blocked as unknown.
-
 
 ## Artifacts and Notes
 
@@ -239,7 +228,6 @@ Workflow-only and helper-only changes should be safe to retry. If a new optimiza
   - runtime-equivalent ancestor reuse: `22.151` seconds
 - Current remote artifact workflow: `termux-mobile-artifact.yml`.
 - Current helper polling cadence: 10 second loops in `wait_for_remote_run()` and `wait_for_remote_run_since()`.
-
 
 ## Interfaces and Dependencies
 
