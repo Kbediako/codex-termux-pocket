@@ -10,6 +10,14 @@ on:
         description: Git ref to build for Termux (branch, tag, or commit SHA)
         required: false
         default: ""
+      runner_label:
+        description: Hosted runner label to use for benchmarking
+        required: false
+        default: ubuntu-24.04-arm
+        type: choice
+        options:
+          - ubuntu-24.04-arm
+          - ubuntu-24.04
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
@@ -18,7 +26,7 @@ concurrency:
 jobs:
   build-termux-artifact:
     if: ${{ github.repository != 'openai/codex' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label || 'ubuntu-24.04-arm' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -27,9 +35,13 @@ jobs:
         working-directory: codex-rs
     env:
       TARGET: aarch64-unknown-linux-musl
+      RUNNER_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label || 'ubuntu-24.04-arm' }}
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
+      # Bump when inline build-env or wrapper changes alter outputs in ways that
+      # Cargo fingerprints do not already capture.
+      TERMUX_RELEASE_CACHE_VERSION: "2"
 
     steps:
       - name: Checkout requested ref
@@ -42,12 +54,27 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.source_ref == '' }}
         uses: actions/checkout@v6
 
+      - name: Prepare APT cache directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
+          sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
+
+      - name: Restore APT cache
+        id: cache_apt_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            /var/cache/apt
+          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v1
+
       - name: Install Linux build dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libubsan1 python3
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libubsan1 python3
 
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
@@ -60,7 +87,6 @@ jobs:
           set -euo pipefail
           mapfile -t manifest_files < <(find "${GITHUB_WORKSPACE}/codex-rs" -name Cargo.toml -print | LC_ALL=C sort)
           cache_key_files=(
-            "${GITHUB_WORKSPACE}/.github/workflows/termux-mobile-artifact.yml"
             "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
             "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py"
             "${GITHUB_WORKSPACE}/codex-rs/.cargo/config.toml"
@@ -69,7 +95,20 @@ jobs:
             "${manifest_files[@]}"
           )
           mapfile -t cache_key_files < <(printf '%s\n' "${cache_key_files[@]}" | LC_ALL=C sort -u)
-          cache_hash="$(sha256sum "${cache_key_files[@]}" | sha256sum | cut -d' ' -f1)"
+          cache_fingerprint_lines=(
+            "release_cache_version=${TERMUX_RELEASE_CACHE_VERSION}"
+            "target=${TARGET}"
+            "cargo_profile_release_lto=${CARGO_PROFILE_RELEASE_LTO}"
+            "cargo_profile_release_codegen_units=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}"
+            "aws_lc_sys_no_jitter_entropy=${AWS_LC_SYS_NO_JITTER_ENTROPY}"
+            "build_command=cargo build --locked --target ${TARGET} --release --bin codex --timings"
+          )
+          cache_hash="$(
+            {
+              sha256sum "${cache_key_files[@]}"
+              printf '%s\n' "${cache_fingerprint_lines[@]}"
+            } | sha256sum | cut -d' ' -f1
+          )"
           echo "dependency_tooling_hash=${cache_hash}" >> "$GITHUB_OUTPUT"
 
       - name: Use hermetic Cargo home (musl)
@@ -253,6 +292,7 @@ jobs:
               "head_sha": head_sha,
               "git_describe": describe,
               "target": "aarch64-unknown-linux-musl",
+              "runner_label": os.environ.get("RUNNER_LABEL", ""),
               "source_ref": os.environ.get("SOURCE_REF", ""),
           }
           (artifact_root / "metadata.json").write_text(
@@ -306,6 +346,15 @@ jobs:
             codex-rs/target/${{ env.TARGET }}/release/deps/
             codex-rs/target/${{ env.TARGET }}/release/gn_out/obj/
           key: termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-${{ github.run_id }}
+
+      - name: Save APT cache
+        if: always() && !cancelled() && steps.cache_apt_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            /var/cache/apt
+          key: termux-apt-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-v1
 
       - name: Save musl tools cache
         if: always() && !cancelled() && steps.cache_musl_tools_restore.outputs.cache-hit != 'true'
