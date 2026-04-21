@@ -24,6 +24,8 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - [x] (2026-04-17 04:10) Re-ran the warm-cache experiment after adding `target/${TARGET}/release/gn_out/obj`; the rerun succeeded and cut `Build Codex for Termux` from about `18m55s` to about `13m49s`.
 - [x] (2026-04-21 03:10 UTC) Re-baselined the current fork after the successful `rust-v0.123.0-alpha.2` remote-artifact install and confirmed the dominant cost is still the remote `Build Codex for Termux` step.
 - [x] (2026-04-21 03:26 UTC) Validated the next workflow-only iteration with three subagents and narrowed it to APT archive reuse, release-cache key hygiene, and a controlled x64 runner benchmark while keeping the Android runtime/auth path untouched.
+- [x] (2026-04-21 06:13 UTC) Validated the release-cache-key change on the real arm shipping path: run `24702957227` restored both release caches across a workflow-only edit and held `Build Codex for Termux` at about `13m50s`, then run `24706188602` stayed green at about `14m07s`.
+- [x] (2026-04-21 06:14 UTC) Closed the hosted x64 benchmark as non-viable for this workflow after three benchmark attempts exposed host/target env leaks and finally a fundamental linker mismatch (`musl-gcc` on hosted x64 cannot link the `aarch64-unknown-linux-musl` CRT objects).
 
 
 ## Surprises & Discoveries
@@ -79,6 +81,12 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
 - Observation: With musl `sccache` rejected and the helper already optimized, the remaining cold-build upside is in runner class and setup trimming, not another new cache mechanism.
   Evidence: the latest successful cold build run `24700059690` still spent about `20m57s` in `Build Codex for Termux`, while the repo-local musl CI patterns already show APT caching and alternate runner classes as the safer remaining levers.
 
+- Observation: The release-cache-key hygiene change is confirmed on the real arm shipping path: after removing the workflow file from the cache fingerprint, subsequent workflow-only edits restored the prior release caches and kept the compile step near the old warm-cache number.
+  Evidence: arm run `24702957227` restored host and target release caches from `24702317240` and finished `Build Codex for Termux` in about `13m50s`; arm run `24706188602` on the next workflow-only edit remained green at about `14m07s`.
+
+- Observation: Hosted `ubuntu-24.04` x64 is not a useful cold-build accelerator for this aarch64-musl workflow in its current tooling model.
+  Evidence: x64 runs `24702518505`, `24702960510`, and `24706196165` failed in sequence on three different host/target separation problems, and the last one still spent about `27m19s` in `Build Codex for Termux` before failing at final link because `/usr/bin/musl-gcc` on x64 cannot link the aarch64 musl CRT objects.
+
 
 ## Decision Log
 
@@ -118,6 +126,10 @@ Reduce the end-to-end mobile install/update time for Codex on Termux, with the i
   Rationale: all three validation threads agreed the helper is no longer the dominant cost, the repo-local evidence still rejects musl `sccache`, and the safest remaining cold-build upside is runner-class experimentation plus avoiding unnecessary warm-cache invalidation when the workflow file changes.
   Date/Author: 2026-04-21 / Codex
 
+- Decision: Keep the real shipping workflow pinned to `ubuntu-24.04-arm` and treat hosted x64 as closed for now.
+  Rationale: the arm path is now measurably faster and green, while hosted x64 proved slower and exposed a fundamental missing cross-linker/toolchain issue on the GitHub-hosted image. Leaving an optional broken runner path in the workflow is not worth the repo hygiene cost.
+  Date/Author: 2026-04-21 / Codex
+
 
 ## Outcomes & Retrospective
 
@@ -125,7 +137,9 @@ The deeper compile bottleneck did not move much with dependency/tool bootstrap c
 
 The second phase narrowed the viable path. `sccache` clearly accelerated repeated Rust crate compilation on the fork, but it still broke the musl proc-macro load path twice, which makes it unacceptable for this job. The next candidate replaced `sccache` with selective caching of host and target release dependency outputs while restoring the direct `rustc-ubsan-wrapper` pattern that the repo already uses for musl CI.
 
-That candidate cleared the correctness bar on its cold run, then cleared the warm-rerun bar once `target/${TARGET}/release/gn_out/obj` was added. With that path present, warm rerun `24546776031` cut `Build Codex for Termux` to about `13m49s` on the same SHA. That means the release-target cache work is worth keeping; the remaining gap is true cold-build time on new dependency hashes, which now points toward runner-class benchmarking and setup trimming rather than another cache mechanism.
+That candidate cleared the correctness bar on its cold run, then cleared the warm-rerun bar once `target/${TARGET}/release/gn_out/obj` was added. With that path present, warm rerun `24546776031` cut `Build Codex for Termux` to about `13m49s` on the same SHA. The later cache-key hygiene change then held that gain across workflow-only edits on the real arm shipping path: runs `24702957227` and `24706188602` stayed green at about `13m50s` and `14m07s`.
+
+The hosted x64 branch of the experiment was useful only as a negative result. It surfaced three distinct host/target separation problems and still ended slower than arm before failing at final link. The conclusion is straightforward: keep the supported shipping path on `ubuntu-24.04-arm`, keep the release-cache-key change and APT-cache scaffolding, and do not spend more workflow complexity on hosted x64 until there is a proper aarch64 musl cross-linker/toolchain story for that runner.
 
 
 ## Context and Orientation
