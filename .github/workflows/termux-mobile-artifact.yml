@@ -10,14 +10,6 @@ on:
         description: Git ref to build for Termux (branch, tag, or commit SHA)
         required: false
         default: ""
-      runner_label:
-        description: Hosted runner label to use for benchmarking
-        required: false
-        default: ubuntu-24.04-arm
-        type: choice
-        options:
-          - ubuntu-24.04-arm
-          - ubuntu-24.04
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
@@ -26,7 +18,7 @@ concurrency:
 jobs:
   build-termux-artifact:
     if: ${{ github.repository != 'openai/codex' }}
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label || 'ubuntu-24.04-arm' }}
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     permissions:
       contents: read
@@ -35,7 +27,6 @@ jobs:
         working-directory: codex-rs
     env:
       TARGET: aarch64-unknown-linux-musl
-      RUNNER_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_label || 'ubuntu-24.04-arm' }}
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
@@ -153,23 +144,6 @@ jobs:
           APT_INSTALL_ARGS: --no-install-recommends
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
-
-      - name: Normalize host compiler env for x64 benchmarks
-        if: ${{ runner.arch == 'X64' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Leave target-scoped tool vars intact for the aarch64 musl build,
-          # but stop forcing host proc-macro/build-dependency compilations
-          # through target-only compiler and warning-flag settings on x64.
-          target_cflags="${CFLAGS-}"
-          target_cxxflags="${CXXFLAGS-}"
-          echo "CC=" >> "$GITHUB_ENV"
-          echo "CXX=" >> "$GITHUB_ENV"
-          echo "CFLAGS=" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=" >> "$GITHUB_ENV"
-          echo "CFLAGS_aarch64_unknown_linux_musl=${target_cflags}" >> "$GITHUB_ENV"
-          echo "CXXFLAGS_aarch64_unknown_linux_musl=${target_cxxflags}" >> "$GITHUB_ENV"
 
       - name: Configure rustc UBSan wrapper (musl host)
         shell: bash
@@ -309,7 +283,6 @@ jobs:
               "head_sha": head_sha,
               "git_describe": describe,
               "target": "aarch64-unknown-linux-musl",
-              "runner_label": os.environ.get("RUNNER_LABEL", ""),
               "source_ref": os.environ.get("SOURCE_REF", ""),
           }
           (artifact_root / "metadata.json").write_text(

@@ -35,5 +35,6 @@ subject	termux: cache mobile rusty_v8 outputs	tooling	Fork workflow-only follow-
 subject	termux: tune mobile artifact cold-build workflow	tooling	Fork workflow-only speedup and benchmarking changes; runtime/install/auth behavior unchanged.
 subject	termux: normalize x64 mobile benchmark env	tooling	Fork workflow-only x64 benchmark fix; the shipped Termux runtime/auth path stays unchanged.
 subject	termux: scope x64 benchmark cflags to target	tooling	Fork workflow-only x64 benchmark fix; keeps target flags off host builds without changing shipped runtime/auth behavior.
+subject	termux: keep mobile artifact builds on arm runner	tooling	Fork workflow-only cleanup after x64 benchmark attempts; preserves the green Android shipping path.
 subject	termux: refresh lockfile after alpha.123.0-alpha.2 rebase	build-only	Refreshes workspace package versions in Cargo.lock and keeps the fork artifact build graph consistent for --locked alpha.123.0-alpha.2 builds.
 subject	termux: keep temporal ICU lock graph compatible on alpha.123	build-only	Pins the ICU/temporal portion of Cargo.lock back to the temporal_rs-compatible minor versions for alpha.123 remote artifact builds.
