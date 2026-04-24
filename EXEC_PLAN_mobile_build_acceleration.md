@@ -24,6 +24,12 @@ The observable user outcome is:
 - [x] (2026-04-09 14:00 AEST) Extended `codex-update-alpha` with `artifact`, `source`, `remote-artifact`, and `auto` modes, with upstream-artifact and remote-artifact fallback logic.
 - [x] (2026-04-09 14:00 AEST) Added `.github/workflows/termux-mobile-artifact.yml` so the fork can build Linux ARM64 musl artifacts off-device for Termux installs.
 - [x] (2026-04-10 02:20 AEST) Benchmarked the remaining source fallback paths and codified the result: Termux source builds now fail fast by default, with remote artifacts as the supported fork/mobile path.
+- [x] (2026-04-23 21:26 UTC) Re-opened the plan for helper/workflow speed improvements requested by the user, using two read-only subagents to inspect helper fallback behavior and remote artifact workflow speed.
+- [x] (2026-04-23 21:40 UTC) Update `codex-update-alpha` so auto mode tries a fork remote artifact before the explicit source fallback when an upstream artifact install fails.
+- [x] (2026-04-23 21:40 UTC) Reduce avoidable remote-artifact rebuilds and wait time by widening reusable-run lookup and avoiding repeated GitHub run-list scans.
+- [x] (2026-04-23 21:40 UTC) Add conservative workflow path ignores for docs/helper-only pushes that cannot change the shipped binary.
+- [x] (2026-04-23 21:40 UTC) Validated shell syntax, whitespace, workflow YAML parsing, `gh` fork access, and `codex-update-alpha --check`.
+- [x] (2026-04-23 21:50 UTC) Attempted `codex review --uncommitted`; it timed out after 180 seconds with a ChatGPT backend transport error, so final review used manual diff review plus targeted validation.
 
 ## Surprises & Discoveries
 
@@ -41,6 +47,12 @@ The observable user outcome is:
 
 - Observation: even the repaired locked source path is still not shippable on Termux.
   Evidence: a locked rerun with the pinned OpenAI musl archive and binding pair reached the final `codex` binary link and then failed with unresolved `bcmp` and `__errno_location` symbols from `libv8` while targeting Android.
+
+- Observation: the helper's auto-mode recovery path could still burn time by falling from a failed upstream artifact install directly to source fallback, even when fork remote-artifact mode is available.
+  Evidence: on 2026-04-23, subagent review of `scripts/termux/codex-update-alpha` found `install_failed=yes` only triggered `run_source_build` for `mode=auto`.
+
+- Observation: remote artifact reuse can miss older successful artifacts and trigger unnecessary 20 minute fork builds.
+  Evidence: on 2026-04-23, subagent review found reusable-run lookup only scanned the latest 50 workflow runs, while docs record exact/ancestor artifact reuse finishing in about 20-22 seconds versus fresh builds around 20 minutes.
 
 - Observation: the CLI build graph is large enough that "just rebuild the CLI" is still expensive on-device.
   Evidence: `cargo tree -p codex-cli --prefix none | wc -l` returned `3222`, and `cargo tree -p codex-cli -i v8 --target aarch64-linux-android` shows `v8 -> codex-code-mode -> codex-core -> codex-cli`.
@@ -70,6 +82,14 @@ The observable user outcome is:
   Rationale: benchmarking is now complete, and the remaining blocker is a deterministic final-link V8/ABI mismatch rather than a missing performance tweak. Remote artifacts are the supported path for fork/mobile updates.
   Date/Author: 2026-04-10 / Codex
 
+- Decision: treat fork remote artifacts as the auto-mode fallback after upstream artifact install failure, before considering source fallback.
+  Rationale: remote artifacts preserve runtime-critical fork behavior and avoid the known slow/broken on-device source path.
+  Date/Author: 2026-04-23 / Codex
+
+- Decision: apply only conservative workflow path ignores for docs and Termux helper metadata, not Cargo, Rust, build-script, or workflow changes.
+  Rationale: helper/docs-only pushes do not alter the shipped binary, while broad path ignores could skip required runtime artifact builds.
+  Date/Author: 2026-04-23 / Codex
+
 ## Outcomes & Retrospective
 
 Implementation is now in place for the artifact-first mobile update path. The biggest shift is that the primary mobile problem is no longer "how do we make Cargo slightly less painful on Android" but "how do we safely adopt published ARM64 alpha artifacts without dropping fork-specific fixes."
@@ -84,6 +104,15 @@ Completed work:
 Remaining work:
 
 - upstream or replace the Termux/V8 source-build story if local Android-targeted Cargo builds need to become supported again
+
+2026-04-23 update:
+
+- `codex-update-alpha` now tries fork remote artifacts before the explicit source fallback when an upstream artifact install fails in `auto`.
+- reusable remote artifact lookup fetches recent successful runs once and searches target/safe-ancestor SHAs locally, with a higher default lookup window.
+- remote workflow waiting switches to `gh run view` after a run appears instead of repeatedly scanning workflow lists.
+- `.github/workflows/termux-mobile-artifact.yml` skips push builds for top-level docs/plans and Termux helper metadata only.
+- validation passed: `sh -n scripts/termux/codex-update-alpha`, `git diff --check`, PyYAML parse for the workflow, `gh auth status --hostname github.com`, `gh repo view Kbediako/codex-termux-pocket`, and `codex-update-alpha --check`.
+- `codex review --uncommitted` did not complete in this Termux session; the fallback review checked the helper diff, workflow path-ignore scope, docs/audit consistency, and validation outputs manually.
 
 ## Context and Orientation
 
