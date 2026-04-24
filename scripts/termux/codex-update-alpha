@@ -19,6 +19,8 @@ mode="auto"
 target_tag=""
 remote_timeout="1800"
 remote_ref=""
+remote_run_lookup_limit="${CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT:-200}"
+remote_run_poll_limit="${CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT:-50}"
 selected_mode=""
 latest_tag=""
 base_tag=""
@@ -41,6 +43,12 @@ Environment:
                          Retry the local Cargo source fallback experimentally.
                          By default it is disabled on Termux because the Android
                          target still fails at the final V8 link.
+  CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT
+                         Number of recent workflow runs to scan for reusable
+                         fork artifacts (default: 200).
+  CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT
+                         Number of recent workflow runs to scan while waiting
+                         for a new fork artifact run to appear (default: 50).
 USAGE
 }
 
@@ -94,6 +102,20 @@ esac
 case "$remote_timeout" in
   *[!0-9]*|'')
     echo "--remote-timeout must be an integer number of seconds." >&2
+    exit 2
+    ;;
+esac
+
+case "$remote_run_lookup_limit" in
+  *[!0-9]*|'')
+    echo "CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT must be an integer number of runs." >&2
+    exit 2
+    ;;
+esac
+
+case "$remote_run_poll_limit" in
+  *[!0-9]*|'')
+    echo "CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT must be an integer number of runs." >&2
     exit 2
     ;;
 esac
@@ -299,52 +321,44 @@ classification_allows_remote_artifact_reuse() {
   return 1
 }
 
-find_successful_remote_run_id_for_sha() {
+write_successful_remote_runs() {
   repo_slug="$1"
+  output_file="$2"
+
+  gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_lookup_limit" --json url,headSha,status,conclusion --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}{{"\n"}}{{end}}' 2>/dev/null \
+    | awk -F '|' '$3 == "completed" && $4 == "success" { print }' > "$output_file" \
+    || true
+}
+
+find_successful_remote_run_id_in_file() {
+  runs_file="$1"
   expected_sha="$2"
 
-  run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 50 --json url,headSha,status,conclusion --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-
-  if [ -z "$run_lines" ]; then
-    return 1
-  fi
-
-  old_ifs="$IFS"
-  IFS='
-'
-  for run_line in $run_lines; do
-    IFS='|'
-    set -- $run_line
-    IFS='
-'
-    run_url="${1:-}"
-    run_sha="${2:-}"
-    run_status="${3:-}"
-    run_conclusion="${4:-}"
-    run_id="${run_url##*/}"
-
-    if [ "$run_sha" = "$expected_sha" ] && [ "$run_status" = "completed" ] && [ "$run_conclusion" = "success" ]; then
-      printf '%s\n' "$run_id"
-      IFS="$old_ifs"
-      return 0
-    fi
-  done
-  IFS="$old_ifs"
-
-  return 1
+  awk -F '|' -v expected_sha="$expected_sha" '
+    $2 == expected_sha {
+      n = split($1, url_parts, "/")
+      print url_parts[n]
+      exit
+    }
+  ' "$runs_file"
 }
 
 resolve_reusable_remote_artifact_run() {
   repo_slug="$1"
   target_sha="$2"
 
-  run_id="$(find_successful_remote_run_id_for_sha "$repo_slug" "$target_sha" || true)"
+  remote_runs_file="$(mktemp)"
+  write_successful_remote_runs "$repo_slug" "$remote_runs_file"
+
+  run_id="$(find_successful_remote_run_id_in_file "$remote_runs_file" "$target_sha" || true)"
   if [ -n "$run_id" ]; then
     printf '%s|%s\n' "$target_sha" "$run_id"
+    rm -f "$remote_runs_file"
     return 0
   fi
 
   if ! git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_sha}^{commit}" >/dev/null 2>&1; then
+    rm -f "$remote_runs_file"
     return 1
   fi
 
@@ -355,22 +369,37 @@ resolve_reusable_remote_artifact_run() {
     classification="${lookup_result%%	*}"
 
     if ! classification_allows_remote_artifact_reuse "$classification"; then
+      rm -f "$remote_runs_file"
       return 1
     fi
 
     parent_sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${current_sha}^" 2>/dev/null || true)"
     if [ -z "$parent_sha" ]; then
+      rm -f "$remote_runs_file"
       return 1
     fi
 
-    run_id="$(find_successful_remote_run_id_for_sha "$repo_slug" "$parent_sha" || true)"
+    run_id="$(find_successful_remote_run_id_in_file "$remote_runs_file" "$parent_sha" || true)"
     if [ -n "$run_id" ]; then
       printf '%s|%s\n' "$parent_sha" "$run_id"
+      rm -f "$remote_runs_file"
       return 0
     fi
 
     current_sha="$parent_sha"
   done
+}
+
+remote_artifact_available() {
+  repo_slug="$1"
+
+  if [ -z "$repo_slug" ] || ! command -v gh >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+    return 1
+  fi
+  gh repo view "$repo_slug" --json name >/dev/null 2>&1
 }
 
 wait_for_remote_run() {
@@ -380,38 +409,48 @@ wait_for_remote_run() {
   timeout_seconds="$4"
 
   started_at="$(date +%s)"
+  matched_run_id=""
+  matched_status=""
+  matched_conclusion=""
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    if [ -n "$matched_run_id" ]; then
+      run_state="$(gh run view "$matched_run_id" --repo "$repo_slug" --json status,conclusion --template '{{.status}}|{{.conclusion}}' 2>/dev/null || true)"
+      if [ -n "$run_state" ]; then
+        matched_status="${run_state%%|*}"
+        matched_conclusion="${run_state#*|}"
+      fi
+    else
+      run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_poll_limit" --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
-    matched_run_id=""
-    matched_status=""
-    matched_conclusion=""
+      matched_status=""
+      matched_conclusion=""
 
-    if [ -n "$run_lines" ]; then
-      old_ifs="$IFS"
-      IFS='
-'
-      for run_line in $run_lines; do
-        IFS='|'
-        set -- $run_line
+      if [ -n "$run_lines" ]; then
+        old_ifs="$IFS"
         IFS='
 '
-        run_url="${1:-}"
-        run_sha="${2:-}"
-        run_status="${3:-}"
-        run_conclusion="${4:-}"
-        run_event="${5:-}"
-        run_id="${run_url##*/}"
+        for run_line in $run_lines; do
+          IFS='|'
+          set -- $run_line
+          IFS='
+'
+          run_url="${1:-}"
+          run_sha="${2:-}"
+          run_status="${3:-}"
+          run_conclusion="${4:-}"
+          run_event="${5:-}"
+          run_id="${run_url##*/}"
 
-        if [ "$run_sha" = "$expected_sha" ] && [ "$run_event" = "$expected_event" ]; then
-          matched_run_id="$run_id"
-          matched_status="$run_status"
-          matched_conclusion="$run_conclusion"
-          break
-        fi
-      done
-      IFS="$old_ifs"
+          if [ "$run_sha" = "$expected_sha" ] && [ "$run_event" = "$expected_event" ]; then
+            matched_run_id="$run_id"
+            matched_status="$run_status"
+            matched_conclusion="$run_conclusion"
+            break
+          fi
+        done
+        IFS="$old_ifs"
+      fi
     fi
 
     if [ -n "$matched_run_id" ]; then
@@ -449,38 +488,48 @@ wait_for_remote_run_since() {
   timeout_seconds="$4"
 
   started_at="$(date +%s)"
+  matched_run_id=""
+  matched_status=""
+  matched_conclusion=""
 
   while :; do
-    run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit 20 --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}|{{.createdAt}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    if [ -n "$matched_run_id" ]; then
+      run_state="$(gh run view "$matched_run_id" --repo "$repo_slug" --json status,conclusion --template '{{.status}}|{{.conclusion}}' 2>/dev/null || true)"
+      if [ -n "$run_state" ]; then
+        matched_status="${run_state%%|*}"
+        matched_conclusion="${run_state#*|}"
+      fi
+    else
+      run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_poll_limit" --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}|{{.createdAt}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 
-    matched_run_id=""
-    matched_status=""
-    matched_conclusion=""
+      matched_status=""
+      matched_conclusion=""
 
-    if [ -n "$run_lines" ]; then
-      old_ifs="$IFS"
-      IFS='
-'
-      for run_line in $run_lines; do
-        IFS='|'
-        set -- $run_line
+      if [ -n "$run_lines" ]; then
+        old_ifs="$IFS"
         IFS='
 '
-        run_url="${1:-}"
-        run_created_at="${2:-}"
-        run_status="${3:-}"
-        run_conclusion="${4:-}"
-        run_event="${5:-}"
-        run_id="${run_url##*/}"
+        for run_line in $run_lines; do
+          IFS='|'
+          set -- $run_line
+          IFS='
+'
+          run_url="${1:-}"
+          run_created_at="${2:-}"
+          run_status="${3:-}"
+          run_conclusion="${4:-}"
+          run_event="${5:-}"
+          run_id="${run_url##*/}"
 
-        if [ "$run_event" = "$expected_event" ] && ! [ "$run_created_at" \< "$earliest_created_at" ]; then
-          matched_run_id="$run_id"
-          matched_status="$run_status"
-          matched_conclusion="$run_conclusion"
-          break
-        fi
-      done
-      IFS="$old_ifs"
+          if [ "$run_event" = "$expected_event" ] && ! [ "$run_created_at" \< "$earliest_created_at" ]; then
+            matched_run_id="$run_id"
+            matched_status="$run_status"
+            matched_conclusion="$run_conclusion"
+            break
+          fi
+        done
+        IFS="$old_ifs"
+      fi
     fi
 
     if [ -n "$matched_run_id" ]; then
@@ -640,10 +689,40 @@ run_remote_artifact_install() {
   install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
 }
 
+install_remote_artifact_for_head() {
+  repo_slug="$1"
+  expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
+  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
+  if [ -n "$reusable_run" ]; then
+    reusable_sha="${reusable_run%%|*}"
+    reusable_run_id="${reusable_run#*|}"
+    if [ "$reusable_sha" = "$expected_sha" ]; then
+      echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
+    else
+      echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
+    fi
+    install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
+    return
+  fi
+
+  ensure_push_remote
+  if [ -z "$PUSH_REMOTE" ]; then
+    echo "Remote artifact mode needs a GitHub fork remote configured as branch.main.pushRemote or termux-pocket." >&2
+    return 1
+  fi
+
+  git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
+  run_remote_artifact_install "$repo_slug" "$expected_sha" "push"
+}
+
 if [ -n "$remote_ref" ]; then
   repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
   if [ -z "$repo_slug" ]; then
     echo "Remote artifact mode needs a GitHub fork remote configured as branch.main.pushRemote or termux-pocket." >&2
+    exit 1
+  fi
+  if ! remote_artifact_available "$repo_slug"; then
+    echo "Remote artifact mode requires gh authentication and access to ${repo_slug}." >&2
     exit 1
   fi
   expected_sha="$(resolve_remote_ref_sha "$remote_ref")"
@@ -748,7 +827,8 @@ fi
 
 repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
 can_remote_artifact="no"
-if [ -n "$repo_slug" ] && command -v gh >/dev/null 2>&1; then
+if { [ "$mode" = "remote-artifact" ] || [ "$allow_upstream_artifact" != "yes" ]; } \
+  && remote_artifact_available "$repo_slug"; then
   can_remote_artifact="yes"
 fi
 
@@ -783,26 +863,6 @@ esac
 
 echo "Selected install mode: $selected_mode"
 
-reusable_run_id=""
-reusable_sha=""
-if [ "$selected_mode" = "remote-artifact" ]; then
-  expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
-  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
-  if [ -n "$reusable_run" ]; then
-    reusable_sha="${reusable_run%%|*}"
-    reusable_run_id="${reusable_run#*|}"
-  fi
-fi
-
-if [ "$selected_mode" = "remote-artifact" ] && [ -z "$reusable_run_id" ]; then
-  ensure_push_remote
-  if [ -n "$PUSH_REMOTE" ]; then
-    git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
-  else
-    echo "No pushRemote set; skipping push." >&2
-  fi
-fi
-
 install_failed="no"
 case "$selected_mode" in
   artifact)
@@ -811,14 +871,7 @@ case "$selected_mode" in
     fi
     ;;
   remote-artifact)
-    if [ -n "$reusable_run_id" ]; then
-      if [ "$reusable_sha" = "$expected_sha" ]; then
-        echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
-      else
-        echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
-      fi
-      install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
-    elif ! run_remote_artifact_install "$repo_slug" "$expected_sha" "push"; then
+    if ! install_remote_artifact_for_head "$repo_slug"; then
       install_failed="yes"
     fi
     ;;
@@ -829,8 +882,22 @@ esac
 
 if [ "$install_failed" = "yes" ]; then
   if [ "$mode" = "auto" ]; then
-    echo "Falling back to source build after ${selected_mode} install failed." >&2
-    run_source_build
+    if [ "$selected_mode" = "artifact" ] && [ "$can_remote_artifact" != "yes" ] \
+      && remote_artifact_available "$repo_slug"; then
+      can_remote_artifact="yes"
+    fi
+    if [ "$selected_mode" = "artifact" ] && [ "$can_remote_artifact" = "yes" ]; then
+      echo "Falling back to fork remote artifact after upstream artifact install failed." >&2
+      if install_remote_artifact_for_head "$repo_slug"; then
+        install_failed="no"
+      else
+        echo "Fork remote artifact fallback failed." >&2
+      fi
+    fi
+    if [ "$install_failed" = "yes" ]; then
+      echo "Falling back to source build after ${selected_mode} install failed." >&2
+      run_source_build
+    fi
   else
     exit 1
   fi
