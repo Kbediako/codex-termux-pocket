@@ -74,6 +74,14 @@ On this device, the supported mobile paths now split cleanly into two timing ban
 
 Upstream release-asset installs should still be faster when the patch audit allows them, but the fork path is no longer forced to rebuild every tooling-only or repeat install.
 
+The helper also reduces avoidable fresh builds in three ways:
+
+- if an upstream artifact install fails in `auto`, it tries the fork `remote-artifact` path before the explicit source fallback
+- reusable remote artifact lookup scans a wider recent run window once per install attempt, then searches safe ancestors locally
+- once a remote workflow run appears, polling switches to that run ID instead of repeatedly scanning workflow lists
+
+Set `CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT` or `CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT` only for debugging; the defaults are tuned to avoid missing reusable artifacts while keeping GitHub queries bounded.
+
 ## Remote artifact workflow
 
 The fork workflow [`termux-mobile-artifact.yml`](/data/data/com.termux/files/home/codex/.github/workflows/termux-mobile-artifact.yml)
@@ -95,10 +103,12 @@ only when no reusable successful artifact already exists. The helper now prefers
 
 That reuse logic is what collapses repeat or tooling-only installs from about 20 minutes to about 20-22 seconds on this device.
 
+Push-triggered fork builds are skipped when a commit only changes top-level docs/plans or Termux helper metadata. Those commits are classified as `tooling` or `docs`, so the helper can install the newest runtime-equivalent ancestor artifact instead of spending another remote build on a binary-identical change.
+
 ## Requirements
 
 - Termux `PREFIX` must point at the live Termux install.
-- `gh auth status` must be healthy for remote-artifact mode.
+- `gh auth status` must be healthy and able to access the fork for remote-artifact mode.
 - The fork remote should be configured as `branch.main.pushRemote`, or be named `termux-pocket`.
 
 ## Runtime bridge
@@ -116,7 +126,7 @@ Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that
 
 ## Recovery
 
-- If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available.
+- If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available and authenticated.
 - If no artifact path is usable, the helper refuses the local source build by default and tells you to use `remote-artifact` or opt into `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
 - The helper validates candidate binaries before replacing `$PREFIX/bin/codex`.
 - Dirty working trees are auto-stashed before the rebase/update path and restored afterward.
