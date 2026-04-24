@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "AGENTS.md"
+      - "PLANS.md"
+      - "EXEC_PLAN*.md"
+      - "README.md"
+      - "docs/**"
+      - "scripts/termux/codex-update-alpha"
+      - "scripts/termux/patch_audit.tsv"
+      - "scripts/termux/smoke-test-artifact"
+      - "scripts/termux/termux-mobile-lib.sh"
   workflow_dispatch:
     inputs:
       source_ref:
