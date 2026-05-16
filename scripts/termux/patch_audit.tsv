@@ -49,3 +49,4 @@ subject	termux: keep temporal ICU lock graph compatible on alpha.124	build-only	
 subject	termux: improve mobile artifact update speed	tooling	Helper/workflow speedup only; preserves runtime/auth behavior and keeps source fallback explicit.
 subject	termux: refresh lockfile after alpha.131.0-alpha.22 rebase	build-only	Refreshes workspace package versions in Cargo.lock and keeps the fork artifact build graph consistent for --locked alpha.131.0-alpha.22 builds.
 subject	termux: handle self-update strict config	runtime-critical	Keeps the shipped Termux self-update subcommand compiling with the upstream strict-config classifier.
+subject	termux: add cargo check helper	tooling	Helper and docs only; makes local Termux cargo check use the pinned musl rusty_v8 pair without changing shipped runtime behavior.
