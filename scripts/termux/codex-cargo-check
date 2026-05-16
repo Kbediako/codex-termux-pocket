@@ -1,0 +1,88 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+. "$SCRIPT_DIR/termux-mobile-lib.sh"
+
+CODEX_SRC_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
+V8_CACHE_ROOT="${CODEX_TERMUX_V8_CACHE_ROOT:-$HOME/.cache/codex-target/v8}"
+
+usage() {
+  cat <<'USAGE'
+Usage: codex-cargo-check [CARGO_CHECK_ARGS...]
+
+Runs `cargo check` on Termux with the OpenAI musl rusty_v8 archive and binding
+overrides. With no arguments, checks the shipped CLI binary:
+
+  cargo check --manifest-path "$CODEX_SRC_DIR/codex-rs/Cargo.toml" --locked -p codex-cli --bin codex
+
+Environment:
+  CODEX_SRC_DIR                 Source checkout, default: $HOME/codex
+  CODEX_TERMUX_V8_CACHE_ROOT    Binding cache root, default: $HOME/.cache/codex-target/v8
+  RUSTY_V8_ARCHIVE              Override the rusty_v8 archive URL.
+  RUSTY_V8_SRC_BINDING_PATH     Override the rusty_v8 binding path.
+USAGE
+}
+
+resolve_termux_v8_version() {
+  awk '
+    $0 == "[[package]]" { in_v8 = 0; next }
+    $0 == "name = \"v8\"" { in_v8 = 1; next }
+    in_v8 && $0 ~ /^version = "/ {
+      sub(/^version = "/, "", $0)
+      sub(/"$/, "", $0)
+      print
+      exit
+    }
+  ' "$CODEX_SRC_DIR/codex-rs/Cargo.lock"
+}
+
+prepare_termux_v8_musl_overrides() {
+  v8_version="$(resolve_termux_v8_version)"
+  if [ -z "$v8_version" ]; then
+    echo "Failed to resolve the pinned v8 crate version from codex-rs/Cargo.lock." >&2
+    exit 1
+  fi
+
+  v8_target="aarch64-unknown-linux-musl"
+  v8_release_tag="rusty-v8-v${v8_version}"
+  v8_cache_dir="$V8_CACHE_ROOT/v${v8_version}"
+  default_binding_path="$v8_cache_dir/src_binding_release_${v8_target}.rs"
+  default_archive_url="$(upstream_release_asset_url "$v8_release_tag" "librusty_v8_release_${v8_target}.a.gz")"
+  binding_url="$(upstream_release_asset_url "$v8_release_tag" "src_binding_release_${v8_target}.rs")"
+
+  mkdir -p "$v8_cache_dir"
+  if [ -z "${RUSTY_V8_SRC_BINDING_PATH:-}" ] && [ ! -f "$default_binding_path" ]; then
+    download_file "$binding_url" "$default_binding_path"
+  fi
+
+  export RUSTY_V8_ARCHIVE="${RUSTY_V8_ARCHIVE:-$default_archive_url}"
+  export RUSTY_V8_SRC_BINDING_PATH="${RUSTY_V8_SRC_BINDING_PATH:-$default_binding_path}"
+  echo "Using OpenAI musl rusty_v8 release pair ${v8_release_tag}."
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ "${PREFIX#*com.termux}" = "$PREFIX" ]; then
+  echo "PREFIX must point at a Termux installation." >&2
+  exit 1
+fi
+
+if [ ! -f "$CODEX_SRC_DIR/codex-rs/Cargo.toml" ]; then
+  echo "Missing Codex Rust workspace: $CODEX_SRC_DIR/codex-rs/Cargo.toml" >&2
+  exit 1
+fi
+
+prepare_termux_v8_musl_overrides
+
+if [ "$#" -eq 0 ]; then
+  set -- --manifest-path "$CODEX_SRC_DIR/codex-rs/Cargo.toml" --locked -p codex-cli --bin codex
+fi
+
+exec cargo check "$@"
