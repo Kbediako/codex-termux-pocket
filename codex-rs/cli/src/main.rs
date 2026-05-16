@@ -2025,6 +2025,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::SelfUpdate) => Some("self-update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
@@ -3451,6 +3452,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "`--strict-config` is not supported for `codex remote-control`"
+        );
+
+        let cli = MultitoolCli::try_parse_from(["codex", "--strict-config", "self-update"])
+            .expect("parse");
+        let err = reject_root_strict_config_for_subcommand(
+            cli.interactive.strict_config,
+            &cli.subcommand,
+        )
+        .expect_err("self-update should not support root --strict-config");
+
+        assert_eq!(
+            err.to_string(),
+            "`--strict-config` is not supported for `codex self-update`"
         );
     }
 
