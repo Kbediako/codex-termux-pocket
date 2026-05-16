@@ -140,3 +140,26 @@ A fresh benchmark on 2026-04-10 established the current boundary:
 - `--locked` with the pinned OpenAI musl archive and binding pair reached the final `codex` binary link, then failed on unresolved V8/ABI symbols (`bcmp`, `__errno_location`) against the Android target
 
 That means the source path is still useful as an experimental diagnostic tool, but it is no longer part of the default fast-path story for Termux.
+
+## Local Cargo checks
+
+Bare `cargo check` on Termux still asks the `v8` crate for the missing
+Android-targeted `rusty_v8` archive. Use `codex-cargo-check` instead. It sets
+`RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` to the pinned OpenAI musl
+release pair before invoking Cargo.
+
+With no arguments, it checks the shipped CLI binary:
+
+```shell
+codex-cargo-check
+```
+
+Pass normal `cargo check` arguments to check a different package or target:
+
+```shell
+codex-cargo-check --manifest-path ~/codex/codex-rs/Cargo.toml --locked -p codex-core
+```
+
+This validates local Rust typechecking. It does not make the experimental local
+source install path production-ready; the final Android-targeted binary link is
+still outside the supported fast path.
