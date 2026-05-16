@@ -26,7 +26,10 @@ Quick Termux setup:
 git clone https://github.com/Kbediako/codex-termux-pocket.git ~/codex
 mkdir -p ~/bin
 cp ~/codex/scripts/termux/codex-update-alpha ~/bin/
-chmod 700 ~/bin/codex-update-alpha
+cp ~/codex/scripts/termux/codex-cargo-check ~/bin/
+cp ~/codex/scripts/termux/termux-mobile-lib.sh ~/bin/
+cp ~/codex/scripts/termux/patch_audit.tsv ~/bin/
+chmod 700 ~/bin/codex-update-alpha ~/bin/codex-cargo-check ~/bin/termux-mobile-lib.sh
 codex-update-alpha
 ```
 
@@ -36,6 +39,7 @@ Useful commands:
 codex-update-alpha
 codex-update-alpha --check
 codex-update-alpha --mode remote-artifact --remote-ref main
+codex-cargo-check
 ```
 
 Details, recovery rules, and the experimental source fallback are documented in [Termux Mobile Update Flow](./docs/termux-mobile-update.md).
