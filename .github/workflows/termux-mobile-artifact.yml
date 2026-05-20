@@ -65,7 +65,7 @@ jobs:
 
       - name: Restore APT cache
         id: cache_apt_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             /var/cache/apt/archives/*.deb
@@ -127,7 +127,7 @@ jobs:
 
       - name: Restore cargo home cache
         id: cache_cargo_home_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ${{ github.workspace }}/.cargo-home/registry/index/
@@ -143,7 +143,7 @@ jobs:
 
       - name: Restore musl tools cache
         id: cache_musl_tools_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
           key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
@@ -223,7 +223,7 @@ jobs:
 
       - name: Restore host release cache
         id: cache_host_release_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             codex-rs/target/.rustc_info.json
@@ -237,7 +237,7 @@ jobs:
 
       - name: Restore target release cache
         id: cache_target_release_restore
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             codex-rs/target/${{ env.TARGET }}/.rustc_info.json
@@ -314,7 +314,7 @@ jobs:
       - name: Save cargo home cache
         if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ${{ github.workspace }}/.cargo-home/registry/index/
@@ -325,7 +325,7 @@ jobs:
       - name: Save host release cache
         if: success() && !cancelled() && steps.cache_host_release_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             codex-rs/target/.rustc_info.json
@@ -338,7 +338,7 @@ jobs:
       - name: Save target release cache
         if: success() && !cancelled() && steps.cache_target_release_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             codex-rs/target/${{ env.TARGET }}/.rustc_info.json
@@ -352,7 +352,7 @@ jobs:
       - name: Save APT cache
         if: always() && !cancelled() && steps.cache_apt_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             /var/cache/apt/archives/*.deb
@@ -361,7 +361,7 @@ jobs:
       - name: Save musl tools cache
         if: always() && !cancelled() && steps.cache_musl_tools_restore.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
           key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
