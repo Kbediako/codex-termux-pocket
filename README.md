@@ -1,3 +1,28 @@
+# 👋 Hi, I'm Pritom Siddique!
+
+<div align="center">
+  <img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&pause=1000&color=00FF00&center=true&width=500&lines=Full-Stack+Developer;Tech+Blogger;Open+Source+Enthusiast" alt="Typing SVG" />
+</div>
+
+---
+
+## 🚀 About Me
+
+I'm a passionate **Full-Stack Developer** from **Bangladesh** with expertise in building modern web applications. I love sharing knowledge through my tech blog and contributing to the open-source community.
+
+---
+
+## 💻 Skills & Technologies
+
+**Languages:** JavaScript, Python, HTML, CSS  
+**Frontend:** React, Vue, Tailwind CSS  
+**Backend:** Node.js, Express, Firebase  
+**Tools:** Git, GitHub, VS Code, Docker
+
+---
+
+## 🌐 Connect With Me
+
 <p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.</p>
 <p align="center">
