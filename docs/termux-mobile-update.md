@@ -129,6 +129,7 @@ Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that
 - If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available and authenticated.
 - If a fresh alpha rebase makes the fork workflow fail at `cargo build --locked`, refresh `codex-rs/Cargo.lock`, verify with `cargo metadata --locked --format-version=1 --no-deps`, and add a matching `build-only` patch audit row before dispatching a replacement artifact build.
 - If `gh run download` exits early but the remote workflow finished successfully, retry the download from the same run ID and install the verified artifact instead of dispatching another build.
+- After any manual artifact install, verify `codex --version`, the `$PREFIX/bin/codex` wrapper, the `$PREFIX/libexec/codex-termux/codex` runtime, and `codex login status`.
 - If no artifact path is usable, the helper refuses the local source build by default and tells you to use `remote-artifact` or opt into `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
 - The helper validates candidate binaries before replacing `$PREFIX/bin/codex`.
 - Dirty working trees are auto-stashed before the rebase/update path and restored afterward.
