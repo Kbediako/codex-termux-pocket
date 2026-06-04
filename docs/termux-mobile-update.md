@@ -133,6 +133,7 @@ Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that
 - Keep the remote run ID and artifact metadata SHA together while diagnosing manual installs so the installed binary can be traced back to the fork commit.
 - When reusing an existing artifact, confirm the candidate commit is an ancestor of the requested ref before treating it as runtime-equivalent.
 - After any manual artifact install, verify `codex --version`, the `$PREFIX/bin/codex` wrapper, the `$PREFIX/libexec/codex-termux/codex` runtime, and `codex login status`.
+- Keep the final `codex-update-alpha --check` output with the install notes so the selected alpha tag is recorded alongside the installed version.
 - If no artifact path is usable, the helper refuses the local source build by default and tells you to use `remote-artifact` or opt into `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
 - Remove temporary artifact download directories after verification so repeat update checks do not leave stale tarballs in the Termux home directory.
 - The helper validates candidate binaries before replacing `$PREFIX/bin/codex`.
