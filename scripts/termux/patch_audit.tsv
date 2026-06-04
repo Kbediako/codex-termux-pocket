@@ -46,6 +46,7 @@ subject	ci: replace setup-bazelisk action with local installer	tooling	Fork work
 subject	termux: refresh lockfile after alpha.123.0-alpha.2 rebase	build-only	Refreshes workspace package versions in Cargo.lock and keeps the fork artifact build graph consistent for --locked alpha.123.0-alpha.2 builds.
 subject	termux: keep temporal ICU lock graph compatible on alpha.123	build-only	Pins the ICU/temporal portion of Cargo.lock back to the temporal_rs-compatible minor versions for alpha.123 remote artifact builds.
 subject	termux: keep temporal ICU lock graph compatible on alpha.124	build-only	Pins the ICU/temporal portion of Cargo.lock back to the temporal_rs-compatible minor versions for alpha.124 remote artifact builds.
+subject	termux: unpin temporal ICU for alpha.137	build-only	Restores upstream ICU workspace dependency ranges so v8 147 can resolve the temporal ICU 2.2 graph.
 subject	termux: improve mobile artifact update speed	tooling	Helper/workflow speedup only; preserves runtime/auth behavior and keeps source fallback explicit.
 subject	termux: handle self-update strict config	runtime-critical	Keeps the shipped Termux self-update subcommand compiling with the upstream strict-config classifier.
 subject	termux: add cargo check helper	tooling	Helper and docs only; makes local Termux cargo check use the pinned musl rusty_v8 pair without changing shipped runtime behavior.
