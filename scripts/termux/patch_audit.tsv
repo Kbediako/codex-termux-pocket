@@ -49,6 +49,7 @@ subject	termux: keep temporal ICU lock graph compatible on alpha.124	build-only	
 subject	termux: unpin temporal ICU for alpha.137	build-only	Restores upstream ICU workspace dependency ranges so v8 147 can resolve the temporal ICU 2.2 graph.
 subject	termux: align mobile artifact Rust toolchain	tooling	Fork workflow-only fix so the mobile artifact job installs the musl target for the repo rust-toolchain version.
 subject	termux: pin allocative for starlark map	build-only	Pins allocative to the Starlark-declared compatible release so hashbrown trait impls match the alpha.137 mobile artifact graph.
+subject	termux: refresh lockfile after alpha.138 rebase	build-only	Refreshes Cargo.lock after rebasing to rust-v0.138.0-alpha.1 so the remote artifact build can run with --locked.
 subject	termux: improve mobile artifact update speed	tooling	Helper/workflow speedup only; preserves runtime/auth behavior and keeps source fallback explicit.
 subject	termux: handle self-update strict config	runtime-critical	Keeps the shipped Termux self-update subcommand compiling with the upstream strict-config classifier.
 subject	termux: add cargo check helper	tooling	Helper and docs only; makes local Termux cargo check use the pinned musl rusty_v8 pair without changing shipped runtime behavior.
