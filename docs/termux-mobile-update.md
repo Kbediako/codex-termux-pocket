@@ -132,6 +132,7 @@ Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that
 - If `gh run download` exits early but the remote workflow finished successfully, retry the download from the same run ID and install the verified artifact instead of dispatching another build.
 - Keep the remote run ID and artifact metadata SHA together while diagnosing manual installs so the installed binary can be traced back to the fork commit.
 - Include the successful workflow URL in handoff notes so the remote artifact can be reopened without searching Actions history.
+- Record whether the helper reused an ancestor artifact or built the requested SHA before summarizing the installed version.
 - When reusing an existing artifact, confirm the candidate commit is an ancestor of the requested ref before treating it as runtime-equivalent.
 - After any manual artifact install, verify `codex --version`, the `$PREFIX/bin/codex` wrapper, the `$PREFIX/libexec/codex-termux/codex` runtime, and `codex login status`.
 - Keep the final `codex-update-alpha --check` output with the install notes so the selected alpha tag is recorded alongside the installed version.
