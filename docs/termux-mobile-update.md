@@ -137,6 +137,7 @@ Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that
 - Keep artifact reuse notes close to the final remote-ref check so pushed state can be audited later.
 - Rerun `codex-update-alpha --check` after long artifact installs in case a newer alpha appeared during the build.
 - Avoid dispatching a fresh artifact for docs-only follow-ups when the helper reports a reusable ancestor build.
+- For immediate artifact failures, inspect the first failed workflow step before changing toolchain settings.
 - When reusing an existing artifact, confirm the candidate commit is an ancestor of the requested ref before treating it as runtime-equivalent.
 - After any manual artifact install, verify `codex --version`, the `$PREFIX/bin/codex` wrapper, the `$PREFIX/libexec/codex-termux/codex` runtime, and `codex login status`.
 - Keep the final `codex-update-alpha --check` output with the install notes so the selected alpha tag is recorded alongside the installed version.
