@@ -27,6 +27,10 @@ refreshing `origin`.
 
 ## 2026-06-15
 
+- Upstream `origin/main` changed: 59 commits are recorded for this date.
+- Notable areas: plugin/app capability filtering, exec-server Noise relay and
+  remote transport defaults, Windows sandbox/session work, rate-limit reset
+  usage surfaces, realtime controls, and multi-agent prompt updates.
 - Upstream Codex alpha tags created: `rust-v0.140.0-alpha.20`,
   `rust-v0.140.0-alpha.21`, `rust-v0.140.0-alpha.22`,
   `rust-v0.141.0-alpha.1`, `rust-v0.141.0-alpha.2`, and
