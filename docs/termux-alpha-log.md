@@ -14,3 +14,11 @@ metadata after refreshing `origin`.
 
 - No upstream Codex alpha tags were created on this date.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-15
+
+- Upstream Codex alpha tags created: `rust-v0.140.0-alpha.20`,
+  `rust-v0.140.0-alpha.21`, `rust-v0.140.0-alpha.22`,
+  `rust-v0.141.0-alpha.1`, `rust-v0.141.0-alpha.2`, and
+  `rust-v0.141.0-alpha.3`.
+- No Termux-specific update action is recorded here for this date.
