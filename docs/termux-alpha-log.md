@@ -48,3 +48,12 @@ refreshing `origin`.
   `rust-v0.142.0-alpha.5`, `rust-v0.142.0-alpha.6`, and
   `rust-v0.142.0-alpha.7`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-20
+
+- Upstream `origin/main` changed: 4 commits are recorded for this date.
+- Notable areas: token budget context, configurable compaction reminders,
+  MCP-history thread hint prototyping, and context window lineage IDs.
+- Upstream Codex alpha tags created: `rust-v0.142.0-alpha.8` and
+  `rust-v0.142.0-alpha.9`.
+- No Termux-specific update action is recorded here for this date.
