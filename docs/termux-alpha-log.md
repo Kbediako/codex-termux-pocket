@@ -57,3 +57,12 @@ refreshing `origin`.
 - Upstream Codex alpha tags created: `rust-v0.142.0-alpha.8` and
   `rust-v0.142.0-alpha.9`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-21
+
+- Upstream `origin/main` changed: 11 commits are recorded for this date.
+- Notable areas: code-mode runtime ownership, authoritative session shutdown,
+  cell terminal state linearization, plan-mode prompt updates, sandbox intent
+  for remote exec servers, skill metadata stats, and scalar exec-server tests.
+- Upstream Codex alpha tag created: `rust-v0.142.0-alpha.10`.
+- No Termux-specific update action is recorded here for this date.
