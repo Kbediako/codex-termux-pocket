@@ -66,3 +66,17 @@ refreshing `origin`.
   for remote exec servers, skill metadata stats, and scalar exec-server tests.
 - Upstream Codex alpha tag created: `rust-v0.142.0-alpha.10`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-22
+
+- Upstream `origin/main` changed: 46 commits are recorded for this date.
+- Notable areas: remote plugin catalog and sharing flows, permission profile
+  availability, PAC/system proxy plumbing, guardian session startup,
+  usage-limit reset handling, rollout budget reminder thresholds, MCP tool
+  search, environment context/model world state migration, and remote sandbox
+  intent/denial reporting.
+- Upstream Codex release tag created: `rust-v0.142.0`.
+- Upstream Codex alpha tags created: `rust-v0.142.0-alpha.11`,
+  `rust-v0.142.0-alpha.12`, `rust-v0.143.0-alpha.2`,
+  `rust-v0.143.0-alpha.3`, and `rust-v0.143.0-alpha.4`.
+- No Termux-specific update action is recorded here for this date.
