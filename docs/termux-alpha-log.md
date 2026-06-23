@@ -80,3 +80,19 @@ refreshing `origin`.
   `rust-v0.142.0-alpha.12`, `rust-v0.143.0-alpha.2`,
   `rust-v0.143.0-alpha.3`, and `rust-v0.143.0-alpha.4`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-23
+
+- Upstream `origin/main` changed: 72 commits are recorded for this date.
+- Notable areas: Codex Apps client/auth/cache handling, multi-agent v2 tool
+  namespacing, path URI cleanup, selected plugin roots, managed network sandbox
+  context, MCP manager refresh and error metrics, rollout persistence/session
+  budget reporting, code-mode host handshake work, thread item listing, image
+  generation auth, and token budget compaction context.
+- Upstream Codex alpha tags created: `rust-v0.143.0-alpha.1`,
+  `rust-v0.143.0-alpha.5`, `rust-v0.143.0-alpha.6`,
+  `rust-v0.143.0-alpha.7`, `rust-v0.143.0-alpha.8`,
+  `rust-v0.143.0-alpha.9`, `rust-v0.143.0-alpha.10`,
+  `rust-v0.143.0-alpha.11`, `rust-v0.143.0-alpha.12`,
+  `rust-v0.143.0-alpha.13`, and `rust-v0.143.0-alpha.14`.
+- No Termux-specific update action is recorded here for this date.
