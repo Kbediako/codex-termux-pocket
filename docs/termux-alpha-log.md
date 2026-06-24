@@ -96,3 +96,17 @@ refreshing `origin`.
   `rust-v0.143.0-alpha.11`, `rust-v0.143.0-alpha.12`,
   `rust-v0.143.0-alpha.13`, and `rust-v0.143.0-alpha.14`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-24
+
+- Upstream `origin/main` changed: 35 commits are recorded for this date.
+- Notable areas: executor plugin connector declarations, app metadata/icon
+  wiring, curated plugin sync isolation, plugin install tracking, bounded
+  filesystem walk RPCs, environment skill discovery, agent graph/message
+  persistence, descendant thread listing, local credential broker work, Windows
+  ConPTY/sandbox credential retries, path URI normalization, and CI worktree
+  dirtiness checks.
+- Upstream Codex release tag created: `rust-v0.142.1`.
+- Upstream Codex alpha tags created: `rust-v0.143.0-alpha.15`,
+  `rust-v0.143.0-alpha.16`, and `rust-v0.143.0-alpha.17`.
+- No Termux-specific update action is recorded here for this date.
