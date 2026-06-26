@@ -110,3 +110,16 @@ refreshing `origin`.
 - Upstream Codex alpha tags created: `rust-v0.143.0-alpha.15`,
   `rust-v0.143.0-alpha.16`, and `rust-v0.143.0-alpha.17`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-26
+
+- Upstream `origin/main` changed: 32 commits are recorded for this date.
+- Notable areas: process-owned code mode host wiring, selected capability
+  availability and resume tests, managed new-thread model settings, thread
+  `history_mode`, optional `turn_id` on thread fork, delegation authorization
+  from AGENTS.md and skills, npm marketplace plugin sources, MCP authentication
+  startup errors, rollout turn protocol items, exec-server process events, and
+  JSON shutdown logs.
+- Upstream Codex release tag created: `rust-v0.142.3`.
+- Upstream Codex alpha tag created: `rust-v0.143.0-alpha.26`.
+- No Termux-specific update action is recorded here for this date.
