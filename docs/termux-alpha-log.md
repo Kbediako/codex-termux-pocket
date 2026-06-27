@@ -123,3 +123,13 @@ refreshing `origin`.
 - Upstream Codex release tag created: `rust-v0.142.3`.
 - Upstream Codex alpha tag created: `rust-v0.143.0-alpha.26`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-27
+
+- Upstream `origin/main` changed: 5 commits are recorded for this date.
+- Notable areas: custom tool call namespace preservation, synthesized call
+  output ID stability, environment info RPC, marketplace source policy runtime
+  enforcement, and a longer app-server `currentTime/read` timeout.
+- Upstream Codex alpha tags created: `rust-v0.143.0-alpha.27`,
+  `rust-v0.143.0-alpha.28`, and `rust-v0.143.0-alpha.29`.
+- No Termux-specific update action is recorded here for this date.
