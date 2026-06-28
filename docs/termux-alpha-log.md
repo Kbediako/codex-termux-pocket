@@ -133,3 +133,11 @@ refreshing `origin`.
 - Upstream Codex alpha tags created: `rust-v0.143.0-alpha.27`,
   `rust-v0.143.0-alpha.28`, and `rust-v0.143.0-alpha.29`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-28
+
+- Upstream `origin/main` changed: 2 commits are recorded for this date.
+- Notable areas: enabling remote plugins by default and clearing completed
+  safety-buffering prompts in the TUI.
+- No upstream Codex alpha or release tags were created on this date.
+- No Termux-specific update action is recorded here for this date.
