@@ -141,3 +141,12 @@ refreshing `origin`.
   safety-buffering prompts in the TUI.
 - No upstream Codex alpha or release tags were created on this date.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-06-29
+
+- Upstream `origin/main` changed so far: 1 commit is recorded for this date as
+  of the 2026-06-29 UTC refresh.
+- Notable area: skills usage instructions now use model metadata.
+- No upstream Codex alpha or release tags were created on this date as of this
+  refresh.
+- No Termux-specific update action is recorded here for this date.
