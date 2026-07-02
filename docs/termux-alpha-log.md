@@ -159,3 +159,14 @@ refreshing `origin`.
   fenced-code-block documentation formatting.
 - Upstream Codex alpha tag created: `rust-v0.143.0-alpha.33`.
 - No Termux-specific update action is recorded here for this date.
+
+## 2026-07-02
+
+- Upstream `origin/main` changed: 6 commits are recorded for this date.
+- Notable areas: per-request TTFT telemetry, Bedrock inherited availability
+  metadata, quick-xml security advisories, incremental WebSocket request
+  metadata handling, structured direct tool-call timing, and configurable
+  multi-agent mode hint text.
+- Upstream Codex alpha tags created: `rust-v0.143.0-alpha.34` and
+  `rust-v0.143.0-alpha.35`.
+- No Termux-specific update action is recorded here for this date.
