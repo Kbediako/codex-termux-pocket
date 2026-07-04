@@ -15,6 +15,39 @@ For macOS, Windows, Linux desktop, or other PC installs, use the main
   />
 </p>
 
+## Easy Termux Setup
+
+Use Termux from F-Droid, not the old Play Store build. F-Droid currently marks
+`0.118.3` as the suggested stable build (checked 2026-07-04); beta builds are
+not required.
+
+Open Termux and paste this:
+
+```shell
+pkg update -y
+pkg install -y git curl ca-certificates proot termux-tools
+
+if [ -d "$HOME/codex/.git" ]; then
+  git -C "$HOME/codex" pull --ff-only
+else
+  git clone https://github.com/Kbediako/codex-termux-pocket.git "$HOME/codex"
+fi
+
+mkdir -p "$HOME/bin"
+cp "$HOME/codex/scripts/termux/codex-update-alpha" "$HOME/bin/"
+cp "$HOME/codex/scripts/termux/codex-cargo-check" "$HOME/bin/"
+cp "$HOME/codex/scripts/termux/termux-mobile-lib.sh" "$HOME/bin/"
+cp "$HOME/codex/scripts/termux/patch_audit.tsv" "$HOME/bin/"
+chmod 700 "$HOME/bin/codex-update-alpha" "$HOME/bin/codex-cargo-check"
+chmod 700 "$HOME/bin/termux-mobile-lib.sh"
+
+"$HOME/bin/codex-update-alpha" --mode auto --force
+```
+
+After the install finishes, run `codex login` and choose the ChatGPT browser
+login flow. Later updates can use `codex-update-alpha` or
+`$HOME/bin/codex-update-alpha`.
+
 ## Android / Termux
 
 This fork keeps the mobile update path artifact-first:
