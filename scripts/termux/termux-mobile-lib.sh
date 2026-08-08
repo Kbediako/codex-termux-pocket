@@ -68,6 +68,24 @@ termux_validate_sha256() {
   [[ "$1" =~ ^[0-9a-f]{64}$ ]]
 }
 
+termux_latest_valid_alpha_tag() {
+  local repo_dir="$1"
+  local merged_ref="${2:-}"
+  local candidate_tag
+  local -a tag_command=(git -C "$repo_dir" tag --list 'rust-v*-alpha.*' --sort=-version:refname)
+
+  if [[ -n "$merged_ref" ]]; then
+    tag_command=(git -C "$repo_dir" tag --merged "$merged_ref" --list 'rust-v*-alpha.*' --sort=-version:refname)
+  fi
+  while IFS= read -r candidate_tag; do
+    if [[ "$candidate_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+      printf '%s\n' "$candidate_tag"
+      return 0
+    fi
+  done < <("${tag_command[@]}")
+  return 1
+}
+
 termux_configure_remotes() {
   local repo_dir="$1"
   local fork_url="${2:-$CODEX_TERMUX_FORK_URL_DEFAULT}"
