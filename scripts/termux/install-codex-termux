@@ -1,0 +1,136 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+FORK_URL="${CODEX_TERMUX_FORK_URL:-https://github.com/Kbediako/codex-termux-pocket.git}"
+INSTALL_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
+helper_temporary=""
+
+cleanup() {
+  if [[ -n "$helper_temporary" && -f "$helper_temporary" ]]; then
+    rm -f "$helper_temporary"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+bootstrap_die() {
+  printf 'install-codex-termux: %s\n' "$*" >&2
+  exit 1
+}
+
+bootstrap_configure_remotes() {
+  local repo_dir="$1"
+  local origin_url
+  origin_url="$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$origin_url" ]]; then
+    git -C "$repo_dir" remote add origin "$FORK_URL"
+  elif [[ "$origin_url" == "https://github.com/openai/codex.git" \
+          || "$origin_url" == "https://github.com/openai/codex" ]]; then
+    if git -C "$repo_dir" remote get-url upstream >/dev/null 2>&1; then
+      bootstrap_die 'origin points to OpenAI but upstream already exists; refusing to rewrite ambiguous remotes.'
+    fi
+    git -C "$repo_dir" remote rename origin upstream
+    git -C "$repo_dir" remote add origin "$FORK_URL"
+  elif [[ "$origin_url" != "$FORK_URL" && "$origin_url" != "${FORK_URL%.git}" ]]; then
+    bootstrap_die "origin is $origin_url, not the expected Termux fork; this checkout was left untouched."
+  fi
+  if git -C "$repo_dir" remote get-url upstream >/dev/null 2>&1; then
+    git -C "$repo_dir" remote set-url upstream https://github.com/openai/codex.git
+  else
+    git -C "$repo_dir" remote add upstream https://github.com/openai/codex.git
+  fi
+  git -C "$repo_dir" config remote.upstream.pushurl DISABLED
+  git -C "$repo_dir" config remote.pushDefault origin
+  git -C "$repo_dir" config branch.main.remote origin
+  git -C "$repo_dir" config branch.main.merge refs/heads/main
+  git -C "$repo_dir" config branch.main.pushRemote origin
+}
+
+if [[ "${PREFIX:-}" != */com.termux/files/usr ]]; then
+  bootstrap_die 'run this installer inside Termux.'
+fi
+if [[ "${TERMUX_APK_RELEASE:-}" == "GOOGLE_PLAY" ]]; then
+  bootstrap_die 'this Termux Play Store build is unsupported; install current Termux from F-Droid or GitHub.'
+fi
+if [[ "$(uname -m)" != "aarch64" ]]; then
+  bootstrap_die "this installer currently supports aarch64 phones, not $(uname -m)."
+fi
+
+printf 'Installing required Termux packages...\n'
+pkg update -y
+pkg install -y bash git curl ca-certificates coreutils tar gzip proot termux-tools ripgrep
+
+if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+  bootstrap_die "$INSTALL_DIR exists but is not a Git checkout; move it or set CODEX_SRC_DIR to an unused path."
+fi
+
+if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+  git clone --origin origin --branch main --single-branch "$FORK_URL" "$INSTALL_DIR"
+fi
+
+if [[ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]]; then
+  bootstrap_die "$INSTALL_DIR has local changes; they were left untouched. Commit/stash them or use a separate CODEX_SRC_DIR."
+fi
+if [[ "$(git -C "$INSTALL_DIR" branch --show-current)" != "main" ]]; then
+  bootstrap_die "$INSTALL_DIR is not on main; it was left untouched. Use a separate CODEX_SRC_DIR for installation."
+fi
+
+bootstrap_configure_remotes "$INSTALL_DIR"
+git -C "$INSTALL_DIR" fetch --prune origin main
+if ! git -C "$INSTALL_DIR" merge-base --is-ancestor HEAD origin/main; then
+  bootstrap_die 'local main has diverged from origin/main; refusing to rewrite it. No files were reset.'
+fi
+git -C "$INSTALL_DIR" merge --ff-only origin/main
+
+# Re-source the fast-forwarded implementation and install helpers atomically on
+# Termux's existing PATH.
+LIB="$INSTALL_DIR/scripts/termux/termux-mobile-lib.sh"
+[[ -f "$LIB" ]] || bootstrap_die "updated checkout does not contain $LIB"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+source "$LIB"
+termux_configure_remotes "$INSTALL_DIR" "$FORK_URL"
+helper_dir="$PREFIX/bin"
+mkdir -p "$helper_dir"
+helpers=(
+  codex-update-alpha
+  install-codex-termux
+  smoke-test-artifact
+  codex-cargo-check
+  termux-mobile-lib.sh
+  release-manifest.env
+)
+for helper in "${helpers[@]}"; do
+  source_path="$INSTALL_DIR/scripts/termux/$helper"
+  [[ -f "$source_path" ]] || bootstrap_die "checkout is missing helper: $source_path"
+  helper_temporary="$helper_dir/.${helper}.new.$$"
+  cp "$source_path" "$helper_temporary"
+  case "$helper" in
+    *.env)
+      chmod 0644 "$helper_temporary"
+      ;;
+    *)
+      chmod 0755 "$helper_temporary"
+      ;;
+  esac
+  mv -f "$helper_temporary" "$helper_dir/$helper"
+  helper_temporary=""
+done
+
+if [[ -z "$(termux_metadata_value "$helper_dir/release-manifest.env" release_tag)" ]]; then
+  # GitHub's Actions artifact API requires gh authentication. This package is
+  # unnecessary once a public release is pinned in release-manifest.env.
+  pkg install -y gh
+fi
+
+CODEX_SRC_DIR="$INSTALL_DIR" "$helper_dir/codex-update-alpha" update
+"$helper_dir/smoke-test-artifact" --installed
+
+cat <<'SUMMARY'
+
+Codex for Termux is installed and verified.
+  Git push remote: origin (Termux fork)
+  Git tag/source remote: upstream (OpenAI, push disabled)
+  Runtime: verified complete artifact; no local rebase or source build
+
+Next command:
+  codex login
+SUMMARY

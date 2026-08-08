@@ -1,0 +1,199 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TERMUX_DIR="$(cd -- "$TEST_DIR/.." && pwd)"
+REPO_ROOT="$(cd -- "$TERMUX_DIR/../.." && pwd)"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+source "$TERMUX_DIR/termux-mobile-lib.sh"
+
+test_root="$(mktemp -d)"
+cleanup() {
+  rm -rf "$test_root"
+}
+trap cleanup EXIT INT TERM
+
+pass_count=0
+pass() {
+  printf 'ok %d - %s\n' "$((++pass_count))" "$1"
+}
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  exit 1
+}
+
+assert_eq() {
+  local expected="$1"
+  local actual="$2"
+  local label="$3"
+  [[ "$actual" == "$expected" ]] || fail "$label (expected '$expected', got '$actual')"
+}
+
+make_repo() {
+  local dir="$1"
+  git init -q -b main "$dir"
+}
+
+test_remote_topology() {
+  local repo="$test_root/remotes"
+  local fork_url="https://github.com/example/codex-termux.git"
+  make_repo "$repo"
+  git -C "$repo" remote add origin "$fork_url"
+  termux_configure_remotes "$repo" "$fork_url"
+  termux_configure_remotes "$repo" "$fork_url"
+  assert_eq "$fork_url" "$(git -C "$repo" remote get-url origin)" 'origin remains the fork'
+  assert_eq "$CODEX_TERMUX_UPSTREAM_URL" "$(git -C "$repo" remote get-url upstream)" 'upstream fetch URL'
+  assert_eq 'DISABLED' "$(git -C "$repo" remote get-url --push upstream)" 'upstream push is disabled'
+  assert_eq 'origin' "$(git -C "$repo" config remote.pushDefault)" 'fork is default push remote'
+  assert_eq 'origin' "$(git -C "$repo" config branch.main.remote)" 'main pulls from fork'
+  pass 'remote topology has separate fork push and OpenAI tag roles'
+}
+
+test_migrate_openai_origin() {
+  local repo="$test_root/migrate"
+  local fork_url="https://github.com/example/codex-termux.git"
+  make_repo "$repo"
+  git -C "$repo" remote add origin "$CODEX_TERMUX_UPSTREAM_URL"
+  termux_configure_remotes "$repo" "$fork_url"
+  assert_eq "$fork_url" "$(git -C "$repo" remote get-url origin)" 'fork origin after migration'
+  assert_eq "$CODEX_TERMUX_UPSTREAM_URL" "$(git -C "$repo" remote get-url upstream)" 'OpenAI upstream after migration'
+  pass 'legacy OpenAI-origin checkout migrates without commits'
+}
+
+write_fake_executable() {
+  local path="$1"
+  local body="$2"
+  mkdir -p "$(dirname "$path")"
+  printf '#!/data/data/com.termux/files/usr/bin/bash\nset -euo pipefail\n%s\n' "$body" >"$path"
+  chmod 0755 "$path"
+}
+
+make_bundle() {
+  local dir="$1"
+  local sha="$2"
+  local version="$3"
+  local runtime="$dir/codex-termux-runtime"
+  mkdir -p "$runtime/bin" "$runtime/codex-resources"
+  # shellcheck disable=SC2016 # Literal body is written into the fixture script.
+  write_fake_executable "$runtime/bin/codex" 'if [[ "${1:-}" == "--version" ]]; then printf "%s\\n" "codex-cli 9.9.9"; else exit 0; fi'
+  write_fake_executable "$runtime/bin/codex-code-mode-host" 'exit 0'
+  write_fake_executable "$runtime/bin/codex-responses-api-proxy" 'exit 0'
+  write_fake_executable "$runtime/codex-resources/bwrap" 'exit 0'
+  printf '{"layoutVersion":1,"version":"%s","target":"%s"}\n' "$version" "$CODEX_TERMUX_TARGET" >"$runtime/codex-package.json"
+  tar -C "$dir" -czf "$dir/$CODEX_TERMUX_ARCHIVE" codex-termux-runtime
+  rm -rf "$runtime"
+  cat >"$dir/$CODEX_TERMUX_METADATA" <<EOF
+format_version=1
+source_repository=example/codex-termux
+head_sha=$sha
+git_describe=test
+codex_version=$version
+target=$CODEX_TERMUX_TARGET
+source_ref=$sha
+EOF
+  (cd "$dir" && sha256sum "$CODEX_TERMUX_ARCHIVE" "$CODEX_TERMUX_METADATA" >"$CODEX_TERMUX_CHECKSUMS")
+}
+
+test_bundle_install() {
+  local bundle="$test_root/bundle"
+  local prefix="$test_root/prefix"
+  local bad_root
+  local sha='0123456789abcdef0123456789abcdef01234567'
+  local version='codex-cli 9.9.9'
+  mkdir -p "$bundle" "$prefix/bin"
+  make_bundle "$bundle" "$sha" "$version"
+  termux_install_verified_bundle "$bundle" "$sha" "$version" '' "$prefix"
+  [[ -L "$prefix/libexec/codex-termux/current" ]] || fail 'current runtime is not an atomic symlink'
+  [[ -x "$prefix/libexec/codex-termux/current/bin/codex-code-mode-host" ]] || fail 'code-mode host was not installed'
+  [[ -x "$prefix/libexec/codex-termux/current/codex-resources/bwrap" ]] || fail 'bundled bwrap was not installed'
+  assert_eq "$version" "$(CODEX_TERMUX_DISABLE_PROOT=1 "$prefix/bin/codex" --version)" 'launcher version'
+  # shellcheck disable=SC2016 # Match the literal variable in the generated launcher.
+  grep -q 'export PATH="${RESOURCE_DIR}' "$prefix/bin/codex" || fail 'launcher does not expose bundled bwrap'
+  termux_install_verified_bundle "$bundle" "$sha" "$version" '' "$prefix" >/dev/null
+  [[ -x "$prefix/libexec/codex-termux/current/bin/codex" ]] || fail 'idempotent reinstall broke current runtime'
+  pass 'complete bundle verifies and installs atomically'
+
+  printf 'corruption' >>"$bundle/$CODEX_TERMUX_ARCHIVE"
+  if (termux_verify_download_set "$bundle" "$sha" "$version") >/dev/null 2>&1; then
+    fail 'corrupt archive passed checksum verification'
+  fi
+  pass 'corrupt artifact is rejected before installation'
+
+  make_bundle "$bundle" "$sha" "$version"
+  if (termux_verify_download_set "$bundle" 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$version") >/dev/null 2>&1; then
+    fail 'wrong artifact commit was accepted'
+  fi
+  pass 'artifact from a different commit is rejected'
+
+  bad_root="$test_root/missing-sidecar"
+  mkdir -p "$bad_root"
+  tar -xzf "$bundle/$CODEX_TERMUX_ARCHIVE" -C "$bad_root"
+  rm "$bad_root/codex-termux-runtime/bin/codex-code-mode-host"
+  tar -C "$bad_root" -czf "$bundle/$CODEX_TERMUX_ARCHIVE" codex-termux-runtime
+  (cd "$bundle" && sha256sum "$CODEX_TERMUX_ARCHIVE" "$CODEX_TERMUX_METADATA" >"$CODEX_TERMUX_CHECKSUMS")
+  if (termux_extract_and_verify_bundle "$bundle" "$test_root/missing-sidecar-extract") >/dev/null 2>&1; then
+    fail 'bundle without codex-code-mode-host was accepted'
+  fi
+  pass 'artifact missing a required runtime sidecar is rejected'
+}
+
+test_run_dedup_and_timeout() {
+  local repo="$test_root/updater-repo"
+  local fake_bin="$test_root/fake-bin"
+  local gh_log="$test_root/gh.log"
+  local output="$test_root/updater.out"
+  local sha='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  make_repo "$repo"
+  git -C "$repo" remote add origin "$CODEX_TERMUX_FORK_URL_DEFAULT"
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/gh" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+printf '%s\\n' "\$*" >>'$gh_log'
+case "\$1 \${2:-}" in
+  'auth status') exit 0 ;;
+  'run list') printf '%s\\n' '4242|https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
+  'run view') printf '%s' '4242|https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/gh"
+  set +e
+  PATH="$fake_bin:$PATH" \
+    CODEX_SRC_DIR="$repo" \
+    CODEX_TERMUX_SKIP_CHECKOUT_SYNC=1 \
+    CODEX_TERMUX_POLL_SECONDS=1 \
+    CODEX_TERMUX_RELEASE_MANIFEST="$TERMUX_DIR/release-manifest.env" \
+    "$TERMUX_DIR/codex-update-alpha" update --expected-sha "$sha" --dispatch --timeout 1 >"$output" 2>&1
+  status=$?
+  set -e
+  assert_eq '3' "$status" 'queued run local timeout status'
+  grep -q 'run 4242 is queued' "$output" || fail 'queued state was not printed'
+  grep -q 'run URL: https://github.com/.*/4242' "$output" || fail 'timeout omitted run URL'
+  grep -q 'wait --run-id 4242 --expected-sha' "$output" || fail 'timeout omitted resume command'
+  if grep -q '^workflow run ' "$gh_log"; then
+    fail 'a duplicate build was dispatched for an existing queued run'
+  fi
+  pass 'queued run is reused and timeout prints exact recovery without cancellation'
+}
+
+test_static_architecture_guards() {
+  ! grep -q 'git .*rebase' "$TERMUX_DIR/codex-update-alpha" || fail 'end-user updater still rebases'
+  ! grep -q 'git config user\.' "$TERMUX_DIR/install-codex-termux" || fail 'installer configures Git identity'
+  grep -q 'cargo metadata --locked' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow lacks lockfile gate'
+  grep -q -- '--bin codex-code-mode-host' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not build code-mode host'
+  grep -q 'sha256sum --check --strict' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not validate checksums before upload'
+  local lock_line build_line
+  lock_line="$(grep -n 'Validate Cargo.lock before build setup' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
+  build_line="$(grep -n 'Build complete Codex runtime' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
+  (( lock_line < build_line )) || fail 'lockfile gate is not before the expensive build'
+  pass 'static guards enforce artifact-first end-user and early CI lockfile validation'
+}
+
+test_remote_topology
+test_migrate_openai_origin
+test_bundle_install
+test_run_dedup_and_timeout
+test_static_architecture_guards
+printf '1..%d\n' "$pass_count"
