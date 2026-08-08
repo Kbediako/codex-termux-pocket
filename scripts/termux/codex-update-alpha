@@ -197,7 +197,11 @@ list_workflow_runs() {
 find_matching_run() {
   local sha="$1"
   list_workflow_runs | awk -F '|' -v sha="$sha" '
-    $3 == sha || $6 == "Termux runtime " sha { print; exit }
+    $6 ~ /^Termux runtime [0-9a-f]{40}$/ {
+      if ($6 == "Termux runtime " sha) { print; exit }
+      next
+    }
+    $3 == sha { print; exit }
   '
 }
 
