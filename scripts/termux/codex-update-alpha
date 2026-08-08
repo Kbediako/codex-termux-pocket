@@ -187,8 +187,9 @@ resolve_source_sha() {
 
 list_workflow_runs() {
   gh run list --repo "$CODEX_TERMUX_REPO" --workflow "$WORKFLOW_FILE" --limit 100 \
-    --json databaseId,url,headSha,status,conclusion,displayTitle \
-    --template '{{range .}}{{.databaseId}}|{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}{{"\n"}}{{end}}'
+    --json url,headSha,status,conclusion,displayTitle \
+    --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}{{"\n"}}{{end}}' \
+    | awk -F '|' '{ n = split($1, parts, "/"); print parts[n] "|" $0 }'
 }
 
 find_matching_run() {
@@ -201,8 +202,9 @@ find_matching_run() {
 show_run() {
   local id="$1"
   gh run view "$id" --repo "$CODEX_TERMUX_REPO" \
-    --json databaseId,url,headSha,status,conclusion,displayTitle \
-    --template '{{.databaseId}}|{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}'
+    --json url,headSha,status,conclusion,displayTitle \
+    --template '{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}' \
+    | awk -F '|' '{ n = split($1, parts, "/"); print parts[n] "|" $0 }'
 }
 
 run_expected_sha() {
