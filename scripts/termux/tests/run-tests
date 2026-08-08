@@ -196,6 +196,8 @@ test_static_architecture_guards() {
   grep -q -- '-P :workspace' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not exercise the restricted Android command-runner profile'
   grep -q 'command -v bwrap' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not verify bundled bwrap discovery'
   grep -q 'unexpectedly allowed a filesystem write' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not prove restricted write denial'
+  grep -q 'libc::O_PATH | libc::O_CLOEXEC' "$REPO_ROOT/codex-rs/linux-sandbox/src/landlock.rs" || fail 'Termux Landlock rules do not preserve O_PATH for Android virtual roots'
+  grep -q $'subject\ttermux: preserve O_PATH for Android Landlock roots\tsecurity-critical\t' "$TERMUX_DIR/patch_audit.tsv" || fail 'Termux O_PATH security patch is missing from the patch audit'
   local lock_line build_line
   lock_line="$(grep -n 'Validate Cargo.lock before build setup' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
   build_line="$(grep -n 'Build complete Codex runtime' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
