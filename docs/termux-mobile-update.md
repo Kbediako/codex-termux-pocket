@@ -121,14 +121,23 @@ to `PATH`, so Codex finds its bundled copy without printing the generic
 seek an unsupported Termux package merely to suppress that warning.
 
 Stock Android kernels do not generally expose the user/mount namespaces that
-Linux bubblewrap needs for restricted permission profiles. The full smoke test
-therefore runs a harmless token command through Codex's explicit
-`:danger-full-access` command-runner profile, which remains confined by
-Android's Termux app UID and permissions, and separately executes the bundled
-`bwrap --version` probe. This verifies command dispatch and fixes the misleading
-missing-package warning without pretending that `proot` is a security sandbox.
-Restricted bubblewrap profiles can still fail on such kernels; Codex may ask
-for approval to retry a command outside the Linux sandbox.
+Linux bubblewrap needs. On Termux, Codex now automatically uses an in-process
+Landlock filesystem plus seccomp network fallback instead. Android SELinux
+denies opening `/` itself, so the fallback grants read access only through a
+fail-closed list of accessible Android system trees and the Termux app tree.
+This follows the kernel's path-beneath Landlock model and Termux's documented
+SELinux-constrained filesystem layout:
+[Landlock kernel documentation](https://docs.kernel.org/userspace-api/landlock.html),
+[Termux filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout).
+
+Landlock cannot represent nested read-only carve-outs below a writable parent.
+When a profile such as `:workspace` requires those carve-outs, the fallback is
+made more restrictive—not less—by enforcing read-only filesystem access. A
+write is denied and can follow Codex's normal explicit approval path. The full
+smoke test proves a restricted `:workspace` command can execute, that an
+unapproved write is denied, and that the matching bundled `bwrap` remains
+discoverable. `proot` is used only for DNS/CA path bridging and is not treated
+as a security sandbox.
 
 The launcher also binds Termux `resolv.conf` and CA bundle to conventional Linux
 paths with `proot`, exports the Termux CA variables, and uses

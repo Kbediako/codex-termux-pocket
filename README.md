@@ -37,6 +37,8 @@ checksums. The launcher exposes that bundled `bwrap` on `PATH`; do not install
 an unsupported Termux package merely to silence the generic desktop warning.
 Android namespace limits and the command-runner fallback are documented in
 [Termux Mobile Update](./docs/termux-mobile-update.md#bubblewrap-on-termux).
+Restricted commands use Landlock plus seccomp on stock Android; no root,
+unsupported bubblewrap package, or global sandbox disable is required.
 
 Useful commands:
 

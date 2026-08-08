@@ -3,7 +3,9 @@
 //! Filesystem restrictions are enforced by bubblewrap in `linux_run_main`.
 //! Landlock helpers remain available here as legacy/backup utilities.
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::path::PathBuf;
 
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
@@ -141,11 +143,12 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let access_rw = AccessFs::from_all(abi);
     let access_ro = AccessFs::from_read(abi);
 
+    let readable_roots = legacy_readable_roots();
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(access_rw)?
         .create()?
-        .add_rules(landlock::path_beneath_rules(&["/"], access_ro))?
+        .add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?
         .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
         .set_no_new_privs(true);
 
@@ -160,6 +163,52 @@ fn install_filesystem_landlock_rules_on_current_thread(
     }
 
     Ok(())
+}
+
+/// Android SELinux intentionally denies opening `/`, even though an app may
+/// open selected descendants. Landlock needs an open path file descriptor for
+/// every allow rule, so a single `/` rule is silently unusable in Termux. Use a
+/// fail-closed list of Android/Termux hierarchies instead: unavailable entries
+/// are ignored by the Landlock crate's best-effort compatibility layer, while
+/// omitted paths remain inaccessible after restriction.
+fn legacy_readable_roots() -> Vec<PathBuf> {
+    let prefix = std::env::var_os("PREFIX").map(PathBuf::from);
+    legacy_readable_roots_for_prefix(prefix.as_deref())
+}
+
+fn legacy_readable_roots_for_prefix(prefix: Option<&Path>) -> Vec<PathBuf> {
+    let Some(prefix) = prefix.filter(|path| is_termux_prefix(path)) else {
+        return vec![PathBuf::from("/")];
+    };
+
+    let mut roots = BTreeSet::from([
+        PathBuf::from("/apex"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/linkerconfig"),
+        PathBuf::from("/mnt"),
+        PathBuf::from("/odm"),
+        PathBuf::from("/odm_dlkm"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/product"),
+        PathBuf::from("/storage"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/system"),
+        PathBuf::from("/system_ext"),
+        PathBuf::from("/vendor"),
+        PathBuf::from("/vendor_dlkm"),
+    ]);
+    // PREFIX is normally <app-data>/files/usr. Its parent includes both the
+    // Termux package tree and HOME without granting other apps' private data.
+    if let Some(termux_files) = prefix.parent() {
+        roots.insert(termux_files.to_path_buf());
+    } else {
+        roots.insert(prefix.to_path_buf());
+    }
+    roots.into_iter().collect()
+}
+
+pub(crate) fn is_termux_prefix(path: &Path) -> bool {
+    path.ends_with("com.termux/files/usr")
 }
 
 /// Installs a seccomp filter for Linux network sandboxing.
@@ -270,9 +319,34 @@ fn install_network_seccomp_filter_on_current_thread(
 #[cfg(test)]
 mod tests {
     use super::NetworkSeccompMode;
+    use super::is_termux_prefix;
+    use super::legacy_readable_roots_for_prefix;
     use super::network_seccomp_mode;
     use super::should_install_network_seccomp;
     use codex_protocol::protocol::NetworkSandboxPolicy;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn termux_legacy_roots_do_not_depend_on_opening_android_root() {
+        let prefix = Path::new("/data/data/com.termux/files/usr");
+        let roots = legacy_readable_roots_for_prefix(Some(prefix));
+        assert!(!roots.contains(&PathBuf::from("/")));
+        assert!(roots.contains(&PathBuf::from("/data/data/com.termux/files")));
+        assert!(roots.contains(&PathBuf::from("/system")));
+        assert!(roots.contains(&PathBuf::from("/apex")));
+    }
+
+    #[test]
+    fn ordinary_linux_legacy_root_remains_unchanged() {
+        assert_eq!(
+            legacy_readable_roots_for_prefix(Some(Path::new("/usr"))),
+            vec![PathBuf::from("/")]
+        );
+        assert!(is_termux_prefix(Path::new(
+            "/data/data/com.termux/files/usr"
+        )));
+    }
     use pretty_assertions::assert_eq;
 
     #[test]
