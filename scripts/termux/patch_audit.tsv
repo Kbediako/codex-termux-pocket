@@ -60,3 +60,4 @@ subject	termux: secure restricted commands with Landlock	security-critical	Uses 
 subject	termux: preserve O_PATH for Android Landlock roots	security-critical	Ensures the musl helper installs read rules for Android virtual trees such as /apex so dynamically linked Termux commands execute while Landlock remains fail-closed.
 subject	termux: honor explicit Actions artifact requests	tooling	Updater-only fix routes an explicit commit/ref/dispatch request to its exact Actions run instead of attempting the independently pinned public release.
 subject	termux: match Actions runs by requested commit	tooling	Updater-only fix prioritizes the workflow's requested source SHA over the branch head SHA so an unrelated dispatch cannot mask the exact queued run.
+subject	termux: compile Android O_PATH Landlock rules	security-critical	Qualifies the generic rule-result type so the security-critical raw O_PATH Landlock path compiles for the musl artifact target.
