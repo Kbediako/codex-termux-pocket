@@ -55,3 +55,4 @@ subject	termux: add cargo check helper	tooling	Helper and docs only; makes local
 subject	termux: make mobile installs verified and rebase-free	runtime-critical	Changes the shipped Termux launcher and complete runtime bundle contract; end users install exact verified artifacts while rebasing becomes maintainer-only.
 subject	termux: preserve large Actions run IDs	tooling	Updater-only fix derives exact workflow run IDs from URLs instead of GitHub CLI floating-point template rendering.
 subject	termux: publish verified mobile runtime	tooling	Pins the first validated public runtime, preserves exact Actions run IDs, and avoids rebuilding when only installer metadata or tests change.
+subject	termux: make Android command smoke test accurate	tooling	Exercises the Codex command runner and bundled bwrap discovery without claiming stock Android supports Linux user namespaces.

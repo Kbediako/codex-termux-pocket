@@ -32,9 +32,11 @@ untouched.
 
 Normal installs consume a maintained, complete aarch64 runtime bundle. The
 bundle includes `codex`, `codex-code-mode-host`, the matching response proxy,
-and the supported bundled `bwrap`, all from one commit and protected by SHA-256
+and the matching bundled `bwrap`, all from one commit and protected by SHA-256
 checksums. The launcher exposes that bundled `bwrap` on `PATH`; do not install
 an unsupported Termux package merely to silence the generic desktop warning.
+Android namespace limits and the command-runner fallback are documented in
+[Termux Mobile Update](./docs/termux-mobile-update.md#bubblewrap-on-termux).
 
 Useful commands:
 

@@ -20,7 +20,8 @@ Usage:
 
 The installed test checks the launcher, metadata/version, sidecars, bundled
 bubblewrap, DNS, certificates, browser handoff, permissions, and a minimal
-command through `codex sandbox`. --quick skips only the command execution.
+command through the Codex command runner. --quick skips only the command
+execution.
 USAGE
 }
 
@@ -77,7 +78,7 @@ smoke_bundle() {
 
 smoke_installed() {
   termux_check_environment
-  local metadata runtime_root metadata_sha metadata_version actual_version token output
+  local metadata runtime_root metadata_sha metadata_version actual_version token output command_status
   metadata="$(termux_installed_metadata)"
   runtime_root="$PREFIX/libexec/codex-termux/current"
   [[ -f "$metadata" ]] || termux_abort "installed metadata is missing: $metadata"
@@ -105,18 +106,25 @@ smoke_installed() {
       curl --silent --show-error --connect-timeout 15 --max-time 30 --head \
       https://api.openai.com/ >/dev/null
     token="codex-termux-command-ok-$$"
-    if ! output="$(codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c "printf '%s' '$token'" 2>&1)"; then
+    set +e
+    output="$(codex sandbox -P :danger-full-access -- "$PREFIX/bin/bash" -c \
+      "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" 2>&1)"
+    command_status=$?
+    set -e
+    if (( command_status != 0 )); then
       printf '%s\n' "$output" >&2
-      termux_abort 'minimal command failed in the Codex Termux sandbox runner.'
+      termux_abort "minimal command failed in the Codex Termux command runner (exit $command_status)."
     fi
     [[ "$output" != *'Codex could not find bubblewrap on PATH'* ]] || \
       termux_abort 'bundled bubblewrap was not discovered on PATH.'
+    [[ "$output" == *"bwrap=$runtime_root/codex-resources/bwrap"* ]] || \
+      termux_abort 'command runner did not resolve the verified bundled bubblewrap.'
     [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
   fi
 
   termux_info "installed smoke test passed: $actual_version ($metadata_sha)"
   if [[ "$quick" != "yes" ]]; then
-    termux_info 'launcher DNS/CA/browser checks and command-runner smoke test passed.'
+    termux_info 'launcher DNS/CA/browser/bubblewrap checks and command-runner smoke test passed.'
   fi
 }
 
