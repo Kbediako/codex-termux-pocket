@@ -64,3 +64,4 @@ subject	termux: compile Android O_PATH Landlock rules	security-critical	Qualifie
 subject	termux: smoke test the canonical Termux launcher	tooling	Makes installed smoke checks use the absolute managed launcher so an inherited runtime-first PATH cannot bypass DNS, CA, browser, or proot validation.
 subject	termux: publish secure Android command runtime	tooling	Pins the exact public artifact that passed complete on-device launcher, sidecar, network, restricted-command, and denied-write validation.
 subject	termux: install plugin MCP runtime	runtime-critical	Installs and verifies Termux Node.js so bundled plugin MCP servers start in fresh terminals instead of failing with a missing executable.
+subject	termux: select only valid upstream alpha tags	tooling	Filters malformed tag names and selects the newest strictly valid alpha merged into the maintained branch before rebasing.

@@ -53,12 +53,12 @@ if [[ "$lock_only" != "yes" ]]; then
     termux_abort 'maintainer update requires the main branch.'
   git -C "$CODEX_SRC_DIR" fetch --prune upstream main 'refs/tags/rust-v*:refs/tags/rust-v*'
   if [[ -z "$target_tag" ]]; then
-    target_tag="$(git -C "$CODEX_SRC_DIR" tag --list 'rust-v*-alpha.*' --sort=-version:refname | head -n1)"
+    target_tag="$(termux_latest_valid_alpha_tag "$CODEX_SRC_DIR" || true)"
   fi
   [[ "$target_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]] || \
     termux_abort "invalid or unavailable OpenAI alpha tag: ${target_tag:-none}"
   git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_tag}^{commit}" >/dev/null
-  base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
+  base_tag="$(termux_latest_valid_alpha_tag "$CODEX_SRC_DIR" main || true)"
   [[ -n "$base_tag" ]] || termux_abort 'cannot identify the current alpha base tag.'
   if [[ "$base_tag" != "$target_tag" ]]; then
     termux_info "rebasing the maintainer patch stack from $base_tag onto $target_tag"
