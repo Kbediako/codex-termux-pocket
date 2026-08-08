@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 # shellcheck source=scripts/termux/termux-mobile-lib.sh
 . "$SCRIPT_DIR/termux-mobile-lib.sh"
 

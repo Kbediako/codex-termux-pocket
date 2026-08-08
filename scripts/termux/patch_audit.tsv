@@ -52,3 +52,4 @@ subject	termux: align mobile artifact Rust toolchain	tooling	Fork workflow-only 
 subject	termux: improve mobile artifact update speed	tooling	Helper/workflow speedup only; preserves runtime/auth behavior and keeps source fallback explicit.
 subject	termux: handle self-update strict config	runtime-critical	Keeps the shipped Termux self-update subcommand compiling with the upstream strict-config classifier.
 subject	termux: add cargo check helper	tooling	Helper and docs only; makes local Termux cargo check use the pinned musl rusty_v8 pair without changing shipped runtime behavior.
+subject	termux: make mobile installs verified and rebase-free	runtime-critical	Changes the shipped Termux launcher and complete runtime bundle contract; end users install exact verified artifacts while rebasing becomes maintainer-only.

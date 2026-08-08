@@ -1,80 +1,126 @@
-#!/data/data/com.termux/files/usr/bin/sh
-set -eu
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/termux/termux-mobile-lib.sh
-. "$SCRIPT_DIR/termux-mobile-lib.sh"
+source "$SCRIPT_DIR/termux-mobile-lib.sh"
 
-binary_path=""
-tag=""
-keep_temp="no"
-work_dir=""
+mode="installed"
+bundle_dir=""
+expected_sha=""
+expected_version=""
+quick="no"
+temporary_dir=""
 
 usage() {
   cat <<'USAGE'
-Usage: smoke-test-artifact [--binary PATH] [--tag rust-vX.Y.Z-alpha.N] [--keep-temp]
-  --binary PATH  Validate an already-downloaded Codex binary.
-  --tag TAG      Download the upstream ARM64 musl release binary for TAG and validate it.
-  --keep-temp    Keep the temporary download directory when using --tag.
+Usage:
+  smoke-test-artifact --installed [--quick]
+  smoke-test-artifact --bundle-dir DIR --expected-sha SHA [--expected-version VERSION]
+
+The installed test checks the launcher, metadata/version, sidecars, bundled
+bubblewrap, DNS, certificates, browser handoff, permissions, and a minimal
+command through `codex sandbox`. --quick skips only the command execution.
 USAGE
 }
 
-while [ "$#" -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --binary)
-      binary_path="${2:-}"
+    --installed)
+      mode="installed"
+      shift
+      ;;
+    --bundle-dir)
+      mode="bundle"
+      bundle_dir="${2:-}"
       shift 2
       ;;
-    --tag)
-      tag="${2:-}"
+    --expected-sha)
+      expected_sha="${2:-}"
       shift 2
       ;;
-    --keep-temp)
-      keep_temp="yes"
-      shift 1
+    --expected-version)
+      expected_version="${2:-}"
+      shift 2
+      ;;
+    --quick)
+      quick="yes"
+      shift
       ;;
     -h|--help)
       usage
       exit 0
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      usage
-      exit 2
+      usage >&2
+      termux_abort "unknown argument: $1"
       ;;
   esac
 done
 
-if [ -n "$binary_path" ] && [ -n "$tag" ]; then
-  echo "Use either --binary or --tag, not both." >&2
-  exit 2
-fi
-
-if [ -z "$binary_path" ] && [ -z "$tag" ]; then
-  echo "Provide --binary or --tag." >&2
-  exit 2
-fi
-
 cleanup() {
-  if [ -n "$work_dir" ] && [ "$keep_temp" != "yes" ]; then
-    rm -rf "$work_dir"
+  if [[ -n "$temporary_dir" && -d "$temporary_dir" ]]; then
+    rm -rf "$temporary_dir"
   fi
 }
 trap cleanup EXIT INT TERM
 
-if [ -n "$tag" ]; then
-  work_dir="$(mktemp -d)"
-  binary_path="$(download_upstream_release_binary "$tag" "$work_dir")"
-fi
+smoke_bundle() {
+  [[ -d "$bundle_dir" ]] || termux_abort '--bundle-dir must name a directory.'
+  termux_validate_sha "$expected_sha" || termux_abort '--expected-sha must be a full 40-character commit SHA.'
+  termux_verify_download_set "$bundle_dir" "$expected_sha" "$expected_version"
+  temporary_dir="$(mktemp -d)"
+  root="$(termux_extract_and_verify_bundle "$bundle_dir" "$temporary_dir")"
+  version="$("$root/bin/codex" --version)"
+  termux_info "bundle smoke test passed: $version ($expected_sha)"
+}
 
-if [ ! -f "$binary_path" ]; then
-  echo "Binary not found: $binary_path" >&2
-  exit 1
-fi
+smoke_installed() {
+  termux_check_environment
+  local metadata runtime_root metadata_sha metadata_version actual_version token output
+  metadata="$(termux_installed_metadata)"
+  runtime_root="$PREFIX/libexec/codex-termux/current"
+  [[ -f "$metadata" ]] || termux_abort "installed metadata is missing: $metadata"
+  metadata_sha="$(termux_metadata_value "$metadata" head_sha)"
+  metadata_version="$(termux_metadata_value "$metadata" codex_version)"
+  termux_validate_sha "$metadata_sha" || termux_abort 'installed metadata has an invalid commit SHA.'
 
-run_codex_smoke_checks "$binary_path"
-"$binary_path" --version
+  [[ -x "$PREFIX/bin/codex" ]] || termux_abort "launcher is missing or not executable: $PREFIX/bin/codex"
+  [[ -x "$runtime_root/bin/codex" ]] || termux_abort 'installed Codex runtime is missing.'
+  [[ -x "$runtime_root/bin/codex-code-mode-host" ]] || termux_abort 'installed codex-code-mode-host is missing.'
+  [[ -x "$runtime_root/bin/codex-responses-api-proxy" ]] || termux_abort 'installed codex-responses-api-proxy is missing.'
+  [[ -x "$runtime_root/codex-resources/bwrap" ]] || termux_abort 'verified bundled bubblewrap is missing.'
+  [[ ! -w "$runtime_root/bin/codex" || -O "$runtime_root/bin/codex" ]] || termux_abort 'runtime permissions/ownership are unsafe.'
 
-if [ "$keep_temp" = "yes" ] && [ -n "$work_dir" ]; then
-  echo "Kept temp directory: $work_dir"
-fi
+  actual_version="$(codex --version)"
+  [[ "$actual_version" == "$metadata_version" ]] || \
+    termux_abort "installed version mismatch: metadata says $metadata_version, launcher says $actual_version."
+  "$runtime_root/bin/codex-code-mode-host" --help >/dev/null
+  "$runtime_root/bin/codex-responses-api-proxy" --help >/dev/null
+  "$runtime_root/codex-resources/bwrap" --version >/dev/null
+  codex --termux-launcher-check >/dev/null
+
+  if [[ "$quick" != "yes" ]]; then
+    SSL_CERT_FILE="$PREFIX/etc/tls/cert.pem" \
+      curl --silent --show-error --connect-timeout 15 --max-time 30 --head \
+      https://api.openai.com/ >/dev/null
+    token="codex-termux-command-ok-$$"
+    if ! output="$(codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c "printf '%s' '$token'" 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      termux_abort 'minimal command failed in the Codex Termux sandbox runner.'
+    fi
+    [[ "$output" != *'Codex could not find bubblewrap on PATH'* ]] || \
+      termux_abort 'bundled bubblewrap was not discovered on PATH.'
+    [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
+  fi
+
+  termux_info "installed smoke test passed: $actual_version ($metadata_sha)"
+  if [[ "$quick" != "yes" ]]; then
+    termux_info 'launcher DNS/CA/browser checks and command-runner smoke test passed.'
+  fi
+}
+
+case "$mode" in
+  bundle) smoke_bundle ;;
+  installed) smoke_installed ;;
+esac

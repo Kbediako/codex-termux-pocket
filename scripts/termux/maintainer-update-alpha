@@ -1,0 +1,83 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/termux/termux-mobile-lib.sh
+source "$SCRIPT_DIR/termux-mobile-lib.sh"
+
+CODEX_SRC_DIR="${CODEX_SRC_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+target_tag=""
+lock_only="no"
+
+usage() {
+  cat <<'USAGE'
+Usage: maintainer-update-alpha [--tag rust-vX.Y.Z-alpha.N] [--lock-only]
+
+Maintainer-only source workflow. It rebases the clean local Termux patch stack
+onto an OpenAI alpha from the fetch-only upstream remote, then refreshes and
+validates Cargo.lock. It never pushes or dispatches CI.
+
+  --lock-only  Skip fetch/rebase and only refresh/validate Cargo.lock.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag)
+      target_tag="${2:-}"
+      shift 2
+      ;;
+    --lock-only)
+      lock_only="yes"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      termux_abort "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -d "$CODEX_SRC_DIR/.git" ]] || termux_abort "not a Git checkout: $CODEX_SRC_DIR"
+termux_configure_remotes "$CODEX_SRC_DIR" "${CODEX_TERMUX_FORK_URL:-$CODEX_TERMUX_FORK_URL_DEFAULT}"
+[[ -z "$(git -C "$CODEX_SRC_DIR" status --porcelain)" ]] || \
+  termux_abort 'maintainer update requires a clean worktree; no automatic stash will be created.'
+[[ ! -d "$CODEX_SRC_DIR/.git/rebase-merge" && ! -d "$CODEX_SRC_DIR/.git/rebase-apply" ]] || \
+  termux_abort 'a rebase is already in progress.'
+
+if [[ "$lock_only" != "yes" ]]; then
+  [[ "$(git -C "$CODEX_SRC_DIR" branch --show-current)" == "main" ]] || \
+    termux_abort 'maintainer update requires the main branch.'
+  git -C "$CODEX_SRC_DIR" fetch --prune upstream main 'refs/tags/rust-v*:refs/tags/rust-v*'
+  if [[ -z "$target_tag" ]]; then
+    target_tag="$(git -C "$CODEX_SRC_DIR" tag --list 'rust-v*-alpha.*' --sort=-version:refname | head -n1)"
+  fi
+  [[ "$target_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]] || \
+    termux_abort "invalid or unavailable OpenAI alpha tag: ${target_tag:-none}"
+  git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_tag}^{commit}" >/dev/null
+  base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
+  [[ -n "$base_tag" ]] || termux_abort 'cannot identify the current alpha base tag.'
+  if [[ "$base_tag" != "$target_tag" ]]; then
+    termux_info "rebasing the maintainer patch stack from $base_tag onto $target_tag"
+    git -C "$CODEX_SRC_DIR" rebase --onto "$target_tag" "$base_tag" main
+  else
+    termux_info "already based on $target_tag"
+  fi
+fi
+
+cd "$CODEX_SRC_DIR/codex-rs"
+if ! cargo metadata --locked --format-version=1 --no-deps >/dev/null; then
+  termux_info 'Cargo.lock is stale; refreshing it before any artifact build.'
+  cargo metadata --format-version=1 --no-deps >/dev/null
+fi
+cargo metadata --locked --format-version=1 --no-deps >/dev/null
+
+cat <<EOF
+Lockfile validation passed for $(git -C "$CODEX_SRC_DIR" rev-parse HEAD).
+Review and commit any Cargo.lock/MODULE.bazel.lock changes, update
+scripts/termux/patch_audit.tsv, then dispatch the artifact workflow explicitly.
+Nothing was pushed.
+EOF
