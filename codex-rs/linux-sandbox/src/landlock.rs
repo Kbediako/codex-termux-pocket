@@ -205,7 +205,7 @@ fn is_termux_environment() -> bool {
 fn termux_path_beneath_rules(
     paths: &[PathBuf],
     abi: ABI,
-) -> Vec<Result<PathBeneath<OwnedFd>, RulesetError>> {
+) -> Vec<std::result::Result<PathBeneath<OwnedFd>, RulesetError>> {
     let access = AccessFs::from_read(abi);
     paths
         .iter()
