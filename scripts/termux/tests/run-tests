@@ -193,6 +193,8 @@ EOF
 test_static_architecture_guards() {
   ! grep -q 'git .*rebase' "$TERMUX_DIR/codex-update-alpha" || fail 'end-user updater still rebases'
   ! grep -q 'git config user\.' "$TERMUX_DIR/install-codex-termux" || fail 'installer configures Git identity'
+  grep -Eq 'pkg install .* nodejs([[:space:]]|$)' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not install Node.js for plugin MCP servers'
+  grep -q 'command -v node' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not verify the plugin MCP runtime is available'
   grep -q 'cargo metadata --locked' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow lacks lockfile gate'
   grep -q -- '--bin codex-code-mode-host' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not build code-mode host'
   grep -q 'sha256sum --check --strict' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not validate checksums before upload'

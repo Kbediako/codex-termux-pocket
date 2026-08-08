@@ -57,7 +57,9 @@ fi
 
 printf 'Installing required Termux packages...\n'
 pkg update -y
-pkg install -y bash git curl ca-certificates coreutils tar gzip proot termux-tools ripgrep
+pkg install -y bash git curl ca-certificates coreutils tar gzip nodejs proot termux-tools ripgrep
+command -v node >/dev/null 2>&1 \
+  || bootstrap_die 'Node.js was installed but node is not on PATH; restart Termux and rerun the installer.'
 
 if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
   bootstrap_die "$INSTALL_DIR exists but is not a Git checkout; move it or set CODEX_SRC_DIR to an unused path."
