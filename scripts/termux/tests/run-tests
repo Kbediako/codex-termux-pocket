@@ -215,6 +215,7 @@ test_static_architecture_guards() {
   grep -Eq 'pkg install .* nodejs([[:space:]]|$)' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not install Node.js for plugin MCP servers'
   grep -q 'command -v node' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not verify the plugin MCP runtime is available'
   grep -q 'cargo metadata --locked' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow lacks lockfile gate'
+  ! grep -E 'cargo metadata --locked .*--no-deps' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" "$TERMUX_DIR/maintainer-update-alpha" || fail 'lockfile gate skips target-specific dependency resolution'
   grep -q -- '--bin codex-code-mode-host' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not build code-mode host'
   grep -q 'sha256sum --check --strict' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not validate checksums before upload'
   grep -q -- '-P :workspace' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not exercise the restricted Android command-runner profile'
