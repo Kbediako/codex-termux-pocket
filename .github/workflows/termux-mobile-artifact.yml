@@ -11,10 +11,16 @@ on:
       - "EXEC_PLAN*.md"
       - "README.md"
       - "docs/**"
+      - ".github/workflows/termux-mobile-artifact.yml"
       - "scripts/termux/codex-update-alpha"
+      - "scripts/termux/codex-cargo-check"
+      - "scripts/termux/install-codex-termux"
+      - "scripts/termux/maintainer-update-alpha"
       - "scripts/termux/patch_audit.tsv"
+      - "scripts/termux/release-manifest.env"
       - "scripts/termux/smoke-test-artifact"
       - "scripts/termux/termux-mobile-lib.sh"
+      - "scripts/termux/tests/**"
   workflow_dispatch:
     inputs:
       source_ref:

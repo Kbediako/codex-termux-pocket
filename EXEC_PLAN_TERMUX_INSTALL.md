@@ -16,6 +16,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 - [x] (2026-08-08 08:56 UTC) Added the early CI lockfile gate, full same-revision binary build, checksums, pre-upload content validation, and opt-in public release job.
 - [x] (2026-08-08 09:02 UTC) Simplified README and moved recovery and maintainer operations into dedicated docs.
 - [x] (2026-08-08 09:12 UTC) Added and passed eight shell regression cases, ShellCheck, Bash syntax, YAML parsing, locked Cargo metadata, Cargo formatting check, and live Termux DNS/TLS probe.
+- [x] (2026-08-08 20:10 UTC) Built the exact implementation commit in Actions run 31250598056, passed all artifact gates in 35m48s, downloaded the complete bundle, and independently reverified its checksums and contents.
 
 ## Surprises & Discoveries
 
@@ -29,6 +30,8 @@ A user with a fresh supported Termux installation can paste one command, receive
   Evidence: the first corruption regression appended bytes to the archive but the function continued after `sha256sum` failed; explicit immediate returns fixed it and the regression now passes.
 - Observation: repository-wide `just fmt` cannot complete in this Termux checkout because `uv` and `dotslash` are absent.
   Evidence: Rust formatting completed independently with `cargo fmt --all -- --check`; `just fmt` reported only Python SDK, Python scripts, and Bazel/Starlark formatter setup failures.
+- Observation: GitHub CLI templates render large numeric `databaseId` values in scientific notation.
+  Evidence: live run `31250598056` appeared as `3.1250598056e+10`; updater run IDs are now derived losslessly from the run URL and covered by the queued-run regression.
 
 ## Decision Log
 
@@ -47,9 +50,9 @@ A user with a fresh supported Termux installation can paste one command, receive
 
 ## Outcomes & Retrospective
 
-The requested architecture is implemented locally. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, the runtime bundle includes every canonical Linux primary binary, and the full smoke test covers the Termux launcher and command runner. Static and fixture validation passes. No commit, push, force-push, workflow dispatch, release, or pull request was created.
+The requested architecture is implemented and the first exact runtime has passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, the runtime bundle includes every canonical Linux primary binary, and the full smoke test covers the Termux launcher and command runner. Static, fixture, workflow, and independently downloaded bundle validation pass.
 
-One deployment step necessarily remains external to this local-only change: after review, a maintainer must push the implementation, run the new workflow, publish its first validated public `termux-v...` release, and copy the generated values into `scripts/termux/release-manifest.env`. The file intentionally has empty release fields until that artifact actually exists; inventing or pinning a nonexistent checksum would violate the artifact identity requirements.
+The implementation commit is `804da751873022f224e3be69ee1de7c3f7595bd9`; Actions run `31250598056` completed successfully after 35m48s. Its 391 MiB bundle identifies as `codex-cli 804da75` and has SHA-256 `658b110a7020b66c9280ace776880606f0f6405082cb20f5688843fd9c1f4228`. Those values are pinned in `scripts/termux/release-manifest.env`; no inferred or ancestor artifact is accepted.
 
 ## Context and Orientation
 
