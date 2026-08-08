@@ -16,6 +16,7 @@ MANIFEST_FILE="${CODEX_TERMUX_RELEASE_MANIFEST:-$CODEX_SRC_DIR/scripts/termux/re
 operation="update"
 run_id=""
 expected_sha=""
+explicit_expected_sha="no"
 source_ref=""
 dispatch="no"
 install_after_wait="yes"
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --expected-sha)
       expected_sha="${2:-}"
+      explicit_expected_sha="yes"
       shift 2
       ;;
     --ref)
@@ -394,7 +396,8 @@ case "$operation" in
     wait_for_run "$run_id" "$expected_sha"
     ;;
   update)
-    if load_release_manifest; then
+    if [[ "$explicit_expected_sha" == "no" && -z "$source_ref" && "$dispatch" == "no" ]] \
+      && load_release_manifest; then
       installed_sha="$(termux_metadata_value "$(termux_installed_metadata)" head_sha 2>/dev/null || true)"
       if [[ "$installed_sha" == "$expected_sha" ]]; then
         termux_info "already current at $expected_sha"
