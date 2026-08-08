@@ -7,8 +7,9 @@ the known-broken Android/V8 source build.
 ## What the installer configures
 
 `install-codex-termux` is safe to rerun. It installs required Termux packages,
-clones or fast-forwards `~/codex`, copies the helpers to `$PREFIX/bin`, installs the
-maintained runtime, and runs an end-to-end smoke test.
+including Node.js for bundled plugin MCP servers, clones or fast-forwards
+`~/codex`, copies the helpers to `$PREFIX/bin`, installs the maintained runtime,
+and runs an end-to-end smoke test.
 
 Its Git remotes have deliberately separate roles:
 
