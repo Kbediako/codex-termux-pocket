@@ -78,28 +78,29 @@ smoke_bundle() {
 
 smoke_installed() {
   termux_check_environment
-  local metadata runtime_root metadata_sha metadata_version actual_version token output command_status denied_path
+  local launcher metadata runtime_root metadata_sha metadata_version actual_version token output command_status denied_path
   metadata="$(termux_installed_metadata)"
+  launcher="$PREFIX/bin/codex"
   runtime_root="$PREFIX/libexec/codex-termux/current"
   [[ -f "$metadata" ]] || termux_abort "installed metadata is missing: $metadata"
   metadata_sha="$(termux_metadata_value "$metadata" head_sha)"
   metadata_version="$(termux_metadata_value "$metadata" codex_version)"
   termux_validate_sha "$metadata_sha" || termux_abort 'installed metadata has an invalid commit SHA.'
 
-  [[ -x "$PREFIX/bin/codex" ]] || termux_abort "launcher is missing or not executable: $PREFIX/bin/codex"
+  [[ -x "$launcher" ]] || termux_abort "launcher is missing or not executable: $launcher"
   [[ -x "$runtime_root/bin/codex" ]] || termux_abort 'installed Codex runtime is missing.'
   [[ -x "$runtime_root/bin/codex-code-mode-host" ]] || termux_abort 'installed codex-code-mode-host is missing.'
   [[ -x "$runtime_root/bin/codex-responses-api-proxy" ]] || termux_abort 'installed codex-responses-api-proxy is missing.'
   [[ -x "$runtime_root/codex-resources/bwrap" ]] || termux_abort 'verified bundled bubblewrap is missing.'
   [[ ! -w "$runtime_root/bin/codex" || -O "$runtime_root/bin/codex" ]] || termux_abort 'runtime permissions/ownership are unsafe.'
 
-  actual_version="$(codex --version)"
+  actual_version="$("$launcher" --version)"
   [[ "$actual_version" == "$metadata_version" ]] || \
     termux_abort "installed version mismatch: metadata says $metadata_version, launcher says $actual_version."
   "$runtime_root/bin/codex-code-mode-host" --help >/dev/null
   "$runtime_root/bin/codex-responses-api-proxy" --help >/dev/null
   "$runtime_root/codex-resources/bwrap" --version >/dev/null
-  codex --termux-launcher-check >/dev/null
+  "$launcher" --termux-launcher-check >/dev/null
 
   if [[ "$quick" != "yes" ]]; then
     SSL_CERT_FILE="$PREFIX/etc/tls/cert.pem" \
@@ -107,7 +108,7 @@ smoke_installed() {
       https://api.openai.com/ >/dev/null
     token="codex-termux-command-ok-$$"
     set +e
-    output="$(codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
+    output="$("$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
       "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" 2>&1)"
     command_status=$?
     set -e
@@ -122,7 +123,7 @@ smoke_installed() {
     [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
 
     denied_path="${TMPDIR:-$PREFIX/tmp}/codex-termux-sandbox-deny-$$"
-    if codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
+    if "$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
       "printf forbidden >'$denied_path'" >/dev/null 2>&1; then
       termux_abort 'restricted Termux fallback unexpectedly allowed a filesystem write.'
     fi
