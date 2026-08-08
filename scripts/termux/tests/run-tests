@@ -142,19 +142,28 @@ test_run_dedup_and_timeout() {
   local repo="$test_root/updater-repo"
   local fake_bin="$test_root/fake-bin"
   local gh_log="$test_root/gh.log"
+  local manifest="$test_root/empty-release-manifest.env"
   local output="$test_root/updater.out"
   local sha='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   make_repo "$repo"
   git -C "$repo" remote add origin "$CODEX_TERMUX_FORK_URL_DEFAULT"
   mkdir -p "$fake_bin"
+  cat >"$manifest" <<'EOF'
+format_version=1
+repository=Kbediako/codex-termux-pocket
+release_tag=
+head_sha=
+codex_version=
+archive_sha256=
+EOF
   cat >"$fake_bin/gh" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 printf '%s\\n' "\$*" >>'$gh_log'
 case "\$1 \${2:-}" in
   'auth status') exit 0 ;;
-  'run list') printf '%s\\n' '4242|https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
-  'run view') printf '%s' '4242|https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
+  'run list') printf '%s\\n' 'https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
+  'run view') printf '%s' 'https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
   *) exit 1 ;;
 esac
 EOF
@@ -164,7 +173,7 @@ EOF
     CODEX_SRC_DIR="$repo" \
     CODEX_TERMUX_SKIP_CHECKOUT_SYNC=1 \
     CODEX_TERMUX_POLL_SECONDS=1 \
-    CODEX_TERMUX_RELEASE_MANIFEST="$TERMUX_DIR/release-manifest.env" \
+    CODEX_TERMUX_RELEASE_MANIFEST="$manifest" \
     "$TERMUX_DIR/codex-update-alpha" update --expected-sha "$sha" --dispatch --timeout 1 >"$output" 2>&1
   status=$?
   set -e
