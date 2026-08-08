@@ -19,7 +19,8 @@ A user with a fresh supported Termux installation can paste one command, receive
 - [x] (2026-08-08 20:10 UTC) Built the exact implementation commit in Actions run 31250598056, passed all artifact gates in 35m48s, downloaded the complete bundle, and independently reverified its checksums and contents.
 - [x] (2026-08-08 20:36 UTC) Published and pinned the immutable public release, ran the README installer, and passed the then-current installed artifact/launcher smoke test on the target Termux phone.
 - [x] (2026-08-08 21:18 UTC) Traced the stock-Android bubblewrap/Landlock failure, implemented the fail-closed Termux Landlock+seccomp fallback, and proved directly on the phone that the kernel enforces the intended read/write policy.
-- [ ] Build and install the musl `O_PATH` follow-up, then require the full command-runner smoke test to pass before publishing it.
+- [x] (2026-08-08 23:52 UTC) Built and installed the musl `O_PATH` follow-up from exact Actions run 31259201511; the full launcher, sidecar, network, command-runner, and denied-write smoke test passed on the phone.
+- [x] (2026-08-08 23:58 UTC) Published the verified replacement release and pinned its exact commit, version, and archive SHA-256 in the maintained manifest.
 
 ## Surprises & Discoveries
 
@@ -57,9 +58,9 @@ A user with a fresh supported Termux installation can paste one command, receive
 
 ## Outcomes & Retrospective
 
-The requested artifact/update architecture is implemented and the first exact runtime passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, and the runtime bundle includes every canonical Linux primary binary. A newer, unpromoted fallback artifact exposed an Android `O_PATH` incompatibility; neither it nor the older public release will be presented as satisfying the strengthened restricted-command smoke test until the replacement passes on the phone.
+The requested artifact/update architecture and secure stock-Android command fallback are implemented. Normal installation is a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, and the runtime bundle includes every canonical Linux primary binary. The replacement runtime passed the strengthened installed test on the target phone: launcher paths, exact metadata/version, sidecars, bundled bubblewrap discovery, DNS/TLS and certificates, browser handoff, restricted command execution, and denied unapproved writes.
 
-The implementation commit is `804da751873022f224e3be69ee1de7c3f7595bd9`; Actions run `31250598056` completed successfully after 35m48s. Its 391 MiB bundle identifies as `codex-cli 804da75` and has SHA-256 `658b110a7020b66c9280ace776880606f0f6405082cb20f5688843fd9c1f4228`. Those values are pinned in `scripts/termux/release-manifest.env`; no inferred or ancestor artifact is accepted.
+The verified runtime commit is `4255dcd4a7545732bf94f6d163cb48ea70a5dfd3`; Actions run `31259201511` completed successfully. Its 391 MiB bundle identifies as `codex-cli 4255dcd` and has SHA-256 `bf0e342c780d67f02894471c915887c435a1b7ae3d18bd95dc241d8b06d9508e`. Release `termux-v2026.08.08-4255dcd4a` and `scripts/termux/release-manifest.env` pin those values; no inferred or ancestor artifact is accepted.
 
 ## Context and Orientation
 
