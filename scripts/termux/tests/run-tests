@@ -61,6 +61,25 @@ test_migrate_openai_origin() {
   pass 'legacy OpenAI-origin checkout migrates without commits'
 }
 
+test_valid_alpha_tag_selection() {
+  local repo="$test_root/alpha-tags"
+  make_repo "$repo"
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid \
+    commit -q --allow-empty -m base
+  git -C "$repo" tag rust-v0.148.0-alpha.4
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid \
+    commit -q --allow-empty -m latest-main
+  git -C "$repo" tag rust-v0.148.0-alpha.5
+  git -C "$repo" tag rust-vrust-v9.0.0-alpha.99
+  git -C "$repo" checkout -q --detach HEAD~1
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid \
+    commit -q --allow-empty -m unmerged
+  git -C "$repo" tag rust-v0.148.0-alpha.6
+  assert_eq 'rust-v0.148.0-alpha.6' "$(termux_latest_valid_alpha_tag "$repo")" 'latest valid fetched alpha'
+  assert_eq 'rust-v0.148.0-alpha.5' "$(termux_latest_valid_alpha_tag "$repo" main)" 'latest valid alpha merged into main'
+  pass 'alpha selection ignores malformed and unmerged tags'
+}
+
 write_fake_executable() {
   local path="$1"
   local body="$2"
@@ -213,6 +232,7 @@ test_static_architecture_guards() {
 
 test_remote_topology
 test_migrate_openai_origin
+test_valid_alpha_tag_selection
 test_bundle_install
 test_run_dedup_and_timeout
 test_static_architecture_guards
