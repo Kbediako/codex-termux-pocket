@@ -1,181 +1,141 @@
-# Termux Mobile Update Flow
+# Termux Install, Update, and Recovery
 
-This fork now supports three install paths for mobile updates:
+The supported phone workflow installs a verified runtime artifact. It never
+rebases the checkout, creates commits, asks for Git author identity, or attempts
+the known-broken Android/V8 source build.
 
-- `artifact`: install the upstream ARM64 musl alpha binary when the local patch audit says it is safe.
-- `remote-artifact`: download a fork-built ARM64 musl artifact from GitHub Actions.
-- `source`: retry the local low-memory Cargo build only when explicitly opted in.
+## What the installer configures
 
-`codex-update-alpha --mode auto` picks the quickest safe path in that order, but the source path is disabled by default on Termux because the Android-targeted Cargo build still fails at the final V8 link.
+`install-codex-termux` is safe to rerun. It installs required Termux packages,
+clones or fast-forwards `~/codex`, copies the helpers to `$PREFIX/bin`, installs the
+maintained runtime, and runs an end-to-end smoke test.
 
-## Why the patch audit exists
+Its Git remotes have deliberately separate roles:
 
-This fork still carries Android-specific commits on top of upstream alpha tags.
-Some of those commits change runtime behavior on Termux. Installing a raw upstream
-binary while those commits are still required would make the installed `codex`
-diverge from the checked-out fork in ways that matter on device.
+- `origin` is `Kbediako/codex-termux-pocket` and is the only default push remote.
+- `upstream` is `https://github.com/openai/codex.git`, supplies OpenAI tags, and
+  has a disabled push URL.
 
-The file [`scripts/termux/patch_audit.tsv`](/data/data/com.termux/files/home/codex/scripts/termux/patch_audit.tsv)
-classifies local commits after the current alpha base as:
+An existing checkout is updated only when it is clean, on `main`, and can
+fast-forward. Anything dirty, divergent, or unrelated is left untouched with
+an actionable error.
 
-- `runtime-critical`: upstream artifacts are blocked; use the fork remote artifact.
-- `build-only`: only affects local source builds.
-- `tooling` / `docs`: helper or documentation changes only.
+## Artifact trust and layout
 
-Unknown local commit subjects are treated as blocking until the audit file is updated.
+The maintained release provides three files:
+
+- `codex-termux-aarch64-unknown-linux-musl.tar.gz`
+- `metadata.env`
+- `SHA256SUMS`
+
+The committed `scripts/termux/release-manifest.env` pins its release tag, exact
+source commit, reported Codex version, and archive SHA-256. The installer checks
+both checksum manifests, rejects a different commit/version/target, rejects
+unsafe archive paths, and verifies every executable before changing the active
+runtime.
+
+The runtime uses the canonical package layout under
+`$PREFIX/libexec/codex-termux/releases/<commit>/`:
+
+```text
+bin/codex
+bin/codex-code-mode-host
+bin/codex-responses-api-proxy
+codex-resources/bwrap
+codex-package.json
+metadata.env
+```
+
+`current` is an atomically replaced symlink. `$PREFIX/bin/codex` is an
+atomically replaced launcher, so a failed download or validation cannot leave a
+half-installed runtime.
 
 ## Commands
 
-Check whether a newer alpha exists:
-
-```sh
-codex-update-alpha --check
-```
-
-Use the default safe fast path:
-
-```sh
-codex-update-alpha --mode auto
-```
-
-Force an upstream release-asset install when the patch audit allows it:
-
-```sh
-codex-update-alpha --mode artifact --force
-```
-
-Retry the local source rebuild experimentally:
-
-```sh
-CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 codex-update-alpha --mode source --force
-```
-
-Build and install a fork artifact for a branch, tag, or commit SHA:
-
-```sh
-codex-update-alpha --mode remote-artifact --remote-ref main
-codex-update-alpha --mode remote-artifact --remote-ref <commit-sha>
-```
-
-Validate an upstream alpha binary without installing it:
-
-```sh
-~/codex/scripts/termux/smoke-test-artifact --tag rust-v<latest-alpha>
-```
-
-## Measured improvement
-
-On this device, the supported mobile paths now split cleanly into two timing bands:
-
-- on 2026-04-17, a fresh fork `remote-artifact` build still took about 20 minutes end to end, with about 18 minutes 49 seconds spent in `Build Codex for Termux`
-- on 2026-04-17, a repeat install for the exact same SHA completed in 20.654 seconds by reusing the existing successful fork artifact
-- on 2026-04-17, a tooling-only follow-up commit installed in 22.151 seconds by reusing the newest runtime-equivalent ancestor artifact
-- the benchmarked local `cargo install` path still took 5997 seconds and failed
-
-Upstream release-asset installs should still be faster when the patch audit allows them, but the fork path is no longer forced to rebuild every tooling-only or repeat install.
-
-The helper also reduces avoidable fresh builds in three ways:
-
-- if an upstream artifact install fails in `auto`, it tries the fork `remote-artifact` path before the explicit source fallback
-- reusable remote artifact lookup scans a wider recent run window once per install attempt, then searches safe ancestors locally
-- once a remote workflow run appears, polling switches to that run ID instead of repeatedly scanning workflow lists
-
-Set `CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT` or `CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT` only for debugging; the defaults are tuned to avoid missing reusable artifacts while keeping GitHub queries bounded.
-
-## Remote artifact workflow
-
-The fork workflow [`termux-mobile-artifact.yml`](/data/data/com.termux/files/home/codex/.github/workflows/termux-mobile-artifact.yml)
-builds `codex` for `aarch64-unknown-linux-musl` and uploads an Actions artifact named
-`codex-termux-aarch64-unknown-linux-musl`.
-
-`codex-update-alpha --mode auto` uses that workflow automatically when:
-
-- the upstream artifact path is blocked by the patch audit, and
-- a GitHub fork remote is configured, and
-- `gh` is installed and authenticated.
-
-Explicit `--mode remote-artifact --remote-ref ...` dispatches the workflow on the fork
-only when no reusable successful artifact already exists. The helper now prefers:
-
-- an exact successful artifact for the requested commit SHA
-- otherwise, the newest successful ancestor artifact whose newer commits are all classified as `tooling`, `docs`, or `build-only`
-- otherwise, a new workflow dispatch and build
-
-That reuse logic is what collapses repeat or tooling-only installs from about 20 minutes to about 20-22 seconds on this device.
-
-Push-triggered fork builds are skipped when a commit only changes top-level docs/plans or Termux helper metadata. Those commits are classified as `tooling` or `docs`, so the helper can install the newest runtime-equivalent ancestor artifact instead of spending another remote build on a binary-identical change.
-
-## Requirements
-
-- Termux `PREFIX` must point at the live Termux install.
-- `gh auth status` must be healthy and able to access the fork for remote-artifact mode.
-- The fork remote should be configured as `branch.main.pushRemote`, or be named `termux-pocket`.
-
-## Runtime bridge
-
-Termux installs now keep a small launcher at `$PREFIX/bin/codex` and place the real
-binary under `$PREFIX/libexec/codex-termux/codex`.
-
-The launcher does three Termux-specific things before execing the real binary:
-
-- bind-mounts Termux `resolv.conf` to `/etc/resolv.conf` through `proot`
-- bind-mounts the Termux CA bundle to `/etc/ssl/certs/ca-certificates.crt`
-- exports `BROWSER=termux-open-url` when available so `codex login` can hand off to the Android browser without a manual alias
-
-Set `CODEX_TERMUX_DISABLE_PROOT=1` only if you intentionally want to bypass that bridge for debugging.
-
-## Recovery
-
-- If `artifact` mode fails in `auto`, the helper falls back to `remote-artifact` when the fork workflow is available and authenticated.
-- If a fresh alpha rebase makes the fork workflow fail at `cargo build --locked`, refresh `codex-rs/Cargo.lock`, verify with `cargo metadata --locked --format-version=1 --no-deps`, and add a matching `build-only` patch audit row before dispatching a replacement artifact build.
-- Use `gh run view --json status,conclusion,jobs,url` to distinguish a failed remote build from a successful build with a failed artifact download.
-- If `gh run download` exits early but the remote workflow finished successfully, retry the download from the same run ID and install the verified artifact instead of dispatching another build.
-- Keep the remote run ID and artifact metadata SHA together while diagnosing manual installs so the installed binary can be traced back to the fork commit.
-- Include the successful workflow URL in handoff notes so the remote artifact can be reopened without searching Actions history.
-- Record whether the helper reused an ancestor artifact or built the requested SHA before summarizing the installed version.
-- Note when a docs-only commit changes the requested SHA after the installed binary was already built.
-- Keep artifact reuse notes close to the final remote-ref check so pushed state can be audited later.
-- Rerun `codex-update-alpha --check` after long artifact installs in case a newer alpha appeared during the build.
-- Avoid dispatching a fresh artifact for docs-only follow-ups when the helper reports a reusable ancestor build.
-- For immediate artifact failures, inspect the first failed workflow step before changing toolchain settings.
-- Include final wrapper and login checks in the handoff whenever the installed binary changes.
-- When reusing an existing artifact, confirm the candidate commit is an ancestor of the requested ref before treating it as runtime-equivalent.
-- After any manual artifact install, verify `codex --version`, the `$PREFIX/bin/codex` wrapper, the `$PREFIX/libexec/codex-termux/codex` runtime, and `codex login status`.
-- Keep the final `codex-update-alpha --check` output with the install notes so the selected alpha tag is recorded alongside the installed version.
-- If no artifact path is usable, the helper refuses the local source build by default and tells you to use `remote-artifact` or opt into `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
-- Remove temporary artifact download directories after verification so repeat update checks do not leave stale tarballs in the Termux home directory.
-- The helper validates candidate binaries before replacing `$PREFIX/bin/codex`.
-- Dirty working trees are auto-stashed before the rebase/update path and restored afterward.
-
-## Source fallback status
-
-A fresh benchmark on 2026-04-10 established the current boundary:
-
-- unlocked local `cargo install --path cli` drifted to incompatible crate versions after about 5997 seconds
-- `--locked` without V8 overrides failed earlier because upstream no longer publishes the Android-targeted `rusty_v8` archive URL that `v8` expects
-- `--locked` with the pinned OpenAI musl archive and binding pair reached the final `codex` binary link, then failed on unresolved V8/ABI symbols (`bcmp`, `__errno_location`) against the Android target
-
-That means the source path is still useful as an experimental diagnostic tool, but it is no longer part of the default fast-path story for Termux.
-
-## Local Cargo checks
-
-Bare `cargo check` on Termux still asks the `v8` crate for the missing
-Android-targeted `rusty_v8` archive. Use `codex-cargo-check` instead. It sets
-`RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` to the pinned OpenAI musl
-release pair before invoking Cargo.
-
-With no arguments, it checks the shipped CLI binary:
+Install or update to the maintained release:
 
 ```shell
-codex-cargo-check
+codex-update-alpha update
 ```
 
-Pass normal `cargo check` arguments to check a different package or target:
+Before reading the maintained release pointer, the updater fetches `origin/main`
+and fast-forwards the dedicated clean checkout. It refuses dirty, non-`main`,
+or divergent state instead of stashing, resetting, or rebasing it.
+
+Compare the installed runtime with the maintained release and separately show
+the latest alpha tag found on OpenAI `upstream`:
 
 ```shell
-codex-cargo-check --manifest-path ~/codex/codex-rs/Cargo.toml --locked -p codex-core
+codex-update-alpha check
 ```
 
-This validates local Rust typechecking. It does not make the experimental local
-source install path production-ready; the final Android-targeted binary link is
-still outside the supported fast path.
+`check` exits 0 when current and 10 when an install/update is needed.
+
+Run the complete installed smoke test:
+
+```shell
+smoke-test-artifact --installed
+```
+
+It validates the launcher, exact metadata/version, all runtime sidecars,
+bundled bubblewrap, DNS and CA paths, Android browser handoff, executable
+permissions, a DNS/TLS request to the OpenAI API endpoint, and a token-producing
+command through `codex sandbox`. It also fails if the missing-bubblewrap warning
+reappears.
+
+## Queued Actions runs
+
+Public release downloads do not require GitHub authentication. Direct GitHub
+Actions artifact downloads do, because the Actions artifact API requires it;
+run `gh auth login` only when using this recovery path.
+
+The default local wait is two hours (`7200` seconds), which leaves headroom for
+ARM runner queues. Override it with `--timeout` or `CODEX_TERMUX_TIMEOUT`.
+Status messages distinguish queued, running, successful, failed, and locally
+timed-out states and always include the run ID and URL.
+
+If a local wait times out, the workflow is not cancelled. Resume it exactly as
+printed by the updater:
+
+```shell
+codex-update-alpha wait --run-id RUN_ID --expected-sha COMMIT_SHA
+```
+
+Install from an already-successful run without dispatching anything:
+
+```shell
+codex-update-alpha install-run --run-id RUN_ID --expected-sha COMMIT_SHA
+```
+
+The updater reuses an exact queued, running, or successful match. It does not
+substitute an ancestor artifact and does not automatically duplicate a failed
+run. `--dispatch` is an explicit maintainer/advanced operation and is never
+needed for a published maintained release.
+
+## Bubblewrap on Termux
+
+The complete runtime ships the same-revision `bwrap` under
+`codex-resources/bwrap`. The launcher prepends that verified resource directory
+to `PATH`, so Codex can use its supported bundled fallback without printing the
+generic “install bubblewrap with your OS package manager” warning. There is no
+need to seek an unsupported Termux package merely to suppress that warning.
+
+The full smoke test runs a real command through `codex sandbox`; this checks
+that the phone kernel and installed bundle can execute the sandbox path. If it
+fails, keep the exact output and Android/Termux version in the report rather
+than bypassing the sandbox globally.
+
+The launcher also binds Termux `resolv.conf` and CA bundle to conventional Linux
+paths with `proot`, exports the Termux CA variables, and uses
+`termux-open-url` for `codex login` browser handoff. Set
+`CODEX_TERMUX_DISABLE_PROOT=1` only for targeted debugging.
+
+## Recovery rules
+
+- Rerun `install-codex-termux`; all normal operations are idempotent.
+- A checksum, commit, version, target, sidecar, or executable failure is fatal.
+  Do not bypass it or install files manually.
+- A dirty/divergent checkout is never stashed or reset. Use a separate
+  `CODEX_SRC_DIR` if the checkout contains your work.
+- No phone fallback runs Cargo. Maintainer source maintenance is described in
+  [Termux Maintainer Guide](./termux-maintainer.md).

@@ -17,62 +17,38 @@ For macOS, Windows, Linux desktop, or other PC installs, use the main
 
 ## Easy Termux Setup
 
-Use Termux from F-Droid, not the old Play Store build. F-Droid currently marks
-`0.118.3` as the suggested stable build (checked 2026-07-04); beta builds are
-not required.
-
-Open Termux and paste this:
+Use current Termux from F-Droid or the Termux GitHub releases, not the obsolete
+Play Store build. On a fresh aarch64 phone, open Termux and paste:
 
 ```shell
-pkg update -y
-pkg install -y git curl ca-certificates proot termux-tools
-
-if [ -d "$HOME/codex/.git" ]; then
-  git -C "$HOME/codex" pull --ff-only
-else
-  git clone https://github.com/Kbediako/codex-termux-pocket.git "$HOME/codex"
-fi
-
-mkdir -p "$HOME/bin"
-cp "$HOME/codex/scripts/termux/codex-update-alpha" "$HOME/bin/"
-cp "$HOME/codex/scripts/termux/codex-cargo-check" "$HOME/bin/"
-cp "$HOME/codex/scripts/termux/termux-mobile-lib.sh" "$HOME/bin/"
-cp "$HOME/codex/scripts/termux/patch_audit.tsv" "$HOME/bin/"
-chmod 700 "$HOME/bin/codex-update-alpha" "$HOME/bin/codex-cargo-check"
-chmod 700 "$HOME/bin/termux-mobile-lib.sh"
-
-"$HOME/bin/codex-update-alpha" --mode auto --force
+pkg update -y && pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/main/scripts/termux/install-codex-termux | bash
 ```
 
-After the install finishes, run `codex login` and choose the ChatGPT browser
-login flow. Later updates can use `codex-update-alpha` or
-`$HOME/bin/codex-update-alpha`.
+Then run `codex login` and choose the browser flow. The installer is idempotent,
+does not create commits or rebase source, and leaves unrelated/dirty checkouts
+untouched.
 
 ## Android / Termux
 
-This fork keeps the mobile update path artifact-first:
-
-- `codex-update-alpha` is the default updater.
-- `--mode auto` prefers the upstream ARM64 musl alpha artifact, then a fork-built
-  remote artifact, and only allows a local source retry when
-  `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` is set.
-- The installed `codex` command is a Termux launcher wrapper that bridges DNS
-  and CA bundle paths through `proot` and sets `termux-open-url` for
-  browser-based login flows.
-- `codex self-update` still syncs the checkout, but it refuses the broken local
-  Termux Cargo rebuild by default.
+Normal installs consume a maintained, complete aarch64 runtime bundle. The
+bundle includes `codex`, `codex-code-mode-host`, the matching response proxy,
+and the supported bundled `bwrap`, all from one commit and protected by SHA-256
+checksums. The launcher exposes that bundled `bwrap` on `PATH`; do not install
+an unsupported Termux package merely to silence the generic desktop warning.
 
 Useful commands:
 
 ```shell
 codex-update-alpha
-codex-update-alpha --check
-codex-update-alpha --mode remote-artifact --remote-ref main
-codex-cargo-check
+codex-update-alpha check
+codex-update-alpha wait --run-id RUN_ID --expected-sha COMMIT_SHA
+codex-update-alpha install-run --run-id RUN_ID --expected-sha COMMIT_SHA
+smoke-test-artifact --installed
 ```
 
-Details, recovery rules, and the experimental source fallback are documented in
-[Termux Mobile Update Flow](./docs/termux-mobile-update.md).
+Update/recovery details are in [Termux Mobile Update](./docs/termux-mobile-update.md).
+Rebasing and release publication are maintainer-only and documented in
+[Termux Maintainer Guide](./docs/termux-maintainer.md).
 
 ## Docs
 
