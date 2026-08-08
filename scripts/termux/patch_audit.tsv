@@ -62,3 +62,4 @@ subject	termux: honor explicit Actions artifact requests	tooling	Updater-only fi
 subject	termux: match Actions runs by requested commit	tooling	Updater-only fix prioritizes the workflow's requested source SHA over the branch head SHA so an unrelated dispatch cannot mask the exact queued run.
 subject	termux: compile Android O_PATH Landlock rules	security-critical	Qualifies the generic rule-result type so the security-critical raw O_PATH Landlock path compiles for the musl artifact target.
 subject	termux: smoke test the canonical Termux launcher	tooling	Makes installed smoke checks use the absolute managed launcher so an inherited runtime-first PATH cannot bypass DNS, CA, browser, or proot validation.
+subject	termux: publish secure Android command runtime	tooling	Pins the exact public artifact that passed complete on-device launcher, sidecar, network, restricted-command, and denied-write validation.
