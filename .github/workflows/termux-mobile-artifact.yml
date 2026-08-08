@@ -83,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! cargo metadata --locked --format-version=1 --no-deps >/dev/null; then
+          if ! cargo metadata --locked --format-version=1 >/dev/null; then
             echo "::error file=codex-rs/Cargo.lock::Cargo.lock is stale for the checked-out manifests."
             echo "Run scripts/termux/maintainer-update-alpha --lock-only, review the lockfiles, and commit them before dispatching another artifact build."
             exit 1

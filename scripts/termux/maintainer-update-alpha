@@ -69,11 +69,11 @@ if [[ "$lock_only" != "yes" ]]; then
 fi
 
 cd "$CODEX_SRC_DIR/codex-rs"
-if ! cargo metadata --locked --format-version=1 --no-deps >/dev/null; then
+if ! cargo metadata --locked --format-version=1 >/dev/null; then
   termux_info 'Cargo.lock is stale; refreshing it before any artifact build.'
-  cargo metadata --format-version=1 --no-deps >/dev/null
+  cargo metadata --format-version=1 >/dev/null
 fi
-cargo metadata --locked --format-version=1 --no-deps >/dev/null
+cargo metadata --locked --format-version=1 >/dev/null
 
 cat <<EOF
 Lockfile validation passed for $(git -C "$CODEX_SRC_DIR" rev-parse HEAD).
