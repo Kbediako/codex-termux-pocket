@@ -142,7 +142,7 @@ test_run_dedup_and_timeout() {
   local repo="$test_root/updater-repo"
   local fake_bin="$test_root/fake-bin"
   local gh_log="$test_root/gh.log"
-  local manifest="$test_root/empty-release-manifest.env"
+  local manifest="$test_root/stale-release-manifest.env"
   local output="$test_root/updater.out"
   local sha='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   make_repo "$repo"
@@ -151,10 +151,10 @@ test_run_dedup_and_timeout() {
   cat >"$manifest" <<'EOF'
 format_version=1
 repository=Kbediako/codex-termux-pocket
-release_tag=
-head_sha=
-codex_version=
-archive_sha256=
+release_tag=termux-v-test-stale
+head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+codex_version=codex-cli-stale
+archive_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   cat >"$fake_bin/gh" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
@@ -184,7 +184,7 @@ EOF
   if grep -q '^workflow run ' "$gh_log"; then
     fail 'a duplicate build was dispatched for an existing queued run'
   fi
-  pass 'queued run is reused and timeout prints exact recovery without cancellation'
+  pass 'explicit commit reuses its queued run instead of a stale release or duplicate dispatch'
 }
 
 test_static_architecture_guards() {
