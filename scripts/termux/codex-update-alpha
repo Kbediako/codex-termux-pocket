@@ -1,81 +1,100 @@
-#!/data/data/com.termux/files/usr/bin/sh
-set -eu
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/termux/termux-mobile-lib.sh
-. "$SCRIPT_DIR/termux-mobile-lib.sh"
+source "$SCRIPT_DIR/termux-mobile-lib.sh"
 
 CODEX_SRC_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/codex-target}"
-PATCH_AUDIT_FILE="${PATCH_AUDIT_FILE:-$SCRIPT_DIR/patch_audit.tsv}"
-REMOTE_WORKFLOW_FILE="termux-mobile-artifact.yml"
-REMOTE_ARTIFACT_NAME="codex-termux-aarch64-unknown-linux-musl"
-PUSH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.pushRemote 2>/dev/null || true)"
-FETCH_REMOTE="$(git -C "$CODEX_SRC_DIR" config branch.main.remote 2>/dev/null || printf '%s' origin)"
-stashed="no"
-force="no"
-check_only="no"
-mode="auto"
-target_tag=""
-remote_timeout="1800"
-remote_ref=""
-remote_run_lookup_limit="${CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT:-200}"
-remote_run_poll_limit="${CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT:-50}"
-selected_mode=""
-latest_tag=""
-base_tag=""
-branch=""
+CODEX_TERMUX_FORK_URL="${CODEX_TERMUX_FORK_URL:-$CODEX_TERMUX_FORK_URL_DEFAULT}"
+CODEX_TERMUX_REPO="${CODEX_TERMUX_REPO:-$CODEX_TERMUX_FORK_REPO_DEFAULT}"
+CODEX_TERMUX_TIMEOUT="${CODEX_TERMUX_TIMEOUT:-7200}"
+CODEX_TERMUX_POLL_SECONDS="${CODEX_TERMUX_POLL_SECONDS:-15}"
+WORKFLOW_FILE="termux-mobile-artifact.yml"
+MANIFEST_FILE="${CODEX_TERMUX_RELEASE_MANIFEST:-$CODEX_SRC_DIR/scripts/termux/release-manifest.env}"
+
+operation="update"
+run_id=""
+expected_sha=""
+source_ref=""
+dispatch="no"
+install_after_wait="yes"
+release_tag=""
+release_version=""
+release_archive_sha=""
+temporary_dir=""
 
 usage() {
   cat <<'USAGE'
-Usage: codex-update-alpha [--check] [--force] [--mode auto|artifact|source|remote-artifact] [--tag TAG] [--remote-ref REF] [--remote-timeout SECONDS]
-  --check                 Only report whether a newer alpha tag exists.
-  --force                 Reinstall even if already on the selected alpha tag.
-  --mode MODE            auto chooses the quickest safe path:
-                         upstream artifact -> fork remote artifact -> experimental source build.
-  --tag TAG              Install or build a specific rust-vX.Y.Z-alpha.N tag.
-  --remote-ref REF       Build and install a fork artifact for REF via GitHub Actions.
-                         This is valid only with --mode remote-artifact.
-  --remote-timeout SEC   Wait time for remote artifact builds (default: 1800).
+Usage:
+  codex-update-alpha [update] [--timeout SECONDS] [--ref REF] [--dispatch]
+  codex-update-alpha check
+  codex-update-alpha wait --run-id ID [--expected-sha SHA] [--timeout SECONDS]
+  codex-update-alpha install-run --run-id ID [--expected-sha SHA]
+  codex-update-alpha install-release --release-tag TAG --expected-sha SHA
 
-Environment:
-  CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1
-                         Retry the local Cargo source fallback experimentally.
-                         By default it is disabled on Termux because the Android
-                         target still fails at the final V8 link.
-  CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT
-                         Number of recent workflow runs to scan for reusable
-                         fork artifacts (default: 200).
-  CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT
-                         Number of recent workflow runs to scan while waiting
-                         for a new fork artifact run to appear (default: 50).
+Normal update installs the public, verified release named by release-manifest.env.
+It never rebases, commits, pushes, or builds Rust on the phone.
+
+  check          Compare the installed runtime with the maintained release and
+                 report the newest OpenAI alpha from the fetch-only upstream.
+  wait           Resume a queued/running Actions run and install it on success.
+  install-run    Install the complete artifact from an already-successful run.
+  --dispatch     Maintainer/advanced opt-in: dispatch only when no exact matching
+                 queued, running, or completed run exists.
+  --timeout      Local wait limit in seconds (default: 7200). The GitHub run is
+                 not cancelled when this local timeout expires.
+
+GitHub authentication is not needed for a public release. Actions run download
+requires `gh auth login` because GitHub's Actions artifact API requires it.
 USAGE
 }
 
-while [ "$#" -gt 0 ]; do
+if [[ $# -gt 0 ]]; then
   case "$1" in
-    --check)
-      check_only="yes"
-      shift 1
+    update|check|wait|install-run|install-release)
+      operation="$1"
+      shift
       ;;
-    --force)
-      force="yes"
-      shift 1
-      ;;
-    --mode)
-      mode="${2:-}"
+  esac
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run-id)
+      run_id="${2:-}"
       shift 2
       ;;
-    --tag)
-      target_tag="${2:-}"
+    --expected-sha)
+      expected_sha="${2:-}"
       shift 2
       ;;
-    --remote-ref)
-      remote_ref="${2:-}"
+    --ref)
+      source_ref="${2:-}"
       shift 2
       ;;
-    --remote-timeout)
-      remote_timeout="${2:-}"
+    --timeout)
+      CODEX_TERMUX_TIMEOUT="${2:-}"
+      shift 2
+      ;;
+    --dispatch)
+      dispatch="yes"
+      shift
+      ;;
+    --no-install)
+      install_after_wait="no"
+      shift
+      ;;
+    --release-tag)
+      release_tag="${2:-}"
+      shift 2
+      ;;
+    --release-version)
+      release_version="${2:-}"
+      shift 2
+      ;;
+    --archive-sha256)
+      release_archive_sha="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -83,837 +102,311 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      usage
-      exit 2
+      usage >&2
+      termux_abort "unknown argument: $1"
       ;;
   esac
 done
 
-case "$mode" in
-  auto|artifact|source|remote-artifact) ;;
-  *)
-    echo "Unknown mode: $mode" >&2
-    usage
-    exit 2
-    ;;
-esac
+[[ "$CODEX_TERMUX_TIMEOUT" =~ ^[0-9]+$ && "$CODEX_TERMUX_TIMEOUT" -gt 0 ]] || \
+  termux_abort '--timeout must be a positive integer.'
+[[ "$CODEX_TERMUX_POLL_SECONDS" =~ ^[0-9]+$ && "$CODEX_TERMUX_POLL_SECONDS" -gt 0 ]] || \
+  termux_abort 'CODEX_TERMUX_POLL_SECONDS must be a positive integer.'
 
-case "$remote_timeout" in
-  *[!0-9]*|'')
-    echo "--remote-timeout must be an integer number of seconds." >&2
-    exit 2
-    ;;
-esac
-
-case "$remote_run_lookup_limit" in
-  *[!0-9]*|'')
-    echo "CODEX_TERMUX_REMOTE_RUN_LOOKUP_LIMIT must be an integer number of runs." >&2
-    exit 2
-    ;;
-esac
-
-case "$remote_run_poll_limit" in
-  *[!0-9]*|'')
-    echo "CODEX_TERMUX_REMOTE_RUN_POLL_LIMIT must be an integer number of runs." >&2
-    exit 2
-    ;;
-esac
-
-if [ -n "$remote_ref" ] && [ "$mode" != "remote-artifact" ]; then
-  echo "--remote-ref is supported only with --mode remote-artifact." >&2
-  exit 2
-fi
-
-if [ "$check_only" = "yes" ] && [ -n "$remote_ref" ]; then
-  echo "--check cannot be combined with --remote-ref." >&2
-  exit 2
-fi
-
-if [ ! -d "$CODEX_SRC_DIR/.git" ]; then
-  echo "Not a git repo: $CODEX_SRC_DIR" >&2
-  exit 1
-fi
-
-if [ "$check_only" != "yes" ]; then
-  if [ -z "${PREFIX:-}" ] || ! printf '%s\n' "$PREFIX" | grep -q 'com.termux'; then
-    echo "PREFIX must point at a Termux installation." >&2
-    exit 1
+cleanup() {
+  if [[ -n "$temporary_dir" && -d "$temporary_dir" ]]; then
+    rm -rf "$temporary_dir"
   fi
-fi
+}
+trap cleanup EXIT INT TERM
 
-TERMUX_V8_ARCHIVE_URL=""
-TERMUX_V8_BINDING_PATH=""
-
-resolve_termux_v8_version() {
-  awk '
-    $0 == "[[package]]" { in_v8 = 0; next }
-    $0 == "name = \"v8\"" { in_v8 = 1; next }
-    in_v8 && $0 ~ /^version = "/ {
-      sub(/^version = "/, "", $0)
-      sub(/"$/, "", $0)
-      print
-      exit
-    }
-  ' "$CODEX_SRC_DIR/codex-rs/Cargo.lock"
+load_release_manifest() {
+  [[ -f "$MANIFEST_FILE" ]] || return 1
+  local format manifest_repo
+  format="$(termux_metadata_value "$MANIFEST_FILE" format_version)"
+  manifest_repo="$(termux_metadata_value "$MANIFEST_FILE" repository)"
+  [[ "$format" == "1" ]] || termux_abort "unsupported release manifest format: ${format:-missing}"
+  [[ "$manifest_repo" == "$CODEX_TERMUX_REPO" ]] || \
+    termux_abort "release manifest repository mismatch: ${manifest_repo:-missing}"
+  release_tag="${release_tag:-$(termux_metadata_value "$MANIFEST_FILE" release_tag)}"
+  expected_sha="${expected_sha:-$(termux_metadata_value "$MANIFEST_FILE" head_sha)}"
+  release_version="${release_version:-$(termux_metadata_value "$MANIFEST_FILE" codex_version)}"
+  release_archive_sha="${release_archive_sha:-$(termux_metadata_value "$MANIFEST_FILE" archive_sha256)}"
+  [[ -n "$release_tag" && -n "$expected_sha" ]] || return 1
+  termux_validate_sha "$expected_sha" || termux_abort 'release manifest contains an invalid head_sha.'
+  return 0
 }
 
-prepare_termux_v8_musl_overrides() {
-  v8_version="$(resolve_termux_v8_version)"
-  if [ -z "$v8_version" ]; then
-    echo "Failed to resolve the pinned v8 crate version from codex-rs/Cargo.lock." >&2
-    exit 1
-  fi
-
-  v8_target="aarch64-unknown-linux-musl"
-  v8_release_tag="rusty-v8-v${v8_version}"
-  v8_cache_dir="$CARGO_TARGET_DIR/v8/v${v8_version}"
-  TERMUX_V8_BINDING_PATH="$v8_cache_dir/src_binding_release_${v8_target}.rs"
-  TERMUX_V8_ARCHIVE_URL="https://github.com/openai/codex/releases/download/${v8_release_tag}/librusty_v8_release_${v8_target}.a.gz"
-  v8_binding_url="https://github.com/openai/codex/releases/download/${v8_release_tag}/src_binding_release_${v8_target}.rs"
-
-  mkdir -p "$v8_cache_dir"
-  if [ ! -f "$TERMUX_V8_BINDING_PATH" ]; then
-    curl -fsSL "$v8_binding_url" -o "$TERMUX_V8_BINDING_PATH"
-  fi
-
-  echo "Using OpenAI musl rusty_v8 release pair ${v8_release_tag}."
-}
-
-termux_source_fallback_allowed() {
-  [ "${CODEX_TERMUX_ALLOW_SOURCE_FALLBACK:-0}" = "1" ]
-}
-
-termux_source_fallback_message() {
-  cat >&2 <<'EOF'
-Local Termux source fallback is disabled by default.
-
-Benchmark on 2026-04-10 reached the final `codex` link and failed with V8/ABI
-symbols that are still unavailable to the Android target (`bcmp`,
-`__errno_location`) even when using the pinned OpenAI musl rusty_v8 pair.
-
-Use `codex-update-alpha --mode remote-artifact` for fork changes, or set
-`CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1` to retry the local Cargo build
-experimentally.
-EOF
-}
-
-resolve_latest_tag_remote() {
-  git -C "$CODEX_SRC_DIR" ls-remote --tags "$FETCH_REMOTE" 'rust-v*-alpha.*' \
-    | awk '{print $2}' \
-    | sed 's#refs/tags/##; s#\^{}##' \
-    | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' \
-    | sort -V \
-    | tail -n 1
-}
-
-resolve_target_tag() {
-  if [ -n "$target_tag" ]; then
-    printf '%s\n' "$target_tag"
+prepare_checkout() {
+  [[ -d "$CODEX_SRC_DIR/.git" ]] || termux_abort "Codex helper checkout not found at $CODEX_SRC_DIR; rerun install-codex-termux."
+  if [[ "${CODEX_TERMUX_SKIP_CHECKOUT_SYNC:-0}" == "1" ]]; then
+    termux_configure_remotes "$CODEX_SRC_DIR" "$CODEX_TERMUX_FORK_URL"
+    CODEX_TERMUX_REPO="$(termux_remote_repo_slug "$CODEX_SRC_DIR" origin)"
     return
   fi
-  resolve_latest_tag_remote
+  [[ "$(git -C "$CODEX_SRC_DIR" branch --show-current)" == "main" ]] || \
+    termux_abort "$CODEX_SRC_DIR is not on main; refusing to change branches during an update."
+  [[ -z "$(git -C "$CODEX_SRC_DIR" status --porcelain)" ]] || \
+    termux_abort "$CODEX_SRC_DIR has local changes; they were left untouched. Use a separate CODEX_SRC_DIR for the installer checkout."
+  termux_configure_remotes "$CODEX_SRC_DIR" "$CODEX_TERMUX_FORK_URL"
+  CODEX_TERMUX_REPO="$(termux_remote_repo_slug "$CODEX_SRC_DIR" origin)"
+  git -C "$CODEX_SRC_DIR" fetch --prune origin main
+  git -C "$CODEX_SRC_DIR" merge-base --is-ancestor HEAD origin/main || \
+    termux_abort 'local main has diverged from origin/main; refusing to reset or rebase it.'
+  git -C "$CODEX_SRC_DIR" merge --ff-only origin/main
 }
 
-ensure_push_remote() {
-  if [ -z "$PUSH_REMOTE" ]; then
-    if git -C "$CODEX_SRC_DIR" remote | grep -q '^termux-pocket$'; then
-      PUSH_REMOTE="termux-pocket"
-      git -C "$CODEX_SRC_DIR" config branch.main.pushRemote "$PUSH_REMOTE"
-    fi
-  fi
+download_public_release() {
+  local base="https://github.com/${CODEX_TERMUX_REPO}/releases/download/${release_tag}"
+  temporary_dir="$(mktemp -d)"
+  termux_info "downloading maintained runtime $release_tag (commit $expected_sha)"
+  termux_download "$base/$CODEX_TERMUX_ARCHIVE" "$temporary_dir/$CODEX_TERMUX_ARCHIVE"
+  termux_download "$base/$CODEX_TERMUX_METADATA" "$temporary_dir/$CODEX_TERMUX_METADATA"
+  termux_download "$base/$CODEX_TERMUX_CHECKSUMS" "$temporary_dir/$CODEX_TERMUX_CHECKSUMS"
+  termux_install_verified_bundle "$temporary_dir" "$expected_sha" "$release_version" "$release_archive_sha"
 }
 
-lookup_patch_classification() {
-  commit_subject="$1"
-
-  case "$commit_subject" in
-    termux:\ audit\ *)
-      printf 'tooling\tPatch-audit maintenance only.\n'
-      return
-      ;;
-  esac
-
-  if [ ! -f "$PATCH_AUDIT_FILE" ]; then
-    printf 'unknown\tMissing patch audit file: %s\n' "$PATCH_AUDIT_FILE"
-    return
-  fi
-
-  while IFS="$(printf '\t')" read -r match_kind match_value classification reason; do
-    case "$match_kind" in
-      ''|'#'*) continue ;;
-    esac
-    if [ "$match_kind" = "subject" ] && [ "$match_value" = "$commit_subject" ]; then
-      printf '%s\t%s\n' "$classification" "$reason"
-      return
-    fi
-  done < "$PATCH_AUDIT_FILE"
-
-  printf 'unknown\tNo audit entry for commit subject.\n'
-}
-
-audit_patch_stack() {
-  audit_subjects_file="$(mktemp)"
-  git -C "$CODEX_SRC_DIR" log --format=%s "${latest_tag}..HEAD" > "$audit_subjects_file"
-
-  if [ ! -s "$audit_subjects_file" ]; then
-    echo "Patch audit: no local commits beyond ${latest_tag}."
-    rm -f "$audit_subjects_file"
-    return 0
-  fi
-
-  echo "Patch audit for local commits beyond ${latest_tag}:"
-  allow_upstream_artifact="yes"
-
-  while IFS= read -r commit_subject; do
-    lookup_result="$(lookup_patch_classification "$commit_subject")"
-    classification="${lookup_result%%	*}"
-    reason="${lookup_result#*	}"
-    echo "  - ${classification}: ${commit_subject}"
-    echo "    ${reason}"
-
-    case "$classification" in
-      runtime-critical|unknown)
-        allow_upstream_artifact="no"
-        ;;
-    esac
-  done < "$audit_subjects_file"
-
-  rm -f "$audit_subjects_file"
-
-  if [ "$allow_upstream_artifact" = "yes" ]; then
-    return 0
-  fi
-  return 1
-}
-
-resolve_remote_repo_slug() {
-  ensure_push_remote
-  if [ -z "$PUSH_REMOTE" ]; then
-    return 1
-  fi
-  git_remote_repo_slug "$CODEX_SRC_DIR" "$PUSH_REMOTE"
-}
-
-resolve_remote_ref_sha() {
-  ref_name="$1"
-  resolved_sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${ref_name}^{commit}" 2>/dev/null || true)"
-  if [ -n "$resolved_sha" ]; then
-    printf '%s\n' "$resolved_sha"
-    return
-  fi
-
-  ensure_push_remote
-  if [ -z "$PUSH_REMOTE" ]; then
-    return 1
-  fi
-
-  git -C "$CODEX_SRC_DIR" ls-remote "$PUSH_REMOTE" "$ref_name" "refs/heads/$ref_name" "refs/tags/$ref_name" \
-    | awk 'NR == 1 { print $1 }'
-}
-
-classification_allows_remote_artifact_reuse() {
-  case "$1" in
-    tooling|docs|build-only)
-      return 0
-      ;;
-  esac
-  return 1
-}
-
-write_successful_remote_runs() {
-  repo_slug="$1"
-  output_file="$2"
-
-  gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_lookup_limit" --json url,headSha,status,conclusion --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}{{"\n"}}{{end}}' 2>/dev/null \
-    | awk -F '|' '$3 == "completed" && $4 == "success" { print }' > "$output_file" \
-    || true
-}
-
-find_successful_remote_run_id_in_file() {
-  runs_file="$1"
-  expected_sha="$2"
-
-  awk -F '|' -v expected_sha="$expected_sha" '
-    $2 == expected_sha {
-      n = split($1, url_parts, "/")
-      print url_parts[n]
-      exit
-    }
-  ' "$runs_file"
-}
-
-resolve_reusable_remote_artifact_run() {
-  repo_slug="$1"
-  target_sha="$2"
-
-  remote_runs_file="$(mktemp)"
-  write_successful_remote_runs "$repo_slug" "$remote_runs_file"
-
-  run_id="$(find_successful_remote_run_id_in_file "$remote_runs_file" "$target_sha" || true)"
-  if [ -n "$run_id" ]; then
-    printf '%s|%s\n' "$target_sha" "$run_id"
-    rm -f "$remote_runs_file"
-    return 0
-  fi
-
-  if ! git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_sha}^{commit}" >/dev/null 2>&1; then
-    rm -f "$remote_runs_file"
-    return 1
-  fi
-
-  current_sha="$target_sha"
-  while :; do
-    current_subject="$(git -C "$CODEX_SRC_DIR" show -s --format=%s "$current_sha")"
-    lookup_result="$(lookup_patch_classification "$current_subject")"
-    classification="${lookup_result%%	*}"
-
-    if ! classification_allows_remote_artifact_reuse "$classification"; then
-      rm -f "$remote_runs_file"
-      return 1
-    fi
-
-    parent_sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${current_sha}^" 2>/dev/null || true)"
-    if [ -z "$parent_sha" ]; then
-      rm -f "$remote_runs_file"
-      return 1
-    fi
-
-    run_id="$(find_successful_remote_run_id_in_file "$remote_runs_file" "$parent_sha" || true)"
-    if [ -n "$run_id" ]; then
-      printf '%s|%s\n' "$parent_sha" "$run_id"
-      rm -f "$remote_runs_file"
-      return 0
-    fi
-
-    current_sha="$parent_sha"
-  done
-}
-
-remote_artifact_available() {
-  repo_slug="$1"
-
-  if [ -z "$repo_slug" ] || ! command -v gh >/dev/null 2>&1; then
-    return 1
-  fi
+require_gh_actions_access() {
+  termux_require_command gh
   if ! gh auth status --hostname github.com >/dev/null 2>&1; then
-    return 1
-  fi
-  gh repo view "$repo_slug" --json name >/dev/null 2>&1
-}
-
-wait_for_remote_run() {
-  repo_slug="$1"
-  expected_sha="$2"
-  expected_event="$3"
-  timeout_seconds="$4"
-
-  started_at="$(date +%s)"
-  matched_run_id=""
-  matched_status=""
-  matched_conclusion=""
-
-  while :; do
-    if [ -n "$matched_run_id" ]; then
-      run_state="$(gh run view "$matched_run_id" --repo "$repo_slug" --json status,conclusion --template '{{.status}}|{{.conclusion}}' 2>/dev/null || true)"
-      if [ -n "$run_state" ]; then
-        matched_status="${run_state%%|*}"
-        matched_conclusion="${run_state#*|}"
-      fi
-    else
-      run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_poll_limit" --json url,headSha,status,conclusion,event --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-
-      matched_status=""
-      matched_conclusion=""
-
-      if [ -n "$run_lines" ]; then
-        old_ifs="$IFS"
-        IFS='
-'
-        for run_line in $run_lines; do
-          IFS='|'
-          set -- $run_line
-          IFS='
-'
-          run_url="${1:-}"
-          run_sha="${2:-}"
-          run_status="${3:-}"
-          run_conclusion="${4:-}"
-          run_event="${5:-}"
-          run_id="${run_url##*/}"
-
-          if [ "$run_sha" = "$expected_sha" ] && [ "$run_event" = "$expected_event" ]; then
-            matched_run_id="$run_id"
-            matched_status="$run_status"
-            matched_conclusion="$run_conclusion"
-            break
-          fi
-        done
-        IFS="$old_ifs"
-      fi
-    fi
-
-    if [ -n "$matched_run_id" ]; then
-      case "$matched_status" in
-        completed)
-          if [ "$matched_conclusion" = "success" ]; then
-            printf '%s\n' "$matched_run_id"
-            return 0
-          fi
-          echo "Remote artifact workflow failed for ${expected_sha} (run ${matched_run_id}, conclusion=${matched_conclusion:-unknown})." >&2
-          return 1
-          ;;
-        *)
-          echo "Waiting for remote artifact workflow run ${matched_run_id} (${matched_status})..." >&2
-          ;;
-      esac
-    else
-      echo "Waiting for remote artifact workflow to appear for ${expected_sha}..." >&2
-    fi
-
-    now="$(date +%s)"
-    if [ $((now - started_at)) -ge "$timeout_seconds" ]; then
-      echo "Timed out waiting for remote artifact workflow for ${expected_sha}." >&2
-      return 1
-    fi
-
-    sleep 10
-  done
-}
-
-wait_for_remote_run_since() {
-  repo_slug="$1"
-  expected_event="$2"
-  earliest_created_at="$3"
-  timeout_seconds="$4"
-
-  started_at="$(date +%s)"
-  matched_run_id=""
-  matched_status=""
-  matched_conclusion=""
-
-  while :; do
-    if [ -n "$matched_run_id" ]; then
-      run_state="$(gh run view "$matched_run_id" --repo "$repo_slug" --json status,conclusion --template '{{.status}}|{{.conclusion}}' 2>/dev/null || true)"
-      if [ -n "$run_state" ]; then
-        matched_status="${run_state%%|*}"
-        matched_conclusion="${run_state#*|}"
-      fi
-    else
-      run_lines="$(gh run list --repo "$repo_slug" --workflow "$REMOTE_WORKFLOW_FILE" --limit "$remote_run_poll_limit" --json url,createdAt,status,conclusion,event --template '{{range .}}{{.url}}|{{.createdAt}}|{{.status}}|{{.conclusion}}|{{.event}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-
-      matched_status=""
-      matched_conclusion=""
-
-      if [ -n "$run_lines" ]; then
-        old_ifs="$IFS"
-        IFS='
-'
-        for run_line in $run_lines; do
-          IFS='|'
-          set -- $run_line
-          IFS='
-'
-          run_url="${1:-}"
-          run_created_at="${2:-}"
-          run_status="${3:-}"
-          run_conclusion="${4:-}"
-          run_event="${5:-}"
-          run_id="${run_url##*/}"
-
-          if [ "$run_event" = "$expected_event" ] && ! [ "$run_created_at" \< "$earliest_created_at" ]; then
-            matched_run_id="$run_id"
-            matched_status="$run_status"
-            matched_conclusion="$run_conclusion"
-            break
-          fi
-        done
-        IFS="$old_ifs"
-      fi
-    fi
-
-    if [ -n "$matched_run_id" ]; then
-      case "$matched_status" in
-        completed)
-          if [ "$matched_conclusion" = "success" ]; then
-            printf '%s\n' "$matched_run_id"
-            return 0
-          fi
-          echo "Remote artifact workflow failed after dispatch (run ${matched_run_id}, conclusion=${matched_conclusion:-unknown})." >&2
-          return 1
-          ;;
-        *)
-          echo "Waiting for dispatched remote artifact workflow run ${matched_run_id} (${matched_status})..." >&2
-          ;;
-      esac
-    else
-      echo "Waiting for dispatched remote artifact workflow to appear..." >&2
-    fi
-
-    now="$(date +%s)"
-    if [ $((now - started_at)) -ge "$timeout_seconds" ]; then
-      echo "Timed out waiting for the dispatched remote artifact workflow." >&2
-      return 1
-    fi
-
-    sleep 10
-  done
-}
-
-install_candidate_binary() {
-  candidate_binary="$1"
-  mode_name="$2"
-
-  run_codex_smoke_checks "$candidate_binary"
-  install_codex_binary "$candidate_binary" "$PREFIX/bin/codex"
-  echo "Installed via ${mode_name}."
-  codex --version
-}
-
-install_upstream_artifact() {
-  temp_dir="$(mktemp -d)"
-  cleanup_artifact() {
-    rm -rf "$temp_dir"
-  }
-  trap cleanup_artifact EXIT INT TERM
-
-  candidate_binary="$(download_upstream_release_binary "$latest_tag" "$temp_dir")"
-  install_candidate_binary "$candidate_binary" "upstream release artifact"
-
-  trap - EXIT INT TERM
-  cleanup_artifact
-}
-
-dispatch_remote_artifact_workflow() {
-  repo_slug="$1"
-  source_ref="$2"
-  echo "Dispatching remote artifact build for ${source_ref} on ${repo_slug}."
-  gh workflow run "$REMOTE_WORKFLOW_FILE" --repo "$repo_slug" --ref main -f source_ref="$source_ref" >/dev/null
-}
-
-install_remote_artifact_from_run() {
-  repo_slug="$1"
-  run_id="$2"
-  expected_sha="${3:-}"
-
-  temp_dir="$(mktemp -d)"
-  cleanup_artifact() {
-    rm -rf "$temp_dir"
-  }
-  trap cleanup_artifact EXIT INT TERM
-
-  gh run download "$run_id" --repo "$repo_slug" --name "$REMOTE_ARTIFACT_NAME" --dir "$temp_dir" >/dev/null
-  archive_path="${temp_dir}/${REMOTE_ARTIFACT_NAME}.tar.gz"
-  metadata_path="${temp_dir}/metadata.json"
-
-  if [ ! -f "$archive_path" ]; then
-    echo "Missing downloaded remote artifact archive: $archive_path" >&2
-    exit 1
-  fi
-
-  tar -xzf "$archive_path" -C "$temp_dir"
-  candidate_binary="${temp_dir}/codex"
-  if [ ! -f "$candidate_binary" ]; then
-    echo "Remote artifact archive did not contain codex." >&2
-    exit 1
-  fi
-  chmod 700 "$candidate_binary"
-
-  if [ -n "$expected_sha" ] && [ ! -f "$metadata_path" ]; then
-    echo "Remote artifact metadata is missing; refusing to install without commit verification." >&2
-    exit 1
-  fi
-
-  if [ -f "$metadata_path" ]; then
-    metadata_sha="$(sed -n 's/.*"head_sha":"\([^"]*\)".*/\1/p' "$metadata_path" | head -n 1)"
-    metadata_describe="$(sed -n 's/.*"git_describe":"\([^"]*\)".*/\1/p' "$metadata_path" | head -n 1)"
-    echo "Remote artifact metadata: ${metadata_describe}"
-    if [ -n "$expected_sha" ] && [ -n "$metadata_sha" ] && [ "$metadata_sha" != "$expected_sha" ]; then
-      echo "Remote artifact SHA mismatch: expected ${expected_sha}, got ${metadata_sha}." >&2
-      exit 1
-    fi
-  fi
-
-  install_candidate_binary "$candidate_binary" "fork remote artifact"
-
-  trap - EXIT INT TERM
-  cleanup_artifact
-}
-
-run_source_build() {
-  if ! termux_source_fallback_allowed; then
-    termux_source_fallback_message
-    return 1
-  fi
-
-  build_root="$(mktemp -d)"
-  cleanup_build_root() {
-    rm -rf "$build_root"
-  }
-  trap cleanup_build_root EXIT INT TERM
-
-  echo "Building from source with the low-memory Termux profile."
-  prepare_termux_v8_musl_overrides
-  cd "$CODEX_SRC_DIR/codex-rs"
-  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    CARGO_PROFILE_RELEASE_LTO=false \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-    CARGO_BUILD_JOBS=1 \
-    RUSTY_V8_ARCHIVE="$TERMUX_V8_ARCHIVE_URL" \
-    RUSTY_V8_SRC_BINDING_PATH="$TERMUX_V8_BINDING_PATH" \
-    cargo install --locked --path cli --root "$build_root" --force
-  install_codex_binary "$build_root/bin/codex" "$PREFIX/bin/codex"
-  echo "Installed via source build."
-  codex --version
-
-  trap - EXIT INT TERM
-  cleanup_build_root
-}
-
-run_remote_artifact_install() {
-  repo_slug="$1"
-  expected_sha="$2"
-  expected_event="$3"
-  wait_mode="${4:-sha}"
-  verify_sha="${5:-$expected_sha}"
-  if [ "$wait_mode" = "since" ]; then
-    if ! run_id="$(wait_for_remote_run_since "$repo_slug" "$expected_event" "$expected_sha" "$remote_timeout")" || [ -z "$run_id" ]; then
-      return 1
-    fi
-    install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
-    return
-  fi
-  if ! run_id="$(wait_for_remote_run "$repo_slug" "$expected_sha" "$expected_event" "$remote_timeout")" || [ -z "$run_id" ]; then
-    return 1
-  fi
-  install_remote_artifact_from_run "$repo_slug" "$run_id" "$verify_sha"
-}
-
-install_remote_artifact_for_head() {
-  repo_slug="$1"
-  expected_sha="$(git -C "$CODEX_SRC_DIR" rev-parse HEAD)"
-  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
-  if [ -n "$reusable_run" ]; then
-    reusable_sha="${reusable_run%%|*}"
-    reusable_run_id="${reusable_run#*|}"
-    if [ "$reusable_sha" = "$expected_sha" ]; then
-      echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
-    else
-      echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
-    fi
-    install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
-    return
-  fi
-
-  ensure_push_remote
-  if [ -z "$PUSH_REMOTE" ]; then
-    echo "Remote artifact mode needs a GitHub fork remote configured as branch.main.pushRemote or termux-pocket." >&2
-    return 1
-  fi
-
-  git -C "$CODEX_SRC_DIR" push --force-with-lease "$PUSH_REMOTE" main
-  run_remote_artifact_install "$repo_slug" "$expected_sha" "push"
-}
-
-if [ -n "$remote_ref" ]; then
-  repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
-  if [ -z "$repo_slug" ]; then
-    echo "Remote artifact mode needs a GitHub fork remote configured as branch.main.pushRemote or termux-pocket." >&2
-    exit 1
-  fi
-  if ! remote_artifact_available "$repo_slug"; then
-    echo "Remote artifact mode requires gh authentication and access to ${repo_slug}." >&2
-    exit 1
-  fi
-  expected_sha="$(resolve_remote_ref_sha "$remote_ref")"
-  if [ -z "$expected_sha" ]; then
-    echo "Unable to resolve remote ref: $remote_ref" >&2
-    exit 1
-  fi
-  reusable_run="$(resolve_reusable_remote_artifact_run "$repo_slug" "$expected_sha" || true)"
-  if [ -n "$reusable_run" ]; then
-    reusable_sha="${reusable_run%%|*}"
-    reusable_run_id="${reusable_run#*|}"
-    if [ "$reusable_sha" = "$expected_sha" ]; then
-      echo "Found existing successful remote artifact for ${expected_sha} (run ${reusable_run_id}); installing it."
-    else
-      echo "Reusing successful remote artifact ${reusable_run_id} from ${reusable_sha}; newer commits are tooling/docs/build-only."
-    fi
-    install_remote_artifact_from_run "$repo_slug" "$reusable_run_id" "$reusable_sha"
-    exit 0
-  fi
-  dispatch_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  dispatch_remote_artifact_workflow "$repo_slug" "$expected_sha"
-  run_remote_artifact_install "$repo_slug" "$dispatch_started_at" "workflow_dispatch" "since" "$expected_sha"
-  exit 0
-fi
-
-if [ -d "$CODEX_SRC_DIR/.git/rebase-merge" ] || [ -d "$CODEX_SRC_DIR/.git/rebase-apply" ]; then
-  echo "Rebase in progress in $CODEX_SRC_DIR; finish it first." >&2
-  exit 1
-fi
-
-branch="$(git -C "$CODEX_SRC_DIR" rev-parse --abbrev-ref HEAD)"
-if [ "$branch" != "main" ]; then
-  echo "Not on main (current: $branch). Switch to main before updating." >&2
-  exit 1
-fi
-
-base_tag="$(git -C "$CODEX_SRC_DIR" describe --tags --match 'rust-v*-alpha.*' --abbrev=0 2>/dev/null || true)"
-latest_tag="$(resolve_target_tag)"
-
-if [ -z "$latest_tag" ]; then
-  echo "No rust-v*-alpha.* tags found on $FETCH_REMOTE." >&2
-  exit 1
-fi
-
-if [ "$check_only" = "yes" ]; then
-  echo "Latest alpha tag: $latest_tag"
-  if [ -n "$base_tag" ]; then
-    echo "Current base tag: $base_tag"
-  fi
-  if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ]; then
-    echo "Already on the latest alpha tag."
-    exit 0
-  fi
-  echo "Update available."
-  exit 1
-fi
-
-if [ -n "$base_tag" ] && [ "$latest_tag" = "$base_tag" ] && [ "$force" != "yes" ]; then
-  echo "Latest alpha tag: $latest_tag"
-  echo "Current base tag: $base_tag"
-  echo "Already on latest alpha; skipping rebase/install. Use --force to reinstall."
-  codex --version || true
-  git -C "$CODEX_SRC_DIR" describe --tags --always || true
-  exit 0
-fi
-
-git -C "$CODEX_SRC_DIR" fetch --prune "$FETCH_REMOTE" main 'refs/tags/rust-v*:refs/tags/rust-v*'
-
-if ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{tag}" >/dev/null 2>&1 && ! git -C "$CODEX_SRC_DIR" rev-parse "$latest_tag^{commit}" >/dev/null 2>&1; then
-  echo "Requested tag is not available locally after fetch: $latest_tag" >&2
-  exit 1
-fi
-
-echo "Latest alpha tag: $latest_tag"
-if [ -n "$base_tag" ]; then
-  echo "Current base tag: $base_tag"
-fi
-
-cleanup_stash_notice() {
-  if [ "$stashed" = "yes" ]; then
-    echo "Note: your changes are stashed; run: git -C \"$CODEX_SRC_DIR\" stash list" >&2
+    termux_abort "GitHub Actions artifacts require authentication. Run 'gh auth login', then retry; public release installs do not require GitHub login."
   fi
 }
-trap cleanup_stash_notice EXIT
 
-if [ -n "$(git -C "$CODEX_SRC_DIR" status --porcelain)" ]; then
-  echo "Working tree dirty; stashing changes." >&2
-  git -C "$CODEX_SRC_DIR" stash push -u -m "auto-stash before alpha update $(date +%Y-%m-%d)"
-  stashed="yes"
-fi
+resolve_source_sha() {
+  local ref="${1:-origin/main}"
+  local sha
+  sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
+  if [[ -z "$sha" ]]; then
+    git -C "$CODEX_SRC_DIR" fetch --prune origin main
+    sha="$(git -C "$CODEX_SRC_DIR" rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
+  fi
+  termux_validate_sha "$sha" || termux_abort "cannot resolve source ref to a commit: $ref"
+  printf '%s\n' "$sha"
+}
 
-if [ -n "$base_tag" ]; then
-  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$base_tag"
-else
-  git -C "$CODEX_SRC_DIR" rebase --onto "$latest_tag" "$FETCH_REMOTE/main"
-fi
+list_workflow_runs() {
+  gh run list --repo "$CODEX_TERMUX_REPO" --workflow "$WORKFLOW_FILE" --limit 100 \
+    --json databaseId,url,headSha,status,conclusion,displayTitle \
+    --template '{{range .}}{{.databaseId}}|{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}{{"\n"}}{{end}}'
+}
 
-allow_upstream_artifact="no"
-if audit_patch_stack; then
-  allow_upstream_artifact="yes"
-fi
+find_matching_run() {
+  local sha="$1"
+  list_workflow_runs | awk -F '|' -v sha="$sha" '
+    $3 == sha || $6 == "Termux runtime " sha { print; exit }
+  '
+}
 
-repo_slug="$(resolve_remote_repo_slug 2>/dev/null || true)"
-can_remote_artifact="no"
-if { [ "$mode" = "remote-artifact" ] || [ "$allow_upstream_artifact" != "yes" ]; } \
-  && remote_artifact_available "$repo_slug"; then
-  can_remote_artifact="yes"
-fi
+show_run() {
+  local id="$1"
+  gh run view "$id" --repo "$CODEX_TERMUX_REPO" \
+    --json databaseId,url,headSha,status,conclusion,displayTitle \
+    --template '{{.databaseId}}|{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}'
+}
 
-case "$mode" in
-  artifact)
-    if [ "$allow_upstream_artifact" != "yes" ]; then
-      echo "Upstream artifact mode is blocked by the local patch audit." >&2
-      exit 1
-    fi
-    selected_mode="artifact"
-    ;;
-  source)
-    selected_mode="source"
-    ;;
-  remote-artifact)
-    if [ "$can_remote_artifact" != "yes" ]; then
-      echo "Remote artifact mode requires a GitHub fork remote plus gh authentication." >&2
-      exit 1
-    fi
-    selected_mode="remote-artifact"
-    ;;
-  auto)
-    if [ "$allow_upstream_artifact" = "yes" ]; then
-      selected_mode="artifact"
-    elif [ "$can_remote_artifact" = "yes" ]; then
-      selected_mode="remote-artifact"
-    else
-      selected_mode="source"
-    fi
-    ;;
-esac
+run_expected_sha() {
+  local line="$1"
+  local title head
+  head="$(cut -d '|' -f3 <<<"$line")"
+  title="$(cut -d '|' -f6- <<<"$line")"
+  if [[ "$title" =~ ^Termux\ runtime\ ([0-9a-f]{40})$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "$head"
+  fi
+}
 
-echo "Selected install mode: $selected_mode"
-
-install_failed="no"
-case "$selected_mode" in
-  artifact)
-    if ! install_upstream_artifact; then
-      install_failed="yes"
-    fi
-    ;;
-  remote-artifact)
-    if ! install_remote_artifact_for_head "$repo_slug"; then
-      install_failed="yes"
-    fi
-    ;;
-  source)
-    run_source_build
-    ;;
-esac
-
-if [ "$install_failed" = "yes" ]; then
-  if [ "$mode" = "auto" ]; then
-    if [ "$selected_mode" = "artifact" ] && [ "$can_remote_artifact" != "yes" ] \
-      && remote_artifact_available "$repo_slug"; then
-      can_remote_artifact="yes"
-    fi
-    if [ "$selected_mode" = "artifact" ] && [ "$can_remote_artifact" = "yes" ]; then
-      echo "Falling back to fork remote artifact after upstream artifact install failed." >&2
-      if install_remote_artifact_for_head "$repo_slug"; then
-        install_failed="no"
+print_run_state() {
+  local line="$1"
+  local id url status conclusion
+  IFS='|' read -r id url _ status conclusion _ <<<"$line"
+  case "$status" in
+    queued|requested|waiting|pending)
+      termux_info "run $id is queued: $url"
+      ;;
+    in_progress)
+      termux_info "run $id is running: $url"
+      ;;
+    completed)
+      if [[ "$conclusion" == "success" ]]; then
+        termux_info "run $id succeeded: $url"
       else
-        echo "Fork remote artifact fallback failed." >&2
+        termux_info "run $id failed (conclusion=${conclusion:-unknown}): $url"
       fi
-    fi
-    if [ "$install_failed" = "yes" ]; then
-      echo "Falling back to source build after ${selected_mode} install failed." >&2
-      run_source_build
-    fi
+      ;;
+    *)
+      termux_info "run $id state=${status:-unknown}: $url"
+      ;;
+  esac
+}
+
+download_and_install_run() {
+  local id="$1"
+  local wanted_sha="$2"
+  local line status conclusion actual_sha
+  line="$(show_run "$id")"
+  print_run_state "$line"
+  IFS='|' read -r _ _ _ status conclusion _ <<<"$line"
+  [[ "$status" == "completed" && "$conclusion" == "success" ]] || \
+    termux_abort "run $id is not a successful completed run."
+  actual_sha="$(run_expected_sha "$line")"
+  if [[ -n "$wanted_sha" ]]; then
+    [[ "$actual_sha" == "$wanted_sha" ]] || \
+      termux_abort "run commit mismatch: expected $wanted_sha, run identifies $actual_sha."
   else
-    exit 1
+    wanted_sha="$actual_sha"
   fi
-fi
+  termux_validate_sha "$wanted_sha" || termux_abort 'cannot determine the exact source commit for this run; pass --expected-sha.'
 
-echo "Repo describe: $(git -C "$CODEX_SRC_DIR" describe --tags --always --dirty)"
-echo "Repo dirty state:"
-git -C "$CODEX_SRC_DIR" status --short
+  temporary_dir="$(mktemp -d)"
+  gh run download "$id" --repo "$CODEX_TERMUX_REPO" \
+    --name "$CODEX_TERMUX_ARTIFACT_NAME" --dir "$temporary_dir"
+  termux_install_verified_bundle "$temporary_dir" "$wanted_sha"
+}
 
-if [ "$stashed" = "yes" ]; then
-  if git -C "$CODEX_SRC_DIR" stash pop; then
-    stashed="no"
+wait_for_run() {
+  local id="$1"
+  local wanted_sha="$2"
+  local started now line status conclusion last_state=""
+  started="$(date +%s)"
+  while true; do
+    line="$(show_run "$id")"
+    IFS='|' read -r _ _ _ status conclusion _ <<<"$line"
+    if [[ "$status/$conclusion" != "$last_state" ]]; then
+      print_run_state "$line"
+      last_state="$status/$conclusion"
+    fi
+    if [[ "$status" == "completed" ]]; then
+      [[ "$conclusion" == "success" ]] || termux_abort "workflow run $id failed with conclusion ${conclusion:-unknown}."
+      if [[ "$install_after_wait" == "yes" ]]; then
+        download_and_install_run "$id" "$wanted_sha"
+      fi
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= CODEX_TERMUX_TIMEOUT )); then
+      local url
+      url="$(cut -d '|' -f2 <<<"$line")"
+      printf 'codex-termux: local wait timed out after %s seconds. The GitHub run was not cancelled and may still continue.\n' "$CODEX_TERMUX_TIMEOUT" >&2
+      printf 'codex-termux: resume with: codex-update-alpha wait --run-id %s --expected-sha %s\n' "$id" "${wanted_sha:-$(run_expected_sha "$line")}" >&2
+      printf 'codex-termux: run URL: %s\n' "$url" >&2
+      return 3
+    fi
+    sleep "$CODEX_TERMUX_POLL_SECONDS"
+  done
+}
+
+find_dispatched_run() {
+  local sha="$1"
+  local started now line
+  started="$(date +%s)"
+  while true; do
+    line="$(find_matching_run "$sha" || true)"
+    if [[ -n "$line" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started >= 120 )); then
+      termux_abort "dispatched workflow did not appear within 120 seconds; inspect https://github.com/$CODEX_TERMUX_REPO/actions"
+    fi
+    sleep "$CODEX_TERMUX_POLL_SECONDS"
+  done
+}
+
+update_from_actions() {
+  local sha="$1"
+  local line id url status conclusion
+  require_gh_actions_access
+  line="$(find_matching_run "$sha" || true)"
+  if [[ -z "$line" ]]; then
+    if [[ "$dispatch" != "yes" ]]; then
+      termux_abort "no maintained public release or exact Actions run exists for $sha. A maintainer must publish one; no local source build will be attempted."
+    fi
+    termux_info "no matching run exists; dispatching one exact build for $sha"
+    gh workflow run "$WORKFLOW_FILE" --repo "$CODEX_TERMUX_REPO" --ref main -f source_ref="$sha"
+    line="$(find_dispatched_run "$sha")"
   else
-    echo "Stash pop had conflicts; stash kept." >&2
-    exit 1
+    termux_info "reusing the existing exact workflow run; no duplicate was dispatched"
   fi
-fi
+  IFS='|' read -r id url _ status conclusion _ <<<"$line"
+  print_run_state "$line"
+  case "$status/$conclusion" in
+    completed/success)
+      download_and_install_run "$id" "$sha"
+      ;;
+    completed/*)
+      termux_abort "matching run $id failed; inspect $url. Refusing to dispatch a duplicate automatically."
+      ;;
+    *)
+      wait_for_run "$id" "$sha"
+      ;;
+  esac
+}
 
-trap - EXIT
+check_versions() {
+  local installed_file installed_sha installed_version latest_alpha
+  installed_file="$(termux_installed_metadata)"
+  installed_sha="$(termux_metadata_value "$installed_file" head_sha 2>/dev/null || true)"
+  installed_version="$(termux_metadata_value "$installed_file" codex_version 2>/dev/null || true)"
+  printf 'Installed: %s (%s)\n' "${installed_version:-none}" "${installed_sha:-none}"
+  if load_release_manifest; then
+    printf 'Maintained release: %s (%s, %s)\n' "$release_tag" "$release_version" "$expected_sha"
+  else
+    printf 'Maintained release: not published in %s\n' "$MANIFEST_FILE"
+  fi
+  latest_alpha="$(git -C "$CODEX_SRC_DIR" ls-remote --tags upstream 'rust-v*-alpha.*' 2>/dev/null \
+    | awk '{print $2}' | sed 's#refs/tags/##; s#\^{}##' \
+    | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' | sort -V | tail -n1 || true)"
+  printf 'Latest OpenAI alpha on upstream: %s\n' "${latest_alpha:-not found}"
+  [[ -n "$expected_sha" && "$installed_sha" == "$expected_sha" ]]
+}
+
+termux_check_environment
+prepare_checkout
+
+case "$operation" in
+  check)
+    if check_versions; then
+      termux_info 'installed runtime is current.'
+      exit 0
+    fi
+    termux_info 'an install or update is needed.'
+    exit 10
+    ;;
+  install-release)
+    [[ -n "$release_tag" && -n "$expected_sha" ]] || termux_abort 'install-release requires --release-tag and --expected-sha.'
+    [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || termux_abort 'invalid --release-tag.'
+    termux_validate_sha "$expected_sha" || termux_abort '--expected-sha must be a full 40-character commit SHA.'
+    download_public_release
+    ;;
+  install-run)
+    [[ "$run_id" =~ ^[0-9]+$ ]] || termux_abort 'install-run requires a numeric --run-id.'
+    require_gh_actions_access
+    download_and_install_run "$run_id" "$expected_sha"
+    ;;
+  wait)
+    [[ "$run_id" =~ ^[0-9]+$ ]] || termux_abort 'wait requires a numeric --run-id.'
+    require_gh_actions_access
+    wait_for_run "$run_id" "$expected_sha"
+    ;;
+  update)
+    if load_release_manifest; then
+      installed_sha="$(termux_metadata_value "$(termux_installed_metadata)" head_sha 2>/dev/null || true)"
+      if [[ "$installed_sha" == "$expected_sha" ]]; then
+        termux_info "already current at $expected_sha"
+        codex --version
+        exit 0
+      fi
+      download_public_release
+    else
+      expected_sha="${expected_sha:-$(resolve_source_sha "${source_ref:-origin/main}")}"
+      termux_validate_sha "$expected_sha" || termux_abort '--expected-sha must be a full 40-character commit SHA.'
+      update_from_actions "$expected_sha"
+    fi
+    ;;
+esac
+
+"$SCRIPT_DIR/smoke-test-artifact" --installed --quick
+termux_info 'update complete. Next command: codex login'

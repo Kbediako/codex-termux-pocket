@@ -1,4 +1,5 @@
 name: termux-mobile-artifact
+run-name: Termux runtime ${{ inputs.source_ref || github.sha }}
 
 on:
   push:
@@ -20,10 +21,19 @@ on:
         description: Git ref to build for Termux (branch, tag, or commit SHA)
         required: false
         default: ""
+      publish_release:
+        description: Publish the validated bundle as a public GitHub release
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: Immutable release tag (required when publish_release is true)
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-termux-artifact:
@@ -32,6 +42,10 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      head_sha: ${{ steps.stage.outputs.head_sha }}
+      codex_version: ${{ steps.stage.outputs.codex_version }}
+      archive_sha256: ${{ steps.stage.outputs.archive_sha256 }}
     defaults:
       run:
         working-directory: codex-rs
@@ -51,10 +65,24 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_ref }}
+          persist-credentials: false
 
       - name: Checkout triggering commit
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.source_ref == '' }}
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate Cargo.lock before build setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo metadata --locked --format-version=1 --no-deps >/dev/null; then
+            echo "::error file=codex-rs/Cargo.lock::Cargo.lock is stale for the checked-out manifests."
+            echo "Run scripts/termux/maintainer-update-alpha --lock-only, review the lockfiles, and commit them before dispatching another artifact build."
+            exit 1
+          fi
+          git diff --exit-code -- Cargo.lock
 
       - name: Prepare APT cache directories
         shell: bash
@@ -105,7 +133,7 @@ jobs:
             "cargo_profile_release_lto=${CARGO_PROFILE_RELEASE_LTO}"
             "cargo_profile_release_codegen_units=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}"
             "aws_lc_sys_no_jitter_entropy=${AWS_LC_SYS_NO_JITTER_ENTROPY}"
-            "build_command=cargo build --locked --target ${TARGET} --release --bin codex --timings"
+            "build_command=cargo build --locked --target ${TARGET} --release --bin codex --bin codex-code-mode-host --bin codex-responses-api-proxy"
           )
           cache_hash="$(
             {
@@ -250,11 +278,26 @@ jobs:
           restore-keys: |
             termux-target-release-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ steps.release_cache_key.outputs.dependency_tooling_hash }}-
 
-      - name: Build Codex for Termux
+      - name: Build bundled bubblewrap and export its digest
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --target "${TARGET}" --release --bin codex --timings
+          cargo build --locked --target "${TARGET}" --release --bin bwrap --timings
+          bwrap="target/${TARGET}/release/bwrap"
+          test -x "$bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap"
+          digest="$(sha256sum "$bwrap" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
+          echo "Bundled bwrap sha256:${digest}"
+
+      - name: Build complete Codex runtime for Termux
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target "${TARGET}" --release --timings \
+            --bin codex \
+            --bin codex-code-mode-host \
+            --bin codex-responses-api-proxy
 
       - name: Upload Cargo timings
         if: always()
@@ -265,24 +308,29 @@ jobs:
           if-no-files-found: warn
 
       - name: Stage Termux artifact
+        id: stage
         env:
           SOURCE_REF: ${{ inputs.source_ref }}
         shell: bash
         run: |
           set -euo pipefail
           artifact_root="${GITHUB_WORKSPACE}/dist/termux-mobile"
-          mkdir -p "${artifact_root}"
-          cp "target/${TARGET}/release/codex" "${artifact_root}/codex"
-          chmod 0755 "${artifact_root}/codex"
-          tar -C "${artifact_root}" -czf "${artifact_root}/codex-termux-aarch64-unknown-linux-musl.tar.gz" codex
+          runtime_root="${artifact_root}/codex-termux-runtime"
+          mkdir -p "${runtime_root}/bin" "${runtime_root}/codex-resources"
+          for binary in codex codex-code-mode-host codex-responses-api-proxy; do
+            cp "target/${TARGET}/release/${binary}" "${runtime_root}/bin/${binary}"
+            chmod 0755 "${runtime_root}/bin/${binary}"
+          done
+          cp "target/${TARGET}/release/bwrap" "${runtime_root}/codex-resources/bwrap"
+          chmod 0755 "${runtime_root}/codex-resources/bwrap"
 
           python3 - <<'PY'
-          import json
           import os
           import subprocess
           from pathlib import Path
 
           artifact_root = Path(os.environ["GITHUB_WORKSPACE"]) / "dist" / "termux-mobile"
+          runtime_root = artifact_root / "codex-termux-runtime"
           head_sha = subprocess.check_output(
               ["git", "rev-parse", "HEAD"],
               text=True,
@@ -291,17 +339,79 @@ jobs:
               ["git", "describe", "--tags", "--always", "--dirty"],
               text=True,
           ).strip()
-          payload = {
-              "head_sha": head_sha,
-              "git_describe": describe,
+          version = subprocess.check_output(
+              [str(runtime_root / "bin" / "codex"), "--version"],
+              text=True,
+          ).strip()
+          package = {
+              "layoutVersion": 1,
+              "version": version,
               "target": "aarch64-unknown-linux-musl",
-              "source_ref": os.environ.get("SOURCE_REF", ""),
+              "variant": "primary",
+              "entrypoint": "bin/codex",
+              "resourcesDir": "codex-resources",
           }
-          (artifact_root / "metadata.json").write_text(
-              json.dumps(payload, separators=(",", ":")),
-              encoding="utf-8",
+          import json
+          (runtime_root / "codex-package.json").write_text(
+              json.dumps(package, indent=2) + "\n", encoding="utf-8"
           )
+          metadata = "\n".join(
+              [
+                  "format_version=1",
+                  "source_repository=" + os.environ["GITHUB_REPOSITORY"],
+                  "head_sha=" + head_sha,
+                  "git_describe=" + describe.replace("\n", " "),
+                  "codex_version=" + version.replace("\n", " "),
+                  "target=aarch64-unknown-linux-musl",
+                  "source_ref=" + os.environ.get("SOURCE_REF", "").replace("\n", " "),
+                  "",
+              ]
+          )
+          (artifact_root / "metadata.env").write_text(metadata, encoding="utf-8")
           PY
+
+          archive="${artifact_root}/codex-termux-aarch64-unknown-linux-musl.tar.gz"
+          tar -C "${artifact_root}" -czf "$archive" codex-termux-runtime
+          (
+            cd "${artifact_root}"
+            sha256sum codex-termux-aarch64-unknown-linux-musl.tar.gz metadata.env > SHA256SUMS
+          )
+          head_sha="$(git rev-parse HEAD)"
+          codex_version="$("${runtime_root}/bin/codex" --version)"
+          archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "codex_version=${codex_version}" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate complete artifact before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_root="${GITHUB_WORKSPACE}/dist/termux-mobile"
+          verify_root="${RUNNER_TEMP}/termux-artifact-verify"
+          cd "$artifact_root"
+          sha256sum --check --strict SHA256SUMS
+          rm -rf "$verify_root"
+          mkdir -p "$verify_root"
+          tar -xzf codex-termux-aarch64-unknown-linux-musl.tar.gz -C "$verify_root"
+          runtime="$verify_root/codex-termux-runtime"
+          for file in \
+            bin/codex \
+            bin/codex-code-mode-host \
+            bin/codex-responses-api-proxy \
+            codex-resources/bwrap; do
+            test -x "$runtime/$file" || { echo "Missing executable: $file"; exit 1; }
+          done
+          test -f "$runtime/codex-package.json"
+          metadata_version="$(sed -n 's/^codex_version=//p' metadata.env)"
+          test "$metadata_version" = "$("$runtime/bin/codex" --version)"
+          "$runtime/bin/codex-code-mode-host" --help >/dev/null
+          "$runtime/bin/codex-responses-api-proxy" --help >/dev/null
+          "$runtime/codex-resources/bwrap" --version >/dev/null
+          bash "${GITHUB_WORKSPACE}/scripts/termux/smoke-test-artifact" \
+            --bundle-dir "$artifact_root" \
+            --expected-sha "$(git rev-parse HEAD)" \
+            --expected-version "$metadata_version"
 
       - name: Upload Termux artifact
         uses: actions/upload-artifact@v7
@@ -309,7 +419,9 @@ jobs:
           name: codex-termux-aarch64-unknown-linux-musl
           path: |
             dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
-            dist/termux-mobile/metadata.json
+            dist/termux-mobile/metadata.env
+            dist/termux-mobile/SHA256SUMS
+          if-no-files-found: error
 
       - name: Save cargo home cache
         if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
@@ -365,3 +477,72 @@ jobs:
         with:
           path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
           key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
+
+  publish-termux-release:
+    name: Publish validated Termux release
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: build-termux-artifact
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Validate immutable release inputs
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^termux-v[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::release_tag must be a non-empty termux-v... tag"
+            exit 1
+          fi
+
+      - name: Download validated build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: codex-termux-aarch64-unknown-linux-musl
+          path: dist
+
+      - name: Recheck checksums and create release manifest
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          HEAD_SHA: ${{ needs.build-termux-artifact.outputs.head_sha }}
+          CODEX_VERSION: ${{ needs.build-termux-artifact.outputs.codex_version }}
+          ARCHIVE_SHA256: ${{ needs.build-termux-artifact.outputs.archive_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          cat > release-manifest.env <<EOF
+          format_version=1
+          repository=${GITHUB_REPOSITORY}
+          release_tag=${RELEASE_TAG}
+          head_sha=${HEAD_SHA}
+          codex_version=${CODEX_VERSION}
+          archive_sha256=${ARCHIVE_SHA256}
+          EOF
+
+      - name: Publish new public release without overwriting assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          HEAD_SHA: ${{ needs.build-termux-artifact.outputs.head_sha }}
+          CODEX_VERSION: ${{ needs.build-termux-artifact.outputs.codex_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $RELEASE_TAG already exists; refusing to replace immutable runtime assets"
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$HEAD_SHA" \
+            --title "Codex Termux ${CODEX_VERSION}" \
+            --notes "Verified complete Termux runtime for ${HEAD_SHA}." \
+            --latest=false \
+            dist/codex-termux-aarch64-unknown-linux-musl.tar.gz \
+            dist/metadata.env \
+            dist/SHA256SUMS \
+            dist/release-manifest.env
