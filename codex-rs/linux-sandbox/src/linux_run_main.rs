@@ -21,6 +21,7 @@ use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
+use crate::landlock::is_termux_prefix;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
@@ -153,7 +154,7 @@ pub fn run_main() -> ! {
         sandbox_policy_cwd,
         command_cwd,
         permission_profile,
-        use_legacy_landlock,
+        mut use_legacy_landlock,
         apply_seccomp_then_exec,
         allow_network_for_proxy,
         proxy_route_spec,
@@ -166,10 +167,24 @@ pub fn run_main() -> ! {
     }
     ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
     let EffectivePermissions {
-        permission_profile,
+        mut permission_profile,
         mut file_system_sandbox_policy,
-        network_sandbox_policy,
+        mut network_sandbox_policy,
     } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
+    let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);
+    if termux_fallback
+        && file_system_sandbox_policy
+            .needs_direct_runtime_enforcement(network_sandbox_policy, &sandbox_policy_cwd)
+    {
+        // Landlock is monotonic and cannot express a read-only carve-out (for
+        // example `.git`) below a writable workspace. Fail closed to the
+        // read-only profile; a write then follows Codex's normal approval path
+        // instead of silently weakening the requested policy.
+        permission_profile = PermissionProfile::read_only();
+        (file_system_sandbox_policy, network_sandbox_policy) =
+            permission_profile.to_runtime_permissions();
+    }
+    use_legacy_landlock |= termux_fallback;
     ensure_legacy_landlock_mode_supports_policy(
         use_legacy_landlock,
         &file_system_sandbox_policy,
@@ -259,6 +274,13 @@ pub fn run_main() -> ! {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
     exec_or_panic(command);
+}
+
+fn should_use_termux_landlock_fallback(allow_network_for_proxy: bool) -> bool {
+    let is_termux = std::env::var_os("PREFIX")
+        .as_deref()
+        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)));
+    is_termux && !allow_network_for_proxy
 }
 
 #[derive(Debug, Clone)]
