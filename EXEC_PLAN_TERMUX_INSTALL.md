@@ -17,8 +17,9 @@ A user with a fresh supported Termux installation can paste one command, receive
 - [x] (2026-08-08 09:02 UTC) Simplified README and moved recovery and maintainer operations into dedicated docs.
 - [x] (2026-08-08 09:12 UTC) Added and passed eight shell regression cases, ShellCheck, Bash syntax, YAML parsing, locked Cargo metadata, Cargo formatting check, and live Termux DNS/TLS probe.
 - [x] (2026-08-08 20:10 UTC) Built the exact implementation commit in Actions run 31250598056, passed all artifact gates in 35m48s, downloaded the complete bundle, and independently reverified its checksums and contents.
-- [x] (2026-08-08 20:36 UTC) Published and pinned the immutable public release, ran the README installer, and passed the corrected full installed smoke test on the target Termux phone.
-- [x] (2026-08-08 21:18 UTC) Traced the stock-Android bubblewrap/Landlock failure, implemented the fail-closed Termux Landlock+seccomp fallback, and proved directly on the phone that Landlock is fully enforced, commands execute, and unapproved writes are denied.
+- [x] (2026-08-08 20:36 UTC) Published and pinned the immutable public release, ran the README installer, and passed the then-current installed artifact/launcher smoke test on the target Termux phone.
+- [x] (2026-08-08 21:18 UTC) Traced the stock-Android bubblewrap/Landlock failure, implemented the fail-closed Termux Landlock+seccomp fallback, and proved directly on the phone that the kernel enforces the intended read/write policy.
+- [ ] Build and install the musl `O_PATH` follow-up, then require the full command-runner smoke test to pass before publishing it.
 
 ## Surprises & Discoveries
 
@@ -36,6 +37,8 @@ A user with a fresh supported Termux installation can paste one command, receive
   Evidence: live run `31250598056` appeared as `3.1250598056e+10`; updater run IDs are now derived losslessly from the run URL and covered by the queued-run regression.
 - Observation: the bundled Linux `bwrap` executable is valid, but a stock Android kernel denies the user/mount namespace operations required by a restricted bubblewrap profile.
   Evidence: the first installed smoke test reached the exact runtime and returned status 182 for `:workspace`. `strace` then showed Android SELinux denying the Landlock fallback's attempt to open `/`, which silently left only `/dev/null` allowed. The replacement uses explicit accessible Android/Termux hierarchies and automatically selects Landlock plus seccomp, failing closed to read-only when nested workspace carve-outs cannot be represented.
+- Observation: the first musl fallback artifact still exited 182 while loading a dynamically linked Termux command, even though the same Landlock rules worked from a native Android probe.
+  Evidence: syscall comparison showed the native probe opened all 15 roots with `O_PATH`, while the cross-compiled musl helper opened with `O_RDONLY` and Android SELinux rejected `/apex`, `/sys`, and `/storage`. `/apex` contains Android's dynamic-linker runtime. The follow-up opens the fixed internal rule roots with raw `O_PATH` and retains best-effort omission for genuinely unavailable trees.
 
 ## Decision Log
 
@@ -54,7 +57,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 
 ## Outcomes & Retrospective
 
-The requested architecture is implemented and the first exact runtime has passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, the runtime bundle includes every canonical Linux primary binary, and the full smoke test covers the Termux launcher and command runner. Static, fixture, workflow, independently downloaded bundle, and live installed-runtime validation pass.
+The requested artifact/update architecture is implemented and the first exact runtime passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, and the runtime bundle includes every canonical Linux primary binary. A newer, unpromoted fallback artifact exposed an Android `O_PATH` incompatibility; neither it nor the older public release will be presented as satisfying the strengthened restricted-command smoke test until the replacement passes on the phone.
 
 The implementation commit is `804da751873022f224e3be69ee1de7c3f7595bd9`; Actions run `31250598056` completed successfully after 35m48s. Its 391 MiB bundle identifies as `codex-cli 804da75` and has SHA-256 `658b110a7020b66c9280ace776880606f0f6405082cb20f5688843fd9c1f4228`. Those values are pinned in `scripts/termux/release-manifest.env`; no inferred or ancestor artifact is accepted.
 

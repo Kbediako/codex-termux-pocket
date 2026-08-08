@@ -4,6 +4,10 @@
 //! Landlock helpers remain available here as legacy/backup utilities.
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ffi::CString;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -20,9 +24,11 @@ use landlock::Access;
 use landlock::AccessFs;
 use landlock::CompatLevel;
 use landlock::Compatible;
+use landlock::PathBeneath;
 use landlock::Ruleset;
 use landlock::RulesetAttr;
 use landlock::RulesetCreatedAttr;
+use landlock::RulesetError;
 use seccompiler::BpfProgram;
 use seccompiler::SeccompAction;
 use seccompiler::SeccompCmpArgLen;
@@ -147,8 +153,22 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(access_rw)?
-        .create()?
-        .add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?
+        .create()?;
+
+    // Rust's cross-compiled musl OpenOptions currently drops O_PATH when the
+    // landlock crate opens rule roots. Android SELinux denies O_RDONLY on
+    // broad virtual hierarchies such as /apex while permitting O_PATH, which
+    // caused the Android dynamic linker to lose its libc paths after the
+    // sandbox was installed. Open Termux roots with the raw O_PATH flag so
+    // every intended rule is actually installed. Keep the crate's normal
+    // helper everywhere else.
+    if is_termux_environment() {
+        ruleset = ruleset.add_rules(termux_path_beneath_rules(&readable_roots, abi))?;
+    } else {
+        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?;
+    }
+
+    let mut ruleset = ruleset
         .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
         .set_no_new_privs(true);
 
@@ -174,6 +194,49 @@ fn install_filesystem_landlock_rules_on_current_thread(
 fn legacy_readable_roots() -> Vec<PathBuf> {
     let prefix = std::env::var_os("PREFIX").map(PathBuf::from);
     legacy_readable_roots_for_prefix(prefix.as_deref())
+}
+
+fn is_termux_environment() -> bool {
+    std::env::var_os("PREFIX")
+        .as_deref()
+        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)))
+}
+
+fn termux_path_beneath_rules(
+    paths: &[PathBuf],
+    abi: ABI,
+) -> Vec<Result<PathBeneath<OwnedFd>, RulesetError>> {
+    let access = AccessFs::from_read(abi);
+    paths
+        .iter()
+        .filter_map(|path| {
+            // Match landlock::path_beneath_rules' best-effort behavior: a
+            // missing or inaccessible optional Android hierarchy is omitted
+            // and therefore remains inaccessible once the ruleset is active.
+            open_path_for_landlock(path)
+                .ok()
+                .map(|fd| Ok(PathBeneath::new(fd, access)))
+        })
+        .collect()
+}
+
+fn open_path_for_landlock(path: &Path) -> std::io::Result<OwnedFd> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Landlock path contains an interior NUL byte",
+        )
+    })?;
+    // SAFETY: `path` is a live NUL-terminated CString and the flags do not
+    // require a mode argument.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: a successful open returned a new descriptor whose ownership
+        // is transferred exactly once to this OwnedFd.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
 }
 
 fn legacy_readable_roots_for_prefix(prefix: Option<&Path>) -> Vec<PathBuf> {
@@ -322,8 +385,10 @@ mod tests {
     use super::is_termux_prefix;
     use super::legacy_readable_roots_for_prefix;
     use super::network_seccomp_mode;
+    use super::open_path_for_landlock;
     use super::should_install_network_seccomp;
     use codex_protocol::protocol::NetworkSandboxPolicy;
+    use std::os::fd::AsRawFd;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -346,6 +411,15 @@ mod tests {
         assert!(is_termux_prefix(Path::new(
             "/data/data/com.termux/files/usr"
         )));
+    }
+
+    #[test]
+    fn termux_landlock_path_is_opened_with_o_path() {
+        let fd = open_path_for_landlock(Path::new("/"))
+            .expect("opening the filesystem root with O_PATH should succeed");
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(flags & libc::O_PATH, libc::O_PATH);
     }
     use pretty_assertions::assert_eq;
 
