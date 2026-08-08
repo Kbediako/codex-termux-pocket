@@ -193,6 +193,8 @@ test_static_architecture_guards() {
   grep -q 'cargo metadata --locked' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow lacks lockfile gate'
   grep -q -- '--bin codex-code-mode-host' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not build code-mode host'
   grep -q 'sha256sum --check --strict' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not validate checksums before upload'
+  grep -q -- '-P :danger-full-access' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not use the Android-compatible command-runner profile'
+  grep -q 'command -v bwrap' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not verify bundled bwrap discovery'
   local lock_line build_line
   lock_line="$(grep -n 'Validate Cargo.lock before build setup' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
   build_line="$(grep -n 'Build complete Codex runtime' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" | cut -d: -f1)"
