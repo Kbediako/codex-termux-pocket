@@ -17,6 +17,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 - [x] (2026-08-08 09:02 UTC) Simplified README and moved recovery and maintainer operations into dedicated docs.
 - [x] (2026-08-08 09:12 UTC) Added and passed eight shell regression cases, ShellCheck, Bash syntax, YAML parsing, locked Cargo metadata, Cargo formatting check, and live Termux DNS/TLS probe.
 - [x] (2026-08-08 20:10 UTC) Built the exact implementation commit in Actions run 31250598056, passed all artifact gates in 35m48s, downloaded the complete bundle, and independently reverified its checksums and contents.
+- [x] (2026-08-08 20:36 UTC) Published and pinned the immutable public release, ran the README installer, and passed the corrected full installed smoke test on the target Termux phone.
 
 ## Surprises & Discoveries
 
@@ -32,6 +33,8 @@ A user with a fresh supported Termux installation can paste one command, receive
   Evidence: Rust formatting completed independently with `cargo fmt --all -- --check`; `just fmt` reported only Python SDK, Python scripts, and Bazel/Starlark formatter setup failures.
 - Observation: GitHub CLI templates render large numeric `databaseId` values in scientific notation.
   Evidence: live run `31250598056` appeared as `3.1250598056e+10`; updater run IDs are now derived losslessly from the run URL and covered by the queued-run regression.
+- Observation: the bundled Linux `bwrap` executable is valid, but a stock Android kernel denies the user/mount namespace operations required by a restricted bubblewrap profile.
+  Evidence: the first installed smoke test reached the exact runtime and returned status 182 for `:workspace`; the explicit `:danger-full-access` Codex command-runner path succeeds, finds the bundled `bwrap`, and remains bounded by the Termux Android app UID. The documentation does not misrepresent `proot` as a security sandbox.
 
 ## Decision Log
 
@@ -50,7 +53,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 
 ## Outcomes & Retrospective
 
-The requested architecture is implemented and the first exact runtime has passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, the runtime bundle includes every canonical Linux primary binary, and the full smoke test covers the Termux launcher and command runner. Static, fixture, workflow, and independently downloaded bundle validation pass.
+The requested architecture is implemented and the first exact runtime has passed the production ARM workflow. Normal installation is now a verified artifact operation, source-history maintenance is explicit and maintainer-only, exact queued/running Actions runs are recoverable, the runtime bundle includes every canonical Linux primary binary, and the full smoke test covers the Termux launcher and command runner. Static, fixture, workflow, independently downloaded bundle, and live installed-runtime validation pass.
 
 The implementation commit is `804da751873022f224e3be69ee1de7c3f7595bd9`; Actions run `31250598056` completed successfully after 35m48s. Its 391 MiB bundle identifies as `codex-cli 804da75` and has SHA-256 `658b110a7020b66c9280ace776880606f0f6405082cb20f5688843fd9c1f4228`. Those values are pinned in `scripts/termux/release-manifest.env`; no inferred or ancestor artifact is accepted.
 
@@ -58,7 +61,7 @@ The implementation commit is `804da751873022f224e3be69ee1de7c3f7595bd9`; Actions
 
 `scripts/termux/termux-mobile-lib.sh` owns download, bundle verification, atomic installation, launcher creation, and shared Git/GitHub helpers. `scripts/termux/codex-update-alpha` is the user updater. `scripts/termux/install-codex-termux` is the new bootstrap. `scripts/termux/maintainer-update-alpha` is the source-history maintenance workflow. `scripts/termux/smoke-test-artifact` validates a bundle or installed runtime. `.github/workflows/termux-mobile-artifact.yml` builds the runtime. Shell tests live under `scripts/termux/tests`.
 
-An Actions artifact is a run-scoped downloadable archive. Its runtime bundle contains a nested tar archive, `metadata.json`, and `SHA256SUMS`; verification checks both outer files and each runtime executable before atomic replacement.
+An Actions artifact is a run-scoped downloadable archive. Its runtime bundle contains a nested tar archive, `metadata.env`, and `SHA256SUMS`; verification checks both outer files and each runtime executable before atomic replacement.
 
 ## Plan of Work
 

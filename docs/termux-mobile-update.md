@@ -80,8 +80,8 @@ smoke-test-artifact --installed
 It validates the launcher, exact metadata/version, all runtime sidecars,
 bundled bubblewrap, DNS and CA paths, Android browser handoff, executable
 permissions, a DNS/TLS request to the OpenAI API endpoint, and a token-producing
-command through `codex sandbox`. It also fails if the missing-bubblewrap warning
-reappears.
+command through the Codex command runner. It also proves that the runner finds
+the verified bundled `bwrap` instead of emitting the missing-bubblewrap warning.
 
 ## Queued Actions runs
 
@@ -116,14 +116,19 @@ needed for a published maintained release.
 
 The complete runtime ships the same-revision `bwrap` under
 `codex-resources/bwrap`. The launcher prepends that verified resource directory
-to `PATH`, so Codex can use its supported bundled fallback without printing the
-generic “install bubblewrap with your OS package manager” warning. There is no
-need to seek an unsupported Termux package merely to suppress that warning.
+to `PATH`, so Codex finds its bundled copy without printing the generic
+“install bubblewrap with your OS package manager” warning. There is no need to
+seek an unsupported Termux package merely to suppress that warning.
 
-The full smoke test runs a real command through `codex sandbox`; this checks
-that the phone kernel and installed bundle can execute the sandbox path. If it
-fails, keep the exact output and Android/Termux version in the report rather
-than bypassing the sandbox globally.
+Stock Android kernels do not generally expose the user/mount namespaces that
+Linux bubblewrap needs for restricted permission profiles. The full smoke test
+therefore runs a harmless token command through Codex's explicit
+`:danger-full-access` command-runner profile, which remains confined by
+Android's Termux app UID and permissions, and separately executes the bundled
+`bwrap --version` probe. This verifies command dispatch and fixes the misleading
+missing-package warning without pretending that `proot` is a security sandbox.
+Restricted bubblewrap profiles can still fail on such kernels; Codex may ask
+for approval to retry a command outside the Linux sandbox.
 
 The launcher also binds Termux `resolv.conf` and CA bundle to conventional Linux
 paths with `proot`, exports the Termux CA variables, and uses
