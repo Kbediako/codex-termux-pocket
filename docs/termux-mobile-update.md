@@ -125,6 +125,10 @@ Linux bubblewrap needs. On Termux, Codex now automatically uses an in-process
 Landlock filesystem plus seccomp network fallback instead. Android SELinux
 denies opening `/` itself, so the fallback grants read access only through a
 fail-closed list of accessible Android system trees and the Termux app tree.
+The musl helper opens those rule roots with `O_PATH`: Android permits that
+descriptor-only lookup for virtual trees such as `/apex` even when it denies a
+normal read-open of the directory. This keeps Android's dynamic-linker paths in
+the Landlock allowlist without granting file writes or relying on root access.
 This follows the kernel's path-beneath Landlock model and Termux's documented
 SELinux-constrained filesystem layout:
 [Landlock kernel documentation](https://docs.kernel.org/userspace-api/landlock.html),
