@@ -18,6 +18,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 - [x] (2026-08-08 09:12 UTC) Added and passed eight shell regression cases, ShellCheck, Bash syntax, YAML parsing, locked Cargo metadata, Cargo formatting check, and live Termux DNS/TLS probe.
 - [x] (2026-08-08 20:10 UTC) Built the exact implementation commit in Actions run 31250598056, passed all artifact gates in 35m48s, downloaded the complete bundle, and independently reverified its checksums and contents.
 - [x] (2026-08-08 20:36 UTC) Published and pinned the immutable public release, ran the README installer, and passed the corrected full installed smoke test on the target Termux phone.
+- [x] (2026-08-08 21:18 UTC) Traced the stock-Android bubblewrap/Landlock failure, implemented the fail-closed Termux Landlock+seccomp fallback, and proved directly on the phone that Landlock is fully enforced, commands execute, and unapproved writes are denied.
 
 ## Surprises & Discoveries
 
@@ -34,7 +35,7 @@ A user with a fresh supported Termux installation can paste one command, receive
 - Observation: GitHub CLI templates render large numeric `databaseId` values in scientific notation.
   Evidence: live run `31250598056` appeared as `3.1250598056e+10`; updater run IDs are now derived losslessly from the run URL and covered by the queued-run regression.
 - Observation: the bundled Linux `bwrap` executable is valid, but a stock Android kernel denies the user/mount namespace operations required by a restricted bubblewrap profile.
-  Evidence: the first installed smoke test reached the exact runtime and returned status 182 for `:workspace`; the explicit `:danger-full-access` Codex command-runner path succeeds, finds the bundled `bwrap`, and remains bounded by the Termux Android app UID. The documentation does not misrepresent `proot` as a security sandbox.
+  Evidence: the first installed smoke test reached the exact runtime and returned status 182 for `:workspace`. `strace` then showed Android SELinux denying the Landlock fallback's attempt to open `/`, which silently left only `/dev/null` allowed. The replacement uses explicit accessible Android/Termux hierarchies and automatically selects Landlock plus seccomp, failing closed to read-only when nested workspace carve-outs cannot be represented.
 
 ## Decision Log
 

@@ -56,3 +56,4 @@ subject	termux: make mobile installs verified and rebase-free	runtime-critical	C
 subject	termux: preserve large Actions run IDs	tooling	Updater-only fix derives exact workflow run IDs from URLs instead of GitHub CLI floating-point template rendering.
 subject	termux: publish verified mobile runtime	tooling	Pins the first validated public runtime, preserves exact Actions run IDs, and avoids rebuilding when only installer metadata or tests change.
 subject	termux: make Android command smoke test accurate	tooling	Exercises the Codex command runner and bundled bwrap discovery without claiming stock Android supports Linux user namespaces.
+subject	termux: secure restricted commands with Landlock	security-critical	Uses a fail-closed Landlock/seccomp fallback on Termux when stock Android denies bubblewrap namespaces; unsupported nested write policies are reduced to read-only rather than weakened.

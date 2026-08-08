@@ -41,6 +41,15 @@ pub fn system_bwrap_warning(permission_profile: &PermissionProfile) -> Option<St
     if !should_warn_about_system_bwrap(permission_profile) {
         return None;
     }
+    // Termux uses the in-process Landlock/seccomp fallback for policies it can
+    // enforce without Linux user/mount namespaces. Package-manager advice for
+    // bubblewrap is both unactionable and misleading on Android.
+    if std::env::var_os("PREFIX")
+        .as_deref()
+        .is_some_and(|prefix| Path::new(prefix).ends_with("com.termux/files/usr"))
+    {
+        return None;
+    }
 
     let system_bwrap_path = find_system_bwrap_in_path();
     system_bwrap_warning_for_path(system_bwrap_path.as_deref())

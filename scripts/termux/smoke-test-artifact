@@ -78,7 +78,7 @@ smoke_bundle() {
 
 smoke_installed() {
   termux_check_environment
-  local metadata runtime_root metadata_sha metadata_version actual_version token output command_status
+  local metadata runtime_root metadata_sha metadata_version actual_version token output command_status denied_path
   metadata="$(termux_installed_metadata)"
   runtime_root="$PREFIX/libexec/codex-termux/current"
   [[ -f "$metadata" ]] || termux_abort "installed metadata is missing: $metadata"
@@ -107,7 +107,7 @@ smoke_installed() {
       https://api.openai.com/ >/dev/null
     token="codex-termux-command-ok-$$"
     set +e
-    output="$(codex sandbox -P :danger-full-access -- "$PREFIX/bin/bash" -c \
+    output="$(codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
       "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" 2>&1)"
     command_status=$?
     set -e
@@ -120,11 +120,21 @@ smoke_installed() {
     [[ "$output" == *"bwrap=$runtime_root/codex-resources/bwrap"* ]] || \
       termux_abort 'command runner did not resolve the verified bundled bubblewrap.'
     [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
+
+    denied_path="${TMPDIR:-$PREFIX/tmp}/codex-termux-sandbox-deny-$$"
+    if codex sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
+      "printf forbidden >'$denied_path'" >/dev/null 2>&1; then
+      termux_abort 'restricted Termux fallback unexpectedly allowed a filesystem write.'
+    fi
+    [[ ! -e "$denied_path" ]] || {
+      rm -f "$denied_path"
+      termux_abort 'restricted Termux fallback created a file outside an approved execution.'
+    }
   fi
 
   termux_info "installed smoke test passed: $actual_version ($metadata_sha)"
   if [[ "$quick" != "yes" ]]; then
-    termux_info 'launcher DNS/CA/browser/bubblewrap checks and command-runner smoke test passed.'
+    termux_info 'launcher DNS/CA/browser checks and restricted Landlock/seccomp command smoke test passed.'
   fi
 }
 
