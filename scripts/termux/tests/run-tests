@@ -162,7 +162,9 @@ set -euo pipefail
 printf '%s\\n' "\$*" >>'$gh_log'
 case "\$1 \${2:-}" in
   'auth status') exit 0 ;;
-  'run list') printf '%s\\n' 'https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
+  'run list') printf '%s\\n' \
+    'https://github.com/Kbediako/codex-termux-pocket/actions/runs/31337|$sha|completed|failure|Termux runtime aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    'https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
   'run view') printf '%s' 'https://github.com/Kbediako/codex-termux-pocket/actions/runs/4242|$sha|queued||Termux runtime $sha' ;;
   *) exit 1 ;;
 esac
@@ -179,6 +181,7 @@ EOF
   set -e
   assert_eq '3' "$status" 'queued run local timeout status'
   grep -q 'run 4242 is queued' "$output" || fail 'queued state was not printed'
+  ! grep -q 'run 31337' "$output" || fail 'a run requested for a different commit matched by branch head SHA'
   grep -q 'run URL: https://github.com/.*/4242' "$output" || fail 'timeout omitted run URL'
   grep -q 'wait --run-id 4242 --expected-sha' "$output" || fail 'timeout omitted resume command'
   if grep -q '^workflow run ' "$gh_log"; then
