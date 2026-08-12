@@ -8,6 +8,7 @@ If this repo lacks `PLANS.md` or an ExecPlans section in `AGENTS.md`, add them b
 
 ## Termux Fork Notes
 
+- On native Android/Termux, before doing any work, read and follow [the Termux agent safety rules](docs/termux-agent-safety.md) completely; they override conflicting instructions later in this file.
 - Prefer `codex-update-alpha` for Android/Termux alpha maintenance; do not default to ad-hoc local Cargo rebuilds.
 - The supported update order on Termux is: upstream ARM64 musl artifact, then fork `remote-artifact`, then explicit source retry with `CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1`.
 - If helper or workflow commits are added on this fork, update `scripts/termux/patch_audit.tsv` in the same change so `auto` mode can classify them correctly.
