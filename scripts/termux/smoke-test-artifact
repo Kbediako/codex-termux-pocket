@@ -78,7 +78,7 @@ smoke_bundle() {
 
 smoke_installed() {
   termux_check_environment
-  local launcher metadata runtime_root metadata_sha metadata_version actual_version token output command_status denied_path
+  local launcher metadata runtime_root metadata_sha metadata_version actual_version output command_status refusal_marker
   metadata="$(termux_installed_metadata)"
   launcher="$PREFIX/bin/codex"
   runtime_root="$PREFIX/libexec/codex-termux/current"
@@ -106,36 +106,27 @@ smoke_installed() {
     SSL_CERT_FILE="$PREFIX/etc/tls/cert.pem" \
       curl --silent --show-error --connect-timeout 15 --max-time 30 --head \
       https://api.openai.com/ >/dev/null
-    token="codex-termux-command-ok-$$"
+    refusal_marker="${TMPDIR:-$PREFIX/tmp}/codex-termux-sandbox-refusal-$$"
+    [[ ! -e "$refusal_marker" ]] || termux_abort "refusal marker already exists: $refusal_marker"
     set +e
     output="$("$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
-      "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" 2>&1)"
+      "printf executed >'$refusal_marker'" 2>&1)"
     command_status=$?
     set -e
-    if (( command_status != 0 )); then
+    if (( command_status == 0 )); then
       printf '%s\n' "$output" >&2
-      termux_abort "minimal command failed in the Codex Termux command runner (exit $command_status)."
+      termux_abort 'restricted Termux command unexpectedly executed.'
     fi
-    [[ "$output" != *'Codex could not find bubblewrap on PATH'* ]] || \
-      termux_abort 'bundled bubblewrap was not discovered on PATH.'
-    [[ "$output" == *"bwrap=$runtime_root/codex-resources/bwrap"* ]] || \
-      termux_abort 'command runner did not resolve the verified bundled bubblewrap.'
-    [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
-
-    denied_path="${TMPDIR:-$PREFIX/tmp}/codex-termux-sandbox-deny-$$"
-    if "$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
-      "printf forbidden >'$denied_path'" >/dev/null 2>&1; then
-      termux_abort 'restricted Termux fallback unexpectedly allowed a filesystem write.'
-    fi
-    [[ ! -e "$denied_path" ]] || {
-      rm -f "$denied_path"
-      termux_abort 'restricted Termux fallback created a file outside an approved execution.'
+    [[ "$output" == *'restricted sandbox execution is disabled on Termux; refusing to run the command'* ]] || {
+      printf '%s\n' "$output" >&2
+      termux_abort 'restricted Termux command did not fail at the expected containment boundary.'
     }
+    [[ ! -e "$refusal_marker" ]] || termux_abort 'restricted Termux command executed its payload before refusing.'
   fi
 
   termux_info "installed smoke test passed: $actual_version ($metadata_sha)"
   if [[ "$quick" != "yes" ]]; then
-    termux_info 'launcher DNS/CA/browser checks and restricted Landlock/seccomp command smoke test passed.'
+    termux_info 'launcher DNS/CA/browser checks and fail-closed restricted-command refusal passed.'
   fi
 }
 

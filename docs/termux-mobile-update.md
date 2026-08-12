@@ -122,27 +122,21 @@ to `PATH`, so Codex finds its bundled copy without printing the generic
 seek an unsupported Termux package merely to suppress that warning.
 
 Stock Android kernels do not generally expose the user/mount namespaces that
-Linux bubblewrap needs. On Termux, Codex now automatically uses an in-process
-Landlock filesystem plus seccomp network fallback instead. Android SELinux
-denies opening `/` itself, so the fallback grants read access only through a
-fail-closed list of accessible Android system trees and the Termux app tree.
-The musl helper opens those rule roots with `O_PATH`: Android permits that
-descriptor-only lookup for virtual trees such as `/apex` even when it denies a
-normal read-open of the directory. This keeps Android's dynamic-linker paths in
-the Landlock allowlist without granting file writes or relying on root access.
-This follows the kernel's path-beneath Landlock model and Termux's documented
-SELinux-constrained filesystem layout:
-[Landlock kernel documentation](https://docs.kernel.org/userspace-api/landlock.html),
-[Termux filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout).
+Linux bubblewrap needs. Earlier Termux runtimes attempted an in-process
+Landlock filesystem plus seccomp network fallback. Repeated full-device
+reboots were observed at that restricted-command boundary, while Android
+denied unprivileged Termux access to the boot reason, kernel log, and pstore
+records needed to distinguish a Landlock, seccomp, firmware, thermal, or
+unrelated system failure.
 
-Landlock cannot represent nested read-only carve-outs below a writable parent.
-When a profile such as `:workspace` requires those carve-outs, the fallback is
-made more restrictive—not less—by enforcing read-only filesystem access. A
-write is denied and can follow Codex's normal explicit approval path. The full
-smoke test proves a restricted `:workspace` command can execute, that an
-unapproved write is denied, and that the matching bundled `bwrap` remains
-discoverable. `proot` is used only for DNS/CA path bridging and is not treated
-as a security sandbox.
+The maintained runtime therefore fails closed: on Termux, an invocation that
+would enter the Linux sandbox helper exits before bubblewrap, Landlock,
+seccomp, or the requested payload. The full smoke test checks that refusal and
+proves its marker payload was not executed. Do not weaken the configured
+permission profile merely to suppress this refusal. The bundled `bwrap`
+remains version-checked as part of the complete same-revision runtime, but
+stock Android cannot use it as a security boundary. `proot` is used only for
+DNS/CA path bridging and is not treated as a security sandbox.
 
 The launcher also binds Termux `resolv.conf` and CA bundle to conventional Linux
 paths with `proot`, exports the Termux CA variables, and uses

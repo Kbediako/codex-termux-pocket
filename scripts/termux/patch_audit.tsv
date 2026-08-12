@@ -68,5 +68,6 @@ subject	termux: select only valid upstream alpha tags	tooling	Filters malformed 
 subject	termux: refresh lockfile after alpha.148.0-alpha.5 rebase	build-only	Refreshes the complete workspace and target-specific dependency graph so the alpha.5 artifact build remains reproducible with --locked.
 subject	termux: refresh lockfile after alpha.148.0-alpha.9 rebase	build-only	Refreshes workspace package versions so the alpha.9 artifact build remains reproducible with --locked.
 subject	termux: refresh lockfile after alpha.148.0-alpha.10 rebase	build-only	Refreshes workspace package versions and target-specific dependencies so the alpha.10 artifact build remains reproducible with --locked.
+subject	termux: contain unstable Android kernel sandbox	security-critical	Refuses restricted Termux commands before bubblewrap, Landlock, seccomp, or payload execution after repeated device reboots at that boundary.
 subject	termux: validate full locked dependency graph	tooling	Makes maintainer and CI lockfile gates resolve target-specific and git dependencies before ARM build setup instead of relying on incomplete --no-deps metadata.
 subject	termux: publish alpha.148.0-alpha.5 runtime	tooling	Pins the exact public alpha.5 artifact that passed the full CI bundle validation and on-device Termux command-runner smoke test.
