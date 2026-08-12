@@ -68,3 +68,4 @@ subject	termux: select only valid upstream alpha tags	tooling	Filters malformed 
 subject	termux: refresh lockfile after alpha.148.0-alpha.5 rebase	build-only	Refreshes the complete workspace and target-specific dependency graph so the alpha.5 artifact build remains reproducible with --locked.
 subject	termux: validate full locked dependency graph	tooling	Makes maintainer and CI lockfile gates resolve target-specific and git dependencies before ARM build setup instead of relying on incomplete --no-deps metadata.
 subject	termux: publish alpha.148.0-alpha.5 runtime	tooling	Pins the exact public alpha.5 artifact that passed the full CI bundle validation and on-device Termux command-runner smoke test.
+subject	termux: test Linux sandbox on hosted runners	tooling	Fork workflow only; validates the Linux sandbox on public x64 and ARM64 Ubuntu runners without executing it on Android.

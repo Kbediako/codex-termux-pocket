@@ -1,0 +1,108 @@
+name: termux-linux-sandbox
+run-name: Linux sandbox tests ${{ inputs.source_ref || github.sha }}
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/setup-ci/**"
+      - ".github/workflows/termux-linux-sandbox.yml"
+      - "codex-rs/.config/nextest.toml"
+      - "codex-rs/Cargo.lock"
+      - "codex-rs/Cargo.toml"
+      - "codex-rs/rust-toolchain.toml"
+      - "codex-rs/linux-sandbox/**"
+      - "codex-rs/sandboxing/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/actions/setup-ci/**"
+      - ".github/workflows/termux-linux-sandbox.yml"
+      - "codex-rs/.config/nextest.toml"
+      - "codex-rs/Cargo.lock"
+      - "codex-rs/Cargo.toml"
+      - "codex-rs/rust-toolchain.toml"
+      - "codex-rs/linux-sandbox/**"
+      - "codex-rs/sandboxing/**"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref to test (branch, tag, or commit SHA)
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: ${{ github.repository != 'openai/codex' }}
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      RUST_BACKTRACE: "1"
+      RUST_MIN_STACK: "8388608"
+      NEXTEST_STATUS_LEVEL: leak
+
+    steps:
+      - name: Checkout requested ref
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref != '' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Checkout triggering commit
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.source_ref == '' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Linux sandbox dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+
+      - name: Enable unprivileged user namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Validate locked dependency graph
+        shell: bash
+        run: cargo metadata --locked --format-version=1 >/dev/null
+
+      - name: Test codex-linux-sandbox
+        shell: bash
+        run: cargo nextest run --locked --no-fail-fast --cargo-profile ci-test --target ${{ matrix.target }} -p codex-linux-sandbox

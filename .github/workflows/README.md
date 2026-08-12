@@ -32,3 +32,15 @@ The workflows in this directory are split so that pull requests get fast, review
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
 - Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
 - Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+
+## Termux Fork Linux Sandbox Checks
+
+`termux-linux-sandbox.yml` gives the Termux fork a public-runner replacement for
+the upstream full-CI Linux sandbox coverage. It runs the scoped
+`codex-linux-sandbox` nextest suite on hosted x64 and ARM64 Ubuntu runners when
+the sandbox changes. Maintainers can also dispatch it with an exact branch, tag,
+or commit SHA before publishing a mobile alpha. Dispatch the full candidate SHA
+for every alpha; an alpha version bump does not require editing the workflow.
+Update its pins only when the upstream Rust/nextest setup, hosted runner labels,
+or required Linux packages change. The workflow is fork-only and does not run
+on `openai/codex`.
