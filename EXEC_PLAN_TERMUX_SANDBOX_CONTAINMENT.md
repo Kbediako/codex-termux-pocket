@@ -14,8 +14,9 @@ The maintained Termux runtime must not invoke a restricted Linux kernel sandbox 
 - [x] (2026-08-12 21:10 UTC) Added an early Termux refusal before Landlock, seccomp, bubblewrap, or payload execution.
 - [x] (2026-08-12 21:12 UTC) Replaced the invalid write probe with a fail-closed refusal smoke test and updated operational guidance and patch audit.
 - [x] (2026-08-12 21:17 UTC) Passed shell regressions, Bash syntax, ShellCheck, workflow YAML, locked Cargo metadata, diff checks, and Rust formatting; scoped Rust tests were unavailable because `cargo-nextest` is not installed.
-- [ ] Build and publish a replacement alpha.10 artifact, install it atomically, and verify the safe refusal on the phone.
-- [ ] Pin only the validated replacement release on `main` and mark it latest.
+- [x] (2026-08-12 21:21 UTC) Built and published the replacement alpha.10 artifact from exact commit `0fa73635a1...` after all guarded CI bundle checks passed.
+- [x] (2026-08-12 21:23 UTC) Installed the replacement atomically and passed the full safe-refusal smoke test with the same Android boot ID before and after.
+- [x] (2026-08-12 21:25 UTC) Pinned the exact release manifest on `main`, marked the replacement Latest, and verified the ordinary updater reports the installed runtime current.
 
 ## Surprises & Discoveries
 
@@ -29,6 +30,8 @@ The maintained Termux runtime must not invoke a restricted Linux kernel sandbox 
   Evidence: `getprop`, `logcat`, `dmesg`, and `/sys/fs/pstore` return permission errors.
 - Observation: repository-wide formatting cannot cover Python or Starlark in this Termux checkout, and the scoped `just test` runner is unavailable.
   Evidence: `just fmt` reports only missing `uv` and `dotslash` after Rust formatting; `just test -p codex-linux-sandbox` stops before compilation because `cargo-nextest` is absent.
+- Observation: the contained helper refusal is both early and stable on the target phone.
+  Evidence: the full installed smoke test completed in 1.5 seconds, reported the fail-closed refusal, left no payload marker, and observed boot ID `d83857d1-612f-4d60-b32e-11b53ff1c552` before and after.
 
 ## Decision Log
 
@@ -44,11 +47,15 @@ The maintained Termux runtime must not invoke a restricted Linux kernel sandbox 
 
 ## Outcomes & Retrospective
 
-Work is in progress. The alpha.10 source and public artifact are verified, but the maintained default remains unpinned until the containment artifact passes on-device validation.
+The maintained Termux alpha is now `codex-cli 0fa7363` from commit `0fa73635a10c0527f6c53f86409e84149ff061a7`. GitHub Actions run `31639531828` built and validated the complete ARM64 musl bundle in 31m35s and published immutable release `termux-v2026.08.12-0fa73635a1`. The archive SHA-256 is `3743e16455a19248510026e274fb9d331020d12da48fc78e8b32351d73e5d74b`.
+
+The target phone installed that exact public release atomically. The full installed test retained launcher, sidecar, bundled-bubblewrap, DNS, certificate, and browser checks, then proved a restricted marker payload was refused before kernel sandbox setup. The Android boot ID remained unchanged. Main commit `6380da8470f49f9b2e96cb269a1b315b89b5e6fe` pins the release, GitHub marks it Latest, and `codex-update-alpha check` reports the phone current on upstream `rust-v0.148.0-alpha.10`.
+
+The kernel-level root cause remains unresolved because Android denies Termux access to authoritative crash logs. The containment intentionally trades restricted command execution for device stability and fail-closed behavior; normal unrestricted Codex operation remains available.
 
 ## Context and Orientation
 
-`codex-rs/linux-sandbox/src/linux_run_main.rs` enters bubblewrap, Landlock, and seccomp enforcement. The Termux fork currently detects `$PREFIX` and selects an in-process Landlock/seccomp fallback because stock Android denies bubblewrap namespaces. `scripts/termux/smoke-test-artifact` owns installed validation. `scripts/termux/tests/run-tests` contains static architecture guards. `docs/termux-mobile-update.md` documents the Android behavior, and `scripts/termux/patch_audit.tsv` classifies fork-only patches.
+`codex-rs/linux-sandbox/src/linux_run_main.rs` enters bubblewrap, Landlock, and seccomp enforcement on supported Linux systems. The Termux fork now detects `$PREFIX` and refuses before those operations. `scripts/termux/smoke-test-artifact` owns installed validation. `scripts/termux/tests/run-tests` contains static architecture guards. `docs/termux-mobile-update.md` documents the Android behavior, and `scripts/termux/patch_audit.tsv` classifies fork-only patches.
 
 The active alpha.10 source branch is `release/rust-v0.148.0-alpha.10`. The first public alpha.10 release points to commit `378db3af113b2deb13b299c063365a3d6ec9473d`; it must remain an immutable historical artifact rather than being overwritten.
 
@@ -89,8 +96,13 @@ If the contained smoke test still reboots the phone, do not repeat it. Leave the
 
 Current active runtime after reboot:
 
-    codex-cli 378db3a
-    378db3af113b2deb13b299c063365a3d6ec9473d
+    codex-cli 0fa7363
+    0fa73635a10c0527f6c53f86409e84149ff061a7
+
+Published release and manifest:
+
+    termux-v2026.08.12-0fa73635a1
+    archive_sha256=3743e16455a19248510026e274fb9d331020d12da48fc78e8b32351d73e5d74b
 
 Current authoritative observation gap: Android system crash logs require privileges unavailable to the Termux app.
 
