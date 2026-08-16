@@ -129,6 +129,7 @@ jobs:
             "${GITHUB_WORKSPACE}/codex-rs/.cargo/config.toml"
             "${GITHUB_WORKSPACE}/codex-rs/Cargo.lock"
             "${GITHUB_WORKSPACE}/codex-rs/rust-toolchain.toml"
+            "${GITHUB_WORKSPACE}/scripts/termux/build-inputs.env"
             "${manifest_files[@]}"
           )
           mapfile -t cache_key_files < <(printf '%s\n' "${cache_key_files[@]}" | LC_ALL=C sort -u)
@@ -239,20 +240,31 @@ jobs:
           echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
           echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
 
-      - name: Configure musl rusty_v8 artifact overrides
+      - name: Configure and verify musl rusty_v8 artifact overrides
         env:
           TARGET: aarch64-unknown-linux-musl
         shell: bash
         run: |
           set -euo pipefail
+          lock_file="${GITHUB_WORKSPACE}/scripts/termux/build-inputs.env"
+          # shellcheck disable=SC1090
+          source "$lock_file"
+          [[ "${format_version:-}" == "1" ]] || { echo "invalid build input lock format" >&2; exit 1; }
           version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
+          [[ "$version" == "$rusty_v8_version" ]] || {
+            echo "Rusty V8 lock mismatch: Cargo resolves $version, lock pins $rusty_v8_version" >&2
+            exit 1
+          }
           base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
-          archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
           binding_dir="${RUNNER_TEMP}/rusty_v8"
+          archive_path="${binding_dir}/librusty_v8_release_${TARGET}.a.gz"
           binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
-          mkdir -p "${binding_dir}"
-          curl -fsSL "${base_url}/src_binding_release_${TARGET}.rs" -o "${binding_path}"
-          echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
+          mkdir -p "$binding_dir"
+          curl -fsSL "${base_url}/librusty_v8_release_${TARGET}.a.gz" -o "$archive_path"
+          curl -fsSL "${base_url}/src_binding_release_${TARGET}.rs" -o "$binding_path"
+          printf '%s  %s\n' "$rusty_v8_archive_sha256" "$archive_path" | sha256sum --check --strict
+          printf '%s  %s\n' "$rusty_v8_binding_sha256" "$binding_path" | sha256sum --check --strict
+          echo "RUSTY_V8_ARCHIVE=file://${archive_path}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
       - name: Restore host release cache
@@ -361,9 +373,18 @@ jobs:
           (runtime_root / "codex-package.json").write_text(
               json.dumps(package, indent=2) + "\n", encoding="utf-8"
           )
+          import hashlib
+          manifest_lines = []
+          for path in sorted(item for item in runtime_root.rglob("*") if item.is_file()):
+              relative = path.relative_to(runtime_root).as_posix()
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              manifest_lines.append(f"{digest}  {relative}")
+          (runtime_root / "runtime-files.sha256").write_text(
+              "\n".join(manifest_lines) + "\n", encoding="utf-8"
+          )
           metadata = "\n".join(
               [
-                  "format_version=1",
+                  "format_version=2",
                   "source_repository=" + os.environ["GITHUB_REPOSITORY"],
                   "head_sha=" + head_sha,
                   "git_describe=" + describe.replace("\n", " "),
@@ -409,6 +430,8 @@ jobs:
             test -x "$runtime/$file" || { echo "Missing executable: $file"; exit 1; }
           done
           test -f "$runtime/codex-package.json"
+          test -f "$runtime/runtime-files.sha256"
+          (cd "$runtime" && sha256sum --check --strict runtime-files.sha256)
           metadata_version="$(sed -n 's/^codex_version=//p' metadata.env)"
           test "$metadata_version" = "$("$runtime/bin/codex" --version)"
           "$runtime/bin/codex-code-mode-host" --help >/dev/null
@@ -521,7 +544,7 @@ jobs:
           cd dist
           sha256sum --check --strict SHA256SUMS
           cat > release-manifest.env <<EOF
-          format_version=1
+          format_version=2
           repository=${GITHUB_REPOSITORY}
           release_tag=${RELEASE_TAG}
           head_sha=${HEAD_SHA}
