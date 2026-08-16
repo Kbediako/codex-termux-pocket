@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - ".github/scripts/termux-android-emulator-check.sh"
+      - ".github/scripts/termux-android-emulator-noninteractive.sh"
       - ".github/workflows/termux-android-emulator.yml"
   workflow_dispatch:
 
@@ -16,13 +17,13 @@ permissions:
 
 concurrency:
   group: termux-android-emulator-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   native-termux:
     name: Real Termux app on Android emulator
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       SOURCE_SHA: 976d1798cd03427e3ca37a614b236042868a635f
       EXPECTED_PACKAGE_VERSION: 0.148.0-alpha.20
@@ -103,9 +104,11 @@ jobs:
           ram-size: 4096M
           heap-size: 1024M
           disk-size: 8192M
+          emulator-boot-timeout: 900
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: bash .github/scripts/termux-android-emulator-check.sh
+          disable-spellchecker: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -no-metrics
+          script: bash .github/scripts/termux-android-emulator-noninteractive.sh
 
       - name: Upload native validation evidence
         if: always()
