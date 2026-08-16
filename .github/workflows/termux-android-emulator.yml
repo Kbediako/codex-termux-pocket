@@ -87,16 +87,39 @@ jobs:
           echo "TERMUX_APK=${GITHUB_WORKSPACE}/apk/${TERMUX_APK_NAME}" >>"$GITHUB_ENV"
           echo "EMULATOR_DIST=${GITHUB_WORKSPACE}/dist/android-emulator" >>"$GITHUB_ENV"
 
-      - name: Enable KVM access
+      - name: Prepare KVM acceleration when available
         shell: bash
         run: |
           set -euo pipefail
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-            sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          test -r /dev/kvm
-          test -w /dev/kvm
+          mkdir -p android-termux-logs
+          {
+            printf 'kernel=%s\n' "$(uname -srmo)"
+            printf 'virtualization_flags=%s\n' "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo | tr '\n' ',' || true)"
+
+            if [[ ! -e /dev/kvm ]]; then
+              sudo modprobe kvm 2>/dev/null || true
+              if grep -qw vmx /proc/cpuinfo; then
+                sudo modprobe kvm_intel 2>/dev/null || true
+              elif grep -qw svm /proc/cpuinfo; then
+                sudo modprobe kvm_amd 2>/dev/null || true
+              fi
+            fi
+
+            if [[ -e /dev/kvm ]]; then
+              echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+                sudo tee /etc/udev/rules.d/99-kvm4all.rules
+              sudo udevadm control --reload-rules
+              sudo udevadm trigger --name-match=kvm || true
+              sudo chmod 0666 /dev/kvm
+              ls -l /dev/kvm
+              test -r /dev/kvm
+              test -w /dev/kvm
+              echo 'kvm=available'
+            else
+              echo 'kvm=unavailable'
+              echo '::warning::/dev/kvm is unavailable on this hosted runner; the Android emulator will use software acceleration.'
+            fi
+          } 2>&1 | tee android-termux-logs/kvm-preflight.log
 
       - name: Run native Android and Termux validation
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
@@ -109,9 +132,10 @@ jobs:
           ram-size: 4096M
           heap-size: 1024M
           disk-size: 8192M
-          emulator-boot-timeout: 900
+          emulator-boot-timeout: 1800
           disable-animations: true
           disable-spellchecker: true
+          disable-linux-hw-accel: auto
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -no-metrics
           script: bash .github/scripts/termux-android-emulator-noninteractive.sh
 
