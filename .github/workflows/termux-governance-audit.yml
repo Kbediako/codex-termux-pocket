@@ -1,0 +1,283 @@
+name: termux-governance-audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/termux-*.yml"
+      - "scripts/termux/**"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: termux-governance-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-public-channel:
+    name: Verify release identity and governance state
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FORCED_PUSH: ${{ github.event.forced || false }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout audited main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Reject observed force pushes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FORCED_PUSH" == "true" ]]; then
+            echo "::error::A force push to main was observed. Audit the rewritten history immediately."
+            exit 1
+          fi
+
+      - name: Verify the promoted public release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          manifest_path = Path("scripts/termux/release-manifest.env")
+          sha_re = re.compile(r"^[0-9a-f]{40}$")
+          digest_re = re.compile(r"^[0-9a-f]{64}$")
+
+          def parse_env(path: Path, allowed: set[str], required: set[str]) -> dict[str, str]:
+              values: dict[str, str] = {}
+              for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  if "=" not in line:
+                      raise SystemExit(f"{path}:{number}: malformed key/value line")
+                  key, value = line.split("=", 1)
+                  if key not in allowed:
+                      raise SystemExit(f"{path}:{number}: unknown key {key}")
+                  if key in values:
+                      raise SystemExit(f"{path}:{number}: duplicate key {key}")
+                  if not value or "\n" in value or "\r" in value:
+                      raise SystemExit(f"{path}:{number}: invalid value for {key}")
+                  values[key] = value
+              missing = required - values.keys()
+              if missing:
+                  raise SystemExit(f"{path}: missing keys: {', '.join(sorted(missing))}")
+              return values
+
+          def request_json(url: str) -> dict:
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "codex-termux-governance-audit",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+
+          def request_bytes(url: str) -> bytes:
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "codex-termux-governance-audit"},
+              )
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  return response.read()
+
+          allowed_manifest = {
+              "format_version",
+              "repository",
+              "release_tag",
+              "head_sha",
+              "codex_version",
+              "archive_sha256",
+              "archive_size_bytes",
+              "runtime_size_bytes",
+          }
+          required_manifest = {
+              "format_version",
+              "repository",
+              "release_tag",
+              "head_sha",
+              "codex_version",
+              "archive_sha256",
+          }
+          manifest = parse_env(manifest_path, allowed_manifest, required_manifest)
+          if manifest["format_version"] not in {"1", "2"}:
+              raise SystemExit("unsupported release manifest format")
+          if manifest["repository"] != repo:
+              raise SystemExit("release manifest repository mismatch")
+          if not re.fullmatch(r"termux-v[0-9A-Za-z._-]+", manifest["release_tag"]):
+              raise SystemExit("invalid release tag")
+          if not sha_re.fullmatch(manifest["head_sha"]):
+              raise SystemExit("invalid release commit SHA")
+          if not digest_re.fullmatch(manifest["archive_sha256"]):
+              raise SystemExit("invalid archive SHA256")
+          if manifest["format_version"] == "2":
+              for key in ("archive_size_bytes", "runtime_size_bytes"):
+                  if key not in manifest or not manifest[key].isdigit() or int(manifest[key]) <= 0:
+                      raise SystemExit(f"invalid {key}")
+
+          release_url = (
+              f"https://api.github.com/repos/{repo}/releases/tags/"
+              f"{urllib.parse.quote(manifest['release_tag'], safe='')}"
+          )
+          release = request_json(release_url)
+          if release.get("draft"):
+              raise SystemExit("promoted release is still a draft")
+          if release.get("tag_name") != manifest["release_tag"]:
+              raise SystemExit("release tag identity mismatch")
+
+          assets = {asset["name"]: asset for asset in release.get("assets", [])}
+          required_assets = {
+              "codex-termux-aarch64-unknown-linux-musl.tar.gz",
+              "metadata.env",
+              "release-manifest.env",
+              "SHA256SUMS",
+          }
+          if manifest["format_version"] == "2":
+              required_assets.add("codex-termux-sbom.spdx.json")
+          missing_assets = required_assets - assets.keys()
+          if missing_assets:
+              raise SystemExit(f"release is missing assets: {', '.join(sorted(missing_assets))}")
+
+          archive = assets["codex-termux-aarch64-unknown-linux-musl.tar.gz"]
+          expected_digest = f"sha256:{manifest['archive_sha256']}"
+          if archive.get("digest") and archive["digest"] != expected_digest:
+              raise SystemExit("GitHub archive digest disagrees with the promoted manifest")
+          if manifest["format_version"] == "2" and not archive.get("digest"):
+              raise SystemExit("GitHub did not report a digest for the promoted archive")
+          if "archive_size_bytes" in manifest and archive.get("size") != int(manifest["archive_size_bytes"]):
+              raise SystemExit("GitHub archive size disagrees with the promoted manifest")
+
+          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
+          if published_manifest != manifest_path.read_bytes():
+              raise SystemExit("published release manifest differs from the repository promotion")
+
+          metadata_bytes = request_bytes(assets["metadata.env"]["browser_download_url"])
+          sums_bytes = request_bytes(assets["SHA256SUMS"]["browser_download_url"])
+          temp = Path(os.environ["RUNNER_TEMP"])
+          metadata_path = temp / "metadata.env"
+          sums_path = temp / "SHA256SUMS"
+          metadata_path.write_bytes(metadata_bytes)
+          sums_path.write_bytes(sums_bytes)
+
+          metadata = parse_env(
+              metadata_path,
+              {
+                  "format_version",
+                  "source_repository",
+                  "head_sha",
+                  "git_describe",
+                  "codex_version",
+                  "target",
+                  "source_ref",
+                  "archive_size_bytes",
+                  "runtime_size_bytes",
+              },
+              {"format_version", "head_sha", "codex_version", "target"},
+          )
+          if metadata["head_sha"] != manifest["head_sha"]:
+              raise SystemExit("release metadata commit mismatch")
+          if metadata["codex_version"] != manifest["codex_version"]:
+              raise SystemExit("release metadata version mismatch")
+          if metadata["target"] != "aarch64-unknown-linux-musl":
+              raise SystemExit("release metadata target mismatch")
+
+          sum_entries: dict[str, str] = {}
+          for line in sums_bytes.decode("utf-8").splitlines():
+              match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+              if not match:
+                  raise SystemExit("malformed SHA256SUMS entry")
+              digest, name = match.groups()
+              if name in sum_entries:
+                  raise SystemExit("duplicate SHA256SUMS entry")
+              sum_entries[name] = digest
+          if sum_entries.get("codex-termux-aarch64-unknown-linux-musl.tar.gz") != manifest["archive_sha256"]:
+              raise SystemExit("SHA256SUMS archive digest mismatch")
+
+          tag_ref = request_json(
+              f"https://api.github.com/repos/{repo}/git/ref/tags/"
+              f"{urllib.parse.quote(manifest['release_tag'], safe='')}"
+          )["object"]
+          if tag_ref["type"] == "tag":
+              tag_ref = request_json(tag_ref["url"])["object"]
+          if tag_ref["type"] != "commit" or tag_ref["sha"] != manifest["head_sha"]:
+              raise SystemExit("release tag no longer resolves to the promoted commit")
+
+          archive_head = urllib.request.Request(
+              archive["browser_download_url"],
+              method="HEAD",
+              headers={"User-Agent": "codex-termux-governance-audit"},
+          )
+          with urllib.request.urlopen(archive_head, timeout=60) as response:
+              if response.status != 200:
+                  raise SystemExit("anonymous archive download is unavailable")
+
+          immutable = bool(release.get("immutable", False))
+          with summary_path.open("a", encoding="utf-8") as summary:
+              summary.write("### Termux public channel audit\n\n")
+              summary.write(f"- Release: `{manifest['release_tag']}`\n")
+              summary.write(f"- Runtime commit: `{manifest['head_sha']}`\n")
+              summary.write(f"- Runtime version: `{manifest['codex_version']}`\n")
+              summary.write(f"- Archive digest: `{manifest['archive_sha256']}`\n")
+              summary.write(f"- GitHub release immutable: `{str(immutable).lower()}`\n")
+          if not immutable:
+              print("::warning::GitHub repository-level release immutability is not enabled; immutable-by-contract checks remain active.")
+          PY
+
+      - name: Audit main branch protection visibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/main-protection.json"
+          status="$(
+            curl --silent --show-error \
+              --output "$response" \
+              --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/branches/main/protection"
+          )"
+          case "$status" in
+            200)
+              force="$(jq -r '.allow_force_pushes.enabled // false' "$response")"
+              deletion="$(jq -r '.allow_deletions.enabled // false' "$response")"
+              if [[ "$force" != "false" || "$deletion" != "false" ]]; then
+                echo "::error::main protection permits force pushes or deletion."
+                exit 1
+              fi
+              echo '- Main force pushes/deletion: `blocked`' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            403|404)
+              echo "::warning::The Actions token cannot inspect branch protection. Force-push events are still detected, but prevention requires repository Administration permission."
+              echo '- Main branch protection visibility: `unavailable to Actions token`' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              cat "$response" >&2
+              echo "::error::Unexpected branch protection API status: $status"
+              exit 1
+              ;;
+          esac
