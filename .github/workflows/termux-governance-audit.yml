@@ -172,8 +172,15 @@ jobs:
               raise SystemExit("GitHub archive size disagrees with the promoted manifest")
 
           published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
-          if published_manifest != manifest_path.read_bytes():
-              raise SystemExit("published release manifest differs from the repository promotion")
+          published_manifest_path = Path(os.environ["RUNNER_TEMP"]) / "published-release-manifest.env"
+          published_manifest_path.write_bytes(published_manifest)
+          published_values = parse_env(
+              published_manifest_path,
+              allowed_manifest,
+              required_manifest,
+          )
+          if published_values != manifest:
+              raise SystemExit("published release manifest values differ from the repository promotion")
 
           metadata_bytes = request_bytes(assets["metadata.env"]["browser_download_url"])
           sums_bytes = request_bytes(assets["SHA256SUMS"]["browser_download_url"])
