@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -32,21 +31,25 @@ jobs:
           from pathlib import Path
 
           path = Path('.github/scripts/termux-android-emulator-check.sh')
-          text = path.read_text(encoding='utf-8')
-          old = '''    if adb shell run-as com.termux sh -c \\
-      "test -x files/usr/bin/bash" >/dev/null 2>&1; then
-      return 0
-    fi
-'''
-          new = '''    if adb shell run-as com.termux ls files/usr/bin/bash >/dev/null 2>&1; then
-      adb shell run-as com.termux files/usr/bin/bash --version >/dev/null 2>&1
-      return 0
-    fi
-'''
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f'expected one quoted readiness probe, found {count}')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          starts = [
+              index
+              for index, line in enumerate(lines)
+              if 'if adb shell run-as com.termux sh -c' in line
+              and index + 4 < len(lines)
+              and 'test -x files/usr/bin/bash' in lines[index + 1]
+          ]
+          if len(starts) != 1:
+              raise SystemExit(f'expected one quoted readiness probe, found {len(starts)}')
+          index = starts[0]
+          replacement = [
+              '    if adb shell run-as com.termux ls files/usr/bin/bash >/dev/null 2>&1; then\n',
+              '      adb shell run-as com.termux files/usr/bin/bash --version >/dev/null 2>&1\n',
+              '      return 0\n',
+              '    fi\n',
+          ]
+          lines[index:index + 5] = replacement
+          path.write_text(''.join(lines), encoding='utf-8')
           PY
 
       - name: Validate and push script-only change
@@ -55,7 +58,9 @@ jobs:
           set -euo pipefail
           bash -n .github/scripts/termux-android-emulator-check.sh
           grep -F 'run-as com.termux ls files/usr/bin/bash' .github/scripts/termux-android-emulator-check.sh >/dev/null
-          ! grep -F 'test -x files/usr/bin/bash' .github/scripts/termux-android-emulator-check.sh
+          if grep -F 'test -x files/usr/bin/bash' .github/scripts/termux-android-emulator-check.sh; then
+            exit 1
+          fi
           git diff --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
