@@ -93,9 +93,11 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          cp .github/workflows/termux-mobile-artifact.yml \
+            scripts/termux/generated-termux-mobile-artifact.yml
           git add \
-            .github/workflows/termux-mobile-artifact.yml \
             scripts/termux/codex-update-alpha \
+            scripts/termux/generated-termux-mobile-artifact.yml \
             scripts/termux/smoke-test-artifact \
             scripts/termux/termux-mobile-lib.sh \
             scripts/termux/tests/run-tests
