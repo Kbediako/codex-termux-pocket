@@ -57,7 +57,7 @@ fi
 
 printf 'Installing required Termux packages...\n'
 pkg update -y
-pkg install -y bash git curl ca-certificates coreutils tar gzip nodejs proot termux-tools ripgrep
+pkg install -y bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
 command -v node >/dev/null 2>&1 \
   || bootstrap_die 'Node.js was installed but node is not on PATH; restart Termux and rerun the installer.'
 
@@ -66,7 +66,8 @@ if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
 fi
 
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-  git clone --origin origin --branch main --single-branch "$FORK_URL" "$INSTALL_DIR"
+  git clone --filter=blob:none --no-tags --origin origin --branch main --single-branch \
+    "$FORK_URL" "$INSTALL_DIR"
 fi
 
 if [[ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]]; then

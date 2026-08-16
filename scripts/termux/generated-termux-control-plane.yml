@@ -1,0 +1,92 @@
+name: termux-control-plane
+
+on:
+  pull_request:
+    paths:
+      - ".github/CODEOWNERS"
+      - ".github/workflows/termux-*.yml"
+      - "docs/termux-agent-safety.md"
+      - "scripts/termux/**"
+      - "codex-rs/Cargo.lock"
+      - "codex-rs/Cargo.toml"
+      - "codex-rs/linux-sandbox/**"
+      - "codex-rs/sandboxing/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/CODEOWNERS"
+      - ".github/workflows/termux-*.yml"
+      - "docs/termux-agent-safety.md"
+      - "scripts/termux/**"
+      - "codex-rs/Cargo.lock"
+      - "codex-rs/Cargo.toml"
+      - "codex-rs/linux-sandbox/**"
+      - "codex-rs/sandboxing/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Termux helpers and artifact contract
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      PREFIX: /data/data/com.termux/files/usr
+      TERMUX_APK_RELEASE: F_DROID
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install shell validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+
+      - name: Validate Python utilities
+        shell: bash
+        run: python3 -m py_compile scripts/termux/generate-sbom.py
+
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts=(
+            scripts/termux/codex-cargo-check
+            scripts/termux/codex-update-alpha
+            scripts/termux/install-codex-termux
+            scripts/termux/maintainer-update-alpha
+            scripts/termux/smoke-test-artifact
+            scripts/termux/termux-mobile-lib.sh
+            scripts/termux/tests/run-tests
+          )
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+          shellcheck --external-sources --severity=error "${scripts[@]}"
+
+      - name: Run Termux helper regression tests
+        shell: bash
+        run: bash scripts/termux/tests/run-tests
+
+      - name: Validate locked dependency graph
+        working-directory: codex-rs
+        shell: bash
+        run: cargo metadata --locked --format-version=1 >/dev/null
+
+      - name: Validate workflow YAML and whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; Dir[".github/workflows/termux-*.yml"].sort.each { |path| YAML.load_file(path, aliases: true) }'
+          git diff --check

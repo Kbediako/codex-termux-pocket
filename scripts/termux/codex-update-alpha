@@ -23,6 +23,8 @@ install_after_wait="yes"
 release_tag=""
 release_version=""
 release_archive_sha=""
+release_archive_size=""
+release_runtime_size=""
 temporary_dir=""
 update_lock_dir=""
 
@@ -34,6 +36,9 @@ Usage:
   codex-update-alpha wait --run-id ID [--expected-sha SHA] [--timeout SECONDS]
   codex-update-alpha install-run --run-id ID [--expected-sha SHA]
   codex-update-alpha install-release --release-tag TAG --expected-sha SHA
+  codex-update-alpha list-installed
+  codex-update-alpha rollback
+  codex-update-alpha activate --expected-sha SHA
 
 Normal update installs the public, verified release named by release-manifest.env.
 It never rebases, commits, pushes, or builds Rust on the phone.
@@ -42,6 +47,9 @@ It never rebases, commits, pushes, or builds Rust on the phone.
                  report the newest OpenAI alpha from the fetch-only upstream.
   wait           Resume a queued/running Actions run and install it on success.
   install-run    Install the complete artifact from an already-successful run.
+  list-installed Show verified installed releases; the active release is marked *.
+  rollback       Atomically activate the newest previous verified release.
+  activate       Atomically activate an installed verified release by commit SHA.
   --dispatch     Maintainer/advanced opt-in: dispatch only when no exact matching
                  queued, running, or completed run exists.
   --timeout      Local wait limit in seconds (default: 7200). The GitHub run is
@@ -54,7 +62,7 @@ USAGE
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    update|check|wait|install-run|install-release)
+    update|check|wait|install-run|install-release|list-installed|rollback|activate)
       operation="$1"
       shift
       ;;
@@ -143,7 +151,10 @@ acquire_update_lock() {
 load_release_manifest() {
   [[ -f "$MANIFEST_FILE" ]] || return 1
   local format manifest_repo
-  termux_validate_key_value_file "$MANIFEST_FILE"     format_version repository release_tag head_sha codex_version archive_sha256 ||     termux_abort 'release manifest is malformed, duplicated, or contains an unknown key.'
+  termux_validate_key_value_file "$MANIFEST_FILE" \
+    format_version repository release_tag head_sha codex_version archive_sha256 \
+    archive_size_bytes runtime_size_bytes || \
+    termux_abort 'release manifest is malformed, duplicated, or contains an unknown key.'
   format="$(termux_metadata_value "$MANIFEST_FILE" format_version)"
   manifest_repo="$(termux_metadata_value "$MANIFEST_FILE" repository)"
   [[ "$format" == "1" || "$format" == "2" ]] || termux_abort "unsupported release manifest format: ${format:-missing}"
@@ -153,10 +164,16 @@ load_release_manifest() {
   expected_sha="${expected_sha:-$(termux_metadata_value "$MANIFEST_FILE" head_sha)}"
   release_version="${release_version:-$(termux_metadata_value "$MANIFEST_FILE" codex_version)}"
   release_archive_sha="${release_archive_sha:-$(termux_metadata_value "$MANIFEST_FILE" archive_sha256)}"
+  release_archive_size="$(termux_metadata_value "$MANIFEST_FILE" archive_size_bytes)"
+  release_runtime_size="$(termux_metadata_value "$MANIFEST_FILE" runtime_size_bytes)"
   [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || termux_abort 'release manifest contains an invalid release_tag.'
   [[ -n "$release_version" && "$release_version" != *$'\n'* ]] || termux_abort 'release manifest contains an invalid codex_version.'
   termux_validate_sha "$expected_sha" || termux_abort 'release manifest contains an invalid head_sha.'
   termux_validate_sha256 "$release_archive_sha" || termux_abort 'release manifest contains an invalid archive_sha256.'
+  if [[ "$format" == "2" ]]; then
+    termux_validate_positive_integer "$release_archive_size" ||       termux_abort 'release manifest contains an invalid archive_size_bytes.'
+    termux_validate_positive_integer "$release_runtime_size" ||       termux_abort 'release manifest contains an invalid runtime_size_bytes.'
+  fi
   return 0
 }
 
@@ -181,6 +198,9 @@ prepare_checkout() {
 
 download_public_release() {
   local base="https://github.com/${CODEX_TERMUX_REPO}/releases/download/${release_tag}"
+  if [[ -n "$release_archive_size" && -n "$release_runtime_size" ]]; then
+    termux_require_install_space "$PREFIX" "$release_archive_size" "$release_runtime_size"
+  fi
   temporary_dir="$(mktemp -d)"
   termux_info "downloading maintained runtime $release_tag (commit $expected_sha)"
   termux_download "$base/$CODEX_TERMUX_ARCHIVE" "$temporary_dir/$CODEX_TERMUX_ARCHIVE"
@@ -209,7 +229,7 @@ resolve_source_sha() {
 }
 
 list_workflow_runs() {
-  gh run list --repo "$CODEX_TERMUX_REPO" --workflow "$WORKFLOW_FILE" --limit 100 \
+  gh run list --repo "$CODEX_TERMUX_REPO" --workflow "$WORKFLOW_FILE" --limit 1000 \
     --json url,headSha,status,conclusion,displayTitle \
     --template '{{range .}}{{.url}}|{{.headSha}}|{{.status}}|{{.conclusion}}|{{.displayTitle}}{{"\n"}}{{end}}' \
     | awk -F '|' '{ n = split($1, parts, "/"); print parts[n] "|" $0 }'
@@ -393,6 +413,28 @@ check_versions() {
 }
 
 termux_check_environment
+case "$operation" in
+  list-installed)
+    termux_list_installed_releases "$PREFIX"
+    exit 0
+    ;;
+  rollback)
+    acquire_update_lock
+    termux_rollback_installed_release "$PREFIX"
+    "$SCRIPT_DIR/smoke-test-artifact" --installed --quick
+    termux_info 'rollback complete.'
+    exit 0
+    ;;
+  activate)
+    termux_validate_sha "$expected_sha" ||       termux_abort 'activate requires --expected-sha with a full 40-character commit SHA.'
+    acquire_update_lock
+    termux_activate_installed_release "$PREFIX" "$expected_sha"
+    "$SCRIPT_DIR/smoke-test-artifact" --installed --quick
+    termux_info 'release activation complete.'
+    exit 0
+    ;;
+esac
+
 acquire_update_lock
 prepare_checkout
 

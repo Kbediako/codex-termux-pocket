@@ -105,6 +105,8 @@ make_bundle() {
     find . -type f ! -path "./$CODEX_TERMUX_RUNTIME_CHECKSUMS" -print       | sed 's#^\./##' | LC_ALL=C sort       | while IFS= read -r relative; do sha256sum "$relative"; done       >"$CODEX_TERMUX_RUNTIME_CHECKSUMS"
   )
   tar -C "$dir" -czf "$dir/$CODEX_TERMUX_ARCHIVE" codex-termux-runtime
+  runtime_size_bytes="$(termux_runtime_payload_bytes "$runtime")"
+  archive_size_bytes="$(termux_file_size "$dir/$CODEX_TERMUX_ARCHIVE")"
   rm -rf "$runtime"
   cat >"$dir/$CODEX_TERMUX_METADATA" <<EOF
 format_version=2
@@ -114,6 +116,8 @@ git_describe=test
 codex_version=$version
 target=$CODEX_TERMUX_TARGET
 source_ref=$sha
+archive_size_bytes=$archive_size_bytes
+runtime_size_bytes=$runtime_size_bytes
 EOF
   (cd "$dir" && sha256sum "$CODEX_TERMUX_ARCHIVE" "$CODEX_TERMUX_METADATA" >"$CODEX_TERMUX_CHECKSUMS")
 }
@@ -176,6 +180,55 @@ test_bundle_install() {
     fail 'archive containing a symbolic link was accepted'
   fi
   pass 'archive links and special entries are rejected before activation'
+
+  make_bundle "$bundle" "$sha" "$version"
+  printf 'head_sha=%s\n' "$sha" >>"$bundle/$CODEX_TERMUX_METADATA"
+  (cd "$bundle" && sha256sum "$CODEX_TERMUX_ARCHIVE" "$CODEX_TERMUX_METADATA" >"$CODEX_TERMUX_CHECKSUMS")
+  if (termux_verify_download_set "$bundle" "$sha" "$version") >/dev/null 2>&1; then
+    fail 'artifact metadata containing a duplicate key was accepted'
+  fi
+  pass 'duplicate and unknown metadata fields are rejected'
+}
+
+make_test_bundle_for_sha() {
+  local dir="$1"
+  local sha="$2"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  make_bundle "$dir" "$sha" 'codex-cli 9.9.9'
+}
+
+test_storage_retention_and_rollback() {
+  local prefix="$test_root/retention-prefix"
+  local bundle="$test_root/retention-bundle"
+  local sha1='1111111111111111111111111111111111111111'
+  local sha2='2222222222222222222222222222222222222222'
+  local sha3='3333333333333333333333333333333333333333'
+  mkdir -p "$prefix/bin"
+
+  if CODEX_TERMUX_AVAILABLE_BYTES=1 CODEX_TERMUX_INSTALL_SAFETY_BYTES=0       termux_require_install_space "$prefix" 1 1 >/dev/null 2>&1; then
+    fail 'storage preflight accepted an undersized filesystem'
+  fi
+  CODEX_TERMUX_AVAILABLE_BYTES=1000000 CODEX_TERMUX_INSTALL_SAFETY_BYTES=0     termux_require_install_space "$prefix" 1 1 || fail 'storage preflight rejected sufficient space'
+  pass 'storage preflight rejects installs before extraction when space is insufficient'
+
+  CODEX_TERMUX_KEEP_RELEASES=2
+  CODEX_TERMUX_KEEP_QUARANTINES=1
+  CODEX_TERMUX_AVAILABLE_BYTES=1000000000
+  CODEX_TERMUX_INSTALL_SAFETY_BYTES=0
+  make_test_bundle_for_sha "$bundle" "$sha1"
+  termux_install_verified_bundle "$bundle" "$sha1" 'codex-cli 9.9.9' '' "$prefix" >/dev/null
+  make_test_bundle_for_sha "$bundle" "$sha2"
+  termux_install_verified_bundle "$bundle" "$sha2" 'codex-cli 9.9.9' '' "$prefix" >/dev/null
+  make_test_bundle_for_sha "$bundle" "$sha3"
+  termux_install_verified_bundle "$bundle" "$sha3" 'codex-cli 9.9.9' '' "$prefix" >/dev/null
+
+  [[ ! -e "$prefix/libexec/codex-termux/releases/$sha1" ]] || fail 'retention kept more releases than configured'
+  assert_eq "releases/$sha3" "$(readlink "$prefix/libexec/codex-termux/current")" 'newest release activation'
+  termux_rollback_installed_release "$prefix" >/dev/null
+  assert_eq "releases/$sha2" "$(readlink "$prefix/libexec/codex-termux/current")" 'rollback activation'
+  termux_list_installed_releases "$prefix" | grep -q "^\* $sha2" || fail 'release listing did not mark the active rollback target'
+  pass 'bounded release retention preserves one verified rollback and activates it atomically'
 }
 
 test_run_dedup_and_timeout() {
@@ -235,6 +288,7 @@ test_static_architecture_guards() {
   ! grep -q 'git .*rebase' "$TERMUX_DIR/codex-update-alpha" || fail 'end-user updater still rebases'
   ! grep -q 'git config user\.' "$TERMUX_DIR/install-codex-termux" || fail 'installer configures Git identity'
   grep -Eq 'pkg install .* nodejs([[:space:]]|$)' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not install Node.js for plugin MCP servers'
+  grep -q -- '--filter=blob:none' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not use a filtered helper checkout'
   grep -q 'command -v node' "$TERMUX_DIR/install-codex-termux" || fail 'installer does not verify the plugin MCP runtime is available'
   grep -q 'cargo metadata --locked' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow lacks lockfile gate'
   ! grep -E 'cargo metadata --locked .*--no-deps' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" "$TERMUX_DIR/maintainer-update-alpha" || fail 'lockfile gate skips target-specific dependency resolution'
@@ -243,6 +297,10 @@ test_static_architecture_guards() {
   grep -q 'runtime-files.sha256' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not publish a complete runtime file manifest'
   grep -q 'rusty_v8_archive_sha256' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not verify the pinned Rusty V8 archive'
   grep -q 'termux-control-plane' "$REPO_ROOT/.github/workflows/termux-control-plane.yml" || fail 'Termux control-plane workflow is missing'
+  grep -q 'gzip -n -9' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'runtime archive is not deterministic'
+  grep -q 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'runtime provenance action is not pinned'
+  grep -q 'generate-sbom.py' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'runtime SBOM generation is missing'
+  grep -q 'rollback)' "$TERMUX_DIR/codex-update-alpha" || fail 'updater does not expose rollback'
   grep -q -- '-P :workspace' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not exercise the restricted Android command-runner profile'
   grep -q 'command -v bwrap' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not verify bundled bwrap discovery'
   grep -q 'unexpectedly allowed a filesystem write' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not prove restricted write denial'
@@ -261,5 +319,6 @@ test_migrate_openai_origin
 test_valid_alpha_tag_selection
 test_bundle_install
 test_run_dedup_and_timeout
+test_storage_retention_and_rollback
 test_static_architecture_guards
 printf '1..%d\n' "$pass_count"

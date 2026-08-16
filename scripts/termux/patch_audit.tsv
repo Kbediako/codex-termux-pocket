@@ -70,3 +70,4 @@ subject	termux: validate full locked dependency graph	tooling	Makes maintainer a
 subject	termux: publish alpha.148.0-alpha.5 runtime	tooling	Pins the exact public alpha.5 artifact that passed the full CI bundle validation and on-device Termux command-runner smoke test.
 subject	termux: test Linux sandbox on hosted runners	tooling	Fork workflow only; validates the Linux sandbox on public x64 and ARM64 Ubuntu runners without executing it on Android.
 subject	termux: refresh lockfile after 0.148.0-alpha.20 merge	build-only	Refreshes the complete workspace and target-specific dependency graph after merging the maintained Termux patch stack with the upstream alpha.
+subject	termux: align alpha.20 and harden mobile releases	security-critical	Aligns the Android runtime with alpha.20 and hardens verified archives, pinned build inputs, installed-tree repair, storage checks, rollback, retention, SBOM, and provenance.
