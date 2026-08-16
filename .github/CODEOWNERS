@@ -13,5 +13,12 @@
 /.github/scripts/macos-signing/ @openai/codex-core-agent-team
 /.github/workflows/rust-release.yml @openai/codex-core-agent-team
 
-# Keep ownership changes reviewed by the same team.
-/.github/CODEOWNERS @openai/codex-core-agent-team
+# Local ownership for the Android/Termux release and security surface.
+/scripts/termux/ @Kbediako
+/.github/workflows/termux-*.yml @Kbediako
+/docs/termux-agent-safety.md @Kbediako
+/codex-rs/linux-sandbox/ @Kbediako
+/codex-rs/sandboxing/ @Kbediako
+
+# Keep ownership changes reviewed by the fork maintainer.
+/.github/CODEOWNERS @Kbediako
