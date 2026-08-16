@@ -1,0 +1,89 @@
+name: repair-termux-android-validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/repair-termux-android-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-termux-android-validation
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch native validation controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/scripts/termux-android-emulator-check.sh')
+          text = path.read_text(encoding='utf-8')
+
+          old_wait = '''  for _ in $(seq 1 180); do
+            if termux_run 'test -x "$PREFIX/bin/bash"'; then
+              return 0
+            fi
+          done
+          '''
+          new_wait = '''  for _ in $(seq 1 180); do
+            if termux_run 'test -x "$PREFIX/bin/bash"'; then
+              return 0
+            fi
+            sleep 1
+          done
+          '''
+          if text.count(old_wait) != 1:
+              raise SystemExit(f'expected one bootstrap loop, found {text.count(old_wait)}')
+          text = text.replace(old_wait, new_wait, 1)
+
+          old_clone = '''  termux_run 'rm -rf "$HOME/codex-ci"'
+          termux_run 'git clone --filter=blob:none --no-tags --single-branch --branch main https://github.com/Kbediako/codex-termux-pocket.git "$HOME/codex-ci"'
+          termux_run "test \"\$(git -C \"\$HOME/codex-ci\" rev-parse HEAD)\" = \"$CONTROL_SHA\"" || \\
+            die 'cloned repository does not match the exact validation control commit'
+          '''
+          new_clone = '''  termux_run 'rm -rf "$HOME/codex-ci" && git init "$HOME/codex-ci"'
+          termux_run 'git -C "$HOME/codex-ci" remote add origin https://github.com/Kbediako/codex-termux-pocket.git'
+          termux_run 'git -C "$HOME/codex-ci" sparse-checkout init --cone'
+          termux_run 'git -C "$HOME/codex-ci" sparse-checkout set scripts/termux'
+          termux_run "git -C \"\$HOME/codex-ci\" fetch --depth=1 origin \"$CONTROL_SHA\""
+          termux_run 'git -C "$HOME/codex-ci" checkout --detach FETCH_HEAD'
+          termux_run "test \"\$(git -C \"\$HOME/codex-ci\" rev-parse HEAD)\" = \"$CONTROL_SHA\"" || \\
+            die 'sparse checkout does not match the exact validation control commit'
+          '''
+          if text.count(old_clone) != 1:
+              raise SystemExit(f'expected one moving-main clone block, found {text.count(old_clone)}')
+          text = text.replace(old_clone, new_clone, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          bash -n .github/scripts/termux-android-emulator-check.sh
+          git diff --check
+
+      - name: Push repaired validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/scripts/termux-android-emulator-check.sh
+          git diff --cached --quiet && { echo 'No validator changes produced.' >&2; exit 1; }
+          git commit -m 'ci: pin native Termux validation checkout'
+          git push origin HEAD:main
