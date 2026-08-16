@@ -32,19 +32,67 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "http://127.0.0.1:${PORT}/current/metadata.env" >/dev/null
 
+wait_for_android_settle() {
+  adb wait-for-device
+  local boot_completed="" boot_animation=""
+  for _ in $(seq 1 180); do
+    boot_completed="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    boot_animation="$(adb shell getprop init.svc.bootanim 2>/dev/null | tr -d '\r')"
+    if [[ "$boot_completed" == "1" && "$boot_animation" == "stopped" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  [[ "$boot_completed" == "1" && "$boot_animation" == "stopped" ]] || {
+    echo "Android did not reach a stable completed boot state" >&2
+    return 1
+  }
+
+  # Termux starts its bootstrap from Activity.onCreate(). A late Android theme,
+  # density or rotation relaunch can invoke onCreate() again while extraction is
+  # still active, causing two installer threads to race over usr-staging.
+  adb shell settings put system accelerometer_rotation 0 >/dev/null 2>&1 || true
+  adb shell settings put system user_rotation 0 >/dev/null 2>&1 || true
+  adb shell cmd activity wait-for-broadcast-idle >/dev/null 2>&1 || true
+  adb shell am wait-for-broadcast-idle >/dev/null 2>&1 || true
+  sleep 45
+}
+
+bootstrap_termux() {
+  local attempt="$1"
+  adb shell am force-stop com.termux >/dev/null 2>&1 || true
+  adb shell run-as com.termux sh -c \
+    'rm -rf files/usr files/usr-staging' >/dev/null 2>&1 || true
+  sleep 3
+  adb logcat -c >/dev/null 2>&1 || true
+  adb shell am start -W -n com.termux/.app.TermuxActivity \
+    >"$LOG_DIR/activity-start-${attempt}.txt"
+
+  for _ in $(seq 1 180); do
+    if adb shell run-as com.termux sh -c \
+      "test -x files/usr/bin/bash" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  adb logcat -d >"$LOG_DIR/bootstrap-attempt-${attempt}.log" 2>&1 || true
+  return 1
+}
+
+wait_for_android_settle
 adb install -r "$TERMUX_APK"
-adb shell am start -W -n com.termux/.app.TermuxActivity >"$LOG_DIR/activity-start.txt"
 
 ready=no
-for _ in $(seq 1 180); do
-  if adb shell run-as com.termux sh -c "test -x files/usr/bin/bash" >/dev/null 2>&1; then
+for attempt in 1 2; do
+  if bootstrap_termux "$attempt"; then
     ready=yes
     break
   fi
-  sleep 2
+  echo "Termux bootstrap attempt ${attempt} did not complete; resetting the app prefix before retry." >&2
+  sleep 10
 done
 [[ "$ready" == yes ]] || {
-  echo "Termux bootstrap did not create ${PREFIX_DIR}/bin/bash" >&2
+  echo "Termux bootstrap did not create ${PREFIX_DIR}/bin/bash after two clean attempts" >&2
   exit 1
 }
 
