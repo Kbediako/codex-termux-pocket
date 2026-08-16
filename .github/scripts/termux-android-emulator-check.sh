@@ -112,7 +112,7 @@ bash "\${CODEX_SRC_DIR}/scripts/termux/install-codex-termux"
 
 expected_binary_version="codex-cli \${SOURCE_SHA:0:7}"
 test "\$(codex --version)" = "\${expected_binary_version}"
-smoke-test-artifact --installed
+CODEX_TERMUX_DISABLE_PROOT=1 smoke-test-artifact --installed
 codex --termux-launcher-check
 codex --help >/dev/null
 codex login --help >/dev/null
