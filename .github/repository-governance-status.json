@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "checked_at": "2026-08-16T07:26:25Z",
+  "commit": "35bc65f1d9e275081ca82eb1e0bf892d65fbc93a",
+  "main_protection": "administration_permission_unavailable",
+  "api_status": 403,
+  "direct_pushes_required_by_project": true,
+  "force_pushes_requested": false,
+  "branch_deletion_requested": false
+}
