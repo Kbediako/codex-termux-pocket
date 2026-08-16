@@ -56,24 +56,25 @@ jobs:
           index = matches[0]
           if not lines[index].endswith("\n"):
               raise SystemExit("release-manifest validation line has no newline")
-          lines[index] = lines[index][:-1] + " \n"
+          lines[index] = lines[index][:-1] + " \\n"
           updater.write_text("".join(lines), encoding="utf-8")
 
-          mobile = Path(".github/workflows/termux-mobile-artifact.yml")
-          mobile_text = mobile.read_text(encoding="utf-8")
-          collapsed = "            dist/SHA256SUMS             dist/release-manifest.env\n"
-          expanded = "            dist/SHA256SUMS \\\n            dist/release-manifest.env\n"
-          if mobile_text.count(collapsed) != 1:
-              raise SystemExit("expected one collapsed release asset line")
-          mobile.write_text(mobile_text.replace(collapsed, expanded, 1), encoding="utf-8")
-
           patcher = Path("scripts/termux/apply-optimization-patch.py")
-          patch_text = patcher.read_text(encoding="utf-8")
-          old = '        raise SystemExit(f"{path}: expected one exact match, found {count}")\n'
-          new = '        raise SystemExit(f"{path}: expected one exact match, found {count}; unmatched={old[:240]!r}")\n'
-          if patch_text.count(old) != 1:
-              raise SystemExit("expected one exact-match diagnostic in optimisation patcher")
-          patcher.write_text(patch_text.replace(old, new, 1), encoding="utf-8")
+          patch_lines = patcher.read_text(encoding="utf-8").splitlines(keepends=True)
+          continuation_lines = [
+              index
+              for index, line in enumerate(patch_lines)
+              if "'''            dist/SHA256SUMS" in line
+          ]
+          if len(continuation_lines) != 2:
+              raise SystemExit(
+                  f"expected two release-asset template literals, found {len(continuation_lines)}"
+              )
+          for index in continuation_lines:
+              if "r'''" in patch_lines[index]:
+                  raise SystemExit("release-asset template was already converted to a raw literal")
+              patch_lines[index] = patch_lines[index].replace("'''", "r'''", 1)
+          patcher.write_text("".join(patch_lines), encoding="utf-8")
           PY
           python3 -m py_compile \
             scripts/termux/apply-optimization-patch.py \
