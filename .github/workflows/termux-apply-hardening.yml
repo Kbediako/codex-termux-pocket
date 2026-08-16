@@ -30,6 +30,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$PREFIX/bin"
+          sudo ln -sfn /usr/bin/bash "$PREFIX/bin/bash"
+
       - name: Apply exact hardening patch
         shell: bash
         run: |
