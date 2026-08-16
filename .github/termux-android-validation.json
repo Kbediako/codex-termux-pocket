@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "source_sha": "976d1798cd03427e3ca37a614b236042868a635f",
+  "android_control_sha": "0ef41d0da52256c2aaf02e89eabfb6619fd98605",
+  "run_id": 31936658809,
+  "conclusion": "cancelled",
+  "created_at": "2026-08-16T08:31:12Z",
+  "updated_at": "2026-08-16T10:01:20Z",
+  "html_url": "https://github.com/Kbediako/codex-termux-pocket/actions/runs/31936658809",
+  "failed_log_tail": ""
+}
