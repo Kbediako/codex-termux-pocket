@@ -1,0 +1,29 @@
+name: dispatch-native-termux-validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/dispatch-native-termux-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch current native Termux workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run termux-android-emulator.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
+          echo 'Dispatched termux-android-emulator.yml at the current main control commit.' >> "$GITHUB_STEP_SUMMARY"
