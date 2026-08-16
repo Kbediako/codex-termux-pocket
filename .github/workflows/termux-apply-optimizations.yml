@@ -59,6 +59,14 @@ jobs:
           lines[index] = lines[index][:-1] + " \n"
           updater.write_text("".join(lines), encoding="utf-8")
 
+          mobile = Path(".github/workflows/termux-mobile-artifact.yml")
+          mobile_text = mobile.read_text(encoding="utf-8")
+          collapsed = "            dist/SHA256SUMS             dist/release-manifest.env\n"
+          expanded = "            dist/SHA256SUMS \\\n            dist/release-manifest.env\n"
+          if mobile_text.count(collapsed) != 1:
+              raise SystemExit("expected one collapsed release asset line")
+          mobile.write_text(mobile_text.replace(collapsed, expanded, 1), encoding="utf-8")
+
           patcher = Path("scripts/termux/apply-optimization-patch.py")
           patch_text = patcher.read_text(encoding="utf-8")
           old = '        raise SystemExit(f"{path}: expected one exact match, found {count}")\n'
