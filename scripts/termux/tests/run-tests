@@ -100,10 +100,14 @@ make_bundle() {
   write_fake_executable "$runtime/bin/codex-responses-api-proxy" 'exit 0'
   write_fake_executable "$runtime/codex-resources/bwrap" 'exit 0'
   printf '{"layoutVersion":1,"version":"%s","target":"%s"}\n' "$version" "$CODEX_TERMUX_TARGET" >"$runtime/codex-package.json"
+  (
+    cd "$runtime"
+    find . -type f ! -path "./$CODEX_TERMUX_RUNTIME_CHECKSUMS" -print       | sed 's#^\./##' | LC_ALL=C sort       | while IFS= read -r relative; do sha256sum "$relative"; done       >"$CODEX_TERMUX_RUNTIME_CHECKSUMS"
+  )
   tar -C "$dir" -czf "$dir/$CODEX_TERMUX_ARCHIVE" codex-termux-runtime
   rm -rf "$runtime"
   cat >"$dir/$CODEX_TERMUX_METADATA" <<EOF
-format_version=1
+format_version=2
 source_repository=example/codex-termux
 head_sha=$sha
 git_describe=test
@@ -131,7 +135,11 @@ test_bundle_install() {
   grep -q 'export PATH="${RESOURCE_DIR}' "$prefix/bin/codex" || fail 'launcher does not expose bundled bwrap'
   termux_install_verified_bundle "$bundle" "$sha" "$version" '' "$prefix" >/dev/null
   [[ -x "$prefix/libexec/codex-termux/current/bin/codex" ]] || fail 'idempotent reinstall broke current runtime'
-  pass 'complete bundle verifies and installs atomically'
+  printf 'corruption' >>"$prefix/libexec/codex-termux/current/bin/codex-code-mode-host"
+  termux_install_verified_bundle "$bundle" "$sha" "$version" '' "$prefix" >/dev/null
+  ! grep -q 'corruption' "$prefix/libexec/codex-termux/current/bin/codex-code-mode-host" ||     fail 'reinstall reused a modified installed runtime'
+  compgen -G "$prefix/libexec/codex-termux/releases/${sha}.invalid.*" >/dev/null ||     fail 'modified installed runtime was not quarantined'
+  pass 'complete bundle verifies, installs atomically, and repairs modified releases'
 
   printf 'corruption' >>"$bundle/$CODEX_TERMUX_ARCHIVE"
   if (termux_verify_download_set "$bundle" "$sha" "$version") >/dev/null 2>&1; then
@@ -155,6 +163,19 @@ test_bundle_install() {
     fail 'bundle without codex-code-mode-host was accepted'
   fi
   pass 'artifact missing a required runtime sidecar is rejected'
+
+  make_bundle "$bundle" "$sha" "$version"
+  bad_root="$test_root/symlink-entry"
+  rm -rf "$bad_root"
+  mkdir -p "$bad_root"
+  tar -xzf "$bundle/$CODEX_TERMUX_ARCHIVE" -C "$bad_root"
+  ln -s /etc/passwd "$bad_root/codex-termux-runtime/unexpected-link"
+  tar -C "$bad_root" -czf "$bundle/$CODEX_TERMUX_ARCHIVE" codex-termux-runtime
+  (cd "$bundle" && sha256sum "$CODEX_TERMUX_ARCHIVE" "$CODEX_TERMUX_METADATA" >"$CODEX_TERMUX_CHECKSUMS")
+  if (termux_extract_and_verify_bundle "$bundle" "$test_root/symlink-entry-extract") >/dev/null 2>&1; then
+    fail 'archive containing a symbolic link was accepted'
+  fi
+  pass 'archive links and special entries are rejected before activation'
 }
 
 test_run_dedup_and_timeout() {
@@ -194,6 +215,7 @@ EOF
     CODEX_SRC_DIR="$repo" \
     CODEX_TERMUX_SKIP_CHECKOUT_SYNC=1 \
     CODEX_TERMUX_POLL_SECONDS=1 \
+    CODEX_TERMUX_LOCK_DIR="$test_root/updater.lock" \
     CODEX_TERMUX_RELEASE_MANIFEST="$manifest" \
     "$TERMUX_DIR/codex-update-alpha" update --expected-sha "$sha" --dispatch --timeout 1 >"$output" 2>&1
   status=$?
@@ -218,6 +240,9 @@ test_static_architecture_guards() {
   ! grep -E 'cargo metadata --locked .*--no-deps' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" "$TERMUX_DIR/maintainer-update-alpha" || fail 'lockfile gate skips target-specific dependency resolution'
   grep -q -- '--bin codex-code-mode-host' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not build code-mode host'
   grep -q 'sha256sum --check --strict' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not validate checksums before upload'
+  grep -q 'runtime-files.sha256' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not publish a complete runtime file manifest'
+  grep -q 'rusty_v8_archive_sha256' "$REPO_ROOT/.github/workflows/termux-mobile-artifact.yml" || fail 'workflow does not verify the pinned Rusty V8 archive'
+  grep -q 'termux-control-plane' "$REPO_ROOT/.github/workflows/termux-control-plane.yml" || fail 'Termux control-plane workflow is missing'
   grep -q -- '-P :workspace' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not exercise the restricted Android command-runner profile'
   grep -q 'command -v bwrap' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not verify bundled bwrap discovery'
   grep -q 'unexpectedly allowed a filesystem write' "$TERMUX_DIR/smoke-test-artifact" || fail 'installed smoke test does not prove restricted write denial'

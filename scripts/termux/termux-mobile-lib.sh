@@ -6,6 +6,8 @@ CODEX_TERMUX_ARTIFACT_NAME="codex-termux-${CODEX_TERMUX_TARGET}"
 CODEX_TERMUX_ARCHIVE="${CODEX_TERMUX_ARTIFACT_NAME}.tar.gz"
 CODEX_TERMUX_METADATA="metadata.env"
 CODEX_TERMUX_CHECKSUMS="SHA256SUMS"
+CODEX_TERMUX_RUNTIME_CHECKSUMS="runtime-files.sha256"
+CODEX_TERMUX_MAX_ARCHIVE_ENTRIES="${CODEX_TERMUX_MAX_ARCHIVE_ENTRIES:-4096}"
 CODEX_TERMUX_FORK_URL_DEFAULT="https://github.com/Kbediako/codex-termux-pocket.git"
 # shellcheck disable=SC2034 # Used by scripts that source this library.
 CODEX_TERMUX_FORK_REPO_DEFAULT="Kbediako/codex-termux-pocket"
@@ -66,6 +68,74 @@ termux_validate_sha() {
 
 termux_validate_sha256() {
   [[ "$1" =~ ^[0-9a-f]{64}$ ]]
+}
+
+termux_validate_key_value_file() {
+  local file="$1"
+  shift
+  local allowed=" $* "
+  [[ -f "$file" ]] || return 1
+  awk -F= -v allowed="$allowed" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    index($0, "\r") { exit 1 }
+    $0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/ { exit 1 }
+    {
+      key = $1
+      if (index(allowed, " " key " ") == 0 || seen[key]++) { exit 1 }
+    }
+  ' "$file"
+}
+
+termux_validate_sha256_manifest() {
+  local file="$1"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  awk '
+    $0 !~ /^[0-9a-f]{64} [ *][A-Za-z0-9._\/-]+$/ { exit 1 }
+    {
+      path = substr($0, 67)
+      if (path == "" || path ~ /^\// || path ~ /(^|\/)\.\.(\/|$)/ || path ~ /\/\// || seen[path]++) {
+        exit 1
+      }
+    }
+  ' "$file"
+}
+
+termux_verify_runtime_tree() {
+  local root="$1"
+  local manifest="$root/$CODEX_TERMUX_RUNTIME_CHECKSUMS"
+  local expected actual
+
+  [[ -d "$root" ]] || { termux_die "runtime root is missing: $root"; return 1; }
+  [[ -f "$manifest" && ! -L "$manifest" ]] || {
+    termux_die "runtime file manifest is missing: $CODEX_TERMUX_RUNTIME_CHECKSUMS"
+    return 1
+  }
+  termux_validate_sha256_manifest "$manifest" || {
+    termux_die 'runtime file manifest is malformed or contains an unsafe path.'
+    return 1
+  }
+  if find "$root" -type l -print -quit | grep -q .; then
+    termux_die 'runtime tree contains a symbolic link.'
+    return 1
+  fi
+  if find "$root" ! -type f ! -type d -print -quit | grep -q .; then
+    termux_die 'runtime tree contains a special filesystem entry.'
+    return 1
+  fi
+  (cd "$root" && sha256sum --check --strict "$CODEX_TERMUX_RUNTIME_CHECKSUMS" >/dev/null) || {
+    termux_die 'runtime file integrity verification failed.'
+    return 1
+  }
+
+  expected="$(awk '{print substr($0, 67)}' "$manifest" | LC_ALL=C sort)"
+  actual="$(
+    cd "$root"
+    find . -type f       ! -path "./$CODEX_TERMUX_RUNTIME_CHECKSUMS"       ! -path "./$CODEX_TERMUX_METADATA"       ! -path "./$CODEX_TERMUX_CHECKSUMS"       -print | sed 's#^\./##' | LC_ALL=C sort
+  )"
+  [[ "$actual" == "$expected" ]] || {
+    termux_die 'runtime tree contains missing or unexpected files.'
+    return 1
+  }
 }
 
 termux_latest_valid_alpha_tag() {
@@ -154,10 +224,20 @@ termux_verify_download_set() {
     return 1
   }
 
-  if grep -Eq '(^|[[:space:]])(/|\.\./)' "$checksums"; then
-    termux_die 'checksum manifest contains an unsafe path.'
+  termux_validate_key_value_file "$metadata"     format_version source_repository head_sha git_describe codex_version target source_ref || {
+    termux_die 'artifact metadata is malformed, duplicated, or contains an unknown key.'
     return 1
-  fi
+  }
+  termux_validate_sha256_manifest "$checksums" || {
+    termux_die 'checksum manifest is malformed or contains an unsafe path.'
+    return 1
+  }
+  local checksum_names
+  checksum_names="$(awk '{print substr($0, 67)}' "$checksums" | LC_ALL=C sort)"
+  [[ "$checksum_names" == "$CODEX_TERMUX_ARCHIVE"$'\n'"$CODEX_TERMUX_METADATA" ]] || {
+    termux_die 'checksum manifest does not describe exactly the archive and metadata files.'
+    return 1
+  }
   (cd "$dir" && sha256sum --check --strict "$CODEX_TERMUX_CHECKSUMS") || {
     termux_die 'artifact SHA-256 verification failed.'
     return 1
@@ -168,7 +248,7 @@ termux_verify_download_set() {
   head_sha="$(termux_metadata_value "$metadata" head_sha)"
   version="$(termux_metadata_value "$metadata" codex_version)"
   source_repository="$(termux_metadata_value "$metadata" source_repository)"
-  [[ "$format" == "1" ]] || { termux_die "unsupported artifact format: ${format:-missing}"; return 1; }
+  [[ "$format" == "1" || "$format" == "2" ]] || { termux_die "unsupported artifact format: ${format:-missing}"; return 1; }
   [[ "$target" == "$CODEX_TERMUX_TARGET" ]] || { termux_die "artifact target mismatch: ${target:-missing}"; return 1; }
   termux_validate_sha "$head_sha" || { termux_die 'artifact metadata has an invalid head_sha.'; return 1; }
   [[ "$head_sha" == "$expected_sha" ]] || {
@@ -202,35 +282,86 @@ termux_extract_and_verify_bundle() {
   local download_dir="$1"
   local extract_dir="$2"
   local metadata="$download_dir/$CODEX_TERMUX_METADATA"
-  local expected_version
-  local entry
-  expected_version="$(termux_metadata_value "$metadata" codex_version)"
+  local archive="$download_dir/$CODEX_TERMUX_ARCHIVE"
+  local expected_version format entry line entry_type
+  local -a entries required
+  local -A seen_entries=()
 
-  while IFS= read -r entry; do
-    [[ -n "$entry" && "$entry" != /* && "$entry" != '..' && "$entry" != ../* && "$entry" != *'/../'* ]] || {
+  expected_version="$(termux_metadata_value "$metadata" codex_version)"
+  format="$(termux_metadata_value "$metadata" format_version)"
+  [[ "$CODEX_TERMUX_MAX_ARCHIVE_ENTRIES" =~ ^[0-9]+$ && "$CODEX_TERMUX_MAX_ARCHIVE_ENTRIES" -gt 0 ]] || {
+    termux_die 'CODEX_TERMUX_MAX_ARCHIVE_ENTRIES must be a positive integer.'
+    return 1
+  }
+  tar -tzf "$archive" >/dev/null || { termux_die 'runtime archive cannot be listed.'; return 1; }
+  mapfile -t entries < <(tar -tzf "$archive")
+  (( ${#entries[@]} > 0 && ${#entries[@]} <= CODEX_TERMUX_MAX_ARCHIVE_ENTRIES )) || {
+    termux_die "runtime archive has an invalid entry count: ${#entries[@]}"
+    return 1
+  }
+  for entry in "${entries[@]}"; do
+    [[ -n "$entry" \
+      && "$entry" != /* \
+      && "$entry" != *'\\'* \
+      && "$entry" != '..' \
+      && "$entry" != ../* \
+      && "$entry" != *'/../'* \
+      && "$entry" != *'//'* \
+      && ( "$entry" == 'codex-termux-runtime' \
+        || "$entry" == 'codex-termux-runtime/' \
+        || "$entry" == codex-termux-runtime/* ) ]] || {
       termux_die "unsafe archive member: $entry"
       return 1
     }
-  done < <(tar -tzf "$download_dir/$CODEX_TERMUX_ARCHIVE")
+    [[ -z "${seen_entries[$entry]:-}" ]] || {
+      termux_die "duplicate archive member: $entry"
+      return 1
+    }
+    seen_entries[$entry]=1
+  done
+  while IFS= read -r line; do
+    entry_type="${line:0:1}"
+    case "$entry_type" in
+      -|d) ;;
+      *)
+        termux_die "runtime archive contains a link or special entry: $line"
+        return 1
+        ;;
+    esac
+  done < <(tar -tvzf "$archive")
 
   mkdir -p "$extract_dir"
-  tar -xzf "$download_dir/$CODEX_TERMUX_ARCHIVE" -C "$extract_dir"
+  tar -xzf "$archive" -C "$extract_dir"
   local root="$extract_dir/codex-termux-runtime"
-  local required=(
+  required=(
     bin/codex
     bin/codex-code-mode-host
     bin/codex-responses-api-proxy
     codex-resources/bwrap
     codex-package.json
   )
+  if [[ "$format" == "2" ]]; then
+    required+=("$CODEX_TERMUX_RUNTIME_CHECKSUMS")
+  fi
   local relative
   for relative in "${required[@]}"; do
     [[ -f "$root/$relative" ]] || { termux_die "runtime bundle is missing $relative."; return 1; }
     [[ ! -L "$root/$relative" ]] || { termux_die "runtime bundle file must not be a symlink: $relative"; return 1; }
   done
+  if find "$root" -type l -print -quit | grep -q .; then
+    termux_die 'runtime bundle contains a symbolic link.'
+    return 1
+  fi
+  if find "$root" ! -type f ! -type d -print -quit | grep -q .; then
+    termux_die 'runtime bundle contains a special filesystem entry.'
+    return 1
+  fi
   for relative in bin/codex bin/codex-code-mode-host bin/codex-responses-api-proxy codex-resources/bwrap; do
     [[ -x "$root/$relative" ]] || { termux_die "runtime file is not executable: $relative"; return 1; }
   done
+  if [[ "$format" == "2" ]]; then
+    termux_verify_runtime_tree "$root"
+  fi
 
   local actual_version
   actual_version="$("$root/bin/codex" --version)"
@@ -301,6 +432,34 @@ EOF
   mv -f "$temporary" "$launcher"
 }
 
+termux_installed_release_is_valid() {
+  local root="$1"
+  local expected_sha="$2"
+  local expected_version="${3:-}"
+  local metadata="$root/$CODEX_TERMUX_METADATA"
+  local format installed_sha installed_version target actual_version
+
+  [[ -f "$metadata" && ! -L "$metadata" ]] || return 1
+  termux_validate_key_value_file "$metadata" \
+    format_version source_repository head_sha git_describe codex_version target source_ref || return 1
+  format="$(termux_metadata_value "$metadata" format_version)"
+  installed_sha="$(termux_metadata_value "$metadata" head_sha)"
+  installed_version="$(termux_metadata_value "$metadata" codex_version)"
+  target="$(termux_metadata_value "$metadata" target)"
+  [[ "$format" == "1" || "$format" == "2" ]] || return 1
+  [[ "$installed_sha" == "$expected_sha" && "$target" == "$CODEX_TERMUX_TARGET" ]] || return 1
+  [[ -z "$expected_version" || "$installed_version" == "$expected_version" ]] || return 1
+  [[ -x "$root/bin/codex" \
+    && -x "$root/bin/codex-code-mode-host" \
+    && -x "$root/bin/codex-responses-api-proxy" \
+    && -x "$root/codex-resources/bwrap" ]] || return 1
+  if [[ "$format" == "2" ]]; then
+    termux_verify_runtime_tree "$root" || return 1
+  fi
+  actual_version="$("$root/bin/codex" --version 2>/dev/null || true)"
+  [[ -n "$installed_version" && "$installed_version" == "$actual_version" ]]
+}
+
 termux_install_verified_bundle() {
   local download_dir="$1"
   local expected_sha="$2"
@@ -318,25 +477,16 @@ termux_install_verified_bundle() {
   mkdir -p "$releases"
   trap 'rm -rf "$stage" "$link_tmp"' RETURN
   extracted_root="$(termux_extract_and_verify_bundle "$download_dir" "$stage")"
-  cp "$download_dir/$CODEX_TERMUX_METADATA" "$extracted_root/metadata.env"
-  cp "$download_dir/$CODEX_TERMUX_CHECKSUMS" "$extracted_root/SHA256SUMS"
+  cp "$download_dir/$CODEX_TERMUX_METADATA" "$extracted_root/$CODEX_TERMUX_METADATA"
+  cp "$download_dir/$CODEX_TERMUX_CHECKSUMS" "$extracted_root/$CODEX_TERMUX_CHECKSUMS"
 
   if [[ -e "$release" ]]; then
-    local installed_sha
-    local installed_version
-    installed_sha="$(termux_metadata_value "$release/metadata.env" head_sha 2>/dev/null || true)"
-    installed_version="$(termux_metadata_value "$release/metadata.env" codex_version 2>/dev/null || true)"
-    if [[ "$installed_sha" == "$expected_sha" \
-          && -x "$release/bin/codex" \
-          && -x "$release/bin/codex-code-mode-host" \
-          && -x "$release/bin/codex-responses-api-proxy" \
-          && -x "$release/codex-resources/bwrap" \
-          && "$installed_version" == "$("$release/bin/codex" --version 2>/dev/null || true)" ]]; then
+    if termux_installed_release_is_valid "$release" "$expected_sha" "$expected_version"; then
       rm -rf "$stage"
     else
       local quarantined
       quarantined="${release}.invalid.$(date +%s).$$"
-      termux_info "moving an incomplete existing runtime aside to $quarantined"
+      termux_info "moving an invalid existing runtime aside to $quarantined"
       mv "$release" "$quarantined"
       mv "$extracted_root" "$release"
       rmdir "$stage"
@@ -350,7 +500,7 @@ termux_install_verified_bundle() {
   mv -Tf "$link_tmp" "$runtime_root/current"
   termux_write_launcher "$prefix/bin/codex" "$prefix" "$runtime_root"
   trap - RETURN
-  termux_info "installed $(termux_metadata_value "$release/metadata.env" codex_version) from commit $expected_sha"
+  termux_info "installed $(termux_metadata_value "$release/$CODEX_TERMUX_METADATA" codex_version) from commit $expected_sha"
 }
 
 termux_installed_metadata() {

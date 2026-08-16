@@ -24,6 +24,7 @@ release_tag=""
 release_version=""
 release_archive_sha=""
 temporary_dir=""
+update_lock_dir=""
 
 usage() {
   cat <<'USAGE'
@@ -119,23 +120,43 @@ cleanup() {
   if [[ -n "$temporary_dir" && -d "$temporary_dir" ]]; then
     rm -rf "$temporary_dir"
   fi
+  if [[ -n "$update_lock_dir" && -d "$update_lock_dir" ]]; then
+    rm -f "$update_lock_dir/pid"
+    rmdir "$update_lock_dir" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
+
+acquire_update_lock() {
+  local requested="${CODEX_TERMUX_LOCK_DIR:-$PREFIX/var/lock/codex-termux-update.lock}"
+  mkdir -p "$(dirname "$requested")" || termux_abort "cannot create update lock parent: $(dirname "$requested")"
+  if ! mkdir "$requested" 2>/dev/null; then
+    local owner
+    owner="$(cat "$requested/pid" 2>/dev/null || true)"
+    termux_abort "another Codex Termux update is active${owner:+ (pid $owner)}; retry after it finishes."
+  fi
+  update_lock_dir="$requested"
+  printf '%s
+' "$$" >"$update_lock_dir/pid"
+}
 
 load_release_manifest() {
   [[ -f "$MANIFEST_FILE" ]] || return 1
   local format manifest_repo
+  termux_validate_key_value_file "$MANIFEST_FILE"     format_version repository release_tag head_sha codex_version archive_sha256 ||     termux_abort 'release manifest is malformed, duplicated, or contains an unknown key.'
   format="$(termux_metadata_value "$MANIFEST_FILE" format_version)"
   manifest_repo="$(termux_metadata_value "$MANIFEST_FILE" repository)"
-  [[ "$format" == "1" ]] || termux_abort "unsupported release manifest format: ${format:-missing}"
+  [[ "$format" == "1" || "$format" == "2" ]] || termux_abort "unsupported release manifest format: ${format:-missing}"
   [[ "$manifest_repo" == "$CODEX_TERMUX_REPO" ]] || \
     termux_abort "release manifest repository mismatch: ${manifest_repo:-missing}"
   release_tag="${release_tag:-$(termux_metadata_value "$MANIFEST_FILE" release_tag)}"
   expected_sha="${expected_sha:-$(termux_metadata_value "$MANIFEST_FILE" head_sha)}"
   release_version="${release_version:-$(termux_metadata_value "$MANIFEST_FILE" codex_version)}"
   release_archive_sha="${release_archive_sha:-$(termux_metadata_value "$MANIFEST_FILE" archive_sha256)}"
-  [[ -n "$release_tag" && -n "$expected_sha" ]] || return 1
+  [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || termux_abort 'release manifest contains an invalid release_tag.'
+  [[ -n "$release_version" && "$release_version" != *$'\n'* ]] || termux_abort 'release manifest contains an invalid codex_version.'
   termux_validate_sha "$expected_sha" || termux_abort 'release manifest contains an invalid head_sha.'
+  termux_validate_sha256 "$release_archive_sha" || termux_abort 'release manifest contains an invalid archive_sha256.'
   return 0
 }
 
@@ -372,6 +393,7 @@ check_versions() {
 }
 
 termux_check_environment
+acquire_update_lock
 prepare_checkout
 
 case "$operation" in
@@ -403,9 +425,10 @@ case "$operation" in
     if [[ "$explicit_expected_sha" == "no" && -z "$source_ref" && "$dispatch" == "no" ]] \
       && load_release_manifest; then
       installed_sha="$(termux_metadata_value "$(termux_installed_metadata)" head_sha 2>/dev/null || true)"
-      if [[ "$installed_sha" == "$expected_sha" ]]; then
+      installed_root="$PREFIX/libexec/codex-termux/current"
+      if [[ "$installed_sha" == "$expected_sha" ]]         && termux_installed_release_is_valid "$installed_root" "$expected_sha" "$release_version"; then
         termux_info "already current at $expected_sha"
-        codex --version
+        "$PREFIX/bin/codex" --version
         exit 0
       fi
       download_public_release

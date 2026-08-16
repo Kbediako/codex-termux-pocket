@@ -93,6 +93,7 @@ smoke_installed() {
   [[ -x "$runtime_root/bin/codex-responses-api-proxy" ]] || termux_abort 'installed codex-responses-api-proxy is missing.'
   [[ -x "$runtime_root/codex-resources/bwrap" ]] || termux_abort 'verified bundled bubblewrap is missing.'
   [[ ! -w "$runtime_root/bin/codex" || -O "$runtime_root/bin/codex" ]] || termux_abort 'runtime permissions/ownership are unsafe.'
+  termux_installed_release_is_valid "$runtime_root" "$metadata_sha" "$metadata_version" ||     termux_abort 'installed runtime tree failed integrity validation.'
 
   actual_version="$("$launcher" --version)"
   [[ "$actual_version" == "$metadata_version" ]] || \
