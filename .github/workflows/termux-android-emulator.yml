@@ -6,6 +6,7 @@ on:
     branches:
       - main
     paths:
+      - ".github/scripts/termux-android-emulator-check.sh"
       - ".github/workflows/termux-android-emulator.yml"
   workflow_dispatch:
 
