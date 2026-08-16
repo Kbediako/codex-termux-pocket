@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -24,11 +25,10 @@ use landlock::Access;
 use landlock::AccessFs;
 use landlock::CompatLevel;
 use landlock::Compatible;
-use landlock::PathBeneath;
 use landlock::Ruleset;
 use landlock::RulesetAttr;
+use landlock::RulesetCreated;
 use landlock::RulesetCreatedAttr;
-use landlock::RulesetError;
 use seccompiler::BpfProgram;
 use seccompiler::SeccompAction;
 use seccompiler::SeccompCmpArgLen;
@@ -153,33 +153,102 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(access_rw)?
-        .create()?;
-
-    // Rust's cross-compiled musl OpenOptions currently drops O_PATH when the
-    // landlock crate opens rule roots. Android SELinux denies O_RDONLY on
-    // broad virtual hierarchies such as /apex while permitting O_PATH, which
-    // caused the Android dynamic linker to lose its libc paths after the
-    // sandbox was installed. Open Termux roots with the raw O_PATH flag so
-    // every intended rule is actually installed. Keep the crate's normal
-    // helper everywhere else.
-    if is_termux_environment() {
-        ruleset = ruleset.add_rules(termux_path_beneath_rules(&readable_roots, abi))?;
-    } else {
-        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?;
-    }
-
-    let mut ruleset = ruleset
-        .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
-        .set_no_new_privs(true);
+        .create()?
+        .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?;
 
     if !writable_roots.is_empty() {
         ruleset = ruleset.add_rules(landlock::path_beneath_rules(&writable_roots, access_rw))?;
     }
 
-    let status = ruleset.restrict_self()?;
+    if is_termux_environment() {
+        return install_termux_read_rules_and_restrict(ruleset, &readable_roots, access_ro.bits());
+    }
+
+    let status = ruleset
+        .add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?
+        .set_no_new_privs(true)
+        .restrict_self()?;
 
     if status.ruleset == landlock::RulesetStatus::NotEnforced {
         return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+
+    Ok(())
+}
+
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
+
+/// Adds read rules with the kernel UAPI on Termux, then enforces the
+/// ruleset. Android SELinux permits opening some virtual roots with
+/// `O_PATH` but denies the `fstat()` compatibility probe performed by
+/// landlock 0.4.x. The kernel only needs the live `O_PATH` descriptor.
+///
+/// Writable roots and `/dev/null` still go through the crate's normal
+/// compatibility checks before this function receives the ruleset.
+fn install_termux_read_rules_and_restrict(
+    ruleset: RulesetCreated,
+    readable_roots: &[PathBuf],
+    allowed_access: u64,
+) -> Result<()> {
+    let ruleset_fd: Option<OwnedFd> = ruleset.into();
+    let Some(ruleset_fd) = ruleset_fd else {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    };
+
+    let mut added_rules = 0usize;
+    for path in readable_roots {
+        // Match landlock::path_beneath_rules' best-effort behavior:
+        // unavailable optional Android roots are omitted and therefore
+        // remain inaccessible once this ruleset is enforced.
+        let parent_fd = match open_path_for_landlock(path) {
+            Ok(fd) => fd,
+            Err(_) => continue,
+        };
+        let attr = LandlockPathBeneathAttr {
+            allowed_access,
+            parent_fd: parent_fd.as_raw_fd(),
+        };
+
+        // SAFETY: `ruleset_fd` and `parent_fd` are live descriptors,
+        // `attr` has the exact C layout required by
+        // `landlock_path_beneath_attr`, and Landlock requires flags 0.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset_fd.as_raw_fd(),
+                LANDLOCK_RULE_PATH_BENEATH,
+                &attr as *const LandlockPathBeneathAttr,
+                0 as libc::c_uint,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        added_rules += 1;
+    }
+
+    if added_rules == 0 {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+
+    set_no_new_privs()?;
+    // SAFETY: `ruleset_fd` is a live Landlock ruleset descriptor and
+    // the kernel API currently requires flags 0.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset_fd.as_raw_fd(),
+            0 as libc::c_uint,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
 
     Ok(())
@@ -200,24 +269,6 @@ fn is_termux_environment() -> bool {
     std::env::var_os("PREFIX")
         .as_deref()
         .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)))
-}
-
-fn termux_path_beneath_rules(
-    paths: &[PathBuf],
-    abi: ABI,
-) -> Vec<std::result::Result<PathBeneath<OwnedFd>, RulesetError>> {
-    let access = AccessFs::from_read(abi);
-    paths
-        .iter()
-        .filter_map(|path| {
-            // Match landlock::path_beneath_rules' best-effort behavior: a
-            // missing or inaccessible optional Android hierarchy is omitted
-            // and therefore remains inaccessible once the ruleset is active.
-            open_path_for_landlock(path)
-                .ok()
-                .map(|fd| Ok(PathBeneath::new(fd, access)))
-        })
-        .collect()
 }
 
 fn open_path_for_landlock(path: &Path) -> std::io::Result<OwnedFd> {
