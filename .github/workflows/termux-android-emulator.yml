@@ -6,17 +6,7 @@ on:
     branches:
       - main
     paths:
-      - ".github/scripts/build-termux-android-emulator-fixture.sh"
-      - ".github/scripts/termux-android-emulator-check.sh"
-      - ".github/scripts/install-musl-build-tools.sh"
-      - ".github/scripts/install-musl-build-tools-core-49035f.sh"
       - ".github/workflows/termux-android-emulator.yml"
-      - ".github/workflows/termux-release-request.yml"
-      - "scripts/termux/release-request.env"
-      - "scripts/termux/codex-update-alpha"
-      - "scripts/termux/install-codex-termux"
-      - "scripts/termux/smoke-test-artifact"
-      - "scripts/termux/termux-mobile-lib.sh"
   workflow_dispatch:
 
 permissions:
@@ -28,265 +18,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    name: Resolve runtime under test
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      source_sha: ${{ steps.request.outputs.source_sha }}
-      expected_package_version: ${{ steps.request.outputs.expected_package_version }}
-    steps:
-      - name: Checkout control commit
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Parse release request
-        id: request
-        shell: bash
-        run: |
-          set -euo pipefail
-          request="scripts/termux/release-request.env"
-          source_sha="$(sed -n 's/^source_sha=//p' "$request")"
-          expected_package_version="$(sed -n 's/^expected_package_version=//p' "$request")"
-          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$expected_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
-          [[ "$(grep -c '^source_sha=' "$request")" -eq 1 ]]
-          [[ "$(grep -c '^expected_package_version=' "$request")" -eq 1 ]]
-          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
-          echo "expected_package_version=${expected_package_version}" >> "$GITHUB_OUTPUT"
-
-  build-emulator-surrogate:
-    name: Build x86_64 surrogate from exact alpha source
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 100
-    env:
-      TARGET: x86_64-unknown-linux-musl
-      ZIG_VERSION: "0.14.0"
-      CARGO_PROFILE_RELEASE_LTO: "false"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
-      RUSTY_V8_VERSION: "150.4.0"
-      RUSTY_V8_ARCHIVE_SHA256: "694faa7c6136d3218862df62c29f3785cbcce241977da3183ddadabf09040ddf"
-      RUSTY_V8_BINDING_SHA256: "7727826ae479bdb645e807239fb12d1f8e2e23de7a6cf16f5ee592690d1d8506"
-
-    steps:
-      - name: Checkout validation controls
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Checkout exact runtime source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
-          fetch-depth: 2
-          persist-credentials: false
-          path: runtime-source
-
-      - name: Validate source identity and locked graph
-        env:
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          EXPECTED_PACKAGE_VERSION: ${{ needs.prepare.outputs.expected_package_version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git -C runtime-source rev-parse HEAD)" = "$SOURCE_SHA"
-          actual_version="$(
-            awk '
-              /^\[workspace\.package\]$/ { in_package=1; next }
-              /^\[/ && in_package { exit }
-              in_package && /^version[[:space:]]*=/ {
-                value=$0
-                sub(/^[^=]*=[[:space:]]*"/, "", value)
-                sub(/".*$/, "", value)
-                print value
-                exit
-              }
-            ' runtime-source/codex-rs/Cargo.toml
-          )"
-          test "$actual_version" = "$EXPECTED_PACKAGE_VERSION"
-          (cd runtime-source/codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
-
-      - name: Install host dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            --no-install-recommends libubsan1 python3
-
-      - name: Install pinned Rust toolchain target
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Use hermetic Cargo home
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo_home="${GITHUB_WORKSPACE}/.cargo-home-emulator"
-          mkdir -p "${cargo_home}/bin"
-          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
-          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
-          : >"${cargo_home}/config.toml"
-
-      - name: Restore Cargo dependency cache
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
-        with:
-          path: |
-            ${{ github.workspace }}/.cargo-home-emulator/registry/index/
-            ${{ github.workspace }}/.cargo-home-emulator/registry/cache/
-            ${{ github.workspace }}/.cargo-home-emulator/git/db/
-          key: termux-emulator-cargo-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('runtime-source/codex-rs/Cargo.lock', 'runtime-source/codex-rs/rust-toolchain.toml') }}
-          restore-keys: |
-            termux-emulator-cargo-${{ runner.os }}-${{ env.TARGET }}-
-
-      - name: Install Zig and musl build tools
-        env:
-          TARGET: x86_64-unknown-linux-musl
-          APT_INSTALL_ARGS: --no-install-recommends
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash "${GITHUB_WORKSPACE}/runtime-source/.github/scripts/install-zig.sh"
-          bash "${GITHUB_WORKSPACE}/runtime-source/.github/scripts/install-musl-build-tools.sh"
-
-      - name: Configure host runtime and clear sanitizer flags
-        shell: bash
-        run: |
-          set -euo pipefail
-          ubsan=""
-          if command -v ldconfig >/dev/null 2>&1; then
-            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
-          fi
-          wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
-          cat >"$wrapper" <<EOF
-          #!/usr/bin/env bash
-          set -euo pipefail
-          if [[ -n "${ubsan}" ]]; then
-            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
-          fi
-          exec "\$1" "\${@:2}"
-          EOF
-          chmod 0755 "$wrapper"
-          {
-            echo "RUSTC_WRAPPER=${wrapper}"
-            echo "RUSTC_WORKSPACE_WRAPPER="
-            echo "RUSTFLAGS="
-            echo "CARGO_ENCODED_RUSTFLAGS="
-            echo "RUSTDOCFLAGS="
-            echo "CARGO_BUILD_RUSTFLAGS="
-            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="
-            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="
-          } >>"$GITHUB_ENV"
-          sanitize() {
-            local value="$1"
-            value="${value//-fsanitize=undefined/}"
-            value="${value//-fno-sanitize-recover=undefined/}"
-            value="${value//-fno-sanitize-trap=undefined/}"
-            printf '%s' "$value"
-          }
-          echo "CFLAGS=$(sanitize "${CFLAGS-}")" >>"$GITHUB_ENV"
-          echo "CXXFLAGS=$(sanitize "${CXXFLAGS-}")" >>"$GITHUB_ENV"
-
-      - name: Download and verify x86_64 Rusty V8 inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          resolved="$(
-            python3 "${GITHUB_WORKSPACE}/runtime-source/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version
-          )"
-          test "$resolved" = "$RUSTY_V8_VERSION"
-          base="https://github.com/openai/codex/releases/download/rusty-v8-v${resolved}"
-          input_dir="${RUNNER_TEMP}/rusty-v8-x86_64"
-          archive="${input_dir}/librusty_v8_release_${TARGET}.a.gz"
-          binding="${input_dir}/src_binding_release_${TARGET}.rs"
-          mkdir -p "$input_dir"
-          curl -fsSL "$base/librusty_v8_release_${TARGET}.a.gz" -o "$archive"
-          curl -fsSL "$base/src_binding_release_${TARGET}.rs" -o "$binding"
-          printf '%s  %s\n' "$RUSTY_V8_ARCHIVE_SHA256" "$archive" |
-            sha256sum --check --strict
-          printf '%s  %s\n' "$RUSTY_V8_BINDING_SHA256" "$binding" |
-            sha256sum --check --strict
-          echo "RUSTY_V8_ARCHIVE=${archive}" >>"$GITHUB_ENV"
-          echo "RUSTY_V8_SRC_BINDING_PATH=${binding}" >>"$GITHUB_ENV"
-
-      - name: Restore compiled target cache
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
-        with:
-          path: |
-            runtime-source/codex-rs/target/.rustc_info.json
-            runtime-source/codex-rs/target/release/.fingerprint/
-            runtime-source/codex-rs/target/release/build/
-            runtime-source/codex-rs/target/release/deps/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/.rustc_info.json
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/.fingerprint/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/build/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/deps/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/gn_out/obj/
-          key: termux-emulator-target-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('runtime-source/codex-rs/Cargo.lock', 'runtime-source/codex-rs/rust-toolchain.toml') }}-${{ needs.prepare.outputs.source_sha }}
-          restore-keys: |
-            termux-emulator-target-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('runtime-source/codex-rs/Cargo.lock', 'runtime-source/codex-rs/rust-toolchain.toml') }}-
-
-      - name: Build and stage deterministic emulator fixtures
-        env:
-          SOURCE_DIR: ${{ github.workspace }}/runtime-source
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          EXPECTED_PACKAGE_VERSION: ${{ needs.prepare.outputs.expected_package_version }}
-        shell: bash
-        run: bash .github/scripts/build-termux-android-emulator-fixture.sh
-
-      - name: Upload Android emulator fixture
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: codex-termux-android-emulator-fixture
-          path: dist/android-emulator/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Save Cargo dependency cache
-        if: always() && !cancelled()
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
-        with:
-          path: |
-            ${{ github.workspace }}/.cargo-home-emulator/registry/index/
-            ${{ github.workspace }}/.cargo-home-emulator/registry/cache/
-            ${{ github.workspace }}/.cargo-home-emulator/git/db/
-          key: termux-emulator-cargo-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('runtime-source/codex-rs/Cargo.lock', 'runtime-source/codex-rs/rust-toolchain.toml') }}
-
-      - name: Save compiled target cache
-        if: always() && !cancelled()
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
-        with:
-          path: |
-            runtime-source/codex-rs/target/.rustc_info.json
-            runtime-source/codex-rs/target/release/.fingerprint/
-            runtime-source/codex-rs/target/release/build/
-            runtime-source/codex-rs/target/release/deps/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/.rustc_info.json
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/.fingerprint/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/build/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/deps/
-            runtime-source/codex-rs/target/x86_64-unknown-linux-musl/release/gn_out/obj/
-          key: termux-emulator-target-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('runtime-source/codex-rs/Cargo.lock', 'runtime-source/codex-rs/rust-toolchain.toml') }}-${{ needs.prepare.outputs.source_sha }}
-
   native-termux:
     name: Real Termux app on Android emulator
-    needs:
-      - prepare
-      - build-emulator-surrogate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      EXPECTED_PACKAGE_VERSION: ${{ needs.prepare.outputs.expected_package_version }}
+      SOURCE_SHA: 976d1798cd03427e3ca37a614b236042868a635f
+      EXPECTED_PACKAGE_VERSION: 0.148.0-alpha.20
       CONTROL_SHA: ${{ github.sha }}
+      FIXTURE_RUN_ID: "31932665977"
       TERMUX_APK_NAME: termux-app_v0.118.3+github-debug_x86_64.apk
       TERMUX_APK_URL: https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_x86_64.apk
       TERMUX_SUMS_URL: https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_sha256sums
@@ -298,11 +38,17 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Download exact emulator fixture
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: codex-termux-android-emulator-fixture
-          path: dist/android-emulator
+      - name: Download exact verified emulator fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/android-emulator
+          gh run download "$FIXTURE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name codex-termux-android-emulator-fixture \
+            --dir dist/android-emulator
 
       - name: Verify fixture source identity
         shell: bash
@@ -314,6 +60,10 @@ jobs:
           test "$(sed -n 's/^package_version=//p' "$fixture")" = "$EXPECTED_PACKAGE_VERSION"
           test "$(grep -c '^source_sha=' "$fixture")" -eq 1
           test "$(grep -c '^package_version=' "$fixture")" -eq 1
+          for name in previous current broken lowspace; do
+            test -f "dist/android-emulator/${name}/release-manifest.env"
+            test -f "dist/android-emulator/${name}/codex-termux-aarch64-unknown-linux-musl.tar.gz"
+          done
 
       - name: Download and verify official Termux debug APK
         shell: bash
@@ -341,7 +91,7 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
 
-      - name: Run native Android/Termux validation
+      - name: Run native Android and Termux validation
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
         with:
           api-level: 35
