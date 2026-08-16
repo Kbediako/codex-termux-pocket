@@ -1,5 +1,5 @@
 name: termux-alpha-sync
-run-name: Sync Termux patch stack to ${{ inputs.alpha_tag || 'rust-v0.148.0-alpha.20' }}
+run-name: Merge upstream ${{ inputs.alpha_tag || 'rust-v0.148.0-alpha.20' }} into the Termux candidate
 
 on:
   push:
@@ -38,31 +38,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Rebase the audited Termux patch stack
+      - name: Merge the exact upstream alpha
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git checkout -B main "$GITHUB_SHA"
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/openai/codex.git
-          git fetch --prune upstream main 'refs/tags/rust-v*:refs/tags/rust-v*'
-          CODEX_SRC_DIR="$GITHUB_WORKSPACE" \
-            bash scripts/termux/maintainer-update-alpha --tag "$TARGET_TAG"
+          git fetch --no-tags upstream "refs/tags/${TARGET_TAG}:refs/tags/${TARGET_TAG}"
 
+          set +e
+          git merge --no-ff --no-commit "$TARGET_TAG"
+          merge_status=$?
+          set -e
+          if (( merge_status != 0 )); then
+            echo "::error::The upstream alpha does not merge cleanly. No branch update was published."
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Conflicted files (%d):\n' "${#conflicts[@]}"
+            printf '  %s\n' "${conflicts[@]}"
+            for path in "${conflicts[@]}"; do
+              echo "::group::Conflict: $path"
+              git diff --cc -- "$path" | sed -n '1,500p'
+              echo "::endgroup::"
+            done
+            git merge --abort
+            exit 2
+          fi
+
+          git commit -m "Merge upstream ${TARGET_TAG} for Termux"
+          CODEX_SRC_DIR="$GITHUB_WORKSPACE" \
+            bash scripts/termux/maintainer-update-alpha --lock-only
           if ! git diff --quiet -- codex-rs/Cargo.lock MODULE.bazel.lock; then
-            subject="termux: refresh lockfile after ${TARGET_TAG#rust-v} rebase"
+            subject="termux: refresh lockfile after ${TARGET_TAG#rust-v} merge"
             if ! awk -F '\t' -v subject="$subject" '$1 == "subject" && $2 == subject { found=1 } END { exit !found }' \
                 scripts/termux/patch_audit.tsv; then
-              printf 'subject\t%s\tbuild-only\tRefreshes the complete workspace and target-specific dependency graph after rebasing the maintained Termux patch stack.\n' \
+              printf 'subject\t%s\tbuild-only\tRefreshes the complete workspace and target-specific dependency graph after merging the maintained Termux patch stack with the upstream alpha.\n' \
                 "$subject" >> scripts/termux/patch_audit.tsv
             fi
             git add codex-rs/Cargo.lock MODULE.bazel.lock scripts/termux/patch_audit.tsv
             git commit -m "$subject"
           fi
 
-      - name: Validate rebased control plane
+      - name: Validate merged control plane
         shell: bash
         run: |
           set -euo pipefail
@@ -75,13 +93,13 @@ jobs:
           (cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
           git diff --check
 
-      - name: Publish the rebased candidate branch
+      - name: Publish and dispatch hosted validation
         shell: bash
         run: |
           set -euo pipefail
-          git push --force-with-lease origin "HEAD:refs/heads/$TARGET_BRANCH"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
           new_sha="$(git rev-parse HEAD)"
-          printf 'Rebased candidate: %s\n' "$new_sha"
+          printf 'Merged candidate: %s\n' "$new_sha"
           gh workflow run termux-mobile-artifact.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
