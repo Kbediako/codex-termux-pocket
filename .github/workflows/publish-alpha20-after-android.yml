@@ -1,0 +1,240 @@
+name: publish-alpha20-after-android
+run-name: Publish alpha.20 after native Android validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-alpha20-after-android.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: publish-alpha20-after-android
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: 976d1798cd03427e3ca37a614b236042868a635f
+      ANDROID_CONTROL_SHA: 0ef41d0da52256c2aaf02e89eabfb6619fd98605
+      ANDROID_RUN_ID: "31936658809"
+      ARTIFACT_RUN_ID: "31926857361"
+      RELEASE_TAG: termux-v2026.08.16-alpha.20-976d1798cd
+      EXPECTED_CODEX_VERSION: codex-cli 976d179
+      ARCHIVE_NAME: codex-termux-aarch64-unknown-linux-musl.tar.gz
+
+    steps:
+      - name: Checkout release controls
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Require exact successful native Android run
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${ANDROID_RUN_ID}")"
+            head_sha="$(jq -r .head_sha <<<"$run_json")"
+            workflow_path="$(jq -r .path <<<"$run_json")"
+            status="$(jq -r .status <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // empty' <<<"$run_json")"
+            [[ "$head_sha" == "$ANDROID_CONTROL_SHA" ]] || {
+              echo "::error::Android run ${ANDROID_RUN_ID} has unexpected head ${head_sha}"
+              exit 1
+            }
+            [[ "$workflow_path" == ".github/workflows/termux-android-emulator.yml" ]] || {
+              echo "::error::Android run ${ANDROID_RUN_ID} used unexpected workflow ${workflow_path}"
+              exit 1
+            }
+            if [[ "$status" == "completed" ]]; then
+              [[ "$conclusion" == "success" ]] || {
+                echo "::error::Android run ${ANDROID_RUN_ID} concluded ${conclusion}"
+                exit 1
+              }
+              break
+            fi
+            sleep 20
+          done
+          echo "Native Android/Termux run ${ANDROID_RUN_ID} passed at ${ANDROID_CONTROL_SHA}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require exact successful production ARM64 artifact run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}")"
+          [[ "$(jq -r .head_sha <<<"$run_json")" == "$SOURCE_SHA" ]]
+          [[ "$(jq -r .path <<<"$run_json")" == ".github/workflows/termux-mobile-artifact.yml" ]]
+          [[ "$(jq -r .status <<<"$run_json")" == "completed" ]]
+          [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]]
+          echo "Production ARM64 artifact run ${ARTIFACT_RUN_ID} passed at ${SOURCE_SHA}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download exact production artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          gh run download "$ARTIFACT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name codex-termux-aarch64-unknown-linux-musl \
+            --dir dist
+
+      - name: Revalidate artifact and create release manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          required=(
+            "$ARCHIVE_NAME"
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+          )
+          for file in "${required[@]}"; do
+            [[ -f "$file" ]] || { echo "::error::Missing artifact file: $file"; exit 1; }
+          done
+          sha256sum --check --strict SHA256SUMS
+          python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); assert data["spdxVersion"] == "SPDX-2.3"' codex-termux-sbom.spdx.json
+
+          read_metadata() {
+            local key="$1"
+            local count value
+            count="$(grep -c "^${key}=" metadata.env || true)"
+            value="$(sed -n "s/^${key}=//p" metadata.env)"
+            [[ "$count" -eq 1 && -n "$value" ]] || {
+              echo "::error file=dist/metadata.env::Expected exactly one non-empty ${key}= entry"
+              exit 1
+            }
+            printf '%s' "$value"
+          }
+
+          [[ "$(read_metadata format_version)" == "2" ]]
+          [[ "$(read_metadata head_sha)" == "$SOURCE_SHA" ]]
+          [[ "$(read_metadata codex_version)" == "$EXPECTED_CODEX_VERSION" ]]
+          [[ "$(read_metadata target)" == "aarch64-unknown-linux-musl" ]]
+          archive_size="$(read_metadata archive_size_bytes)"
+          runtime_size="$(read_metadata runtime_size_bytes)"
+          [[ "$archive_size" =~ ^[0-9]+$ && "$runtime_size" =~ ^[0-9]+$ ]]
+          [[ "$archive_size" == "$(stat -c '%s' "$ARCHIVE_NAME")" ]]
+          archive_sha="$(sha256sum "$ARCHIVE_NAME" | awk '{print $1}')"
+
+          printf '%s\n' \
+            'format_version=2' \
+            "repository=${GITHUB_REPOSITORY}" \
+            "release_tag=${RELEASE_TAG}" \
+            "head_sha=${SOURCE_SHA}" \
+            "codex_version=${EXPECTED_CODEX_VERSION}" \
+            "archive_sha256=${archive_sha}" \
+            "archive_size_bytes=${archive_size}" \
+            "runtime_size_bytes=${runtime_size}" \
+            > release-manifest.env
+
+          echo "archive_sha=${archive_sha}" >> "$GITHUB_OUTPUT"
+          echo "archive_size=${archive_size}" >> "$GITHUB_OUTPUT"
+          echo "runtime_size=${runtime_size}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest runtime and release metadata
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/codex-termux-aarch64-unknown-linux-musl.tar.gz
+            dist/metadata.env
+            dist/SHA256SUMS
+            dist/codex-termux-sbom.spdx.json
+            dist/release-manifest.env
+
+      - name: Attest SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/codex-termux-aarch64-unknown-linux-musl.tar.gz
+          sbom-path: dist/codex-termux-sbom.spdx.json
+
+      - name: Publish immutable-by-contract release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_files=(
+            "$ARCHIVE_NAME"
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+            release-manifest.env
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing="$(mktemp -d)"
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$existing"
+            for file in "${release_files[@]}"; do
+              [[ -f "$existing/$file" ]]
+              cmp --silent "dist/$file" "$existing/$file" || {
+                echo "::error::Existing release ${RELEASE_TAG} differs for ${file}"
+                exit 1
+              }
+            done
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "Codex Termux ${EXPECTED_CODEX_VERSION}" \
+              --notes "Verified alpha.20 Termux runtime for ${SOURCE_SHA}. Production ARM64 artifact run ${ARTIFACT_RUN_ID} and native Android/Termux validation run ${ANDROID_RUN_ID} passed before publication." \
+              --latest=false \
+              "${release_files[@]/#/dist/}"
+          fi
+
+      - name: Verify anonymous public assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          public="$(mktemp -d)"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          for file in \
+            "$ARCHIVE_NAME" \
+            metadata.env \
+            SHA256SUMS \
+            codex-termux-sbom.spdx.json \
+            release-manifest.env; do
+            curl --fail --location --silent --show-error --retry 6 \
+              "${base}/${file}" -o "${public}/${file}"
+            cmp --silent "dist/${file}" "${public}/${file}"
+          done
+          (cd "$public" && sha256sum --check --strict SHA256SUMS)
+
+      - name: Promote exact release manifest to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(gh api "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env?ref=main")"
+          blob_sha="$(jq -r .sha <<<"$response")"
+          current="$(mktemp)"
+          jq -r .content <<<"$response" | tr -d '\n' | base64 --decode > "$current"
+          if ! cmp --silent dist/release-manifest.env "$current"; then
+            encoded="$(base64 -w0 dist/release-manifest.env)"
+            gh api --method PUT \
+              "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env" \
+              -f message="termux: promote ${RELEASE_TAG}" \
+              -f content="$encoded" \
+              -f sha="$blob_sha" \
+              -f branch=main >/dev/null
+          fi
+          {
+            echo "### Alpha.20 published"
+            echo
+            echo "- Release: ${RELEASE_TAG}"
+            echo "- Runtime source: ${SOURCE_SHA}"
+            echo "- Android validation run: ${ANDROID_RUN_ID}"
+            echo "- ARM64 artifact run: ${ARTIFACT_RUN_ID}"
+            echo "- Archive SHA256: ${{ steps.manifest.outputs.archive_sha }}"
+          } >> "$GITHUB_STEP_SUMMARY"
