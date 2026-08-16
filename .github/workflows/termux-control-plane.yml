@@ -46,6 +46,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$PREFIX/bin"
+          sudo ln -sfn /usr/bin/bash "$PREFIX/bin/bash"
+
       - name: Install shell validation tools
         shell: bash
         run: |
