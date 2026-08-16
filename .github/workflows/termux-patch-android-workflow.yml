@@ -1,0 +1,47 @@
+name: termux-patch-android-workflow
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/termux-patch-android-workflow.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply exact patch
+        shell: bash
+        run: python3 scripts/termux/patch-android-workflow.py
+
+      - name: Validate patched workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/termux-android-emulator.yml"), aliases: true)'
+          grep -F 'cancel-in-progress: true' .github/workflows/termux-android-emulator.yml >/dev/null
+          grep -F 'Save compiled target cache' .github/workflows/termux-android-emulator.yml >/dev/null
+          git diff --check
+
+      - name: Create validated commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'ci: deduplicate and cache native Android validation'
+          git push origin HEAD:main
