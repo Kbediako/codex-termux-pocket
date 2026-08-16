@@ -108,25 +108,42 @@ jobs:
 
           cli = Path("codex-rs/cli/src/main.rs")
           cli_text = cli.read_text(encoding="utf-8")
-          psp_line = "        psp,\n"
-          if cli_text.count(psp_line) != 1:
-              raise SystemExit("expected one root PSP destructuring line")
-          cli_text = cli_text.replace(psp_line, "", 1)
-          cli_pattern = re.compile(
-              r"<<<<<<< HEAD\n"
-              r"    \} = MultitoolCli::from_arg_matches\(&matches\)\.unwrap_or_else\(\|err\| err\.exit\(\)\);\n"
-              r"    interactive\.psp = psp;\n\n"
-              r"=======\n"
-              r"    \} = MultitoolCli::parse\(\);\n"
-              r">>>>>>> [^\n]+\n"
+          conflict_pattern = re.compile(
+              r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n",
+              re.DOTALL,
           )
-          cli_text, cli_replacements = cli_pattern.subn(
-              lambda _match: "    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n",
-              cli_text,
-              count=1,
-          )
-          if cli_replacements != 1 or "<<<<<<<" in cli_text or ">>>>>>>" in cli_text:
-              raise SystemExit("failed to resolve the exact CLI merge conflict")
+          resolved_blocks: list[str] = []
+
+          def resolve_cli_conflict(match: re.Match[str]) -> str:
+              ours = match.group(1)
+              theirs = match.group(2)
+              combined = ours + theirs
+              target_tokens = (
+                  "command_with_version",
+                  "MultitoolCli::from_arg_matches",
+                  "interactive.psp = psp",
+                  "MultitoolCli::parse",
+              )
+              if not any(token in combined for token in target_tokens):
+                  raise SystemExit("encountered an unexpected CLI conflict hunk")
+              resolved_blocks.append(combined)
+              return (
+                  ours.replace("        psp,\n", "")
+                  .replace("    interactive.psp = psp;\n", "")
+              )
+
+          cli_text = conflict_pattern.sub(resolve_cli_conflict, cli_text)
+          if not resolved_blocks or "<<<<<<<" in cli_text or ">>>>>>>" in cli_text:
+              raise SystemExit("failed to resolve every expected CLI conflict hunk")
+          segment_start = cli_text.index("async fn cli_main(")
+          segment_end = cli_text.index("    // Fold --enable/--disable", segment_start)
+          cli_main_prefix = cli_text[segment_start:segment_end]
+          if "command_with_version()" not in cli_main_prefix:
+              raise SystemExit("Termux compile-time version command was lost")
+          if "MultitoolCli::from_arg_matches" not in cli_main_prefix:
+              raise SystemExit("Termux version-aware Clap parsing was lost")
+          if "interactive.psp = psp" in cli_main_prefix or "\n        psp,\n" in cli_main_prefix:
+              raise SystemExit("removed alpha.20 root PSP plumbing remains")
           cli.write_text(cli_text, encoding="utf-8")
           PY
             git add codex-rs/Cargo.toml codex-rs/cli/src/main.rs
