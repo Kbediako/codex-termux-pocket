@@ -44,8 +44,8 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("scripts/termux/codex-update-alpha")
-          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          updater = Path("scripts/termux/codex-update-alpha")
+          lines = updater.read_text(encoding="utf-8").splitlines(keepends=True)
           matches = [
               index
               for index, line in enumerate(lines)
@@ -57,7 +57,15 @@ jobs:
           if not lines[index].endswith("\n"):
               raise SystemExit("release-manifest validation line has no newline")
           lines[index] = lines[index][:-1] + " \n"
-          path.write_text("".join(lines), encoding="utf-8")
+          updater.write_text("".join(lines), encoding="utf-8")
+
+          patcher = Path("scripts/termux/apply-optimization-patch.py")
+          patch_text = patcher.read_text(encoding="utf-8")
+          old = '        raise SystemExit(f"{path}: expected one exact match, found {count}")\n'
+          new = '        raise SystemExit(f"{path}: expected one exact match, found {count}; unmatched={old[:240]!r}")\n'
+          if patch_text.count(old) != 1:
+              raise SystemExit("expected one exact-match diagnostic in optimisation patcher")
+          patcher.write_text(patch_text.replace(old, new, 1), encoding="utf-8")
           PY
           python3 -m py_compile \
             scripts/termux/apply-optimization-patch.py \
