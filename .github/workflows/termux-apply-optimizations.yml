@@ -41,6 +41,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/termux/codex-update-alpha")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          matches = [
+              index
+              for index, line in enumerate(lines)
+              if 'termux_validate_key_value_file "$MANIFEST_FILE"' in line
+          ]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one release-manifest validation line, found {len(matches)}")
+          index = matches[0]
+          if not lines[index].endswith("\n"):
+              raise SystemExit("release-manifest validation line has no newline")
+          lines[index] = lines[index][:-1] + " \n"
+          path.write_text("".join(lines), encoding="utf-8")
+          PY
           python3 -m py_compile \
             scripts/termux/apply-optimization-patch.py \
             scripts/termux/generate-sbom.py
