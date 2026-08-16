@@ -1,0 +1,64 @@
+name: patch-termux-run-as-poll
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/patch-termux-run-as-poll.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Replace remote-shell readiness check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/scripts/termux-android-emulator-check.sh')
+          text = path.read_text(encoding='utf-8')
+          old = '''    if adb shell run-as com.termux sh -c \\
+      "test -x files/usr/bin/bash" >/dev/null 2>&1; then
+      return 0
+    fi
+'''
+          new = '''    if adb shell run-as com.termux ls files/usr/bin/bash >/dev/null 2>&1; then
+      adb shell run-as com.termux files/usr/bin/bash --version >/dev/null 2>&1
+      return 0
+    fi
+'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected one quoted readiness probe, found {count}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Validate and push script-only change
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/scripts/termux-android-emulator-check.sh
+          grep -F 'run-as com.termux ls files/usr/bin/bash' .github/scripts/termux-android-emulator-check.sh >/dev/null
+          ! grep -F 'test -x files/usr/bin/bash' .github/scripts/termux-android-emulator-check.sh
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/scripts/termux-android-emulator-check.sh
+          git commit -m 'ci: use a quote-safe Termux readiness probe'
+          git push origin HEAD:main
