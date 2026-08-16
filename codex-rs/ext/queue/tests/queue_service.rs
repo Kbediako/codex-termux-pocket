@@ -6,8 +6,11 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use anyhow::Context;
+use codex_core::NotSubmittedReason;
+use codex_core::StartIfIdleSubmission;
 use codex_core::TurnInput;
-use codex_core::UserMessageAdmission;
+use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
@@ -37,11 +40,14 @@ use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses;
 use core_test_support::responses::start_mock_server;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -220,24 +226,26 @@ async fn queued_input_and_unique_event_ids_round_trip() -> anyhow::Result<()> {
         7,
         uuid::Uuid::parse_str(generated_client_id)?.get_version_num()
     );
-    assert_eq!(vec![first.clone(), second], service.list(thread_id).await?);
+    assert_eq!(
+        vec![first.clone(), second.clone()],
+        service.list(thread_id).await?
+    );
     assert_eq!(input, first.input);
 
-    let events = sink
-        .events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(2, events.len());
-    for event in events.iter() {
-        let EventMsg::ThreadQueueChanged(change) = &event.msg else {
-            anyhow::bail!("event is not a queue change");
-        };
-        assert_eq!(
-            serde_json::json!({ "threadId": thread_id }),
-            serde_json::to_value(change)?
-        );
+    {
+        let events = sink
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(2, events.len());
+        for event in events.iter() {
+            let EventMsg::ThreadQueueChanged(change) = &event.msg else {
+                anyhow::bail!("event is not a queue change");
+            };
+            assert_eq!(change.thread_id, thread_id);
+        }
+        assert_ne!(events[0].id, events[1].id);
     }
-    assert_ne!(events[0].id, events[1].id);
     Ok(())
 }
 
@@ -291,11 +299,18 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
         .enqueue(thread_id, structured_user_input("second"))
         .await?;
 
-    let admission = service
-        .start(test.codex.as_ref(), second.id.clone(), /*trace*/ None)
+    let submission = service
+        .start(
+            test.codex.as_ref(),
+            Some(second.id.clone()),
+            /*trace*/ None,
+        )
         .await?;
 
-    assert!(matches!(admission, UserMessageAdmission::Started { .. }));
+    assert!(matches!(
+        submission,
+        StartIfIdleSubmission::Started { turn_id } if !turn_id.is_empty()
+    ));
     assert_eq!(vec![first], service.list(thread_id).await?);
     wait_for_event_match(test.codex.as_ref(), |event| match event {
         EventMsg::TurnComplete(_) => Some(()),
@@ -314,8 +329,75 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stopped_turns_leave_queued_messages_in_place() -> anyhow::Result<()> {
+async fn starting_a_selected_item_while_active_leaves_it_queued() -> anyhow::Result<()> {
+    let (release_response, response_gate) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![vec![
+        StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![responses::ev_response_created("resp-1")]),
+        },
+        StreamingSseChunk {
+            gate: Some(response_gate),
+            body: responses::sse(vec![responses::ev_completed("resp-1")]),
+        },
+    ]])
+    .await;
+    let test = test_codex().build_with_streaming_server(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    let service = QueuedItemService::new(
+        loaded_thread_queue(&test)?,
+        Weak::new(),
+        Arc::new(NoopExtensionEventSink),
+    );
+    let queued = service
+        .enqueue(thread_id, user_input("stay queued"))
+        .await?;
+
+    let active_turn = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "active turn".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    assert!(matches!(active_turn, TurnInputSubmission::Started { .. }));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        server.wait_for_request_count(/*count*/ 1),
+    )
+    .await?;
+
+    let submission = service
+        .start(
+            test.codex.as_ref(),
+            Some(queued.id.clone()),
+            /*trace*/ None,
+        )
+        .await?;
+    assert!(matches!(
+        submission,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle
+        }
+    ));
+    assert_eq!(vec![queued], service.list(thread_id).await?);
+
+    release_response
+        .send(())
+        .expect("active response gate should remain open");
+    wait_for_event_match(test.codex.as_ref(), |event| {
+        matches!(event, EventMsg::TurnComplete(_)).then_some(())
+    })
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_turns_pause_queued_messages_but_failed_turns_drain_them() -> anyhow::Result<()>
+{
     let server = start_mock_server().await;
+    let response =
+        responses::mount_sse_once(&server, responses::sse_completed("failed-follow-up")).await;
     let test = test_codex().build_with_auto_env(&server).await?;
     let thread_id = test.session_configured.thread_id;
     let queue = loaded_thread_queue(&test)?;
@@ -325,14 +407,26 @@ async fn stopped_turns_leave_queued_messages_in_place() -> anyhow::Result<()> {
         Arc::new(NoopExtensionEventSink),
     );
     let queued = service
-        .enqueue(thread_id, user_input("keep queued after stopping"))
+        .enqueue(thread_id, user_input("continue after failure"))
         .await?;
 
-    for cause in [ThreadIdleCause::Interrupted, ThreadIdleCause::Failed] {
-        emit_idle_with_cause(&service, thread_id, cause).await;
+    emit_idle_with_cause(&service, thread_id, ThreadIdleCause::Interrupted).await;
+    assert_eq!(vec![queued], service.list(thread_id).await?);
 
-        assert_eq!(vec![queued.clone()], service.list(thread_id).await?);
-    }
+    emit_idle_with_cause(&service, thread_id, ThreadIdleCause::Failed).await;
+    wait_for_event_match(test.codex.as_ref(), |event| {
+        matches!(event, EventMsg::TurnComplete(_)).then_some(())
+    })
+    .await;
+    assert!(service.list(thread_id).await?.is_empty());
+    assert_eq!(
+        Some("continue after failure"),
+        response
+            .single_request()
+            .message_input_texts("user")
+            .last()
+            .map(String::as_str)
+    );
     Ok(())
 }
 
@@ -451,30 +545,44 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
         hook_log.lines().collect::<Vec<_>>()
     );
     assert!(queue.list(thread_id).await?.is_empty());
+    assert_eq!(2, responses.requests().len());
+    Ok(())
+}
 
-    let rejected = staging.enqueue(thread_id, user_input("blocked")).await?;
-    let error = tokio::time::timeout(
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let responses =
+        responses::mount_sse_once(&server, responses::sse_completed("unexpected-turn")).await;
+    let test = test_codex()
+        .with_pre_build_hook(write_rejecting_prompt_hook)
+        .with_config(trust_discovered_hooks)
+        .with_config(|config| config.include_environment_context = false)
+        .build_with_auto_env(&server)
+        .await?;
+    let thread_id = test.session_configured.thread_id;
+    let queue = QueuedItemService::new(
+        loaded_thread_queue(&test)?,
+        Weak::new(),
+        Arc::new(NoopExtensionEventSink),
+    );
+
+    let rejected = queue.enqueue(thread_id, user_input("blocked")).await?;
+    let submission = tokio::time::timeout(
         Duration::from_secs(10),
-        queue.start(test.codex.as_ref(), rejected.id, /*trace*/ None),
+        queue.start(test.codex.as_ref(), Some(rejected.id), /*trace*/ None),
     )
     .await?
-    .expect_err("explicitly started blocked input should be rejected");
-    assert!(matches!(
-        error,
-        QueueServiceError::Admission(error)
-            if matches!(
-                error.details(),
-                codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
-                    if message == "user message was rejected by a hook"
-            )
-    ));
+    .expect("explicitly started input should be submitted");
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
+    wait_for_event_match(test.codex.as_ref(), |event| {
+        matches!(event, EventMsg::TurnComplete(_)).then_some(())
+    })
+    .await;
     assert!(queue.list(thread_id).await?.is_empty());
     let hook_log = std::fs::read_to_string(test.codex_home_path().join("queue_prompt_hook.log"))?;
-    assert_eq!(
-        vec!["A", "blocked", "C", "blocked"],
-        hook_log.lines().collect::<Vec<_>>()
-    );
-    assert_eq!(2, responses.requests().len());
+    assert_eq!(vec!["blocked"], hook_log.lines().collect::<Vec<_>>());
+    assert!(responses.requests().is_empty());
     Ok(())
 }
 
@@ -732,7 +840,7 @@ async fn invalid_head_is_skipped_and_a_live_user_turn_is_accepted() -> anyhow::R
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumed_idle_dispatches_input_persisted_without_a_loaded_manager() -> anyhow::Result<()> {
+async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     responses::mount_sse_once(&server, responses::sse_completed("resumed-turn")).await;
     let test = test_codex().build_with_auto_env(&server).await?;

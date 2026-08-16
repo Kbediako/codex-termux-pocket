@@ -3,13 +3,17 @@
 use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_core::TurnInputRequest;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_exec_server::RemoveOptions;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
@@ -25,8 +29,9 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
@@ -80,29 +85,23 @@ enum ImageBudgetPolicy {
     UnifiedResponsesLiteWithoutOriginalSupport,
 }
 
-fn disabled_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -> Op {
+fn disabled_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -> TurnInputRequest {
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
-    Op::UserInput {
-        items,
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-            approval_policy: Some(AskForApproval::Never),
-            sandbox_policy: Some(sandbox_policy),
-            permission_profile,
-            collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                mode: codex_protocol::config_types::ModeKind::Default,
-                settings: codex_protocol::config_types::Settings {
-                    model,
-                    reasoning_effort: None,
-                    developer_instructions: None,
-                },
-            }),
-            ..Default::default()
-        },
-    }
+    TurnInputRequest::user_input(items).with_thread_settings(ThreadSettingsOverrides {
+        approval_policy: Some(AskForApproval::Never),
+        sandbox_policy: Some(sandbox_policy),
+        permission_profile,
+        collaboration_mode: Some(CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model,
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        }),
+        ..Default::default()
+    })
 }
 
 fn image_messages(body: &Value) -> Vec<&Value> {
@@ -255,7 +254,7 @@ async fn assert_user_turn_local_image_resizes_to(
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::LocalImage {
                 path: abs_path.clone(),
@@ -463,7 +462,7 @@ async fn view_image_tool_attaches_local_image() -> anyhow::Result<()> {
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please add the screenshot".into(),
@@ -750,6 +749,7 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
         cwd: remote_cwd_uri.clone(),
         workspace_roots: vec![remote_cwd_uri],
+        config: EnvironmentConfigState::FromThread,
     };
     let relative_call_id = "call-view-image-relative-multi-env";
     let absolute_call_id = "call-view-image-absolute-multi-env";
@@ -877,7 +877,7 @@ async fn view_image_tool_can_preserve_original_resolution_when_requested_on_gpt5
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please add the original screenshot".into(),
@@ -1042,7 +1042,7 @@ async fn view_image_tool_errors_clearly_for_unsupported_detail_values() -> anyho
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please attach the image at low detail".into(),
@@ -1122,7 +1122,7 @@ async fn view_image_tool_treats_null_detail_as_omitted() -> anyhow::Result<()> {
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please attach the image with a null detail".into(),
@@ -1231,7 +1231,7 @@ async fn assert_view_image_tool_resizes_without_original_support(
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please add the screenshot".into(),
@@ -1325,7 +1325,7 @@ async fn view_image_tool_does_not_force_original_resolution_with_capability_only
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please add the screenshot".into(),
@@ -1407,7 +1407,7 @@ async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please attach the folder".into(),
@@ -1443,7 +1443,7 @@ async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn view_image_tool_turns_invalid_image_into_placeholder() -> anyhow::Result<()> {
+async fn view_image_tool_rejects_invalid_image_before_tool_output() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1479,7 +1479,7 @@ async fn view_image_tool_turns_invalid_image_into_placeholder() -> anyhow::Resul
     .await;
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please inspect the image".into(),
@@ -1496,12 +1496,13 @@ async fn view_image_tool_turns_invalid_image_into_placeholder() -> anyhow::Resul
     .await;
 
     let request = second_mock.single_request();
+    let output_text = request
+        .function_call_output_content_and_success(call_id)
+        .and_then(|(content, _)| content)
+        .context("invalid view_image error text present")?;
     assert_eq!(
-        request.function_call_output(call_id).get("output"),
-        Some(&serde_json::json!([{
-            "type": "input_text",
-            "text": "image content omitted because it could not be processed"
-        }]))
+        output_text,
+        "unable to process image: invalid or unsupported image data"
     );
     Ok(())
 }
@@ -1553,7 +1554,7 @@ async fn view_image_tool_errors_when_file_missing() -> anyhow::Result<()> {
     let session_model = session_configured.model.clone();
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please attach the missing image".into(),
@@ -1619,6 +1620,8 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         used_fallback_model_metadata: false,
         supports_search_tool: false,
         use_responses_lite: false,
+        node_repl_auto_review_required: false,
+        node_repl_disabled: false,
         auto_review_model_override: None,
         model_specialty: None,
         tool_mode: None,
@@ -1640,7 +1643,6 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
-        supports_parallel_tool_calls: false,
         supports_image_detail_original: false,
         context_window: Some(272_000),
         max_context_window: None,
@@ -1691,7 +1693,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
     let mock = responses::mount_sse_once(&server, second_response).await;
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please attach the image".into(),

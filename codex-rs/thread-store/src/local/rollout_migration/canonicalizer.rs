@@ -17,11 +17,11 @@ use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -114,13 +114,13 @@ impl LegacyRolloutCanonicalizer {
         let bytes_before = self.bytes_written;
         match line.item {
             RolloutItem::SessionMeta(_) => return Ok(0),
-            RolloutItem::ResponseItem(ResponseItem::Other) => {
-                return Err(migration_error(
-                    "legacy rollout contains an unsupported response item",
-                ));
-            }
             RolloutItem::ResponseItem(response) => {
-                let hook = match &response {
+                if matches!(&response.item, ResponseItem::Other) {
+                    return Err(migration_error(
+                        "legacy rollout contains an unsupported response item",
+                    ));
+                }
+                let hook = match &response.item {
                     ResponseItem::Message {
                         role, content, id, ..
                     } if role == "user" => parse_hook_prompt_message(id.as_deref(), content),
@@ -292,6 +292,7 @@ impl LegacyRolloutCanonicalizer {
             }
             item @ (RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_)) => {
                 self.write_item(writer, &timestamp, item).await?;
             }

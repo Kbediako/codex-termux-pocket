@@ -120,7 +120,9 @@ pub async fn list_cached_accessible_connectors_from_mcp_tools(
     config: &Config,
 ) -> Option<Vec<AppInfo>> {
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+            .await
+            .ok()?;
     let auth = auth_manager.auth().await;
     if !config
         .features
@@ -187,7 +189,13 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_environment_manager(
     force_refetch: bool,
     environment_manager: Arc<EnvironmentManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
-    let plugins_manager = Arc::new(plugins_manager_for_config(config));
+    let auth_manager =
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let auth = auth_manager.auth().await;
+    let plugins_manager = Arc::new(plugins_manager_for_config(
+        config,
+        auth.as_ref().map(CodexAuth::api_auth_mode),
+    ));
     let mcp_manager = Arc::new(McpManager::new(plugins_manager));
     list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         config,
@@ -205,7 +213,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
     mcp_manager: Arc<McpManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     let auth = auth_manager.auth().await;
     if !config
         .features
@@ -427,8 +435,11 @@ async fn cached_directory_connectors_for_tool_suggest_with_auth(
     let auth = if let Some(auth) = auth {
         Some(auth)
     } else {
-        let auth_manager =
-            AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
+        let Ok(auth_manager) =
+            AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await
+        else {
+            return Vec::new();
+        };
         loaded_auth = auth_manager.auth().await;
         loaded_auth.as_ref()
     };
@@ -502,21 +513,6 @@ pub fn with_app_plugin_sources(
             .to_vec();
     }
     connectors
-}
-
-pub(crate) fn mcp_approvals_reviewer(
-    config: &Config,
-    model: Option<&str>,
-    server_name: &str,
-    connector_id: Option<&str>,
-) -> ApprovalsReviewer {
-    mcp_approvals_reviewer_from_layers(
-        &config.config_layer_stack,
-        config.approvals_reviewer,
-        model,
-        server_name,
-        connector_id,
-    )
 }
 
 pub(crate) fn mcp_approvals_reviewer_from_layers(

@@ -4,8 +4,10 @@ use std::time::Duration;
 use anyhow::Context;
 use codex_config::Constrained;
 use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_core::NewThread;
 use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::RemoveOptions;
 use codex_protocol::models::PermissionProfile;
@@ -16,8 +18,11 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
+use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::is_remote_test_environment;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::mount_sse_once;
@@ -29,6 +34,7 @@ use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use test_case::test_case;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
@@ -36,21 +42,16 @@ use super::rmcp_client::remote_aware_stdio_server_bin;
 const SERVER_NAME: &str = "cached_rmcp";
 const NAMESPACE: &str = "mcp__cached_rmcp";
 
-fn user_turn(prompt: &str) -> Op {
-    Op::UserInput {
-        items: vec![UserInput::Text {
-            text: prompt.to_string(),
-            text_elements: Vec::new(),
-        }],
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-            approval_policy: Some(AskForApproval::Never),
-            permission_profile: Some(PermissionProfile::Disabled),
-            ..Default::default()
-        },
-    }
+fn user_turn(prompt: &str) -> TurnInputRequest {
+    TurnInputRequest::user_input(vec![UserInput::Text {
+        text: prompt.to_string(),
+        text_elements: Vec::new(),
+    }])
+    .with_thread_settings(ThreadSettingsOverrides {
+        approval_policy: Some(AskForApproval::Never),
+        permission_profile: Some(PermissionProfile::Disabled),
+        ..Default::default()
+    })
 }
 
 fn process_label(pid: &str) -> String {
@@ -189,7 +190,7 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
         )
         .await;
         thread
-            .submit(user_turn(&format!("Call the {SERVER_NAME} echo tool.")))
+            .start_or_steer_turn(user_turn(&format!("Call the {SERVER_NAME} echo tool.")))
             .await?;
         let EventMsg::McpToolCallEnd(end) = wait_for_event(
             thread,
@@ -241,6 +242,141 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
 
     fixture.codex.shutdown_and_wait().await?;
     second_thread.shutdown_and_wait().await?;
+    responses_server.verify().await;
+    Ok(())
+}
+
+#[test_case(false, false, 1; "optional server uses cache")]
+#[test_case(true, false, 1; "required server uses cache")]
+#[test_case(false, true, 2; "headers helper bypasses cache")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_http_mcp_starts_lazily_for_subagents(
+    required: bool,
+    with_headers_helper: bool,
+    expected_startup_attempts: usize,
+) -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    if with_headers_helper && is_remote_test_environment() {
+        return Ok(());
+    }
+
+    let responses_server = responses::start_mock_server().await;
+    let (http_server, startup_control) =
+        AppsTestServer::mount_with_startup_control(&responses_server).await?;
+    let server_url = format!("{}/api/codex/ps/mcp", http_server.chatgpt_base_url);
+    let fixture = test_codex()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("test config should allow disabled permissions");
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                SERVER_NAME.to_string(),
+                serde_json::from_value(json!({
+                    "url": server_url,
+                    "http_headers": { "Authorization": "Bearer cached-http-test-token" },
+                    "enabled_tools": ["calendar_create_event"],
+                    "required": required,
+                    "startup_timeout_sec": 10,
+                }))
+                .expect("HTTP MCP server configuration"),
+            );
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("test MCP server configuration");
+        })
+        .build_with_auto_env(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, SERVER_NAME).await?;
+    assert_eq!(startup_control.initialize_attempts(), 1);
+
+    let mut subagent_config = fixture.config.clone();
+    if with_headers_helper {
+        let mut servers = subagent_config.mcp_servers.get().clone();
+        let server = servers.get_mut(SERVER_NAME).expect("cached HTTP server");
+        let McpServerTransportConfig::StreamableHttp {
+            http_headers_helper,
+            ..
+        } = &mut server.transport
+        else {
+            unreachable!("expected HTTP transport");
+        };
+        *http_headers_helper = Some(if cfg!(windows) {
+            r#"echo {"X-Cache-Test":"helper"}"#.to_string()
+        } else {
+            r#"printf '{"X-Cache-Test":"helper"}'"#.to_string()
+        });
+        subagent_config.mcp_servers.set(servers)?;
+    }
+    let NewThread {
+        thread: subagent, ..
+    } = fixture
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: fixture.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..StartThreadOptions::new(subagent_config)
+        })
+        .await?;
+    if with_headers_helper {
+        wait_for_mcp_server(&subagent, SERVER_NAME).await?;
+    }
+    assert_eq!(
+        startup_control.initialize_attempts(),
+        expected_startup_attempts
+    );
+
+    let call_id = "http-call";
+    let call_response = mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_response_created(call_id),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                NAMESPACE,
+                "calendar_create_event",
+                r#"{"title":"cached","starts_at":"2026-01-01T00:00:00Z"}"#,
+            ),
+            responses::ev_completed(call_id),
+        ]),
+    )
+    .await;
+    let completion_response = mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_assistant_message("http-call-message", "done"),
+            responses::ev_completed("http-call-done"),
+        ]),
+    )
+    .await;
+    subagent
+        .start_or_steer_turn(user_turn("Call the cached HTTP tool."))
+        .await?;
+    wait_for_event(&subagent, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = call_response.single_request();
+    assert!(
+        request
+            .tool_by_name(NAMESPACE, "calendar_create_event")
+            .is_some()
+    );
+    let output = completion_response.function_call_output_text(call_id);
+    assert!(output.is_some());
+    assert_eq!(startup_control.initialize_attempts(), 2);
+
+    fixture.codex.shutdown_and_wait().await?;
+    subagent.shutdown_and_wait().await?;
     responses_server.verify().await;
     Ok(())
 }
@@ -306,7 +442,10 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         ]),
     )
     .await;
-    fixture.codex.submit(user_turn("use the echo tool")).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(user_turn("use the echo tool"))
+        .await?;
     let first_pid = wait_for_new_pid(fs.as_ref(), &pid_file, /*previous_pid*/ None).await?;
     fs.write_file(&barrier_file, b"ready".to_vec(), /*sandbox*/ None)
         .await?;
@@ -376,7 +515,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     )
     .await;
     second_thread
-        .submit(user_turn("Do not call any MCP tools."))
+        .start_or_steer_turn(user_turn("Do not call any MCP tools."))
         .await?;
     let mut reported_ready_before_startup = false;
     wait_for_event(&second_thread, |event| {
@@ -395,7 +534,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     );
     assert_definition(
         &unused_response,
-        &format!("Tools in the {NAMESPACE} namespace."),
+        &format!("Use the tools from {cached_process}."),
         &format!("Echo from {cached_process}."),
     );
     assert_eq!(
@@ -439,7 +578,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     let second_for_turn = Arc::clone(&second_thread);
     let cached_turn = tokio::spawn(async move {
         second_for_turn
-            .submit(user_turn("call the echo and cwd tools"))
+            .start_or_steer_turn(user_turn("call the echo and cwd tools"))
             .await?;
         let mut unrelated_finished_tx = Some(unrelated_finished_tx);
         let mut saw_starting = false;
@@ -492,7 +631,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     .context("cached MCP definitions should reach inference before initialization")?;
     assert_definition(
         &cached_response,
-        &format!("Tools in the {NAMESPACE} namespace."),
+        &format!("Use the tools from {cached_process}."),
         &format!("Echo from {cached_process}."),
     );
     let second_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&eager_pid)).await?;
@@ -595,7 +734,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     )
     .await;
     interrupted_thread
-        .submit(user_turn("Start the cached MCP tool."))
+        .start_or_steer_turn(user_turn("Start the cached MCP tool."))
         .await?;
     let interrupted_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&filtered_pid)).await?;
     wait_for_event(&interrupted_thread, |event| {
@@ -651,7 +790,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     )
     .await;
     interrupted_thread
-        .submit(user_turn("Retry the cached MCP tool."))
+        .start_or_steer_turn(user_turn("Retry the cached MCP tool."))
         .await?;
     wait_for_event(&interrupted_thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))

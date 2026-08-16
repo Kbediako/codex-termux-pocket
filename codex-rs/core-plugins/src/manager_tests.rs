@@ -45,6 +45,7 @@ use codex_config::SkillConfigRules;
 use codex_config::compose_requirements;
 use codex_config::types::McpServerTransportConfig;
 use codex_login::CodexAuth;
+use codex_model_provider::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_plugin::AppDeclaration;
 use codex_plugin::PluginId;
 use codex_protocol::auth::AuthMode;
@@ -952,6 +953,7 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
                         bearer_token_env_var: None,
                         http_headers: None,
                         env_http_headers: None,
+                        http_headers_helper: None,
                     },
                     environment_id: "local".to_string(),
                     enabled: true,
@@ -967,6 +969,7 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
                     scopes: None,
                     oauth: Some(McpServerOAuthConfig {
                         client_id: Some("client-id".to_string()),
+                        callback_port: Some(3118),
                     }),
                     oauth_resource: None,
                     tools: HashMap::new(),
@@ -991,7 +994,11 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
         }]
     );
     assert_eq!(
-        outcome.effective_skill_roots(),
+        outcome
+            .effective_plugin_skill_roots()
+            .into_iter()
+            .map(|root| root.path)
+            .collect::<Vec<_>>(),
         vec![plugin_root.join("skills").abs()]
     );
     assert_eq!(outcome.effective_mcp_servers().len(), 1);
@@ -1046,6 +1053,7 @@ enabled = true
                     bearer_token_env_var: None,
                     http_headers: None,
                     env_http_headers: None,
+                    http_headers_helper: None,
                 },
                 environment_id: "local".to_string(),
                 enabled: true,
@@ -1631,7 +1639,7 @@ enabled = true
     manager.set_auth_mode(/*auth_mode*/ None);
     assert_eq!(
         loaded_plugin_names(&manager, &config).await,
-        vec!["linear@openai-curated".to_string()]
+        vec!["linear@openai-api-curated".to_string()]
     );
 
     for auth_mode in [AuthMode::ApiKey, AuthMode::BedrockApiKey] {
@@ -1644,11 +1652,13 @@ enabled = true
     }
 
     manager.set_auth_mode(/*auth_mode*/ None);
-    config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
-    assert_eq!(
-        loaded_plugin_names(&manager, &config).await,
-        vec!["linear@openai-api-curated".to_string()]
-    );
+    for model_provider_id in ["openai", AMAZON_BEDROCK_PROVIDER_ID, "ollama"] {
+        config.model_provider_id = model_provider_id.to_string();
+        assert_eq!(
+            loaded_plugin_names(&manager, &config).await,
+            vec!["linear@openai-api-curated".to_string()]
+        );
+    }
 
     manager.set_auth_mode(Some(AuthMode::Chatgpt));
     assert_eq!(
@@ -2142,6 +2152,7 @@ async fn load_plugins_uses_manifest_configured_component_paths() {
                         bearer_token_env_var: None,
                         http_headers: None,
                         env_http_headers: None,
+                        http_headers_helper: None,
                     },
                     environment_id: "local".to_string(),
                     enabled: true,
@@ -2479,6 +2490,7 @@ async fn load_plugins_ignores_manifest_component_paths_without_dot_slash() {
                     bearer_token_env_var: None,
                     http_headers: None,
                     env_http_headers: None,
+                    http_headers_helper: None,
                 },
                 environment_id: "local".to_string(),
                 enabled: true,
@@ -2596,7 +2608,7 @@ async fn load_plugins_preserves_disabled_plugins_without_effective_contributions
             error: None,
         }]
     );
-    assert!(outcome.effective_skill_roots().is_empty());
+    assert!(outcome.effective_plugin_skill_roots().is_empty());
     assert!(outcome.effective_mcp_servers().is_empty());
 }
 
@@ -2733,6 +2745,7 @@ fn capability_index_filters_inactive_and_zero_capability_plugins() {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         },
         environment_id: "local".to_string(),
         enabled: true,
@@ -3086,7 +3099,7 @@ async fn load_plugins_rejects_invalid_plugin_keys() {
         outcome.plugins()[0].error.as_deref(),
         Some("invalid plugin key `sample`; expected <plugin>@<marketplace>")
     );
-    assert!(outcome.effective_skill_roots().is_empty());
+    assert!(outcome.effective_plugin_skill_roots().is_empty());
     assert!(outcome.effective_mcp_servers().is_empty());
 }
 
@@ -4670,10 +4683,14 @@ plugins = true
     .unwrap();
 
     let config = load_config(tmp.path(), tmp.path()).await;
-    let marketplaces = test_plugins_manager(tmp.path().to_path_buf())
-        .list_marketplaces_for_config(&config, &[], /*include_openai_curated*/ true)
-        .unwrap()
-        .marketplaces;
+    let marketplaces = test_plugins_manager_with_options(
+        tmp.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    )
+    .list_marketplaces_for_config(&config, &[], /*include_openai_curated*/ true)
+    .unwrap()
+    .marketplaces;
 
     let curated_marketplace = marketplaces
         .into_iter()
@@ -4834,16 +4851,36 @@ plugins = true
 }
 
 #[tokio::test]
-async fn list_marketplaces_uses_resolved_provider_instead_of_configured_default() {
-    for (configured_provider, resolved_provider, expected_marketplace) in [
+async fn list_marketplaces_selects_curated_catalog_only_from_authentication() {
+    for (configured_provider, resolved_provider, auth_mode, expected_marketplace) in [
         (
             "openai",
             AMAZON_BEDROCK_PROVIDER_ID,
+            None,
             OPENAI_API_CURATED_MARKETPLACE_NAME,
         ),
         (
             AMAZON_BEDROCK_PROVIDER_ID,
             "openai",
+            None,
+            OPENAI_API_CURATED_MARKETPLACE_NAME,
+        ),
+        (
+            "openai",
+            "ollama",
+            None,
+            OPENAI_API_CURATED_MARKETPLACE_NAME,
+        ),
+        (
+            "openai",
+            "ollama",
+            Some(AuthMode::ApiKey),
+            OPENAI_API_CURATED_MARKETPLACE_NAME,
+        ),
+        (
+            "openai",
+            "ollama",
+            Some(AuthMode::Chatgpt),
             OPENAI_CURATED_MARKETPLACE_NAME,
         ),
     ] {
@@ -4865,16 +4902,22 @@ plugins = true
 
         let mut config = load_config(tmp.path(), tmp.path()).await;
         config.model_provider_id = resolved_provider.to_string();
-        let marketplaces = test_plugins_manager(tmp.path().to_path_buf())
-            .list_marketplaces_for_config(&config, &[], /*include_openai_curated*/ true)
-            .unwrap()
-            .marketplaces;
+        let marketplaces = test_plugins_manager_with_options(
+            tmp.path().to_path_buf(),
+            Some(Product::Codex),
+            auth_mode,
+        )
+        .list_marketplaces_for_config(&config, &[], /*include_openai_curated*/ true)
+        .unwrap()
+        .marketplaces;
 
-        assert!(
+        assert_eq!(
             marketplaces
                 .iter()
-                .any(|marketplace| marketplace.name == expected_marketplace),
-            "expected `{expected_marketplace}` for resolved provider `{resolved_provider}`"
+                .map(|marketplace| marketplace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![expected_marketplace],
+            "unexpected curated catalog for provider `{resolved_provider}` with auth {auth_mode:?}"
         );
     }
 }

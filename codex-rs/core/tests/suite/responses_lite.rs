@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -248,22 +249,16 @@ async fn responses_lite_prepares_images() -> Result<()> {
     let test = builder.build(&server).await?;
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![
-                UserInput::Image {
-                    image_url: image_url.to_string(),
-                    detail: Some(ImageDetail::Original),
-                },
-                UserInput::Image {
-                    image_url: remote_image_url.to_string(),
-                    detail: Some(ImageDetail::High),
-                },
-            ],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            UserInput::Image {
+                image_url: image_url.to_string(),
+                detail: Some(ImageDetail::Original),
+            },
+            UserInput::Image {
+                image_url: remote_image_url.to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ]))
         .await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -537,7 +532,6 @@ async fn responses_lite_compact_request_uses_lite_transport_contract() -> Result
     let mut builder = test_codex()
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.use_responses_lite = true;
-            model_info.supports_parallel_tool_calls = true;
         })
         .with_config(|config| {
             let _ = config.features.disable(Feature::RemoteCompactionV2);

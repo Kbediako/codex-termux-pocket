@@ -23,6 +23,8 @@ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandle
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
+use codex_history::InitialHistory;
+use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
@@ -32,6 +34,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -49,11 +52,10 @@ use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -102,6 +104,27 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[UserInput]) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::UserMessage(item),
+                ..
+            }) = event.msg
+            {
+                assert_eq!(item.content, expected);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for recorded user input");
 }
 
 fn thread_manager() -> ThreadManager {
@@ -2275,7 +2298,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     else {
         panic!("parent environment should be ready");
     };
-    environment.config.permission_profile =
+    environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(expected_permission_profile.clone());
     assert_ne!(
         role_config.permissions.effective_permission_profile(),
@@ -2582,9 +2605,16 @@ async fn send_input_interrupts_before_prompt() {
         .iter()
         .filter_map(|(id, op)| (*id == agent_id).then_some(op))
         .collect();
-    assert_eq!(ops_for_agent.len(), 2);
+    assert_eq!(ops_for_agent.len(), 1);
     assert!(matches!(ops_for_agent[0], Op::Interrupt));
-    assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[UserInput::Text {
+            text: "hi".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2621,8 +2651,9 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    let expected = Op::UserInput {
-        items: vec![
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[
             UserInput::Mention {
                 name: "drive".to_string(),
                 path: "app://google_drive".to_string(),
@@ -2632,16 +2663,8 @@ async fn send_input_accepts_structured_items() {
                 text_elements: Vec::new(),
             },
         ],
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: Default::default(),
-    };
-    let captured = manager
-        .captured_ops()
-        .into_iter()
-        .find(|(id, op)| *id == agent_id && *op == expected);
-    assert_eq!(captured, Some((agent_id, expected)));
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2737,15 +2760,18 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let thread = manager
         .resume_thread_with_history(
             config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "materialized".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })]),
+            InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "materialized".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
@@ -2969,6 +2995,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3473,6 +3500,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3549,6 +3577,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3651,6 +3680,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3742,6 +3772,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -4541,7 +4572,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
     else {
         panic!("parent environment should be ready");
     };
-    environment.config.permission_profile =
+    environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(environment_permission_profile.clone());
 
     let config =

@@ -37,9 +37,11 @@ use crate::local_file_system::LocalFileSystem;
 use crate::local_process::LocalProcess;
 use crate::process::ExecBackend;
 use crate::protocol::EnvironmentInfo;
+use crate::protocol::FsCreateDirectoryParams;
 use crate::remote::NoiseRendezvousEnvironmentConfig;
 use crate::remote_file_system::RemoteFileSystem;
 use crate::remote_process::RemoteProcess;
+use codex_utils_path_uri::PathUri;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -897,6 +899,26 @@ impl Environment {
         }
     }
 
+    /// Atomically creates an owner-private directory on a remote executor.
+    pub async fn create_private_directory(&self, path: &PathUri) -> Result<(), ExecServerError> {
+        let Some(client) = &self.remote_client else {
+            return Err(ExecServerError::Protocol(
+                "private executor directory creation requires a remote environment".to_string(),
+            ));
+        };
+        client
+            .get()
+            .await?
+            .fs_create_directory(FsCreateDirectoryParams {
+                path: path.clone(),
+                recursive: Some(false),
+                sandbox: None,
+                private: Some(true),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Discovers plugin and skill manifests through the environment's high-level discovery API.
     pub async fn discover_capability_roots(
         &self,
@@ -904,22 +926,48 @@ impl Environment {
     ) -> Result<CapabilityRootsDiscoverResponse, ExecServerError> {
         match &self.remote_client {
             Some(client) => {
+                let mut connection_state = client.subscribe_connection_state();
                 let client = client.get().await?;
-                if params.roots.iter().any(|root| {
-                    root.sandbox
-                        .as_ref()
-                        .is_some_and(crate::FileSystemSandboxContext::should_run_in_sandbox)
-                }) && !client
-                    .environment_info()
-                    .await?
-                    .capabilities
-                    .capability_discovery_sandbox
-                {
-                    return Err(ExecServerError::Protocol(
-                        "exec-server does not support sandboxed capability discovery".to_string(),
-                    ));
+                let discover = || async {
+                    if params.roots.iter().any(|root| {
+                        root.sandbox
+                            .as_ref()
+                            .is_some_and(crate::FileSystemSandboxContext::should_run_in_sandbox)
+                    }) && !client
+                        .environment_info()
+                        .await?
+                        .capabilities
+                        .capability_discovery_sandbox
+                    {
+                        return Err(ExecServerError::Protocol(
+                            "exec-server does not support sandboxed capability discovery"
+                                .to_string(),
+                        ));
+                    }
+                    client.discover_capability_roots(params.clone()).await
+                };
+                match discover().await {
+                    Err(error) if crate::client::is_retryable_recovery_error(&error) => {
+                        tracing::warn!(%error, "replaying capability discovery after executor recovery");
+                        let recovered =
+                            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                                while self.readiness_result().is_none_or(|result| result.is_err()) {
+                                    if connection_state.changed().await.is_err() {
+                                        return false;
+                                    }
+                                }
+                                true
+                            })
+                            .await
+                            .unwrap_or(false);
+                        if recovered {
+                            discover().await
+                        } else {
+                            Err(error)
+                        }
+                    }
+                    response => response,
                 }
-                client.discover_capability_roots(params).await
             }
             None => crate::discover_capability_roots(self.filesystem.as_ref(), params)
                 .await
@@ -961,14 +1009,14 @@ impl Environment {
         }
     }
 
-    /// Returns whether initial startup has either succeeded or permanently failed.
+    /// Returns whether the initial startup attempt has completed.
     pub fn startup_finished(&self) -> bool {
         self.remote_client
             .as_ref()
             .is_none_or(LazyRemoteExecServerClient::startup_finished)
     }
 
-    /// Waits for initial startup. A failed startup is never attempted again.
+    /// Waits for initial startup, retrying a previous transient failure when possible.
     pub async fn wait_until_ready(&self) -> Result<(), ExecServerError> {
         match &self.remote_client {
             Some(client) => client.wait_until_ready().await,
@@ -1077,6 +1125,10 @@ mod tests {
                 PathUri::from_host_native_path(std::env::current_dir().expect("current directory"))
                     .expect("cwd URI")
             )
+        );
+        assert_eq!(
+            info.temp_dir,
+            PathUri::from_host_native_path(std::env::temp_dir()).ok()
         );
     }
 

@@ -11,6 +11,8 @@ use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
+use codex_history::InitialHistory;
+use codex_history::ResumedHistory;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -23,9 +25,8 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AgentMessageEvent;
-use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::InternalSessionSource;
-use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -409,7 +410,7 @@ fn truncates_before_requested_user_message() {
     let initial: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
     let truncated = truncate_before_nth_user_message(
         InitialHistory::Forked(initial),
@@ -423,9 +424,9 @@ fn truncates_before_requested_user_message() {
     );
     let got_items = truncated.get_rollout_items();
     let expected_items = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
+        RolloutItem::ResponseItem(items[0].clone().into()),
+        RolloutItem::ResponseItem(items[1].clone().into()),
+        RolloutItem::ResponseItem(items[2].clone().into()),
     ];
     assert_eq!(
         serde_json::to_value(got_items).unwrap(),
@@ -435,7 +436,7 @@ fn truncates_before_requested_user_message() {
     let initial2: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
     let truncated2 = truncate_before_nth_user_message(
         InitialHistory::Forked(initial2.clone()),
@@ -456,10 +457,10 @@ fn truncates_before_requested_user_message() {
 #[test]
 fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
     let items = vec![
-        RolloutItem::ResponseItem(user_msg("u1")),
-        RolloutItem::ResponseItem(assistant_msg("a1")),
-        RolloutItem::ResponseItem(user_msg("u2")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
+        RolloutItem::ResponseItem(user_msg("u1").into()),
+        RolloutItem::ResponseItem(assistant_msg("a1").into()),
+        RolloutItem::ResponseItem(user_msg("u2").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
     ];
 
     let truncated = truncate_before_nth_user_message(
@@ -501,8 +502,8 @@ fn fork_thread_accepts_legacy_usize_snapshot_argument() {
 #[test]
 fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
     let items = vec![
-        RolloutItem::ResponseItem(user_msg("u1")),
-        RolloutItem::ResponseItem(assistant_msg("a1")),
+        RolloutItem::ResponseItem(user_msg("u1").into()),
+        RolloutItem::ResponseItem(assistant_msg("a1").into()),
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: "turn-2".to_string(),
             trace_id: None,
@@ -510,8 +511,8 @@ fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
             model_context_window: None,
             collaboration_mode_kind: Default::default(),
         })),
-        RolloutItem::ResponseItem(user_msg("u2")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
+        RolloutItem::ResponseItem(user_msg("u2").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
     ];
 
     let snapshot_state = snapshot_turn_state(&InitialHistory::Forked(items.clone()));
@@ -553,7 +554,7 @@ async fn ignores_session_prefix_messages_when_truncating() {
     let rollout_items: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
 
     let truncated = truncate_before_nth_user_message(
@@ -569,10 +570,10 @@ async fn ignores_session_prefix_messages_when_truncating() {
     let got_items = truncated.get_rollout_items();
 
     let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
-        RolloutItem::ResponseItem(items[3].clone()),
+        RolloutItem::ResponseItem(items[0].clone().into()),
+        RolloutItem::ResponseItem(items[1].clone().into()),
+        RolloutItem::ResponseItem(items[2].clone().into()),
+        RolloutItem::ResponseItem(items[3].clone().into()),
     ];
 
     assert_eq!(
@@ -1143,6 +1144,7 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         environment_id: "local".to_string(),
         cwd: PathUri::from_abs_path(&selected_cwd),
         workspace_roots: Vec::new(),
+        config: EnvironmentConfigState::FromThread,
     }];
     let default_cwd = config.cwd.clone();
     let mut source_config = config.clone();
@@ -1596,7 +1598,7 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: source.thread_id,
-                history: Arc::new(vec![RolloutItem::ResponseItem(user_msg("hello"))]),
+                history: Arc::new(vec![RolloutItem::ResponseItem(user_msg("hello").into())]),
                 rollout_path: Some(rollout_path.clone()),
             }),
             auth_manager.clone(),
@@ -1649,6 +1651,135 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
         .shutdown_and_wait()
         .await
         .expect("shutdown forked thread");
+}
+
+#[tokio::test]
+async fn metadata_update_without_result_reads_only_when_the_caller_needs_the_thread() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.experimental_thread_store = ThreadStoreConfig::InMemory {
+        id: format!("metadata-update-none-{}", uuid::Uuid::new_v4()),
+    };
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let thread_store = thread_store_from_config(&config, /*state_db*/ None);
+    let in_memory_store = thread_store
+        .as_any()
+        .downcast_ref::<InMemoryThreadStore>()
+        .expect("configured in-memory store");
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let started = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("start thread");
+    started
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush initial metadata");
+    manager
+        .update_thread_metadata(
+            started.thread_id,
+            ThreadMetadataPatch {
+                name: Some(Some("initial name".to_string())),
+                ..Default::default()
+            },
+            /*include_archived*/ false,
+        )
+        .await
+        .expect("flush pending live metadata before measuring calls");
+    in_memory_store.omit_metadata_update_result_for_testing();
+
+    let before_loaded_update = in_memory_store.calls().await;
+    let loaded = manager
+        .update_thread_metadata(
+            started.thread_id,
+            ThreadMetadataPatch {
+                name: Some(Some("loaded name".to_string())),
+                ..Default::default()
+            },
+            /*include_archived*/ false,
+        )
+        .await
+        .expect("update loaded thread metadata");
+    assert_eq!(loaded.name.as_deref(), Some("loaded name"));
+    let after_loaded_update = in_memory_store.calls().await;
+    assert_eq!(
+        after_loaded_update.update_thread_metadata,
+        before_loaded_update.update_thread_metadata + 1
+    );
+    assert_eq!(
+        after_loaded_update.read_thread,
+        before_loaded_update.read_thread + 1
+    );
+
+    started
+        .thread
+        .append_rollout_items(&[RolloutItem::EventMsg(EventMsg::UserMessage(
+            UserMessageEvent {
+                message: "completion-only metadata".to_string(),
+                ..Default::default()
+            },
+        ))])
+        .await
+        .expect("append item with derived metadata");
+    let after_completion_only_update = in_memory_store.calls().await;
+    assert_eq!(
+        after_completion_only_update.update_thread_metadata,
+        after_loaded_update.update_thread_metadata + 1
+    );
+    assert_eq!(
+        after_completion_only_update.read_thread,
+        after_loaded_update.read_thread
+    );
+
+    started
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown loaded thread");
+    let _ = manager.remove_thread(&started.thread_id).await;
+    let before_cold_update = in_memory_store.calls().await;
+    let cold = manager
+        .update_thread_metadata(
+            started.thread_id,
+            ThreadMetadataPatch {
+                name: Some(Some("cold name".to_string())),
+                ..Default::default()
+            },
+            /*include_archived*/ false,
+        )
+        .await
+        .expect("update cold thread metadata");
+    assert_eq!(cold.name.as_deref(), Some("cold name"));
+    let after_cold_update = in_memory_store.calls().await;
+    assert_eq!(
+        after_cold_update.update_thread_metadata,
+        before_cold_update.update_thread_metadata + 1
+    );
+    assert_eq!(
+        after_cold_update.read_thread,
+        before_cold_update.read_thread + 1
+    );
 }
 
 #[tokio::test]
@@ -1751,7 +1882,7 @@ async fn injected_models_manager_controls_refresh_policy() {
 #[test]
 fn interrupted_fork_snapshot_appends_interrupt_boundary() {
     let committed_history =
-        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello"))]);
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello").into())]);
 
     assert_eq!(
         serde_json::to_value(
@@ -1765,8 +1896,8 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
         )
         .expect("serialize interrupted fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(user_msg("hello")),
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(user_msg("hello").into()),
+            RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1789,7 +1920,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
         )
         .expect("serialize interrupted empty fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1805,7 +1936,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
 #[test]
 fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
     let committed_history =
-        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello"))]);
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello").into())]);
 
     assert_eq!(
         serde_json::to_value(
@@ -1819,7 +1950,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
         )
         .expect("serialize disabled interrupted fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(user_msg("hello")),
+            RolloutItem::ResponseItem(user_msg("hello").into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1857,9 +1988,9 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
 #[test]
 fn interrupted_snapshot_is_not_mid_turn() {
     let interrupted_history = InitialHistory::Forked(vec![
-        RolloutItem::ResponseItem(user_msg("hello")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
-        RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+        RolloutItem::ResponseItem(user_msg("hello").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
+        RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
         RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some("turn-1".to_string()),
             started_at: None,
@@ -1930,7 +2061,7 @@ fn completed_legacy_event_history_is_not_mid_turn() {
 #[test]
 fn mixed_response_and_legacy_user_event_history_is_mid_turn() {
     let mixed_history = InitialHistory::Forked(vec![
-        RolloutItem::ResponseItem(user_msg("hello")),
+        RolloutItem::ResponseItem(user_msg("hello").into()),
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
             client_id: None,
             message: "hello".to_string(),
@@ -1984,8 +2115,8 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .resume_thread_with_history(
             config.clone(),
             InitialHistory::Forked(vec![
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2029,7 +2160,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        contextual_user_interrupted_marker().into(),
     ))
     .expect("serialize interrupted marker");
     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
@@ -2104,8 +2235,8 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
                 })),
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2200,8 +2331,8 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .resume_thread_with_history(
             config.clone(),
             InitialHistory::Forked(vec![
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2244,7 +2375,7 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        contextual_user_interrupted_marker().into(),
     ))
     .expect("serialize interrupted marker");
     assert_eq!(

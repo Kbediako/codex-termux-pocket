@@ -7,7 +7,7 @@
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
-use crate::session::turn_context::TurnContext;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::state::SessionServices;
 use crate::tools::hook_names::HookToolName;
@@ -348,7 +348,7 @@ pub(crate) trait Sandboxable {
 
 pub(crate) struct ToolCtx {
     pub session: Arc<Session>,
-    pub turn: Arc<TurnContext>,
+    pub step_context: Arc<StepContext>,
     pub call_id: String,
     pub tool_name: ToolName,
 }
@@ -401,6 +401,19 @@ pub(crate) struct SandboxAttempt<'a> {
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
 }
 
+pub(crate) fn executor_windows_sandbox_level(
+    windows_sandbox_level: WindowsSandboxLevel,
+    cwd: &PathUri,
+) -> WindowsSandboxLevel {
+    if windows_sandbox_level == WindowsSandboxLevel::Disabled
+        && cwd.infer_path_convention() == Some(PathConvention::Windows)
+    {
+        WindowsSandboxLevel::RestrictedToken
+    } else {
+        windows_sandbox_level
+    }
+}
+
 impl<'a> SandboxAttempt<'a> {
     pub(crate) fn network_proxy<'b>(
         &'b self,
@@ -440,11 +453,7 @@ impl<'a> SandboxAttempt<'a> {
             .iter()
             .map(PathUri::to_abs_path)
             .collect::<std::io::Result<Vec<_>>>()?;
-        Ok(crate::sandboxing::ExecRequest::from_sandbox_exec_request(
-            request,
-            options,
-            workspace_roots,
-        ))
+        crate::sandboxing::ExecRequest::from_sandbox_exec_request(request, options, workspace_roots)
     }
 
     pub fn env_for_exec_server(
@@ -474,28 +483,21 @@ impl<'a> SandboxAttempt<'a> {
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
             })
             .map_err(CodexErr::from)?;
-        let mut exec_request =
-            crate::sandboxing::ExecRequest::from_sandbox_exec_request(request, options, Vec::new());
+        let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(
+            request,
+            options,
+            Vec::new(),
+        )?;
         exec_request.exec_server_managed_network = managed_network;
         if self.sandbox_requested {
-            // This level comes from the orchestrator's config, so `Disabled` means Windows
-            // sandboxing is irrelevant on a non-Windows host. A Windows executor would instead
-            // treat it as unable to enforce the requested sandbox. Select its baseline restricted
-            // token backend while preserving explicitly configured levels and same-OS behavior.
-            let windows_sandbox_level = if self.windows_sandbox_level
-                == WindowsSandboxLevel::Disabled
-                && self.sandbox_cwd.infer_path_convention() == Some(PathConvention::Windows)
-                && PathConvention::native() != PathConvention::Windows
-            {
-                WindowsSandboxLevel::RestrictedToken
-            } else {
-                self.windows_sandbox_level
-            };
             exec_request.exec_server_sandbox = Some(FileSystemSandboxContext {
                 permissions: exec_server_permissions.into(),
                 cwd: Some(exec_request.windows_sandbox_policy_cwd.clone()),
                 workspace_roots: self.workspace_roots.to_vec(),
-                windows_sandbox_level,
+                windows_sandbox_level: executor_windows_sandbox_level(
+                    self.windows_sandbox_level,
+                    self.sandbox_cwd,
+                ),
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
                 windows_sandbox_proxy_settings_mode: None,
                 use_legacy_landlock: self.use_legacy_landlock,

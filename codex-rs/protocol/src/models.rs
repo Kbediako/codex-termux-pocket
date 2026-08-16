@@ -33,6 +33,7 @@ mod executed_tool_calls;
 
 pub use crate::local_media::MAX_PROMPT_AUDIO_INPUT_BYTES;
 pub use crate::local_media::snapshot_local_user_input;
+pub use crate::permission_profile_snapshot::PermissionProfileSnapshot;
 pub use executed_tool_calls::ExecutedToolCall;
 pub use executed_tool_calls::ExecutedToolCallArguments;
 pub use executed_tool_calls::ExecutedToolCallTruncation;
@@ -101,20 +102,18 @@ impl FileSystemPermissions {
     ) -> Self {
         let mut entries = Vec::new();
         if let Some(read) = read {
-            entries.extend(read.into_iter().map(|path| {
-                FileSystemSandboxEntry::new(
-                    FileSystemPath::Path { path },
-                    FileSystemAccessMode::Read,
-                )
-            }));
+            entries.extend(
+                read.into_iter().map(|path| {
+                    FileSystemSandboxEntry::new(path.into(), FileSystemAccessMode::Read)
+                }),
+            );
         }
         if let Some(write) = write {
-            entries.extend(write.into_iter().map(|path| {
-                FileSystemSandboxEntry::new(
-                    FileSystemPath::Path { path },
-                    FileSystemAccessMode::Write,
-                )
-            }));
+            entries.extend(
+                write.into_iter().map(|path| {
+                    FileSystemSandboxEntry::new(path.into(), FileSystemAccessMode::Write)
+                }),
+            );
         }
         Self {
             entries,
@@ -385,6 +384,33 @@ impl PermissionProfile {
             file_system: ManagedFileSystemPermissions::from_sandbox_policy(&file_system),
             network: NetworkSandboxPolicy::Restricted,
         }
+    }
+
+    /// Intersects managed filesystem permissions with read-only access and restricts network.
+    ///
+    /// Returns `None` when filesystem enforcement belongs to an external caller.
+    pub fn intersect_with_read_only(&self) -> Option<Self> {
+        let mut file_system = self.file_system_sandbox_policy();
+        match file_system.kind {
+            FileSystemSandboxKind::Restricted => {
+                for entry in &mut file_system.entries {
+                    entry.access = match entry.access {
+                        FileSystemAccessMode::Read | FileSystemAccessMode::Write => {
+                            FileSystemAccessMode::Read
+                        }
+                        FileSystemAccessMode::Deny => FileSystemAccessMode::Deny,
+                    };
+                }
+            }
+            FileSystemSandboxKind::Unrestricted => {
+                file_system = FileSystemSandboxPolicy::read_only();
+            }
+            FileSystemSandboxKind::ExternalSandbox => return None,
+        }
+        Some(Self::from_runtime_permissions(
+            &file_system,
+            NetworkSandboxPolicy::Restricted,
+        ))
     }
 
     /// Managed workspace-write filesystem access with restricted network
@@ -790,6 +816,11 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub turn_id: Option<String>,
+    /// Message creation time in fractional Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub create_time: Option<serde_json::Number>,
     /// Warehouse-only Responses metadata, not part of the public app-server protocol.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -1131,6 +1162,39 @@ impl ResponseItem {
             return;
         };
         InternalChatMessageMetadataPassthrough::set_turn_id_if_missing(metadata, turn_id);
+    }
+
+    /// Stamps a harness-authored durable item without replacing its creation time.
+    pub fn set_create_time_if_missing(&mut self, create_time: serde_json::Number) {
+        let metadata = match self {
+            Self::Message {
+                role,
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            } if matches!(role.as_str(), "user" | "developer") => metadata,
+            Self::AgentMessage {
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            }
+            | Self::FunctionCallOutput {
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            }
+            | Self::CustomToolCallOutput {
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            }
+            | Self::ToolSearchOutput {
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            } => metadata,
+            _ => return,
+        };
+
+        metadata
+            .get_or_insert_default()
+            .create_time
+            .get_or_insert(create_time);
     }
 
     /// Removes internal chat message metadata passthrough before sending to a provider that does
@@ -2357,9 +2421,19 @@ mod tests {
         let mut missing_turn_id = response_item_with_passthrough_metadata(
             /*internal_chat_message_metadata_passthrough*/ None,
         );
+        let create_time = serde_json::Number::from(123);
+        missing_turn_id.set_create_time_if_missing(create_time.clone());
         missing_turn_id.set_turn_id_if_missing("");
         missing_turn_id.set_turn_id_if_missing("turn-1");
-        assert_eq!(missing_turn_id.turn_id(), Some("turn-1"));
+        missing_turn_id.set_create_time_if_missing(serde_json::Number::from(456));
+        assert_eq!(
+            missing_turn_id.executed_tool_call_metadata(),
+            Some(&InternalChatMessageMetadataPassthrough {
+                turn_id: Some("turn-1".to_string()),
+                create_time: Some(create_time),
+                ..Default::default()
+            })
+        );
 
         let mut other = ResponseItem::Other;
         other.set_turn_id_if_missing("turn-1");
@@ -2753,7 +2827,7 @@ mod tests {
         .expect("absolute path");
         let file_system_permissions = FileSystemPermissions {
             entries: vec![FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path },
+                path: path.into(),
                 access: FileSystemAccessMode::Read,
                 missing_path_behavior: None,
             }],

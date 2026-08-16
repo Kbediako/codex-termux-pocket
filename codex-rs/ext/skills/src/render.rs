@@ -181,7 +181,11 @@ struct SkillLine<'a> {
 
 impl<'a> SkillLine<'a> {
     fn new(entry: &'a SkillCatalogEntry, policy: SkillCatalogRenderPolicy) -> Self {
-        Self::with_locator(entry, policy, entry.rendered_path().to_string())
+        let locator = match &entry.authority.kind {
+            SkillSourceKind::Executor | SkillSourceKind::Orchestrator => entry.id.0.as_str(),
+            SkillSourceKind::Host | SkillSourceKind::Custom(_) => entry.rendered_path(),
+        };
+        Self::with_locator(entry, policy, locator.to_string())
     }
 
     fn with_locator(
@@ -196,8 +200,8 @@ impl<'a> SkillLine<'a> {
             locator,
             locator_kind: match &entry.authority.kind {
                 SkillSourceKind::Host => "file",
-                SkillSourceKind::Executor => "environment resource",
-                SkillSourceKind::Orchestrator => "orchestrator resource",
+                SkillSourceKind::Executor => "executor package",
+                SkillSourceKind::Orchestrator => "orchestrator package",
                 SkillSourceKind::Custom(_) => "custom resource",
             },
         }
@@ -1042,7 +1046,7 @@ fn build_aliased_catalog(
     ))
 }
 
-fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
+pub(crate) fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
     let source = &entries.first()?.authority.kind;
     if entries.iter().any(|entry| &entry.authority.kind != source) {
         return None;
@@ -1071,12 +1075,14 @@ fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPlan> {
 }
 
 fn render_skill_locator_with_aliases(entry: &SkillCatalogEntry, plan: &AliasPlan) -> String {
+    let locator = match &entry.authority.kind {
+        SkillSourceKind::Executor | SkillSourceKind::Orchestrator => entry.id.0.as_str(),
+        SkillSourceKind::Host | SkillSourceKind::Custom(_) => entry.rendered_path(),
+    };
     if entry.alias_root().is_none() {
-        return entry.rendered_path().to_string();
+        return locator.to_string();
     }
-    let locator = entry.rendered_path().replace('\\', "/");
-    plan.shorten(&locator)
-        .unwrap_or_else(|| entry.rendered_path().to_string())
+    plan.shorten(locator).unwrap_or_else(|| locator.to_string())
 }
 
 fn aliased_metadata_overhead_cost(

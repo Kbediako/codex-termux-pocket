@@ -128,7 +128,8 @@ impl ExecCommandHandler {
         };
 
         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
-        let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
+        let context =
+            UnifiedExecContext::new(session.clone(), step_context.clone(), call_id.clone());
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let Some(turn_environment) = resolve_tool_environment(
             &step_context.environments,
@@ -190,16 +191,15 @@ impl ExecCommandHandler {
         let sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
         let hook_command = args.cmd.clone();
-        // TODO(anp) wire PathUri through implicit skills instead of skipping on foreign paths
-        if let Some(native_cwd) = native_cwd.as_ref() {
-            maybe_emit_implicit_skill_invocation(
-                session.as_ref(),
-                context.turn.as_ref(),
-                &hook_command,
-                native_cwd,
-            )
-            .await;
-        }
+        maybe_emit_implicit_skill_invocation(
+            session.as_ref(),
+            context.step_context.turn.as_ref(),
+            &hook_command,
+            &cwd,
+            native_cwd.as_ref(),
+            &turn_environment.selection.environment_id,
+        )
+        .await;
         let shell_mode =
             shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
         // Remote environments may use a different OS and must build commands with their native
@@ -217,13 +217,13 @@ impl ExecCommandHandler {
             let Some(remote_shell) = turn_environment.shell.as_ref() else {
                 return Err(FunctionCallError::RespondToModel(format!(
                     "environment `{}` does not report a shell",
-                    turn_environment.environment_id
+                    turn_environment.selection.environment_id
                 )));
             };
             if detect_shell_type(Path::new(&requested_shell)) != Some(remote_shell.shell_type) {
                 return Err(FunctionCallError::RespondToModel(format!(
                     "environment `{}` only supports `{}`",
-                    turn_environment.environment_id,
+                    turn_environment.selection.environment_id,
                     remote_shell.name()
                 )));
             }
@@ -233,27 +233,10 @@ impl ExecCommandHandler {
             &args,
             shell,
             &shell_mode,
-            turn_environment.config.allow_login_shell,
+            turn_environment.config().allow_login_shell,
         )
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
-        if environment.is_remote()
-            && !cwd_uses_native_convention
-            && !turn_environment
-                .permission_profile()
-                .file_system_sandbox_policy()
-                .has_full_disk_write_access()
-            && matches!(
-                codex_apply_patch::maybe_parse_apply_patch(&command, &cwd),
-                codex_apply_patch::MaybeApplyPatch::Body(_)
-            )
-        {
-            // CA-781: patch verification reads executor files before process sandboxing applies.
-            manager.release_process_id(process_id).await;
-            return Err(FunctionCallError::RespondToModel(
-                "cross-platform remote apply_patch is unavailable until executor-side filesystem sandboxing is supported".to_string(),
-            ));
-        }
         let shell_type = resolved_command.shell_type;
         let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
 
@@ -275,7 +258,7 @@ impl ExecCommandHandler {
         let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            &turn_environment.environment_id,
+            &turn_environment.selection.environment_id,
             permission_cwd.as_path(),
             sandbox_permissions,
             additional_permissions,
@@ -292,11 +275,11 @@ impl ExecCommandHandler {
             .requests_sandbox_override()
             && !effective_additional_permissions.permissions_preapproved
             && !matches!(
-                context.turn.approval_policy(),
+                context.step_context.turn.approval_policy(),
                 codex_protocol::protocol::AskForApproval::OnRequest
             )
         {
-            let approval_policy = context.turn.approval_policy();
+            let approval_policy = context.step_context.turn.approval_policy();
             manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
@@ -312,7 +295,7 @@ impl ExecCommandHandler {
             || {
                 normalize_and_validate_additional_permissions(
                     additional_permissions_allowed,
-                    context.turn.approval_policy(),
+                    context.step_context.turn.approval_policy(),
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
@@ -328,19 +311,24 @@ impl ExecCommandHandler {
             }
         };
 
-        if let Some(output) = intercept_apply_patch(
+        let intercepted_patch = intercept_apply_patch(
             &command,
             &cwd,
             fs.as_ref(),
             turn_environment.clone(),
             context.session.clone(),
-            context.turn.clone(),
+            Arc::clone(&context.step_context),
             Some(&tracker),
             &context.call_id,
             "exec_command",
         )
-        .await?
-        {
+        .await;
+        // Keep the reservation when interception returns `Ok(None)`: the normal command below
+        // still needs this process ID.
+        if intercepted_patch.is_err() {
+            manager.release_process_id(process_id).await;
+        }
+        if let Some(output) = intercepted_patch? {
             manager.release_process_id(process_id).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
@@ -371,7 +359,7 @@ impl ExecCommandHandler {
                     sandbox_cwd: native_environment_cwd,
                     turn_environment: turn_environment.clone(),
                     shell_mode,
-                    network: context.turn.network.clone(),
+                    network: context.step_context.turn.network.clone(),
                     tty,
                     sandbox_permissions: effective_additional_permissions.sandbox_permissions,
                     additional_permissions: normalized_additional_permissions,

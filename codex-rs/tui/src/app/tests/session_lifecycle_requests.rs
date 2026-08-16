@@ -406,7 +406,7 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
         &app.config.cwd,
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     );
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
@@ -575,7 +575,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
         &app.config.cwd,
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     );
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
@@ -718,7 +718,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
         &mut app_server,
         paginated_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
         vec![Arc::new(PlainHistoryCell::new(vec!["visible".into()]))],
     )
     .await
@@ -940,7 +940,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         &app.config.cwd,
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     );
     initial_cells.insert(
         /*index*/ 0,
@@ -1064,6 +1064,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     )
     .await?;
 
+    app_server.remember_thread_history_mode(paginated_thread_id, ThreadHistoryMode::Legacy);
     let resumed = app_server
         .resume_thread(
             app.config.clone(),
@@ -1072,11 +1073,15 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         )
         .await?;
     assert_eq!(resumed.session.thread_id, paginated_thread_id);
+    assert!(recorded_params(&requests, "thread/read").is_empty());
+    let resume_requests = recorded_params(&requests, "thread/resume");
+    assert_eq!(resume_requests.len(), 1);
+    assert_eq!(resume_requests[0]["excludeTurns"], true);
     let cells = crate::thread_transcript::load_session_transcript(
         &mut app_server,
         paginated_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     )
     .await?;
     assert!(!cells.is_empty());
@@ -1105,7 +1110,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         &mut app_server,
         legacy_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     )
     .await?;
     let legacy_reads = recorded_params(&requests, "thread/read");
@@ -1287,7 +1292,7 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
         &mut app_server,
         child_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
-        Some(app.config.codex_home.as_path()),
+        Some(&app.config),
     )
     .await?;
     let visible_history = cells
@@ -1542,6 +1547,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         crate::resume_picker::SessionTarget {
                             path: Some(root_rollout_path),
                             thread_id: root_thread_id,
+                            history_mode: None,
                         },
                     )
                     .await?;

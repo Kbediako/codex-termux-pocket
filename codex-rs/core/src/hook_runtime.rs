@@ -29,17 +29,20 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
+use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookStartedEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::WarningEvent;
+use codex_thread_store::PersistContext;
 use codex_thread_store::ReadThreadParams;
 use serde_json::Value;
 use tracing::instrument;
 
-use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::event_mapping::parse_turn_item;
@@ -48,7 +51,6 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::sandboxing::PermissionRequestPayload;
-use crate::user_message_admission::UserMessageAdmissionError;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
@@ -570,78 +572,25 @@ pub(crate) async fn inspect_pending_input(
     }
 }
 
-#[expect(
-    clippy::await_holding_invalid_type,
-    reason = "durable queue admission must settle before its active turn can be aborted"
-)]
 pub(crate) async fn record_pending_input(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
-) -> Result<(), TryStartTurnIfIdleRejectionReason> {
+    persist_context: PersistContext,
+) {
     match pending_input {
         TurnInput::UserInput { content, client_id } => {
-            let awaiting_admission = client_id.as_deref().is_some_and(|client_id| {
-                sess.pending_user_message_admissions
-                    .contains_client_id(client_id)
-            });
-            let mut active = sess.active_turn.lock().await;
-            let input_persisted = active
-                .as_mut()
-                .and_then(|turn| turn.task.as_mut())
-                .filter(|task| Arc::ptr_eq(&task.turn_context, turn_context))
-                .and_then(|task| task.input_persisted.take());
-            if awaiting_admission || input_persisted.is_some() {
-                sess.record_user_prompt_and_emit_turn_item(
-                    turn_context.as_ref(),
-                    content.as_slice(),
-                    client_id.clone(),
-                )
-                .await;
-                record_additional_contexts(sess, turn_context, additional_contexts).await;
-                match sess.flush_rollout().await {
-                    Ok(()) => {
-                        if awaiting_admission && let Some(client_id) = client_id.as_deref() {
-                            sess.pending_user_message_admissions
-                                .complete_persistence(client_id, Ok(()));
-                        }
-                        if let Some(sender) = input_persisted {
-                            let _ = sender.send(Ok(()));
-                        }
-                    }
-                    Err(error) => {
-                        let error = codex_protocol::error::CodexErr::from(error);
-                        sess.send_event(
-                            turn_context.as_ref(),
-                            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-                        )
-                        .await;
-                        if awaiting_admission && let Some(client_id) = client_id.as_deref() {
-                            sess.pending_user_message_admissions.complete_persistence(
-                                client_id,
-                                Err(UserMessageAdmissionError::PersistenceFailed(error)),
-                            );
-                        }
-                        if let Some(sender) = input_persisted {
-                            let _ = sender
-                                .send(Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed));
-                        }
-                        return Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed);
-                    }
-                }
-                return Ok(());
-            }
-            drop(active);
             sess.record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
                 content.as_slice(),
                 client_id,
+                persist_context,
             )
             .await;
         }
         TurnInput::ResponseItem(item) => {
-            sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+            sess.record_annotated_conversation_items(turn_context, vec![item])
                 .await;
         }
         TurnInput::InterAgentCommunication(communication) => {
@@ -650,31 +599,50 @@ pub(crate) async fn record_pending_input(
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
-    Ok(())
 }
 
-pub(crate) async fn reject_pending_input(
+/// Processes finished async hook results at a safe turn boundary.
+///
+/// Before the user prompt, records additional context directly into conversation
+/// history so results from a previous turn appear before the new prompt. After
+/// sampling, injects context into the active turn's pending-input queue so it
+/// reaches the next sampling request. Warnings and telemetry are handled in both
+/// cases.
+pub(crate) async fn drain_async_hook_results(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    pending_input: &TurnInput,
+    before_user_prompt: bool,
 ) {
-    let TurnInput::UserInput { client_id, .. } = pending_input else {
-        return;
-    };
-    if let Some(client_id) = client_id.as_deref() {
-        sess.pending_user_message_admissions
-            .complete_persistence(client_id, Err(UserMessageAdmissionError::RejectedByHook));
-    }
-    let input_persisted = {
-        let mut active = sess.active_turn.lock().await;
-        active
-            .as_mut()
-            .and_then(|turn| turn.task.as_mut())
-            .filter(|task| Arc::ptr_eq(&task.turn_context, turn_context))
-            .and_then(|task| task.input_persisted.take())
-    };
-    if let Some(sender) = input_persisted {
-        let _ = sender.send(Err(TryStartTurnIfIdleRejectionReason::RejectedByHook));
+    while let Ok(result) = sess.async_hook_results.try_recv() {
+        let additional_contexts = result
+            .run
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == HookOutputEntryKind::Context)
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>();
+
+        if before_user_prompt {
+            record_additional_contexts(sess, turn_context, additional_contexts).await;
+        } else if !additional_contexts.is_empty() {
+            let _ = sess
+                .inject_if_running(additional_context_messages(additional_contexts))
+                .await;
+        }
+
+        for entry in &result.run.entries {
+            if entry.kind == HookOutputEntryKind::Warning {
+                sess.send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: entry.text.clone(),
+                    }),
+                )
+                .await;
+            }
+        }
+
+        emit_hook_completed_events(sess, turn_context, vec![result]).await;
     }
 }
 
@@ -734,7 +702,10 @@ async fn emit_hook_started_events(
     turn_context: &Arc<TurnContext>,
     preview_runs: Vec<HookRunSummary>,
 ) {
-    for run in preview_runs {
+    for run in preview_runs
+        .into_iter()
+        .filter(|run| run.execution_mode == HookExecutionMode::Sync)
+    {
         sess.send_event(
             turn_context,
             EventMsg::HookStarted(HookStartedEvent {
@@ -754,8 +725,10 @@ pub(crate) async fn emit_hook_completed_events(
     for completed in completed_events {
         emit_hook_completed_metrics(turn_context, &completed);
         track_hook_completed_analytics(sess, turn_context, &completed);
-        sess.send_event(turn_context, EventMsg::HookCompleted(completed))
-            .await;
+        if completed.run.execution_mode == HookExecutionMode::Sync {
+            sess.send_event(turn_context, EventMsg::HookCompleted(completed))
+                .await;
+        }
     }
 }
 
@@ -902,9 +875,12 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::additional_context_messages;
+    use super::emit_hook_completed_events;
+    use super::emit_hook_started_events;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
     use crate::session::tests::make_session_and_context;
+    use crate::session::tests::make_session_and_context_with_rx;
     use codex_protocol::protocol::HookCompletedEvent;
     use codex_protocol::protocol::HookRunSummary;
     use codex_utils_absolute_path::test_support::PathBufExt;
@@ -944,6 +920,57 @@ mod tests {
                 ("developer", "second tide note".to_string()),
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn hook_lifecycle_notifications_only_report_synchronous_runs() {
+        let (session, turn_context, events) = make_session_and_context_with_rx().await;
+        let mut synchronous_run = sample_hook_run(HookRunStatus::Running, HookSource::User);
+        synchronous_run.id = "synchronous-hook".to_string();
+        let mut asynchronous_run = synchronous_run.clone();
+        asynchronous_run.id = "asynchronous-hook".to_string();
+        asynchronous_run.execution_mode = HookExecutionMode::Async;
+
+        emit_hook_started_events(
+            &session,
+            &turn_context,
+            vec![asynchronous_run.clone(), synchronous_run.clone()],
+        )
+        .await;
+
+        let started = events.try_recv().expect("synchronous hook should start");
+        assert!(matches!(
+            started.msg,
+            codex_protocol::protocol::EventMsg::HookStarted(event)
+                if event.run.id == synchronous_run.id
+        ));
+        assert!(events.try_recv().is_err());
+
+        asynchronous_run.status = HookRunStatus::Completed;
+        synchronous_run.status = HookRunStatus::Completed;
+        emit_hook_completed_events(
+            &session,
+            &turn_context,
+            vec![
+                HookCompletedEvent {
+                    turn_id: Some(turn_context.sub_id.clone()),
+                    run: asynchronous_run,
+                },
+                HookCompletedEvent {
+                    turn_id: Some(turn_context.sub_id.clone()),
+                    run: synchronous_run.clone(),
+                },
+            ],
+        )
+        .await;
+
+        let completed = events.try_recv().expect("synchronous hook should complete");
+        assert!(matches!(
+            completed.msg,
+            codex_protocol::protocol::EventMsg::HookCompleted(event)
+                if event.run.id == synchronous_run.id
+        ));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

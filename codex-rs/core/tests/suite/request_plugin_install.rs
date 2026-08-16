@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Context;
@@ -6,6 +5,7 @@ use anyhow::Result;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverable;
 use codex_config::types::ToolSuggestDiscoverableType;
+use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core_plugins::startup_sync::curated_plugins_repo_path;
 use codex_features::Feature;
@@ -159,7 +159,7 @@ async fn build_test(
                 configure_apps_without_search_tool(config, apps_base_url.as_str());
             }
         });
-    builder.build(server).await
+    builder.build_with_auto_env(server).await
 }
 
 async fn build_gated_step_preparation_test(
@@ -214,21 +214,18 @@ async fn start_gated_step_preparation(test: &TestCodex, server: &MockServer) -> 
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "prepare MCP and plugin recommendations".to_string(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
 
     let fs = test.fs();
@@ -263,15 +260,12 @@ async fn start_install_turn(test: &TestCodex, prompt: &str) -> Result<Elicitatio
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: prompt.to_string(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -284,8 +278,8 @@ async fn start_install_turn(test: &TestCodex, prompt: &str) -> Result<Elicitatio
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
 
     Ok(wait_for_event_match(&test.codex, |event| match event {
@@ -1029,7 +1023,7 @@ async fn endpoint_mode_with_no_eligible_candidates_exposes_no_suggestion_tools()
                 )];
             }
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("list tools").await?;
 
