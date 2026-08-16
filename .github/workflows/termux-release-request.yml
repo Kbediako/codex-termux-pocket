@@ -1,0 +1,281 @@
+name: termux-release-request
+run-name: Publish Termux runtime for ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/termux/release-request.env"
+  workflow_dispatch:
+
+concurrency:
+  group: termux-release-request-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  publish-validated-runtime:
+    name: Publish and promote validated Termux runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout release request
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate release request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_file="scripts/termux/release-request.env"
+          read_value() {
+            local key="$1"
+            local value
+            value="$(sed -n "s/^${key}=//p" "$request_file")"
+            if [[ -z "$value" || "$(grep -c "^${key}=" "$request_file")" -ne 1 ]]; then
+              echo "::error file=${request_file}::Expected exactly one non-empty ${key}= entry"
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+
+          format_version="$(read_value format_version)"
+          release_tag_prefix="$(read_value release_tag_prefix)"
+          expected_codex_version="$(read_value expected_codex_version)"
+          [[ "$format_version" == "1" ]] || {
+            echo "::error file=${request_file}::Unsupported format_version=${format_version}"
+            exit 1
+          }
+          [[ "$release_tag_prefix" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || {
+            echo "::error file=${request_file}::release_tag_prefix must match termux-v..."
+            exit 1
+          }
+          [[ "$expected_codex_version" =~ ^codex-cli[[:space:]][0-9A-Za-z._-]+$ ]] || {
+            echo "::error file=${request_file}::Unexpected expected_codex_version format"
+            exit 1
+          }
+
+          release_tag="${release_tag_prefix}-${GITHUB_SHA:0:10}"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "expected_codex_version=${expected_codex_version}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Requested Termux release"
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Tag: ${release_tag}"
+            echo "- Expected version: ${expected_codex_version}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for exact validated mobile artifact run
+        id: artifact_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=""
+          for _ in $(seq 1 240); do
+            run_id="$(
+              gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-mobile-artifact.yml/runs?event=push&branch=main&per_page=100" \
+                --jq ".workflow_runs | map(select(.head_sha == \"${GITHUB_SHA}\")) | first | .id // empty"
+            )"
+            [[ -n "$run_id" ]] && break
+            sleep 15
+          done
+          [[ -n "$run_id" ]] || {
+            echo "::error::No termux-mobile-artifact push run was created for ${GITHUB_SHA}"
+            exit 1
+          }
+
+          while true; do
+            status="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .status)"
+            if [[ "$status" == "completed" ]]; then
+              conclusion="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .conclusion)"
+              [[ "$conclusion" == "success" ]] || {
+                echo "::error::Termux artifact run ${run_id} concluded ${conclusion}"
+                exit 1
+              }
+              break
+            fi
+            sleep 20
+          done
+
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "Validated artifact run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download validated artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.artifact_run.outputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name codex-termux-aarch64-unknown-linux-musl \
+            --dir dist
+
+      - name: Revalidate artifact and generate immutable release manifest
+        id: manifest
+        env:
+          EXPECTED_CODEX_VERSION: ${{ steps.request.outputs.expected_codex_version }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          required_files=(
+            codex-termux-aarch64-unknown-linux-musl.tar.gz
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+          )
+          for file in "${required_files[@]}"; do
+            [[ -f "$file" ]] || { echo "::error::Missing artifact file: $file"; exit 1; }
+          done
+          sha256sum --check --strict SHA256SUMS
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' codex-termux-sbom.spdx.json
+
+          metadata_value() {
+            local key="$1"
+            local value
+            value="$(sed -n "s/^${key}=//p" metadata.env)"
+            if [[ -z "$value" || "$(grep -c "^${key}=" metadata.env)" -ne 1 ]]; then
+              echo "::error file=dist/metadata.env::Expected exactly one non-empty ${key}= entry"
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+
+          metadata_format="$(metadata_value format_version)"
+          head_sha="$(metadata_value head_sha)"
+          codex_version="$(metadata_value codex_version)"
+          target="$(metadata_value target)"
+          archive_size_bytes="$(metadata_value archive_size_bytes)"
+          runtime_size_bytes="$(metadata_value runtime_size_bytes)"
+          [[ "$metadata_format" == "2" ]]
+          [[ "$head_sha" == "$GITHUB_SHA" ]] || {
+            echo "::error::Artifact commit ${head_sha} does not match requested commit ${GITHUB_SHA}"
+            exit 1
+          }
+          [[ "$codex_version" == "$EXPECTED_CODEX_VERSION" ]] || {
+            echo "::error::Artifact version ${codex_version} does not match ${EXPECTED_CODEX_VERSION}"
+            exit 1
+          }
+          [[ "$target" == "aarch64-unknown-linux-musl" ]]
+          [[ "$archive_size_bytes" =~ ^[0-9]+$ ]]
+          [[ "$runtime_size_bytes" =~ ^[0-9]+$ ]]
+          [[ "$archive_size_bytes" == "$(stat -c '%s' codex-termux-aarch64-unknown-linux-musl.tar.gz)" ]]
+
+          archive_sha256="$(sha256sum codex-termux-aarch64-unknown-linux-musl.tar.gz | awk '{print $1}')"
+          printf '%s\n' \
+            'format_version=2' \
+            "repository=${GITHUB_REPOSITORY}" \
+            "release_tag=${RELEASE_TAG}" \
+            "head_sha=${head_sha}" \
+            "codex_version=${codex_version}" \
+            "archive_sha256=${archive_sha256}" \
+            "archive_size_bytes=${archive_size_bytes}" \
+            "runtime_size_bytes=${runtime_size_bytes}" \
+            > release-manifest.env
+
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "codex_version=${codex_version}" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest Termux runtime build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/codex-termux-aarch64-unknown-linux-musl.tar.gz
+            dist/metadata.env
+            dist/SHA256SUMS
+            dist/codex-termux-sbom.spdx.json
+            dist/release-manifest.env
+
+      - name: Attest Termux runtime SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/codex-termux-aarch64-unknown-linux-musl.tar.gz
+          sbom-path: dist/codex-termux-sbom.spdx.json
+
+      - name: Publish immutable public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+          HEAD_SHA: ${{ steps.manifest.outputs.head_sha }}
+          CODEX_VERSION: ${{ steps.manifest.outputs.codex_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_files=(
+            codex-termux-aarch64-unknown-linux-musl.tar.gz
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+            release-manifest.env
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing_dir="$(mktemp -d)"
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$existing_dir"
+            for file in "${release_files[@]}"; do
+              [[ -f "$existing_dir/$file" ]] || {
+                echo "::error::Existing release ${RELEASE_TAG} is missing ${file}"
+                exit 1
+              }
+              cmp --silent "dist/$file" "$existing_dir/$file" || {
+                echo "::error::Existing release ${RELEASE_TAG} has mismatched immutable asset ${file}"
+                exit 1
+              }
+            done
+            echo "Release ${RELEASE_TAG} already exists with byte-identical assets; continuing promotion." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$HEAD_SHA" \
+              --title "Codex Termux ${CODEX_VERSION}" \
+              --notes "Verified complete Termux runtime for ${HEAD_SHA}." \
+              --latest=false \
+              "${release_files[@]/#/dist/}"
+          fi
+
+      - name: Promote release manifest on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_response="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env?ref=main"
+          )"
+          manifest_sha="$(jq -r .sha <<<"$manifest_response")"
+          current_manifest="$(mktemp)"
+          jq -r .content <<<"$manifest_response" | tr -d '\n' | base64 --decode > "$current_manifest"
+          if cmp --silent dist/release-manifest.env "$current_manifest"; then
+            echo "Release manifest already promotes ${RELEASE_TAG}; no commit required." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          encoded_manifest="$(base64 -w0 dist/release-manifest.env)"
+          gh api --method PUT \
+            "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env" \
+            -f message="termux: promote ${RELEASE_TAG}" \
+            -f content="$encoded_manifest" \
+            -f sha="$manifest_sha" \
+            -f branch=main >/dev/null
+          echo "Promoted ${RELEASE_TAG} to scripts/termux/release-manifest.env" >> "$GITHUB_STEP_SUMMARY"
