@@ -32,21 +32,23 @@ jobs:
 
           path = Path('.github/workflows/termux-governance-audit.yml')
           text = path.read_text(encoding='utf-8')
-          old = '''          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
-          if published_manifest != manifest_path.read_bytes():
-              raise SystemExit("published release manifest differs from the repository promotion")
-'''
-          new = '''          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
-          published_manifest_path = Path(os.environ["RUNNER_TEMP"]) / "published-release-manifest.env"
-          published_manifest_path.write_bytes(published_manifest)
-          published_values = parse_env(
-              published_manifest_path,
-              allowed_manifest,
-              required_manifest,
+          old = (
+              '          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])\n'
+              '          if published_manifest != manifest_path.read_bytes():\n'
+              '              raise SystemExit("published release manifest differs from the repository promotion")\n'
           )
-          if published_values != manifest:
-              raise SystemExit("published release manifest values differ from the repository promotion")
-'''
+          new = (
+              '          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])\n'
+              '          published_manifest_path = Path(os.environ["RUNNER_TEMP"]) / "published-release-manifest.env"\n'
+              '          published_manifest_path.write_bytes(published_manifest)\n'
+              '          published_values = parse_env(\n'
+              '              published_manifest_path,\n'
+              '              allowed_manifest,\n'
+              '              required_manifest,\n'
+              '          )\n'
+              '          if published_values != manifest:\n'
+              '              raise SystemExit("published release manifest values differ from the repository promotion")\n'
+          )
           if text.count(old) != 1:
               raise SystemExit(f'expected one byte-comparison block, found {text.count(old)}')
           path.write_text(text.replace(old, new, 1), encoding='utf-8')
