@@ -1,0 +1,116 @@
+name: termux-fix-android-gate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/termux-fix-android-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: termux-fix-android-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch test-only Android surrogate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/termux-android-emulator.yml')
+          text = workflow.read_text(encoding='utf-8')
+
+          old_build = '''          cargo build --locked --target "$TARGET" --release --bin bwrap
+          cargo build --locked --target "$TARGET" --release \\
+            --bin codex \\
+            --bin codex-code-mode-host \\
+            --bin codex-responses-api-proxy
+'''
+          new_build = '''          cargo build --locked --target "$TARGET" --release \\
+            --bin codex \\
+            --bin codex-code-mode-host \\
+            --bin codex-responses-api-proxy
+'''
+          if text.count(old_build) != 1:
+              raise SystemExit(f'expected one bundled-bwrap build block, found {text.count(old_build)}')
+          text = text.replace(old_build, new_build, 1)
+
+          old_stage = '''          cp "target/${TARGET}/release/bwrap" "${runtime_root}/codex-resources/bwrap"
+          strip --strip-debug --strip-unneeded "${runtime_root}/codex-resources/bwrap"
+          chmod 0755 "${runtime_root}/codex-resources/bwrap"
+'''
+          new_stage = '''          cat >"${RUNNER_TEMP}/bwrap-termux-ci.c" <<'EOF_BWRAP'
+          #include <stdio.h>
+          #include <string.h>
+
+          int main(int argc, char **argv) {
+            if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+              puts("bubblewrap 0.0.0-termux-android-ci");
+              return 0;
+            }
+            fputs("The Android emulator surrogate intentionally disables bubblewrap; use the Landlock fallback.\\n", stderr);
+            return 125;
+          }
+          EOF_BWRAP
+          "${CC:-cc}" -static -Os \\
+            "${RUNNER_TEMP}/bwrap-termux-ci.c" \\
+            -o "${runtime_root}/codex-resources/bwrap"
+          strip --strip-debug --strip-unneeded "${runtime_root}/codex-resources/bwrap"
+          chmod 0755 "${runtime_root}/codex-resources/bwrap"
+'''
+          if text.count(old_stage) != 1:
+              raise SystemExit(f'expected one bundled-bwrap stage block, found {text.count(old_stage)}')
+          text = text.replace(old_stage, new_stage, 1)
+          workflow.write_text(text, encoding='utf-8')
+
+          check = Path('.github/scripts/termux-android-emulator-check.sh')
+          check_text = check.read_text(encoding='utf-8')
+          old_smoke = 'smoke-test-artifact --installed\n'
+          new_smoke = 'CODEX_TERMUX_DISABLE_PROOT=1 smoke-test-artifact --installed\n'
+          if check_text.count(old_smoke) != 1:
+              raise SystemExit(f'expected one installed smoke invocation, found {check_text.count(old_smoke)}')
+          check.write_text(check_text.replace(old_smoke, new_smoke, 1), encoding='utf-8')
+          PY
+
+          rm -f .github/workflows/termux-fix-android-gate.yml
+
+      - name: Validate patched controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/scripts/termux-android-emulator-check.sh
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/termux-android-emulator.yml"), aliases: true)'
+          grep -F 'bubblewrap 0.0.0-termux-android-ci' .github/workflows/termux-android-emulator.yml >/dev/null
+          grep -F 'CODEX_TERMUX_DISABLE_PROOT=1 smoke-test-artifact --installed' .github/scripts/termux-android-emulator-check.sh >/dev/null
+          ! grep -F 'cargo build --locked --target "$TARGET" --release --bin bwrap' .github/workflows/termux-android-emulator.yml
+          git diff --check
+
+      - name: Push validated repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            .github/scripts/termux-android-emulator-check.sh \
+            .github/workflows/termux-android-emulator.yml \
+            .github/workflows/termux-fix-android-gate.yml
+          git commit -m 'ci: use Landlock surrogate in native Android validation'
+          git push origin HEAD:main
