@@ -73,6 +73,7 @@ bootstrap_termux() {
       adb shell run-as com.termux files/usr/bin/bash --version >/dev/null 2>&1
       return 0
     fi
+    sleep 2
   done
   adb logcat -d >"$LOG_DIR/bootstrap-attempt-${attempt}.log" 2>&1 || true
   return 1
@@ -106,7 +107,15 @@ adb shell run-as com.termux cp \
 termux_script="${RUNNER_TEMP}/termux-native-validation.sh"
 cat >"$termux_script" <<EOF_TERMUX
 #!/data/data/com.termux/files/usr/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+
+report_error() {
+  local status=\$?
+  printf 'termux-native-validation: line %s: command failed (exit %s): %s\n' \
+    "\${BASH_LINENO[0]:-unknown}" "\${status}" "\${BASH_COMMAND:-unknown}" >&2
+  exit "\${status}"
+}
+trap report_error ERR
 
 export PREFIX="${PREFIX_DIR}"
 export HOME="${HOME_DIR}"
@@ -149,9 +158,27 @@ test "\$(git -C "\${HOME}/codex-ci" rev-parse HEAD)" = "\${CONTROL_SHA}"
 git -C "\${HOME}/codex-ci" remote remove seed
 git clone --bare "\${HOME}/codex-ci" "\${HOME}/codex-control-origin.git"
 git --git-dir="\${HOME}/codex-control-origin.git" update-ref refs/heads/main "\${CONTROL_SHA}"
-git -C "\${HOME}/codex-ci" remote add origin \
-  "file://\${HOME}/codex-control-origin.git"
-export CODEX_TERMUX_FORK_URL="file://\${HOME}/codex-control-origin.git"
+
+# Keep the repository identity GitHub-shaped so the production remote guards are
+# exercised. Route the SSH transport to the exact local mirror instead of
+# weakening those guards for a file://-only CI checkout.
+ci_git_mirror="\${HOME}/codex-control-origin.git"
+ci_git_ssh="\${HOME}/ci-git-ssh"
+cat >"\${ci_git_ssh}" <<'EOF_GIT_SSH'
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+: "\${CODEX_TERMUX_CI_GIT_MIRROR:?CODEX_TERMUX_CI_GIT_MIRROR is required}"
+exec git-upload-pack "\${CODEX_TERMUX_CI_GIT_MIRROR}"
+EOF_GIT_SSH
+chmod 0755 "\${ci_git_ssh}"
+export CODEX_TERMUX_CI_GIT_MIRROR="\${ci_git_mirror}"
+export GIT_SSH_COMMAND="\${ci_git_ssh}"
+export GIT_SSH_VARIANT=ssh
+ci_fork_url="git@github.com:${GITHUB_REPOSITORY}.git"
+git -C "\${HOME}/codex-ci" remote add origin "\${ci_fork_url}"
+export CODEX_TERMUX_FORK_URL="\${ci_fork_url}"
+test "\$(git -C "\${HOME}/codex-ci" remote get-url origin)" = "\${ci_fork_url}"
+test "\$(git -C "\${HOME}/codex-ci" ls-remote origin refs/heads/main | awk '{print \$1}')" = "\${CONTROL_SHA}"
 
 updater="\${HOME}/codex-ci/scripts/termux/codex-update-alpha"
 sed -i \
