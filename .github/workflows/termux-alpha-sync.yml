@@ -53,17 +53,57 @@ jobs:
           merge_status=$?
           set -e
           if (( merge_status != 0 )); then
-            echo "::error::The upstream alpha does not merge cleanly. No branch update was published."
-            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-            printf 'Conflicted files (%d):\n' "${#conflicts[@]}"
-            printf '  %s\n' "${conflicts[@]}"
-            for path in "${conflicts[@]}"; do
-              echo "::group::Conflict: $path"
-              git diff --cc -- "$path" | sed -n '1,500p'
-              echo "::endgroup::"
-            done
-            git merge --abort
-            exit 2
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U | LC_ALL=C sort)
+            expected=(codex-rs/Cargo.toml codex-rs/cli/src/main.rs)
+            if [[ "${conflicts[*]}" != "${expected[*]}" ]]; then
+              echo "::error::Unexpected alpha merge conflicts; refusing an automatic resolution."
+              printf 'Conflicted files (%d):\n' "${#conflicts[@]}"
+              printf '  %s\n' "${conflicts[@]}"
+              for path in "${conflicts[@]}"; do
+                echo "::group::Conflict: $path"
+                git diff --cc -- "$path" | sed -n '1,500p'
+                echo "::endgroup::"
+              done
+              git merge --abort
+              exit 2
+            fi
+
+            # The workspace version must come from the exact upstream alpha.
+            git checkout --theirs -- codex-rs/Cargo.toml
+
+            # Preserve the fork's compile-time version command while adopting
+            # alpha.20's newer MultitoolCli shape, which removed the root PSP field.
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("codex-rs/cli/src/main.rs")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace("        psp,\n", "", 1)
+          pattern = re.compile(
+              r"<<<<<<< HEAD\n"
+              r"    \} = MultitoolCli::from_arg_matches\(&matches\)\.unwrap_or_else\(\|err\| err\.exit\(\)\);\n"
+              r"    interactive\.psp = psp;\n\n"
+              r"=======\n"
+              r"    \} = MultitoolCli::parse\(\);\n"
+              r">>>>>>> [^\n]+\n"
+          )
+          text, replacements = pattern.subn(
+              "    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n",
+              text,
+              count=1,
+          )
+          if replacements != 1 or "<<<<<<<" in text or ">>>>>>>" in text:
+              raise SystemExit("failed to resolve the expected CLI merge conflict exactly")
+          path.write_text(text, encoding="utf-8")
+          PY
+            git add codex-rs/Cargo.toml codex-rs/cli/src/main.rs
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              echo "::error::Unresolved files remain after the exact conflict resolution."
+              git diff --name-only --diff-filter=U
+              git merge --abort
+              exit 2
+            fi
           fi
 
           git commit -m "Merge upstream ${TARGET_TAG} for Termux"
