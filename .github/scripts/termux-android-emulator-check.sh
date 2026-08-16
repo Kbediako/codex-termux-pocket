@@ -69,11 +69,10 @@ bootstrap_termux() {
     >"$LOG_DIR/activity-start-${attempt}.txt"
 
   for _ in $(seq 1 180); do
-    if adb shell run-as com.termux sh -c \
-      "test -x files/usr/bin/bash" >/dev/null 2>&1; then
+    if adb shell run-as com.termux ls files/usr/bin/bash >/dev/null 2>&1; then
+      adb shell run-as com.termux files/usr/bin/bash --version >/dev/null 2>&1
       return 0
     fi
-    sleep 2
   done
   adb logcat -d >"$LOG_DIR/bootstrap-attempt-${attempt}.log" 2>&1 || true
   return 1
