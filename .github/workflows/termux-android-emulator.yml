@@ -23,7 +23,7 @@ permissions:
 
 concurrency:
   group: termux-android-emulator-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   prepare:
@@ -394,6 +394,23 @@ jobs:
             ${{ github.workspace }}/.cargo-home-emulator/registry/cache/
             ${{ github.workspace }}/.cargo-home-emulator/git/db/
           key: termux-emulator-cargo-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
+
+      - name: Save compiled target cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            codex-rs/target/.rustc_info.json
+            codex-rs/target/release/.fingerprint/
+            codex-rs/target/release/build/
+            codex-rs/target/release/deps/
+            codex-rs/target/x86_64-unknown-linux-musl/.rustc_info.json
+            codex-rs/target/x86_64-unknown-linux-musl/release/.fingerprint/
+            codex-rs/target/x86_64-unknown-linux-musl/release/build/
+            codex-rs/target/x86_64-unknown-linux-musl/release/deps/
+            codex-rs/target/x86_64-unknown-linux-musl/release/gn_out/obj/
+          key: termux-emulator-target-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ needs.prepare.outputs.source_sha }}
 
   native-termux:
     name: Real Termux app on Android emulator
