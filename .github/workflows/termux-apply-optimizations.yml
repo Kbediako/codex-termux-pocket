@@ -1,0 +1,114 @@
+name: termux-apply-optimizations
+
+on:
+  push:
+    branches:
+      - agent/termux-hardening-alpha-20
+    paths:
+      - ".github/workflows/termux-apply-optimizations.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: termux-apply-optimizations-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      PREFIX: /data/data/com.termux/files/usr
+      TERMUX_APK_RELEASE: F_DROID
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$PREFIX/bin"
+          sudo ln -sfn /usr/bin/bash "$PREFIX/bin/bash"
+
+      - name: Apply exact optimisation patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/termux/apply-optimization-patch.py \
+            scripts/termux/generate-sbom.py
+          python3 scripts/termux/apply-optimization-patch.py
+          subject='termux: align alpha.20 and harden mobile releases'
+          if ! awk -F '\t' -v subject="$subject" \
+              '$1 == "subject" && $2 == subject { found=1 } END { exit !found }' \
+              scripts/termux/patch_audit.tsv; then
+            printf 'subject\t%s\tsecurity-critical\tAligns the Android runtime with alpha.20 and hardens verified archives, pinned build inputs, installed-tree repair, storage checks, rollback, retention, SBOM, and provenance.\n' \
+              "$subject" >> scripts/termux/patch_audit.tsv
+          fi
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+
+      - name: Validate optimised control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts=(
+            scripts/termux/codex-cargo-check
+            scripts/termux/codex-update-alpha
+            scripts/termux/install-codex-termux
+            scripts/termux/maintainer-update-alpha
+            scripts/termux/smoke-test-artifact
+            scripts/termux/termux-mobile-lib.sh
+            scripts/termux/tests/run-tests
+          )
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+          shellcheck --external-sources --severity=error "${scripts[@]}"
+          bash scripts/termux/tests/run-tests
+          python3 -m py_compile scripts/termux/generate-sbom.py
+          python3 scripts/termux/generate-sbom.py \
+            --workspace "$GITHUB_WORKSPACE/codex-rs" \
+            --output "$RUNNER_TEMP/codex-termux-test.spdx.json" \
+            --artifact-version 'codex-cli test' \
+            --commit "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY"
+          python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); assert data["spdxVersion"] == "SPDX-2.3"' \
+            "$RUNNER_TEMP/codex-termux-test.spdx.json"
+          (cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
+          ruby -e 'require "yaml"; Dir[".github/workflows/termux-*.yml"].sort.each { |path| YAML.load_file(path, aliases: true) }'
+          git diff --check
+
+      - name: Publish validated non-workflow changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          cp .github/workflows/termux-mobile-artifact.yml \
+            scripts/termux/generated-termux-mobile-artifact.yml
+          cp .github/workflows/termux-control-plane.yml \
+            scripts/termux/generated-termux-control-plane.yml
+          git add \
+            scripts/termux/codex-update-alpha \
+            scripts/termux/generated-termux-control-plane.yml \
+            scripts/termux/generated-termux-mobile-artifact.yml \
+            scripts/termux/install-codex-termux \
+            scripts/termux/patch_audit.tsv \
+            scripts/termux/termux-mobile-lib.sh \
+            scripts/termux/tests/run-tests
+          git diff --cached --quiet && { echo 'No optimisation changes were produced.' >&2; exit 1; }
+          git commit -m 'termux: add deterministic releases and rollback controls'
+          git push origin HEAD:agent/termux-hardening-alpha-20
