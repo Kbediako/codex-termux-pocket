@@ -1,0 +1,66 @@
+name: fix-termux-governance-audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/fix-termux-governance-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Compare legacy manifests semantically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/termux-governance-audit.yml')
+          text = path.read_text(encoding='utf-8')
+          old = '''          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
+          if published_manifest != manifest_path.read_bytes():
+              raise SystemExit("published release manifest differs from the repository promotion")
+'''
+          new = '''          published_manifest = request_bytes(assets["release-manifest.env"]["browser_download_url"])
+          published_manifest_path = Path(os.environ["RUNNER_TEMP"]) / "published-release-manifest.env"
+          published_manifest_path.write_bytes(published_manifest)
+          published_values = parse_env(
+              published_manifest_path,
+              allowed_manifest,
+              required_manifest,
+          )
+          if published_values != manifest:
+              raise SystemExit("published release manifest values differ from the repository promotion")
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one byte-comparison block, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          Path('.github/workflows/fix-termux-governance-audit.yml').unlink()
+          PY
+
+      - name: Validate and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(".github/workflows/termux-governance-audit.yml"), aliases: true)'
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'ci: compare legacy release manifests semantically'
+          git push origin HEAD:main
