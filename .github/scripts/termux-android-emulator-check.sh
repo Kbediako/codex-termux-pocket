@@ -92,8 +92,12 @@ chmod 0755 "\${HOME}/ci-uname-shim/uname"
 export PATH="\${HOME}/ci-uname-shim:\${PREFIX}/bin:/system/bin"
 
 rm -rf "\${HOME}/codex-ci"
-git clone --filter=blob:none --no-tags --origin origin --branch main --single-branch \
-  "https://github.com/${GITHUB_REPOSITORY}.git" "\${HOME}/codex-ci"
+mkdir -p "\${HOME}/codex-ci"
+git -C "\${HOME}/codex-ci" init
+git -C "\${HOME}/codex-ci" remote add origin \
+  "https://github.com/${GITHUB_REPOSITORY}.git"
+git -C "\${HOME}/codex-ci" fetch --depth=1 origin "\${CONTROL_SHA}"
+git -C "\${HOME}/codex-ci" checkout --detach FETCH_HEAD
 test "\$(git -C "\${HOME}/codex-ci" rev-parse HEAD)" = "\${CONTROL_SHA}"
 
 updater="\${HOME}/codex-ci/scripts/termux/codex-update-alpha"
