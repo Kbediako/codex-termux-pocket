@@ -53,6 +53,10 @@ jobs:
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
 
+      - name: Validate Python utilities
+        shell: bash
+        run: python3 -m py_compile scripts/termux/generate-sbom.py
+
       - name: Validate shell syntax
         shell: bash
         run: |

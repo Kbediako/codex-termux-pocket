@@ -48,10 +48,15 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     outputs:
       head_sha: ${{ steps.stage.outputs.head_sha }}
       codex_version: ${{ steps.stage.outputs.codex_version }}
       archive_sha256: ${{ steps.stage.outputs.archive_sha256 }}
+      archive_size_bytes: ${{ steps.stage.outputs.archive_size_bytes }}
+      runtime_size_bytes: ${{ steps.stage.outputs.runtime_size_bytes }}
     defaults:
       run:
         working-directory: codex-rs
@@ -68,14 +73,14 @@ jobs:
     steps:
       - name: Checkout requested ref
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Checkout triggering commit
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.source_ref == '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -130,6 +135,7 @@ jobs:
             "${GITHUB_WORKSPACE}/codex-rs/Cargo.lock"
             "${GITHUB_WORKSPACE}/codex-rs/rust-toolchain.toml"
             "${GITHUB_WORKSPACE}/scripts/termux/build-inputs.env"
+            "${GITHUB_WORKSPACE}/scripts/termux/generate-sbom.py"
             "${manifest_files[@]}"
           )
           mapfile -t cache_key_files < <(printf '%s\n' "${cache_key_files[@]}" | LC_ALL=C sort -u)
@@ -319,7 +325,7 @@ jobs:
 
       - name: Upload Cargo timings
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-timings-termux-mobile-${{ env.TARGET }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
@@ -337,6 +343,7 @@ jobs:
           mkdir -p "${runtime_root}/bin" "${runtime_root}/codex-resources"
           for binary in codex codex-code-mode-host codex-responses-api-proxy; do
             cp "target/${TARGET}/release/${binary}" "${runtime_root}/bin/${binary}"
+            strip --strip-debug --strip-unneeded "${runtime_root}/bin/${binary}"
             chmod 0755 "${runtime_root}/bin/${binary}"
           done
           cp "target/${TARGET}/release/bwrap" "${runtime_root}/codex-resources/bwrap"
@@ -397,18 +404,39 @@ jobs:
           (artifact_root / "metadata.env").write_text(metadata, encoding="utf-8")
           PY
 
+          head_sha="$(git rev-parse HEAD)"
+          codex_version="$("${runtime_root}/bin/codex" --version)"
+          sbom="${artifact_root}/codex-termux-sbom.spdx.json"
+          python3 "${GITHUB_WORKSPACE}/scripts/termux/generate-sbom.py"             --workspace "${GITHUB_WORKSPACE}/codex-rs"             --output "$sbom"             --artifact-version "$codex_version"             --commit "$head_sha"             --repository "$GITHUB_REPOSITORY"
+
           archive="${artifact_root}/codex-termux-aarch64-unknown-linux-musl.tar.gz"
-          tar -C "${artifact_root}" -czf "$archive" codex-termux-runtime
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          tar --sort=name             --mtime="@${source_date_epoch}"             --owner=0 --group=0 --numeric-owner             -C "${artifact_root}" -cf - codex-termux-runtime             | gzip -n -9 >"$archive"
+          runtime_size_bytes="$(
+            find "$runtime_root" -type f -printf '%s\n'               | awk '{ total += $1 } END { printf "%.0f\n", total }'
+          )"
+          archive_size_bytes="$(stat -c '%s' "$archive")"
+          cat >>"${artifact_root}/metadata.env" <<EOF
+          archive_size_bytes=${archive_size_bytes}
+          runtime_size_bytes=${runtime_size_bytes}
+          EOF
           (
             cd "${artifact_root}"
             sha256sum codex-termux-aarch64-unknown-linux-musl.tar.gz metadata.env > SHA256SUMS
           )
-          head_sha="$(git rev-parse HEAD)"
-          codex_version="$("${runtime_root}/bin/codex" --version)"
           archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
           echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
           echo "codex_version=${codex_version}" >> "$GITHUB_OUTPUT"
           echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
+          echo "archive_size_bytes=${archive_size_bytes}" >> "$GITHUB_OUTPUT"
+          echo "runtime_size_bytes=${runtime_size_bytes}" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Termux runtime size'
+            echo
+            echo "- Compressed archive: ${archive_size_bytes} bytes"
+            echo "- Installed runtime payload: ${runtime_size_bytes} bytes"
+            echo "- SPDX SBOM: $(stat -c '%s' "$sbom") bytes"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Validate complete artifact before upload
         shell: bash
@@ -431,8 +459,15 @@ jobs:
           done
           test -f "$runtime/codex-package.json"
           test -f "$runtime/runtime-files.sha256"
+          test -f "$artifact_root/codex-termux-sbom.spdx.json"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))'             "$artifact_root/codex-termux-sbom.spdx.json"
           (cd "$runtime" && sha256sum --check --strict runtime-files.sha256)
           metadata_version="$(sed -n 's/^codex_version=//p' metadata.env)"
+          metadata_archive_size="$(sed -n 's/^archive_size_bytes=//p' metadata.env)"
+          metadata_runtime_size="$(sed -n 's/^runtime_size_bytes=//p' metadata.env)"
+          test "$metadata_archive_size" = "$(stat -c '%s' codex-termux-aarch64-unknown-linux-musl.tar.gz)"
+          actual_runtime_size="$(find "$runtime" -type f -printf '%s\n' | awk '{ total += $1 } END { printf "%.0f\n", total }')"
+          test "$metadata_runtime_size" = "$actual_runtime_size"
           test "$metadata_version" = "$("$runtime/bin/codex" --version)"
           "$runtime/bin/codex-code-mode-host" --help >/dev/null
           "$runtime/bin/codex-responses-api-proxy" --help >/dev/null
@@ -442,14 +477,32 @@ jobs:
             --expected-sha "$(git rev-parse HEAD)" \
             --expected-version "$metadata_version"
 
+      - name: Attest Termux runtime build provenance
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
+            dist/termux-mobile/metadata.env
+            dist/termux-mobile/SHA256SUMS
+            dist/termux-mobile/codex-termux-sbom.spdx.json
+
+      - name: Attest Termux runtime SPDX SBOM
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
+          sbom-path: dist/termux-mobile/codex-termux-sbom.spdx.json
+
       - name: Upload Termux artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: codex-termux-aarch64-unknown-linux-musl
           path: |
             dist/termux-mobile/codex-termux-aarch64-unknown-linux-musl.tar.gz
             dist/termux-mobile/metadata.env
             dist/termux-mobile/SHA256SUMS
+            dist/termux-mobile/codex-termux-sbom.spdx.json
           if-no-files-found: error
 
       - name: Save cargo home cache
@@ -512,6 +565,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
     needs: build-termux-artifact
     runs-on: ubuntu-24.04
+    environment: termux-release
     permissions:
       contents: write
     steps:
@@ -527,7 +581,7 @@ jobs:
           fi
 
       - name: Download validated build artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: codex-termux-aarch64-unknown-linux-musl
           path: dist
@@ -538,6 +592,8 @@ jobs:
           HEAD_SHA: ${{ needs.build-termux-artifact.outputs.head_sha }}
           CODEX_VERSION: ${{ needs.build-termux-artifact.outputs.codex_version }}
           ARCHIVE_SHA256: ${{ needs.build-termux-artifact.outputs.archive_sha256 }}
+          ARCHIVE_SIZE_BYTES: ${{ needs.build-termux-artifact.outputs.archive_size_bytes }}
+          RUNTIME_SIZE_BYTES: ${{ needs.build-termux-artifact.outputs.runtime_size_bytes }}
         shell: bash
         run: |
           set -euo pipefail
@@ -550,6 +606,8 @@ jobs:
           head_sha=${HEAD_SHA}
           codex_version=${CODEX_VERSION}
           archive_sha256=${ARCHIVE_SHA256}
+          archive_size_bytes=${ARCHIVE_SIZE_BYTES}
+          runtime_size_bytes=${RUNTIME_SIZE_BYTES}
           EOF
 
       - name: Publish new public release without overwriting assets
@@ -574,4 +632,5 @@ jobs:
             dist/codex-termux-aarch64-unknown-linux-musl.tar.gz \
             dist/metadata.env \
             dist/SHA256SUMS \
+            dist/codex-termux-sbom.spdx.json \
             dist/release-manifest.env
