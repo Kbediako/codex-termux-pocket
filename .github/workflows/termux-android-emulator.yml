@@ -9,6 +9,11 @@ on:
       - ".github/scripts/termux-android-emulator-check.sh"
       - ".github/scripts/termux-android-emulator-noninteractive.sh"
       - ".github/workflows/termux-android-emulator.yml"
+      - "scripts/termux/codex-update-alpha"
+      - "scripts/termux/install-codex-termux"
+      - "scripts/termux/release-manifest.env"
+      - "scripts/termux/smoke-test-artifact"
+      - "scripts/termux/termux-mobile-lib.sh"
   workflow_dispatch:
 
 permissions:

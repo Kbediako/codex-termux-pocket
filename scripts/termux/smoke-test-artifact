@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
       expected_version="${2:-}"
       shift 2
       ;;
-    --quick)
+   --quick)
       quick="yes"
       shift
       ;;
@@ -78,14 +78,23 @@ smoke_bundle() {
 
 smoke_installed() {
   termux_check_environment
-  local launcher metadata runtime_root metadata_sha metadata_version actual_version token output command_status denied_path
-  metadata="$(termux_installed_metadata)"
+  local launcher metadata runtime_link runtime_root active_sha metadata_sha metadata_version actual_version token output command_status denied_path
   launcher="$PREFIX/bin/codex"
-  runtime_root="$PREFIX/libexec/codex-termux/current"
-  [[ -f "$metadata" ]] || termux_abort "installed metadata is missing: $metadata"
+  runtime_link="$(termux_runtime_root "$PREFIX")/current"
+  active_sha="$(termux_current_release_sha "$PREFIX" || true)"
+  termux_validate_sha "$active_sha" || termux_abort 'current runtime link is missing or unsafe.'
+  runtime_root="$(termux_runtime_root "$PREFIX")/releases/$active_sha"
+  metadata="$runtime_root/$CODEX_TERMUX_METADATA"
+
+  [[ -L "$runtime_link" ]] || termux_abort "current runtime link is missing: $runtime_link"
+  [[ -d "$runtime_root" && ! -L "$runtime_root" ]] || \
+    termux_abort "active runtime directory is missing or unsafe: $runtime_root"
+  [[ -f "$metadata" && ! -L "$metadata" ]] || termux_abort "installed metadata is missing or unsafe: $metadata"
   metadata_sha="$(termux_metadata_value "$metadata" head_sha)"
   metadata_version="$(termux_metadata_value "$metadata" codex_version)"
   termux_validate_sha "$metadata_sha" || termux_abort 'installed metadata has an invalid commit SHA.'
+  [[ "$metadata_sha" == "$active_sha" ]] || \
+    termux_abort "active runtime link points to $active_sha but metadata names $metadata_sha."
 
   [[ -x "$launcher" ]] || termux_abort "launcher is missing or not executable: $launcher"
   [[ -x "$runtime_root/bin/codex" ]] || termux_abort 'installed Codex runtime is missing.'
@@ -93,7 +102,8 @@ smoke_installed() {
   [[ -x "$runtime_root/bin/codex-responses-api-proxy" ]] || termux_abort 'installed codex-responses-api-proxy is missing.'
   [[ -x "$runtime_root/codex-resources/bwrap" ]] || termux_abort 'verified bundled bubblewrap is missing.'
   [[ ! -w "$runtime_root/bin/codex" || -O "$runtime_root/bin/codex" ]] || termux_abort 'runtime permissions/ownership are unsafe.'
-  termux_installed_release_is_valid "$runtime_root" "$metadata_sha" "$metadata_version" ||     termux_abort 'installed runtime tree failed integrity validation.'
+  termux_installed_release_is_valid "$runtime_root" "$metadata_sha" "$metadata_version" || \
+    termux_abort 'installed runtime tree failed integrity validation.'
 
   actual_version="$("$launcher" --version)"
   [[ "$actual_version" == "$metadata_version" ]] || \
@@ -119,7 +129,7 @@ smoke_installed() {
     fi
     [[ "$output" != *'Codex could not find bubblewrap on PATH'* ]] || \
       termux_abort 'bundled bubblewrap was not discovered on PATH.'
-    [[ "$output" == *"bwrap=$runtime_root/codex-resources/bwrap"* ]] || \
+    [[ "$output" == *"bwrap=$runtime_link/codex-resources/bwrap"* ]] || \
       termux_abort 'command runner did not resolve the verified bundled bubblewrap.'
     [[ "$output" == *"$token"* ]] || termux_abort 'minimal command did not cross the Codex Termux sandbox runner.'
 
@@ -136,7 +146,7 @@ smoke_installed() {
 
   termux_info "installed smoke test passed: $actual_version ($metadata_sha)"
   if [[ "$quick" != "yes" ]]; then
-    termux_info 'launcher DNS/CA/browser checks and restricted Landlock/seccomp command smoke test passed.'
+    termux_info 'launcher DNS/CA/browser checks and restricted Landlock/seccommp command smoke test passed.'
   fi
 }
 
