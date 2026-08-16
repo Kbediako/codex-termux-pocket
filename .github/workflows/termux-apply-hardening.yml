@@ -43,6 +43,17 @@ jobs:
           set -euo pipefail
           python3 -m py_compile scripts/termux/apply-hardening-patch.py
           python3 scripts/termux/apply-hardening-patch.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/termux/termux-mobile-lib.sh")
+          text = path.read_text(encoding="utf-8")
+          old = '  (cd "$root" && sha256sum --check --strict "$CODEX_TERMUX_RUNTIME_CHECKSUMS") || {\n'
+          new = '  (cd "$root" && sha256sum --check --strict "$CODEX_TERMUX_RUNTIME_CHECKSUMS" >/dev/null) || {\n'
+          if text.count(old) != 1:
+              raise SystemExit("expected one runtime checksum verification command")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
 
       - name: Validate patched control plane
         shell: bash
