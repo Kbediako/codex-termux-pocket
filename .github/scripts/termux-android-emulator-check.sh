@@ -91,14 +91,20 @@ EOF_UNAME
 chmod 0755 "\${HOME}/ci-uname-shim/uname"
 export PATH="\${HOME}/ci-uname-shim:\${PREFIX}/bin:/system/bin"
 
-rm -rf "\${HOME}/codex-ci"
+rm -rf "\${HOME}/codex-ci" "\${HOME}/codex-control-origin.git"
 mkdir -p "\${HOME}/codex-ci"
 git -C "\${HOME}/codex-ci" init
-git -C "\${HOME}/codex-ci" remote add origin \
+git -C "\${HOME}/codex-ci" remote add seed \
   "https://github.com/${GITHUB_REPOSITORY}.git"
-git -C "\${HOME}/codex-ci" fetch --depth=1 origin "\${CONTROL_SHA}"
-git -C "\${HOME}/codex-ci" checkout --detach FETCH_HEAD
+git -C "\${HOME}/codex-ci" fetch --depth=1 seed "\${CONTROL_SHA}"
+git -C "\${HOME}/codex-ci" checkout -B main FETCH_HEAD
 test "\$(git -C "\${HOME}/codex-ci" rev-parse HEAD)" = "\${CONTROL_SHA}"
+git -C "\${HOME}/codex-ci" remote remove seed
+git clone --bare "\${HOME}/codex-ci" "\${HOME}/codex-control-origin.git"
+git --git-dir="\${HOME}/codex-control-origin.git" update-ref refs/heads/main "\${CONTROL_SHA}"
+git -C "\${HOME}/codex-ci" remote add origin \
+  "file://\${HOME}/codex-control-origin.git"
+export CODEX_TERMUX_FORK_URL="file://\${HOME}/codex-control-origin.git"
 
 updater="\${HOME}/codex-ci/scripts/termux/codex-update-alpha"
 sed -i \
@@ -192,13 +198,18 @@ case "\${mcp_server_status}" in
 esac
 
 mkdir -p "\${HOME}/sandbox-workspace"
-rm -f "\${HOME}/sandbox-workspace/read-only-denied" "\${HOME}/sandbox-workspace/workspace-write-ok" "\${HOME}/sandbox-outside-denied"
+rm -f \
+  "\${HOME}/sandbox-workspace/read-only-denied" \
+  "\${HOME}/sandbox-workspace/workspace-write-ok" \
+  "\${HOME}/sandbox-outside-denied"
 
 set +e
-CODEX_TERMUX_DISABLE_PROOT=1 codex \
-  -c 'sandbox_mode="read-only"' \
-  sandbox -- sh -c "touch '\${HOME}/sandbox-workspace/read-only-denied'" \
-  >"\${HOME}/sandbox-read-only.log" 2>&1
+(
+  cd "\${HOME}/sandbox-workspace"
+  CODEX_TERMUX_DISABLE_PROOT=1 codex \
+    -c 'sandbox_mode="read-only"' \
+    sandbox -- sh -c 'touch read-only-denied'
+) >"\${HOME}/sandbox-read-only.log" 2>&1
 read_only_status=\$?
 set -e
 test ! -e "\${HOME}/sandbox-workspace/read-only-denied"
@@ -209,11 +220,13 @@ fi
 printf 'read-only sandbox exit=%s\n' "\${read_only_status}"
 
 set +e
-CODEX_TERMUX_DISABLE_PROOT=1 codex \
-  -c 'sandbox_mode="workspace-write"' \
-  sandbox -- sh -c \
-  "touch '\${HOME}/sandbox-workspace/workspace-write-ok'; touch '\${HOME}/sandbox-outside-denied'" \
-  >"\${HOME}/sandbox-workspace-write.log" 2>&1
+(
+  cd "\${HOME}/sandbox-workspace"
+  CODEX_TERMUX_DISABLE_PROOT=1 codex \
+    -c 'sandbox_mode="workspace-write"' \
+    sandbox -- sh -c \
+    "touch workspace-write-ok; touch '\${HOME}/sandbox-outside-denied'"
+) >"\${HOME}/sandbox-workspace-write.log" 2>&1
 workspace_status=\$?
 set -e
 test ! -e "\${HOME}/sandbox-outside-denied"
