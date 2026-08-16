@@ -25,12 +25,14 @@ concurrency:
 jobs:
   sync:
     if: ${{ github.actor != 'github-actions[bot]' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     env:
       TARGET_TAG: ${{ inputs.alpha_tag || 'rust-v0.148.0-alpha.20' }}
       TARGET_BRANCH: agent/termux-hardening-alpha-20
       GH_TOKEN: ${{ github.token }}
+      PREFIX: /data/data/com.termux/files/usr
+      TERMUX_APK_RELEASE: F_DROID
     steps:
       - name: Checkout the candidate branch with full history
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -38,15 +40,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$PREFIX/bin"
+          sudo ln -sfn /usr/bin/bash "$PREFIX/bin/bash"
+
       - name: Merge the exact upstream alpha
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          base_sha="$(git rev-parse HEAD)"
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/openai/codex.git
           git fetch --no-tags upstream "refs/tags/${TARGET_TAG}:refs/tags/${TARGET_TAG}"
+          target_sha="$(git rev-parse "${TARGET_TAG}^{commit}")"
+          target_version="${TARGET_TAG#rust-v}"
+          export TARGET_VERSION="$target_version"
 
           set +e
           git merge --no-ff --no-commit "$TARGET_TAG"
@@ -68,19 +81,38 @@ jobs:
               exit 2
             fi
 
-            # The workspace version must come from the exact upstream alpha.
-            git checkout --theirs -- codex-rs/Cargo.toml
-
-            # Preserve the fork's compile-time version command while adopting
-            # alpha.20's newer MultitoolCli shape, which removed the root PSP field.
             python3 - <<'PY'
           from pathlib import Path
+          import os
           import re
 
-          path = Path("codex-rs/cli/src/main.rs")
-          text = path.read_text(encoding="utf-8")
-          text = text.replace("        psp,\n", "", 1)
-          pattern = re.compile(
+          target_version = os.environ["TARGET_VERSION"]
+
+          cargo = Path("codex-rs/Cargo.toml")
+          cargo_text = cargo.read_text(encoding="utf-8")
+          cargo_pattern = re.compile(
+              r'<<<<<<< HEAD\n'
+              r'version = "[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+"\n'
+              r'=======\n'
+              r'version = "' + re.escape(target_version) + r'"\n'
+              r'>>>>>>> [^\n]+\n'
+          )
+          cargo_text, cargo_replacements = cargo_pattern.subn(
+              lambda _match: f'version = "{target_version}"\n',
+              cargo_text,
+              count=1,
+          )
+          if cargo_replacements != 1 or "<<<<<<<" in cargo_text or ">>>>>>>" in cargo_text:
+              raise SystemExit("failed to resolve the exact workspace-version conflict")
+          cargo.write_text(cargo_text, encoding="utf-8")
+
+          cli = Path("codex-rs/cli/src/main.rs")
+          cli_text = cli.read_text(encoding="utf-8")
+          psp_line = "        psp,\n"
+          if cli_text.count(psp_line) != 1:
+              raise SystemExit("expected one root PSP destructuring line")
+          cli_text = cli_text.replace(psp_line, "", 1)
+          cli_pattern = re.compile(
               r"<<<<<<< HEAD\n"
               r"    \} = MultitoolCli::from_arg_matches\(&matches\)\.unwrap_or_else\(\|err\| err\.exit\(\)\);\n"
               r"    interactive\.psp = psp;\n\n"
@@ -88,14 +120,14 @@ jobs:
               r"    \} = MultitoolCli::parse\(\);\n"
               r">>>>>>> [^\n]+\n"
           )
-          text, replacements = pattern.subn(
-              "    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n",
-              text,
+          cli_text, cli_replacements = cli_pattern.subn(
+              lambda _match: "    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n",
+              cli_text,
               count=1,
           )
-          if replacements != 1 or "<<<<<<<" in text or ">>>>>>>" in text:
-              raise SystemExit("failed to resolve the expected CLI merge conflict exactly")
-          path.write_text(text, encoding="utf-8")
+          if cli_replacements != 1 or "<<<<<<<" in cli_text or ">>>>>>>" in cli_text:
+              raise SystemExit("failed to resolve the exact CLI merge conflict")
+          cli.write_text(cli_text, encoding="utf-8")
           PY
             git add codex-rs/Cargo.toml codex-rs/cli/src/main.rs
             if git diff --name-only --diff-filter=U | grep -q .; then
@@ -106,7 +138,18 @@ jobs:
             fi
           fi
 
+          # The branch's reviewed workflows remain authoritative for the fork.
+          # This also keeps GITHUB_TOKEN from attempting a workflow-file write.
+          git restore --source="$base_sha" --staged --worktree -- .github/workflows
+
+          cat > scripts/termux/upstream-alpha.env <<EOF
+          format_version=1
+          tag=${TARGET_TAG}
+          commit=${target_sha}
+          EOF
+          git add scripts/termux/upstream-alpha.env
           git commit -m "Merge upstream ${TARGET_TAG} for Termux"
+
           CODEX_SRC_DIR="$GITHUB_WORKSPACE" \
             bash scripts/termux/maintainer-update-alpha --lock-only
           if ! git diff --quiet -- codex-rs/Cargo.lock MODULE.bazel.lock; then
@@ -124,13 +167,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/termux/install-codex-termux
-          bash -n scripts/termux/codex-update-alpha
-          bash -n scripts/termux/maintainer-update-alpha
-          bash -n scripts/termux/smoke-test-artifact
-          bash -n scripts/termux/termux-mobile-lib.sh
+          scripts=(
+            scripts/termux/codex-cargo-check
+            scripts/termux/codex-update-alpha
+            scripts/termux/install-codex-termux
+            scripts/termux/maintainer-update-alpha
+            scripts/termux/smoke-test-artifact
+            scripts/termux/termux-mobile-lib.sh
+            scripts/termux/tests/run-tests
+          )
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
           bash scripts/termux/tests/run-tests
           (cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
+          test "$(sed -n 's/^tag=//p' scripts/termux/upstream-alpha.env)" = "$TARGET_TAG"
+          test "$(sed -n 's/^commit=//p' scripts/termux/upstream-alpha.env)" = \
+            "$(git rev-parse "${TARGET_TAG}^{commit}")"
+          git merge-base --is-ancestor "${TARGET_TAG}^{commit}" HEAD
           git diff --check
 
       - name: Publish and dispatch hosted validation
@@ -142,9 +196,9 @@ jobs:
           printf 'Merged candidate: %s\n' "$new_sha"
           gh workflow run termux-mobile-artifact.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref main \
+            --ref "$TARGET_BRANCH" \
             -f source_ref="$new_sha"
           gh workflow run termux-linux-sandbox.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref main \
+            --ref "$TARGET_BRANCH" \
             -f source_ref="$new_sha"
