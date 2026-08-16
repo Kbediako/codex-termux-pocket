@@ -1,0 +1,120 @@
+name: record-alpha20-android-result
+run-name: Record exact alpha.20 Android validation result
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/record-alpha20-android-result.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+concurrency:
+  group: record-alpha20-android-result
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANDROID_RUN_ID: "31936658809"
+      ANDROID_CONTROL_SHA: 0ef41d0da52256c2aaf02e89eabfb6619fd98605
+      SOURCE_SHA: 976d1798cd03427e3ca37a614b236042868a635f
+      EVIDENCE_PATH: .github/termux-android-validation.json
+
+    steps:
+      - name: Wait for exact Android run and collect evidence
+        id: evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${ANDROID_RUN_ID}")"
+            head_sha="$(jq -r .head_sha <<<"$run_json")"
+            workflow_path="$(jq -r .path <<<"$run_json")"
+            [[ "$head_sha" == "$ANDROID_CONTROL_SHA" ]] || {
+              echo "Unexpected Android control SHA: $head_sha" >&2
+              exit 1
+            }
+            [[ "$workflow_path" == ".github/workflows/termux-android-emulator.yml" ]] || {
+              echo "Unexpected Android workflow path: $workflow_path" >&2
+              exit 1
+            }
+            status="$(jq -r .status <<<"$run_json")"
+            [[ "$status" == "completed" ]] && break
+            sleep 20
+          done
+
+          conclusion="$(jq -r .conclusion <<<"$run_json")"
+          created_at="$(jq -r .created_at <<<"$run_json")"
+          updated_at="$(jq -r .updated_at <<<"$run_json")"
+          html_url="$(jq -r .html_url <<<"$run_json")"
+          failed_log_tail=""
+          if [[ "$conclusion" != "success" ]]; then
+            failed_log_tail="$(gh run view "$ANDROID_RUN_ID" --repo "$GITHUB_REPOSITORY" --log-failed 2>&1 | tail -n 240 || true)"
+          fi
+
+          jq -n \
+            --arg format_version "1" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg android_control_sha "$ANDROID_CONTROL_SHA" \
+            --arg run_id "$ANDROID_RUN_ID" \
+            --arg conclusion "$conclusion" \
+            --arg created_at "$created_at" \
+            --arg updated_at "$updated_at" \
+            --arg html_url "$html_url" \
+            --arg failed_log_tail "$failed_log_tail" \
+            '{
+              format_version: ($format_version | tonumber),
+              source_sha: $source_sha,
+              android_control_sha: $android_control_sha,
+              run_id: ($run_id | tonumber),
+              conclusion: $conclusion,
+              created_at: $created_at,
+              updated_at: $updated_at,
+              html_url: $html_url,
+              failed_log_tail: $failed_log_tail
+            }' > evidence.json
+
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+
+      - name: Commit evidence to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_sha=""
+          if response="$(gh api "/repos/${GITHUB_REPOSITORY}/contents/${EVIDENCE_PATH}?ref=main" 2>/dev/null)"; then
+            existing_sha="$(jq -r .sha <<<"$response")"
+          fi
+          encoded="$(base64 -w0 evidence.json)"
+          args=(
+            --method PUT
+            "/repos/${GITHUB_REPOSITORY}/contents/${EVIDENCE_PATH}"
+            -f message="ci: record alpha.20 Android validation ${{ steps.evidence.outputs.conclusion }}"
+            -f content="$encoded"
+            -f branch=main
+          )
+          [[ -z "$existing_sha" ]] || args+=( -f sha="$existing_sha" )
+          gh api "${args[@]}" >/dev/null
+
+      - name: Comment release follow-up issue
+        shell: bash
+        run: |
+          set -euo pipefail
+          conclusion='${{ steps.evidence.outputs.conclusion }}'
+          gh issue comment 44 --repo "$GITHUB_REPOSITORY" \
+            --body "Exact Android/Termux validation run ${ANDROID_RUN_ID} concluded **${conclusion}** for runtime source \`${SOURCE_SHA}\` and validation controls \`${ANDROID_CONTROL_SHA}\`. Persistent evidence: \`${EVIDENCE_PATH}\`."
+
+      - name: Enforce successful conclusion
+        if: ${{ steps.evidence.outputs.conclusion != 'success' }}
+        shell: bash
+        run: |
+          echo "::error::Native Android/Termux validation did not pass. See ${EVIDENCE_PATH} and issue #44."
+          exit 1
