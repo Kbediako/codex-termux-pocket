@@ -11,6 +11,8 @@ on:
     paths:
       - "scripts/termux/release-request.env"
       - ".github/workflows/termux-android-emulator.yml"
+      - ".github/scripts/termux-android-emulator-check.sh"
+      - ".github/scripts/termux-android-emulator-noninteractive.sh"
   workflow_dispatch:
 
 permissions:
