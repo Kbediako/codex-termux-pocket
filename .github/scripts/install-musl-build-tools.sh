@@ -4,6 +4,25 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 core_script="${script_dir}/install-musl-build-tools-core-49035f.sh"
 
+# GitHub applies GITHUB_PATH entries between steps. Some workflows install Zig
+# and invoke this helper in the same shell, so recover an executable Zig path
+# from the command file before the shared core selects its compiler toolchain.
+if ! command -v zig >/dev/null 2>&1 && [[ -f "${GITHUB_PATH:-}" ]]; then
+  while IFS= read -r candidate; do
+    if [[ -x "${candidate}/zig" ]]; then
+      export PATH="${candidate}:${PATH}"
+      break
+    fi
+  done <"${GITHUB_PATH}"
+fi
+
+if [[ "${TARGET:-}" == "x86_64-unknown-linux-musl" ]]; then
+  command -v zig >/dev/null 2>&1 || {
+    echo "Zig is required for the x86_64 musl emulator fixture" >&2
+    exit 1
+  }
+fi
+
 # Keep the established production aarch64 setup byte-for-byte stable while
 # layering compatibility fixes around the shared helper.
 bash "$core_script"
