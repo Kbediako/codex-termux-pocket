@@ -4,6 +4,12 @@ on:
   pull_request:
     paths:
       - ".github/CODEOWNERS"
+      - ".github/scripts/build-termux-android-emulator-fixture.sh"
+      - ".github/scripts/install-musl-build-tools.sh"
+      - ".github/scripts/install-musl-build-tools-core-49035f.sh"
+      - ".github/scripts/install-zig.sh"
+      - ".github/scripts/termux-android-emulator-check.sh"
+      - ".github/scripts/termux-android-emulator-noninteractive.sh"
       - ".github/workflows/termux-*.yml"
       - "docs/termux-agent-safety.md"
       - "scripts/termux/**"
@@ -16,6 +22,12 @@ on:
       - main
     paths:
       - ".github/CODEOWNERS"
+      - ".github/scripts/build-termux-android-emulator-fixture.sh"
+      - ".github/scripts/install-musl-build-tools.sh"
+      - ".github/scripts/install-musl-build-tools-core-49035f.sh"
+      - ".github/scripts/install-zig.sh"
+      - ".github/scripts/termux-android-emulator-check.sh"
+      - ".github/scripts/termux-android-emulator-noninteractive.sh"
       - ".github/workflows/termux-*.yml"
       - "docs/termux-agent-safety.md"
       - "scripts/termux/**"
@@ -77,7 +89,15 @@ jobs:
             scripts/termux/termux-mobile-lib.sh
             scripts/termux/tests/run-tests
           )
-          for script in "${scripts[@]}"; do
+          ci_scripts=(
+            .github/scripts/build-termux-android-emulator-fixture.sh
+            .github/scripts/install-musl-build-tools.sh
+            .github/scripts/install-musl-build-tools-core-49035f.sh
+            .github/scripts/install-zig.sh
+            .github/scripts/termux-android-emulator-check.sh
+            .github/scripts/termux-android-emulator-noninteractive.sh
+          )
+          for script in "${scripts[@]}" "${ci_scripts[@]}"; do
             bash -n "$script"
           done
           shellcheck --external-sources --severity=error "${scripts[@]}"

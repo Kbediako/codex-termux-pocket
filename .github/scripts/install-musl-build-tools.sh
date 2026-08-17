@@ -72,6 +72,7 @@ if [[ "${TARGET:-}" == "x86_64-unknown-linux-musl" ]]; then
   readelf -h "$inspect_dir/cap_proc.o" | grep -F 'Advanced Micro Devices X86-64' >/dev/null
 
   cat >"${inspect_dir}/cap-smoke.c" <<'EOF_CAP'
+#include <stddef.h>
 #include <sys/capability.h>
 
 int main(void) {
