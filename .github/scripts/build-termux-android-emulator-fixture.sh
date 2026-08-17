@@ -28,6 +28,69 @@ actual_version="$(
 )"
 [[ "$actual_version" == "$EXPECTED_PACKAGE_VERSION" ]]
 
+if [[ "$TARGET" == "x86_64-unknown-linux-musl" ]]; then
+  cargo_linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
+  cargo_linker_var="${cargo_linker_var//-/_}"
+  final_linker="${!cargo_linker_var:-}"
+  : "${final_linker:?x86_64 musl Rust final linker is not configured}"
+  : "${MUSL_GCC_LINKER:?MUSL_GCC_LINKER is not configured}"
+  : "${MUSL_LLD_LINKER:?MUSL_LLD_LINKER is not configured}"
+
+  link_stack_inputs=(
+    .github/scripts/build-termux-android-emulator-fixture.sh
+    .github/scripts/check-x86_64-musl-linker-interop.sh
+    .github/scripts/install-musl-build-tools.sh
+    .github/scripts/install-musl-build-tools-core-49035f.sh
+    .github/scripts/install-zig.sh
+    .github/scripts/rusty_v8_bazel.py
+    .github/scripts/x86_64-linux-musl-rust-linker.sh
+    codex-rs/Cargo.lock
+    codex-rs/rust-toolchain.toml
+  )
+  link_stack_fingerprint="$(
+    {
+      printf 'target=%s\n' "$TARGET"
+      printf 'zig_version=%s\n' "${ZIG_VERSION:-unset}"
+      printf 'rusty_v8_version=%s\n' "${RUSTY_V8_VERSION:-unset}"
+      printf 'rusty_v8_archive_sha256=%s\n' "${RUSTY_V8_ARCHIVE_SHA256:-unset}"
+      printf 'rusty_v8_binding_sha256=%s\n' "${RUSTY_V8_BINDING_SHA256:-unset}"
+      printf 'final_linker=%s\n' "$final_linker"
+      printf 'musl_gcc=%s\n' "$MUSL_GCC_LINKER"
+      printf 'lld=%s\n' "$MUSL_LLD_LINKER"
+      for input in "${link_stack_inputs[@]}"; do
+        input_path="${SOURCE_DIR}/${input}"
+        test -f "$input_path"
+        printf '%s  %s\n' "$(sha256sum "$input_path" | awk '{print $1}')" "$input"
+      done
+      rustc --version --verbose
+      cargo --version
+      zig version
+      "$MUSL_GCC_LINKER" --version
+      "$MUSL_LLD_LINKER" --version
+    } | sha256sum | awk '{print $1}'
+  )"
+  test -n "$link_stack_fingerprint"
+
+  target_root="${CODEX_DIR}/target"
+  target_release="${target_root}/${TARGET}/release"
+  marker_dir="${target_release}/.fingerprint"
+  marker="${marker_dir}/termux-link-stack-${link_stack_fingerprint}.ok"
+  if [[ -d "$target_root" && ! -f "$marker" ]]; then
+    echo "Discarding compiled target cache from a different native link stack"
+    rm -rf \
+      "${target_root}/release/.fingerprint" \
+      "${target_root}/release/build" \
+      "${target_root}/release/deps" \
+      "${target_release}/.fingerprint" \
+      "${target_release}/build" \
+      "${target_release}/deps" \
+      "${target_release}/gn_out/obj"
+  fi
+  mkdir -p "$marker_dir"
+  printf '%s\n' "$link_stack_fingerprint" >"$marker"
+  echo "native_link_stack_fingerprint=${link_stack_fingerprint}"
+fi
+
 cd "$CODEX_DIR"
 cargo metadata --locked --format-version=1 >/dev/null
 cargo build --locked --target "$TARGET" --release \

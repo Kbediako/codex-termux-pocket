@@ -47,10 +47,12 @@ if [[ "${TARGET:-}" == "x86_64-unknown-linux-musl" ]]; then
     exit 1
   }
 
-  # The emulator surrogate previously compiled libcap with musl-gcc but linked
-  # the rest of its native graph with Zig. BFD then rejected the archive during
-  # the final Rust link. Rebuild and link the x86_64-only surrogate with one
-  # compiler driver so its CRT, object and linker expectations remain aligned.
+  # A prior GNU/BFD final link rejected native objects produced through Zig.
+  # Keep x86_64 native dependencies and the staged libcap archive on the Zig
+  # compiler path, but do not use Zig's cc driver for Rust executable links:
+  # Zig injects its own musl CRT even when rustc supplies -nostartfiles and its
+  # self-contained CRT. The dedicated final-link wrapper below uses musl GCC
+  # driver semantics with LLD, preserving both sides of that boundary.
   rm -rf "$zig_source_root"
   mkdir -p "$zig_source_root"
   tar -xJf "$libcap_tarball" -C "$zig_source_root"
@@ -91,9 +93,42 @@ EOF_CAP
   file "$inspect_dir/cap-smoke"
   readelf -h "$inspect_dir/cap-smoke" | grep -F 'Advanced Micro Devices X86-64' >/dev/null
 
+  if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+    musl_linker="$(command -v x86_64-linux-musl-gcc)"
+  elif command -v musl-gcc >/dev/null 2>&1; then
+    musl_linker="$(command -v musl-gcc)"
+  else
+    echo "x86_64 musl GCC driver is unavailable after toolchain setup" >&2
+    exit 1
+  fi
+  lld_linker="$(command -v ld.lld || true)"
+  [[ -n "$lld_linker" && -x "$lld_linker" ]] || {
+    echo "ld.lld is unavailable after installing lld" >&2
+    exit 1
+  }
+  rust_linker="${script_dir}/x86_64-linux-musl-rust-linker.sh"
+  [[ -x "$rust_linker" ]] || {
+    echo "x86_64 Rust final-link wrapper is missing: $rust_linker" >&2
+    exit 1
+  }
+
   cargo_linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
   cargo_linker_var="${cargo_linker_var//-/_}"
-  echo "${cargo_linker_var}=${zigcc}" >> "$GITHUB_ENV"
+  {
+    echo "MUSL_GCC_LINKER=${musl_linker}"
+    echo "MUSL_LLD_LINKER=${lld_linker}"
+    echo "${cargo_linker_var}=${rust_linker}"
+  } >>"$GITHUB_ENV"
+
+  # GitHub applies GITHUB_ENV only to later steps. Export the same selection in
+  # this shell so the interop probe can exercise it immediately, before the
+  # expensive workspace build and before any compiled-target cache is reused.
+  export CC="$zigcc"
+  export CXX="${tool_root}/zigcxx"
+  export MUSL_GCC_LINKER="$musl_linker"
+  export MUSL_LLD_LINKER="$lld_linker"
+  export "$cargo_linker_var=$rust_linker"
+  bash "${script_dir}/check-x86_64-musl-linker-interop.sh"
 fi
 
 : "${GITHUB_PATH:?GITHUB_PATH environment variable is required}"
