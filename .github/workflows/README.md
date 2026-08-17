@@ -1,30 +1,31 @@
 # Workflow Strategy
 
-This repository is an Android/Termux-focused Codex CLI fork. Normal pushes and
-pull requests intentionally avoid inherited Windows, macOS, SDK, Bazel,
-OpenAI-internal, and upstream publishing matrices.
+This repository is an Android/Termux-focused Codex CLI fork. The workflow set
+is intentionally limited to checks and release operations that protect the
+supported Termux runtime.
 
 ## Routine checks
 
-- `blocking-ci.yml` (`fork-ci`) emits one compact `Termux fork checks` job. It
-  validates workflow YAML, Bash and Python helper syntax, the locked Cargo
-  metadata, Rust formatting, and Cargo dependency policy.
-- `termux-control-plane.yml` runs focused Termux helper, installer, manifest,
-  workflow-contract, shellcheck, and artifact-flow regression tests when the
-  Termux control plane changes.
-- `termux-linux-sandbox.yml` runs the hosted Linux sandbox test matrix only when
+- `blocking-ci.yml` (`fork-ci`) emits one compact `Termux fork checks` job for
+  workflow and script syntax, locked Cargo metadata, Rust formatting, and
+  dependency policy.
+- `termux-control-plane.yml` validates the installer, updater, artifact
+  contract, shell helpers, and workflow wiring when those inputs change.
+- `termux-linux-sandbox.yml` tests the Linux sandbox on x86_64 and ARM64 when
   the sandbox or its direct build inputs change.
+- `termux-mobile-artifact.yml` builds the supported ARM64 Termux runtime only
+  when Rust or native build inputs change. It also remains manually
+  dispatchable for exact refs and releases.
 
-## Native and release validation
+## Release and device validation
 
-- `termux-mobile-artifact.yml` builds and verifies the supported
-  `aarch64-unknown-linux-musl` runtime from the triggering source.
-- `termux-android-emulator.yml` builds the exact-source x86_64-musl surrogate
-  and exercises the official Termux debug app in an Android emulator.
-- `termux-governance-audit.yml` verifies the promoted public release identity,
+- `termux-android-emulator.yml` is not routine CI. It runs manually or when a
+  Termux release request is committed, so a flaky or still-in-development
+  Android device scenario does not make ordinary pushes red.
+- `termux-release-request.yml` publishes only after the exact ARM64 artifact
+  and release-gated Android validation succeed.
+- `termux-governance-audit.yml` checks the promoted public release identity,
   checksums, and governance state.
 
-Inherited reusable or manually dispatched workflows can remain as upstream
-reference machinery, but they are not called by routine fork CI. Branch
-protection or repository rulesets should require only checks that this focused
-workflow set actually emits.
+Inherited Windows, macOS, Bazel, SDK, Python, upstream release, contributor-bot,
+and OpenAI-internal workflows have been removed from this fork.
