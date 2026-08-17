@@ -161,7 +161,7 @@ fn install_filesystem_landlock_rules_on_current_thread(
     }
 
     if is_termux_environment() {
-        return install_termux_read_rules_and_restrict(ruleset, &readable_roots, access_ro.bits());
+        return install_termux_read_rules_and_restrict(ruleset, &readable_roots, abi);
     }
 
     let status = ruleset
@@ -182,6 +182,7 @@ struct LandlockPathBeneathAttr {
     parent_fd: libc::c_int,
 }
 
+const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 
 /// Adds read rules with the kernel UAPI on Termux, then enforces the
@@ -194,8 +195,14 @@ const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 fn install_termux_read_rules_and_restrict(
     ruleset: RulesetCreated,
     readable_roots: &[PathBuf],
-    allowed_access: u64,
+    requested_abi: ABI,
 ) -> Result<()> {
+    let effective_abi = current_landlock_abi(requested_abi)?;
+    if effective_abi == ABI::Unsupported {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+    let allowed_access = termux_read_access_mask(requested_abi, effective_abi);
+
     let ruleset_fd: Option<OwnedFd> = ruleset.into();
     let Some(ruleset_fd) = ruleset_fd else {
         return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
@@ -228,7 +235,12 @@ fn install_termux_read_rules_and_restrict(
             )
         };
         if result != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            eprintln!(
+                "failed to add Termux Landlock read rule for {} using ABI {effective_abi} and mask {allowed_access:#x}: {error}",
+                path.display()
+            );
+            return Err(error.into());
         }
         added_rules += 1;
     }
@@ -248,10 +260,33 @@ fn install_termux_read_rules_and_restrict(
         )
     };
     if result != 0 {
-        return Err(std::io::Error::last_os_error().into());
+        let error = std::io::Error::last_os_error();
+        eprintln!("failed to restrict the Termux process with Landlock ABI {effective_abi}: {error}");
+        return Err(error.into());
     }
 
     Ok(())
+}
+
+fn current_landlock_abi(maximum_abi: ABI) -> std::io::Result<ABI> {
+    // SAFETY: querying the supported Landlock ABI requires a null attribute,
+    // size 0, and LANDLOCK_CREATE_RULESET_VERSION as the sole flag.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(std::cmp::min(maximum_abi, ABI::from(result as i32)))
+}
+
+fn termux_read_access_mask(requested_abi: ABI, kernel_abi: ABI) -> u64 {
+    AccessFs::from_read(std::cmp::min(requested_abi, kernel_abi)).bits()
 }
 
 /// Android SELinux intentionally denies opening `/`, even though an app may
@@ -438,7 +473,11 @@ mod tests {
     use super::network_seccomp_mode;
     use super::open_path_for_landlock;
     use super::should_install_network_seccomp;
+    use super::termux_read_access_mask;
     use codex_protocol::protocol::NetworkSandboxPolicy;
+    use landlock::ABI;
+    use landlock::Access;
+    use landlock::AccessFs;
     use std::os::fd::AsRawFd;
     use std::path::Path;
     use std::path::PathBuf;
@@ -471,6 +510,18 @@ mod tests {
         let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags, -1);
         assert_eq!(flags & libc::O_PATH, libc::O_PATH);
+    }
+
+    #[test]
+    fn termux_read_mask_is_limited_to_the_running_kernel_abi() {
+        assert_eq!(
+            termux_read_access_mask(ABI::V5, ABI::V3),
+            AccessFs::from_read(ABI::V3).bits()
+        );
+        assert_eq!(
+            termux_read_access_mask(ABI::V3, ABI::V5),
+            AccessFs::from_read(ABI::V3).bits()
+        );
     }
     use pretty_assertions::assert_eq;
 
