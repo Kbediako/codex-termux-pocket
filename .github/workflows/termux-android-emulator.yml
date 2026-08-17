@@ -2,13 +2,15 @@ name: termux-android-emulator
 run-name: Release/manual native Termux validation for ${{ github.sha }}
 
 # The real Android app is an expensive release/device gate, not routine CI.
-# It runs automatically with a release request and remains available manually.
+# It runs automatically with a release request, self-validates changes to this
+# gate, and remains available manually.
 on:
   push:
     branches:
       - main
     paths:
       - "scripts/termux/release-request.env"
+      - ".github/workflows/termux-android-emulator.yml"
   workflow_dispatch:
 
 permissions:
