@@ -111,6 +111,11 @@ set -Eeuo pipefail
 
 report_error() {
   local status=\$?
+  # Bash still invokes an ERR trap while errexit is temporarily disabled.
+  # Expected-failure probes use set +e so their status can be inspected.
+  if [[ \$- != *e* ]]; then
+    return 0
+  fi
   printf 'termux-native-validation: line %s: command failed (exit %s): %s\n' \
     "\${BASH_LINENO[0]:-unknown}" "\${status}" "\${BASH_COMMAND:-unknown}" >&2
   exit "\${status}"
