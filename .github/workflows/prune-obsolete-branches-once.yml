@@ -1,0 +1,125 @@
+name: prune-obsolete-branches-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/prune-obsolete-branches-once.yml"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  prune:
+    name: Preserve historical tips and prune branches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Preserve historical tips and delete obsolete branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          owner="${repo%%/*}"
+
+          ref_sha() {
+            local ref="$1"
+            gh api "/repos/${repo}/git/ref/${ref}" --jq .object.sha
+          }
+
+          preserve_tag() {
+            local tag="$1"
+            local expected_sha="$2"
+            local current_sha=""
+            if current_sha="$(ref_sha "tags/${tag}" 2>/dev/null)"; then
+              [[ "$current_sha" == "$expected_sha" ]] || {
+                echo "::error::Existing tag ${tag} points to ${current_sha}, expected ${expected_sha}"
+                exit 1
+              }
+              echo "Tag ${tag} already preserves ${expected_sha}."
+            else
+              gh api --method POST "/repos/${repo}/git/refs" \
+                -f ref="refs/tags/${tag}" \
+                -f sha="$expected_sha" >/dev/null
+              echo "Created archival tag ${tag} at ${expected_sha}."
+            fi
+          }
+
+          delete_branch() {
+            local branch="$1"
+            local expected_sha="$2"
+            local actual_sha
+            actual_sha="$(ref_sha "heads/${branch}")"
+            [[ "$actual_sha" == "$expected_sha" ]] || {
+              echo "::error::Branch ${branch} moved to ${actual_sha}; expected ${expected_sha}. Refusing deletion."
+              exit 1
+            }
+
+            local open_prs
+            open_prs="$(
+              gh api --method GET "/repos/${repo}/pulls" \
+                -f state=open \
+                -f head="${owner}:${branch}" \
+                -f per_page=100 \
+                --jq length
+            )"
+            [[ "$open_prs" == "0" ]] || {
+              echo "::error::Branch ${branch} still has ${open_prs} open pull request(s)."
+              exit 1
+            }
+
+            gh api --method DELETE "/repos/${repo}/git/refs/heads/${branch}"
+            echo "Deleted ${branch} (${expected_sha})."
+          }
+
+          # These two tips are divergent historical snapshots. Preserve them as
+          # lightweight archive tags so branch cleanup does not discard access.
+          preserve_tag \
+            "archive/main-pre-rust-v0.148.0-alpha.5" \
+            "03c5e0d335bd0e124c92ab98f3b916a0fab313f2"
+          preserve_tag \
+            "archive/release-rust-v0.148.0-alpha.10" \
+            "eb1ca60840fa63fdc359c632993e63c1b471d91a"
+
+          # Published release tags already preserve the alpha.5 and alpha.9
+          # release tips. The agent and release-control tips are ancestors of
+          # main, so they need no additional tag.
+          preserve_tag \
+            "termux-v2026.08.08-75090f5b0" \
+            "75090f5b04492613ba096eea53cbb333d0925b6d"
+          preserve_tag \
+            "termux-v2026.08.12-afb867b43" \
+            "afb867b43d5bcff4dd357c4429134d039c9d1daf"
+
+          delete_branch \
+            "agent/termux-hardening-alpha-20" \
+            "ac321bd46d12ab8a9e06af009640f0ef2bda9fbf"
+          delete_branch \
+            "archive/main-pre-rust-v0.148.0-alpha.5" \
+            "03c5e0d335bd0e124c92ab98f3b916a0fab313f2"
+          delete_branch \
+            "release/rust-v0.148.0-alpha.5" \
+            "75090f5b04492613ba096eea53cbb333d0925b6d"
+          delete_branch \
+            "release/rust-v0.148.0-alpha.9" \
+            "afb867b43d5bcff4dd357c4429134d039c9d1daf"
+          delete_branch \
+            "release/rust-v0.148.0-alpha.10" \
+            "eb1ca60840fa63fdc359c632993e63c1b471d91a"
+          delete_branch \
+            "release-control-alpha20" \
+            "b5c86283b1dd5c255d4a1383578e706511263d18"
+
+          mapfile -t remaining < <(
+            gh api --paginate "/repos/${repo}/branches?per_page=100" --jq '.[].name'
+          )
+          [[ "${#remaining[@]}" -eq 1 && "${remaining[0]}" == "main" ]] || {
+            printf '::error::Unexpected branches remain:\n' >&2
+            printf '  %s\n' "${remaining[@]}" >&2
+            exit 1
+          }
+          echo "Only main remains."
