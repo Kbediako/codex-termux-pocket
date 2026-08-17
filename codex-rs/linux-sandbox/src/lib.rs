@@ -12,6 +12,7 @@ mod bwrap;
 #[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]
+#[path = "landlock_wrapper.rs"]
 mod landlock;
 #[cfg(target_os = "linux")]
 mod launcher;
