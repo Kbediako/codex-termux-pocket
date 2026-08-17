@@ -1,26 +1,24 @@
 name: termux-mobile-artifact
 run-name: Termux runtime ${{ inputs.source_ref || github.sha }}
 
+# Build the production ARM64 runtime only when its source or native build
+# inputs change. Routine workflow/docs housekeeping is covered by fork-ci.
 on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "AGENTS.md"
-      - "PLANS.md"
-      - "EXEC_PLAN*.md"
-      - "README.md"
-      - "docs/**"
-      - ".github/workflows/termux-mobile-artifact.yml"
-      - "scripts/termux/codex-update-alpha"
-      - "scripts/termux/codex-cargo-check"
+    paths:
+      - ".github/scripts/install-zig.sh"
+      - ".github/scripts/install-musl-build-tools.sh"
+      - ".github/scripts/install-musl-build-tools-core-49035f.sh"
+      - ".github/scripts/rusty_v8_bazel.py"
+      - "codex-rs/**"
+      - "patches/**"
+      - "scripts/termux/build-inputs.env"
+      - "scripts/termux/generate-sbom.py"
       - "scripts/termux/install-codex-termux"
-      - "scripts/termux/maintainer-update-alpha"
-      - "scripts/termux/patch_audit.tsv"
-      - "scripts/termux/release-manifest.env"
       - "scripts/termux/smoke-test-artifact"
       - "scripts/termux/termux-mobile-lib.sh"
-      - "scripts/termux/tests/**"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -407,13 +405,23 @@ jobs:
           head_sha="$(git rev-parse HEAD)"
           codex_version="$("${runtime_root}/bin/codex" --version)"
           sbom="${artifact_root}/codex-termux-sbom.spdx.json"
-          python3 "${GITHUB_WORKSPACE}/scripts/termux/generate-sbom.py"             --workspace "${GITHUB_WORKSPACE}/codex-rs"             --output "$sbom"             --artifact-version "$codex_version"             --commit "$head_sha"             --repository "$GITHUB_REPOSITORY"
+          python3 "${GITHUB_WORKSPACE}/scripts/termux/generate-sbom.py" \
+            --workspace "${GITHUB_WORKSPACE}/codex-rs" \
+            --output "$sbom" \
+            --artifact-version "$codex_version" \
+            --commit "$head_sha" \
+            --repository "$GITHUB_REPOSITORY"
 
           archive="${artifact_root}/codex-termux-aarch64-unknown-linux-musl.tar.gz"
           source_date_epoch="$(git show -s --format=%ct HEAD)"
-          tar --sort=name             --mtime="@${source_date_epoch}"             --owner=0 --group=0 --numeric-owner             -C "${artifact_root}" -cf - codex-termux-runtime             | gzip -n -9 >"$archive"
+          tar --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C "${artifact_root}" -cf - codex-termux-runtime \
+            | gzip -n -9 >"$archive"
           runtime_size_bytes="$(
-            find "$runtime_root" -type f -printf '%s\n'               | awk '{ total += $1 } END { printf "%.0f\n", total }'
+            find "$runtime_root" -type f -printf '%s\n' \
+              | awk '{ total += $1 } END { printf "%.0f\n", total }'
           )"
           archive_size_bytes="$(stat -c '%s' "$archive")"
           cat >>"${artifact_root}/metadata.env" <<EOF
@@ -460,7 +468,8 @@ jobs:
           test -f "$runtime/codex-package.json"
           test -f "$runtime/runtime-files.sha256"
           test -f "$artifact_root/codex-termux-sbom.spdx.json"
-          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))'             "$artifact_root/codex-termux-sbom.spdx.json"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            "$artifact_root/codex-termux-sbom.spdx.json"
           (cd "$runtime" && sha256sum --check --strict runtime-files.sha256)
           metadata_version="$(sed -n 's/^codex_version=//p' metadata.env)"
           metadata_archive_size="$(sed -n 's/^archive_size_bytes=//p' metadata.env)"

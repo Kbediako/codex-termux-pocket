@@ -1,29 +1,14 @@
 name: termux-android-emulator
-run-name: Native Termux validation for ${{ github.sha }}
+run-name: Release/manual native Termux validation for ${{ github.sha }}
 
+# The real Android app is an expensive release/device gate, not routine CI.
+# It runs automatically with a release request and remains available manually.
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/scripts/build-termux-android-emulator-fixture.sh"
-      - ".github/scripts/install-musl-build-tools.sh"
-      - ".github/scripts/install-musl-build-tools-core-49035f.sh"
-      - ".github/scripts/install-zig.sh"
-      - ".github/scripts/rusty_v8_bazel.py"
-      - ".github/scripts/termux-android-emulator-check.sh"
-      - ".github/scripts/termux-android-emulator-noninteractive.sh"
-      - ".github/workflows/termux-android-emulator.yml"
-      - "codex-rs/Cargo.lock"
-      - "codex-rs/Cargo.toml"
-      - "codex-rs/rust-toolchain.toml"
-      - "codex-rs/linux-sandbox/**"
-      - "codex-rs/sandboxing/**"
-      - "scripts/termux/codex-update-alpha"
-      - "scripts/termux/install-codex-termux"
-      - "scripts/termux/release-manifest.env"
-      - "scripts/termux/smoke-test-artifact"
-      - "scripts/termux/termux-mobile-lib.sh"
+      - "scripts/termux/release-request.env"
   workflow_dispatch:
 
 permissions:
