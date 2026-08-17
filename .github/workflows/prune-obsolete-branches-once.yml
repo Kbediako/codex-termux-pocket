@@ -15,7 +15,7 @@ jobs:
   prune:
     name: Preserve historical tips and prune branches
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -26,9 +26,30 @@ jobs:
           repo="$GITHUB_REPOSITORY"
           owner="${repo%%/*}"
 
+          gh_api() {
+            local attempt output status
+            for attempt in $(seq 1 12); do
+              if output="$(gh api "$@" 2>&1)"; then
+                printf '%s' "$output"
+                return 0
+              else
+                status=$?
+              fi
+              if grep -Eiq \
+                'HTTP (429|502|503)|Too Many Requests|Bad Gateway|No server is currently available|service unavailable' \
+                <<<"$output" && (( attempt < 12 )); then
+                echo "::warning::Transient GitHub API failure (attempt ${attempt}/12); retrying." >&2
+                sleep $(( attempt * 5 ))
+                continue
+              fi
+              printf '%s\n' "$output" >&2
+              return "$status"
+            done
+          }
+
           ref_sha() {
             local ref="$1"
-            gh api "/repos/${repo}/git/ref/${ref}" --jq .object.sha
+            gh_api "/repos/${repo}/git/ref/${ref}" --jq .object.sha
           }
 
           preserve_tag() {
@@ -42,7 +63,7 @@ jobs:
               }
               echo "Tag ${tag} already preserves ${expected_sha}."
             else
-              gh api --method POST "/repos/${repo}/git/refs" \
+              gh_api --method POST "/repos/${repo}/git/refs" \
                 -f ref="refs/tags/${tag}" \
                 -f sha="$expected_sha" >/dev/null
               echo "Created archival tag ${tag} at ${expected_sha}."
@@ -61,7 +82,7 @@ jobs:
 
             local open_prs
             open_prs="$(
-              gh api --method GET "/repos/${repo}/pulls" \
+              gh_api --method GET "/repos/${repo}/pulls" \
                 -f state=open \
                 -f head="${owner}:${branch}" \
                 -f per_page=100 \
@@ -72,7 +93,7 @@ jobs:
               exit 1
             }
 
-            gh api --method DELETE "/repos/${repo}/git/refs/heads/${branch}"
+            gh_api --method DELETE "/repos/${repo}/git/refs/heads/${branch}" >/dev/null
             echo "Deleted ${branch} (${expected_sha})."
           }
 
@@ -115,7 +136,7 @@ jobs:
             "b5c86283b1dd5c255d4a1383578e706511263d18"
 
           mapfile -t remaining < <(
-            gh api --paginate "/repos/${repo}/branches?per_page=100" --jq '.[].name'
+            gh_api --paginate "/repos/${repo}/branches?per_page=100" --jq '.[].name'
           )
           [[ "${#remaining[@]}" -eq 1 && "${remaining[0]}" == "main" ]] || {
             printf '::error::Unexpected branches remain:\n' >&2
