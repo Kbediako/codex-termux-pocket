@@ -130,9 +130,7 @@ fn read_only_rules() -> std::result::Result<RuleMap, SandboxErr> {
     Ok(rules)
 }
 
-fn write_open_rules(
-    flags_argument: u8,
-) -> std::result::Result<Vec<SeccompRule>, SandboxErr> {
+fn write_open_rules(flags_argument: u8) -> std::result::Result<Vec<SeccompRule>, SandboxErr> {
     // Access mode is a two-bit field, while create/truncate/append are
     // independent bits. Separate rules provide OR semantics across them.
     [
