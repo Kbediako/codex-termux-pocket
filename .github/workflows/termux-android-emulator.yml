@@ -293,7 +293,7 @@ jobs:
       # The fixture must come from this workflow run. Reusing a historical
       # artifact can make a green native job validate an older runtime.
       - name: Download exact fixture built by this run
-        uses: actions/download-artifact@3b7c8c95b2a144f25899b1a74b9a5e4e2f9ab3f0 # v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: codex-termux-android-emulator-fixture
           path: dist/android-emulator
