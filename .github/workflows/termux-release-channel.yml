@@ -1,0 +1,104 @@
+name: termux-release-channel
+run-name: Promote validated Termux release channel
+
+# A release is intentionally created as non-latest until all publication checks
+# pass. Once the gated release workflow completes, promote the repository
+# manifest's release to GitHub's Latest channel and run the public-channel audit.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/termux-release-channel.yml"
+  workflow_run:
+    workflows:
+      - termux-release-request
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: termux-release-channel
+  cancel-in-progress: true
+
+jobs:
+  promote-latest:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    name: Mark promoted runtime as Latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout promoted main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Mark the promoted release as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="scripts/termux/release-manifest.env"
+
+          read_value() {
+            local key="$1"
+            local value
+            value="$(sed -n "s/^${key}=//p" "$manifest")"
+            if [[ -z "$value" || "$(grep -c "^${key}=" "$manifest")" -ne 1 ]]; then
+              echo "::error file=${manifest}::Expected exactly one non-empty ${key}= entry"
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+
+          repository="$(read_value repository)"
+          release_tag="$(read_value release_tag)"
+          head_sha="$(read_value head_sha)"
+          [[ "$repository" == "$GITHUB_REPOSITORY" ]]
+          [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          release_json="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
+          )"
+          release_id="$(jq -r .id <<<"$release_json")"
+          release_target="$(jq -r .target_commitish <<<"$release_json")"
+          draft="$(jq -r .draft <<<"$release_json")"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          [[ "$release_target" == "$head_sha" ]]
+          [[ "$draft" == "false" ]]
+
+          gh api --method PATCH \
+            "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f make_latest=true >/dev/null
+
+          latest_tag="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
+          )"
+          [[ "$latest_tag" == "$release_tag" ]] || {
+            echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${release_tag}"
+            exit 1
+          }
+
+          {
+            echo "### Termux release channel"
+            echo
+            echo "- Latest release: \`${release_tag}\`"
+            echo "- Runtime commit: \`${head_sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run post-promotion governance audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run termux-governance-audit.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
