@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  actions: read
+  actions: write
   contents: write
   id-token: write
   attestations: write
@@ -25,7 +25,7 @@ jobs:
   publish-validated-runtime:
     name: Publish and promote validated Termux runtime
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout release controls
@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate release request and source package
+      - name: Validate release request and workflow-head source
         id: request
         shell: bash
         run: |
@@ -53,17 +53,28 @@ jobs:
             printf '%s' "$value"
           }
 
+          invalid_lines="$(
+            grep -Env \
+              '^(format_version|source_mode|release_tag_prefix|expected_package_version)=[^[:space:]].*$|^[[:space:]]*(#.*)?$' \
+              "$request_file" || true
+          )"
+          if [[ -n "$invalid_lines" ]]; then
+            printf '%s\n' "$invalid_lines" >&2
+            echo "::error file=${request_file}::Release request contains an unknown, malformed, or empty field"
+            exit 1
+          fi
+
           format_version="$(read_value format_version)"
-          source_sha="$(read_value source_sha)"
+          source_mode="$(read_value source_mode)"
           release_tag_prefix="$(read_value release_tag_prefix)"
           expected_package_version="$(read_value expected_package_version)"
 
-          [[ "$format_version" == "2" ]] || {
+          [[ "$format_version" == "3" ]] || {
             echo "::error file=${request_file}::Unsupported format_version=${format_version}"
             exit 1
           }
-          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error file=${request_file}::source_sha must be a full lowercase commit SHA"
+          [[ "$source_mode" == "workflow-head" ]] || {
+            echo "::error file=${request_file}::source_mode must be workflow-head"
             exit 1
           }
           [[ "$release_tag_prefix" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || {
@@ -74,24 +85,30 @@ jobs:
             echo "::error file=${request_file}::Unexpected expected_package_version format"
             exit 1
           }
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "::error::Termux releases must run from refs/heads/main, not ${GITHUB_REF}"
+            exit 1
+          }
 
+          source_sha="$GITHUB_SHA"
+          [[ "$(git rev-parse HEAD)" == "$source_sha" ]]
           git cat-file -e "${source_sha}^{commit}"
+
           package_version="$(
-            git show "${source_sha}:codex-rs/Cargo.toml" |
-              awk '
-                /^\[workspace\.package\]$/ { in_package=1; next }
-                /^\[/ && in_package { exit }
-                in_package && /^version[[:space:]]*=/ {
-                  value=$0
-                  sub(/^[^=]*=[[:space:]]*"/, "", value)
-                  sub(/".*$/, "", value)
-                  print value
-                  exit
-                }
-              '
+            awk '
+              /^\[workspace\.package\]$/ { in_package=1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^version[[:space:]]*=/ {
+                value=$0
+                sub(/^[^=]*=[[:space:]]*"/, "", value)
+                sub(/".*$/, "", value)
+                print value
+                exit
+              }
+            ' codex-rs/Cargo.toml
           )"
           [[ "$package_version" == "$expected_package_version" ]] || {
-            echo "::error file=codex-rs/Cargo.toml::Source package version ${package_version:-missing} does not match ${expected_package_version}"
+            echo "::error file=codex-rs/Cargo.toml::Workflow-head package version ${package_version:-missing} does not match ${expected_package_version}"
             exit 1
           }
 
@@ -106,12 +123,13 @@ jobs:
             echo "### Requested Termux release"
             echo
             echo "- Runtime commit: ${source_sha}"
+            echo "- Source mode: ${source_mode}"
             echo "- Package version: ${expected_package_version}"
             echo "- Binary version: ${expected_codex_version}"
             echo "- Tag: ${release_tag}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Wait for exact validated mobile artifact run
+      - name: Ensure exact workflow-head aarch64 artifact
         id: artifact_run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,55 +137,120 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          workflow="termux-mobile-artifact.yml"
+
+          latest_exact_run() {
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+              --jq ".workflow_runs
+                | map(select(.head_sha == \"${SOURCE_SHA}\"))
+                | first // {}
+                | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
+                | @tsv"
+          }
+
+          run_state="$(latest_exact_run)"
+          IFS=$'\t' read -r run_id status conclusion <<<"$run_state"
+
+          if [[ -z "$run_id" ]]; then
+            echo "Dispatching ${workflow} for exact source ${SOURCE_SHA}"
+            gh workflow run "$workflow" \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref main \
+              -f source_ref="$SOURCE_SHA"
+          fi
+
           run_id=""
-          for _ in $(seq 1 240); do
-            run_id="$(
-              gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-mobile-artifact.yml/runs?per_page=100" \
-                --jq ".workflow_runs | map(select(.head_sha == \"${SOURCE_SHA}\" and .conclusion == \"success\")) | first | .id // empty"
-            )"
-            [[ -n "$run_id" ]] && break
+          for _ in $(seq 1 480); do
+            run_state="$(latest_exact_run)"
+            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
+            if [[ -n "$candidate_id" ]]; then
+              run_id="$candidate_id"
+              case "$status" in
+                completed)
+                  [[ "$conclusion" == "success" ]] || {
+                    echo "::error::Exact aarch64 artifact run ${run_id} concluded ${conclusion}"
+                    exit 1
+                  }
+                  break
+                  ;;
+                queued|in_progress|pending|requested|waiting)
+                  ;;
+                *)
+                  echo "::warning::Exact aarch64 artifact run ${run_id} has status ${status:-unknown}"
+                  ;;
+              esac
+            fi
             sleep 15
           done
-          [[ -n "$run_id" ]] || {
-            echo "::error::No successful termux-mobile-artifact run exists for ${SOURCE_SHA}"
+
+          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
+            echo "::error::No successful exact aarch64 artifact run completed for ${SOURCE_SHA}"
             exit 1
           }
+
+          resolved_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha
+          )"
+          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::Artifact run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
+            exit 1
+          }
+
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "Validated aarch64 artifact run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Wait for native Android/Termux validation
+      - name: Wait for exact native Android/Termux validation
         id: android_run
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
+          workflow="termux-android-emulator.yml"
           run_id=""
-          for _ in $(seq 1 360); do
-            run_id="$(
-              gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-android-emulator.yml/runs?event=push&branch=main&per_page=100" \
-                --jq ".workflow_runs | map(select(.head_sha == \"${GITHUB_SHA}\")) | first | .id // empty"
-            )"
-            [[ -n "$run_id" ]] && break
-            sleep 10
-          done
-          [[ -n "$run_id" ]] || {
-            echo "::error::No Android/Termux validation run was created for control commit ${GITHUB_SHA}"
-            exit 1
-          }
 
-          while true; do
-            status="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .status)"
-            if [[ "$status" == "completed" ]]; then
-              conclusion="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .conclusion)"
-              [[ "$conclusion" == "success" ]] || {
-                echo "::error::Android/Termux validation run ${run_id} concluded ${conclusion}"
-                exit 1
-              }
-              break
+          for _ in $(seq 1 360); do
+            run_state="$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?event=push&branch=main&per_page=100" \
+                --jq ".workflow_runs
+                  | map(select(.head_sha == \"${SOURCE_SHA}\"))
+                  | first // {}
+                  | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
+                  | @tsv"
+            )"
+            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
+            if [[ -n "$candidate_id" ]]; then
+              run_id="$candidate_id"
+              case "$status" in
+                completed)
+                  [[ "$conclusion" == "success" ]] || {
+                    echo "::error::Android/Termux validation run ${run_id} concluded ${conclusion}"
+                    exit 1
+                  }
+                  break
+                  ;;
+                queued|in_progress|pending|requested|waiting)
+                  ;;
+              esac
             fi
             sleep 20
           done
+
+          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
+            echo "::error::No successful Android/Termux validation completed for ${SOURCE_SHA}"
+            exit 1
+          }
+
+          resolved_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha
+          )"
+          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::Android run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
+            exit 1
+          }
 
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "Validated Android/Termux run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
@@ -231,6 +314,10 @@ jobs:
             echo "::error::Artifact commit ${head_sha} does not match requested commit ${SOURCE_SHA}"
             exit 1
           }
+          [[ "$head_sha" == "$GITHUB_SHA" ]] || {
+            echo "::error::Release target ${head_sha} must equal workflow head ${GITHUB_SHA}"
+            exit 1
+          }
           [[ "$codex_version" == "$EXPECTED_CODEX_VERSION" ]] || {
             echo "::error::Artifact binary version ${codex_version} does not match ${EXPECTED_CODEX_VERSION}"
             exit 1
@@ -281,6 +368,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$HEAD_SHA" == "$GITHUB_SHA" ]] || {
+            echo "::error::Refusing to create a release for non-workflow-head commit ${HEAD_SHA}"
+            exit 1
+          }
+          main_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha
+          )"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || {
+            echo "::error::main advanced to ${main_sha}; refusing to publish stale workflow head ${GITHUB_SHA}"
+            exit 1
+          }
+
           release_files=(
             codex-termux-aarch64-unknown-linux-musl.tar.gz
             metadata.env
@@ -307,7 +406,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$HEAD_SHA" \
+              --target "$GITHUB_SHA" \
               --title "Codex Termux ${CODEX_VERSION}" \
               --notes "Verified complete Termux runtime for ${HEAD_SHA}. Native Android/Termux emulator validation passed before publication." \
               --latest=false \
