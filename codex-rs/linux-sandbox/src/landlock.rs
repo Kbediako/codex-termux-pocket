@@ -261,7 +261,9 @@ fn install_termux_read_rules_and_restrict(
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        eprintln!("failed to restrict the Termux process with Landlock ABI {effective_abi}: {error}");
+        eprintln!(
+            "failed to restrict the Termux process with Landlock ABI {effective_abi}: {error}"
+        );
         return Err(error.into());
     }
 
