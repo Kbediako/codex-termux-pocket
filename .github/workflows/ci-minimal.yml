@@ -14,7 +14,7 @@ jobs:
       run:
         working-directory: codex-rs
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.92
         with:
           components: rustfmt, clippy
