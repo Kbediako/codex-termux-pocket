@@ -8,6 +8,7 @@ use std::error::Error;
 use std::path::Path;
 
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::models::PermissionProfile;
 
@@ -54,7 +55,18 @@ fn is_termux_environment() -> bool {
 }
 
 fn error_contains_errno(error: &CodexErr, expected: i32) -> bool {
-    let mut current: Option<&(dyn Error + 'static)> = Some(error);
+    // CodexErrorDetails::Io is transparent. Its Error::source() delegates to
+    // io::Error::source(), which is usually None for raw OS errors, so inspect
+    // the direct payload before walking any nested source chain.
+    if matches!(
+        error.details(),
+        CodexErrorDetails::Io(io_error)
+            if io_error.raw_os_error() == Some(expected)
+    ) {
+        return true;
+    }
+
+    let mut current = error.source();
     while let Some(source) = current {
         if source
             .downcast_ref::<std::io::Error>()
