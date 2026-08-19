@@ -1,4 +1,5 @@
 name: update-latest-alpha-once
+# This follow-up commit triggers the workflow after it exists on protected main.
 
 on:
   push:
