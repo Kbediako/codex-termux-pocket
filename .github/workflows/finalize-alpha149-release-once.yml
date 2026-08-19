@@ -1,0 +1,377 @@
+name: finalize-alpha149-release-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/finalize-alpha149-release-once.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: finalize-alpha149-release-once
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_VERSION: 0.149.0-alpha.1
+      SELF_PATH: .github/workflows/finalize-alpha149-release-once.yml
+    steps:
+      - name: Checkout current protected main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Close stale Dependabot PRs and delete their branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t prs < <(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+              --jq '.[] | select(.user.login == "dependabot[bot]") | [.number, .head.ref] | @tsv'
+          )
+          for row in "${prs[@]}"; do
+            IFS=$'\t' read -r number branch <<<"$row"
+            gh pr comment "$number" --repo "$GITHUB_REPOSITORY" \
+              --body "Closing this stale fork-local version-update PR. The maintained Termux branch receives dependency changes through verified upstream alpha integrations; routine Dependabot version PRs are now disabled to avoid duplicate branch and release noise."
+            gh pr close "$number" --repo "$GITHUB_REPOSITORY"
+            gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+          done
+
+          mapfile -t stale_branches < <(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name' |
+              grep -E '^(observer/|dependabot/)' || true
+          )
+          for branch in "${stale_branches[@]}"; do
+            gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null
+            echo "Deleted ${branch}"
+          done
+
+      - name: Make release publication descendant-safe and immutable-compatible
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/termux-release-request.yml')
+          text = path.read_text(encoding='utf-8')
+
+          old_guard = '''          main_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha
+          )"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || {
+            echo "::error::main advanced to ${main_sha}; refusing to publish stale workflow head ${GITHUB_SHA}"
+            exit 1
+          }
+'''
+          new_guard = '''          main_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha
+          )"
+          if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+            compare_json="$(
+              gh api "/repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${main_sha}"
+            )"
+            compare_status="$(jq -r .status <<<"$compare_json")"
+            merge_base="$(jq -r .merge_base_commit.sha <<<"$compare_json")"
+            [[ "$compare_status" == "ahead" && "$merge_base" == "$GITHUB_SHA" ]] || {
+              echo "::error::main ${main_sha} is not a descendant of validated source ${GITHUB_SHA}"
+              exit 1
+            }
+
+            current_request="$(mktemp)"
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-request.env?ref=main" \
+              --jq .content | tr -d '\\n' | base64 --decode >"$current_request"
+            cmp --silent scripts/termux/release-request.env "$current_request" || {
+              echo "::error::release request changed after validation; refusing stale publication"
+              exit 1
+            }
+            echo "main advanced only through descendant commits and the release request is unchanged; continuing exact-source publication."
+          fi
+'''
+          if old_guard not in text:
+              raise SystemExit('expected strict main-head publication guard was not found')
+          text = text.replace(old_guard, new_guard, 1)
+          if '--latest=false' not in text:
+              raise SystemExit('expected --latest=false release option was not found')
+          text = text.replace('--latest=false', '--latest', 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          cat > .github/workflows/termux-release-channel.yml <<'EOF'
+          name: termux-release-channel
+
+          on:
+            workflow_run:
+              workflows:
+                - termux-release-request
+              types:
+                - completed
+            workflow_dispatch:
+
+          permissions:
+            actions: write
+            contents: read
+
+          concurrency:
+            group: termux-release-channel
+            cancel-in-progress: false
+
+          jobs:
+            verify-latest:
+              if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+              runs-on: ubuntu-24.04
+              timeout-minutes: 15
+              env:
+                GH_TOKEN: ${{ github.token }}
+              steps:
+                - name: Checkout promoted main
+                  uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+                  with:
+                    ref: main
+                    persist-credentials: false
+                    fetch-depth: 1
+
+                - name: Verify immutable Latest release identity
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    manifest=scripts/termux/release-manifest.env
+                    tag="$(sed -n 's/^release_tag=//p' "$manifest")"
+                    source_sha="$(sed -n 's/^head_sha=//p' "$manifest")"
+                    test -n "$tag"
+                    test -n "$source_sha"
+
+                    latest="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+                    test "$(jq -r .tag_name <<<"$latest")" = "$tag"
+                    test "$(jq -r .draft <<<"$latest")" = false
+
+                    tag_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha)"
+                    test "$tag_sha" = "$source_sha"
+                    echo "GitHub Latest points to ${tag} at ${source_sha}."
+
+                - name: Dispatch independent governance audit
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    gh workflow run termux-governance-audit.yml --repo "$GITHUB_REPOSITORY" --ref main
+          EOF
+
+      - name: Disable routine fork-local Dependabot version PRs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/dependabot.yaml')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          out = []
+          in_update = False
+          inserted = False
+          for line in lines:
+              if line.startswith('  - package-ecosystem:'):
+                  if in_update and not inserted:
+                      out.append('    open-pull-requests-limit: 0')
+                  in_update = True
+                  inserted = False
+              if in_update and line.strip().startswith('open-pull-requests-limit:'):
+                  line = '    open-pull-requests-limit: 0'
+                  inserted = True
+              out.append(line)
+          if in_update and not inserted:
+              out.append('    open-pull-requests-limit: 0')
+          path.write_text('\n'.join(out) + '\n', encoding='utf-8')
+          PY
+
+      - name: Refresh exact release request and patch audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(
+            awk '
+              /^\[workspace\.package\]$/ { in_package=1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^version[[:space:]]*=/ {
+                value=$0
+                sub(/^[^=]*=[[:space:]]*"/, "", value)
+                sub(/".*$/, "", value)
+                print value
+                exit
+              }
+            ' codex-rs/Cargo.toml
+          )"
+          test "$version" = "$EXPECTED_VERSION"
+
+          cat > scripts/termux/release-request.env <<EOF
+          # Exact-source release request for the protected alpha merge.
+          # publication_retry=immutable-latest-v2
+          format_version=3
+          source_mode=workflow-head
+          release_tag_prefix=termux-v2026.08.19-alpha.1
+          expected_package_version=${EXPECTED_VERSION}
+          EOF
+          sed -i 's/^          //' scripts/termux/release-request.env
+
+          audit=scripts/termux/patch_audit.tsv
+          add_audit() {
+            local subject="$1" classification="$2" reason="$3"
+            grep -Fqx $'subject\t'"${subject}"$'\t'"${classification}"$'\t'"${reason}" "$audit" ||
+              printf 'subject\t%s\t%s\t%s\n' "$subject" "$classification" "$reason" >>"$audit"
+          }
+          add_audit 'ci: stage final alpha publication repair' tooling \
+            'One-time protected-branch workflow used to repair the immutable Latest release channel and remove stale automation.'
+          add_audit 'ci: stage repository cleanup and alpha release' tooling \
+            'Temporary protected-branch orchestration used during repository cleanup and release recovery.'
+          add_audit 'chore: remove temporary alpha orchestration' tooling \
+            'Removes temporary alpha orchestration after the maintained source update.'
+          add_audit 'chore: clean temporary alpha orchestration' tooling \
+            'Removes temporary observer and release orchestration files.'
+          add_audit 'chore: remove post-alpha governance workflow' tooling \
+            'Removes a one-time governance verification workflow after use.'
+          add_audit 'ci: independently recheck promoted alpha governance' tooling \
+            'One-time independent release-governance verification workflow.'
+          add_audit 'ci: harden one-time latest-alpha orchestration' tooling \
+            'Hardens temporary release orchestration without changing the shipped runtime.'
+          add_audit 'chore: close release follow-up and sync latest alpha' tooling \
+            'Issue and release-control maintenance only.'
+          add_audit 'termux: request validated 0.149.0-alpha.1 release' tooling \
+            'Refreshes exact-source release controls for the maintained alpha runtime.'
+          add_audit 'termux: publish 0.149.0-alpha.1 and harden release channel' security-critical \
+            'Publishes only an exact validated source, creates immutable releases as Latest, and prevents stale non-descendant publication.'
+
+      - name: Remove temporary orchestration workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/finish-repository-cleanup-and-alpha-release-once.yml \
+            .github/workflows/trigger-finish-repository-cleanup-once.yml \
+            .github/workflows/observe-alpha-149-ci.yml \
+            .github/workflows/observe-alpha-149-status.yml \
+            .github/workflows/cancel-stale-alpha-release-runs.yml \
+            "$SELF_PATH"
+
+      - name: Commit final release source to main
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m 'termux: publish 0.149.0-alpha.1 and harden release channel'
+          source_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:main
+          echo "source_sha=${source_sha}" >>"$GITHUB_OUTPUT"
+          echo "Final release source: ${source_sha}" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for exact release publication
+        id: release
+        env:
+          SOURCE_SHA: ${{ steps.commit.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=termux-release-request.yml
+          run_id=""
+          status=""
+          conclusion=""
+          for _ in $(seq 1 960); do
+            state="$(
+              gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+                --jq ".workflow_runs | map(select(.head_sha == \"${SOURCE_SHA}\")) | first // {} | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")] | @tsv"
+            )"
+            IFS=$'\t' read -r candidate status conclusion <<<"$state"
+            if [[ -n "$candidate" ]]; then
+              run_id="$candidate"
+              if [[ "$status" == completed ]]; then
+                break
+              fi
+            fi
+            sleep 15
+          done
+          test -n "$run_id"
+          test "$status" = completed
+          test "$conclusion" = success
+          echo "run_id=${run_id}" >>"$GITHUB_OUTPUT"
+          echo "Release workflow: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Verify Latest, manifest, PRs, branches, and governance
+        env:
+          SOURCE_SHA: ${{ steps.commit.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout --detach origin/main
+
+          manifest=scripts/termux/release-manifest.env
+          tag="$(sed -n 's/^release_tag=//p' "$manifest")"
+          manifest_sha="$(sed -n 's/^head_sha=//p' "$manifest")"
+          version="$(sed -n 's/^codex_version=//p' "$manifest")"
+          test -n "$tag"
+          test "$manifest_sha" = "$SOURCE_SHA"
+          test "$version" = "codex-cli ${SOURCE_SHA:0:7}"
+
+          latest="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          test "$(jq -r .tag_name <<<"$latest")" = "$tag"
+          test "$(jq -r .draft <<<"$latest")" = false
+          tag_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha)"
+          test "$tag_sha" = "$SOURCE_SHA"
+
+          open_dependabot="$(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+              --jq '[.[] | select(.user.login == "dependabot[bot]")] | length'
+          )"
+          test "$open_dependabot" = 0
+
+          mapfile -t branches < <(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name'
+          )
+          test "${#branches[@]}" -eq 1
+          test "${branches[0]}" = main
+
+          gh workflow run termux-governance-audit.yml --repo "$GITHUB_REPOSITORY" --ref main
+          audit_id=""
+          for _ in $(seq 1 120); do
+            audit_state="$(
+              gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-governance-audit.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
+                --jq '[.workflow_runs[]] | first // {} | [(.id // ""), (.status // ""), (.conclusion // "")] | @tsv'
+            )"
+            IFS=$'\t' read -r candidate status conclusion <<<"$audit_state"
+            if [[ -n "$candidate" ]]; then
+              audit_id="$candidate"
+              [[ "$status" == completed ]] && break
+            fi
+            sleep 10
+          done
+          test -n "$audit_id"
+          test "$status" = completed
+          test "$conclusion" = success
+
+          gh issue comment 44 --repo "$GITHUB_REPOSITORY" --body "Final publication repair completed. GitHub Latest and the promoted manifest now point to \`${tag}\` at exact validated source \`${SOURCE_SHA}\` (\`${version}\`). The release workflow, ARM64 artifact, official Termux Android gate, public-download verification, and independent governance audit all passed. There are zero open Dependabot PRs and only \`main\` remains."
+
+          {
+            echo "### Final verified state"
+            echo
+            echo "- Latest release: ${tag}"
+            echo "- Source: ${SOURCE_SHA}"
+            echo "- Binary: ${version}"
+            echo "- Open Dependabot PRs: 0"
+            echo "- Branches: main"
+            echo "- Governance run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${audit_id}"
+          } >>"$GITHUB_STEP_SUMMARY"
