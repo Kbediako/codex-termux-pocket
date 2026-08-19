@@ -1,4 +1,5 @@
 name: trigger-finish-repository-cleanup-once
+# Activation commit: the target workflow now exists on protected main.
 
 on:
   push:
