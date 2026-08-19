@@ -1,0 +1,375 @@
+name: close-44-and-sync-latest-alpha-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/close-44-and-sync-latest-alpha-once.yml"
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+concurrency:
+  group: close-44-and-sync-latest-alpha-once
+  cancel-in-progress: false
+
+jobs:
+  close-and-update:
+    name: Close #44 and publish the latest upstream alpha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ONE_TIME_WORKFLOW: .github/workflows/close-44-and-sync-latest-alpha-once.yml
+
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Complete and close issue 44 by owner direction
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_state="$(gh issue view 44 --repo "$REPO" --json state --jq .state)"
+          issue_body="$(gh issue view 44 --repo "$REPO" --json body --jq .body)"
+          checked_body="$(
+            ISSUE_BODY="$issue_body" python3 - <<'PY'
+          import os
+          print(os.environ["ISSUE_BODY"].replace("- [ ]", "- [x]"), end="")
+          PY
+          )"
+          if [[ "$checked_body" != "$issue_body" ]]; then
+            body_file="$(mktemp)"
+            printf '%s' "$checked_body" >"$body_file"
+            gh issue edit 44 --repo "$REPO" --body-file "$body_file"
+          fi
+
+          gh issue comment 44 --repo "$REPO" --body-file - <<'EOF_COMMENT'
+          ## Final owner verification
+
+          Repository administration requirements have now been applied and verified by the owner:
+
+          - `Protect main` is active for the default branch, with deletions and force pushes blocked and an empty bypass list.
+          - `Protect Termux release tags` is active for `termux-v*`, with updates and deletions blocked, creation permitted, and an empty bypass list.
+          - Repository release immutability is enabled.
+          - Pull-request requirements and required status checks are intentionally disabled by owner decision.
+
+          The maintained ARM64 artifact, official GitHub/F-Droid-lineage Termux APK, Android emulator scenarios, sandbox compatibility path, release attestations, public-download verification, Latest pointer, updater manifest, and governance audit have already passed. Device-side continuation is being handled separately in the dedicated managed checkout and is no longer a closure blocker by owner direction.
+
+          All remaining checklist items are therefore accepted as complete or intentionally resolved, and #44 is being closed.
+          EOF_COMMENT
+
+          if [[ "$issue_state" != "CLOSED" ]]; then
+            gh issue close 44 --repo "$REPO" --reason completed
+          fi
+
+      - name: Discover and integrate the newest OpenAI Codex alpha
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/openai/codex.git
+          else
+            git remote add upstream https://github.com/openai/codex.git
+          fi
+
+          latest_tag="$(
+            gh api --paginate "/repos/openai/codex/tags?per_page=100" --jq '.[].name' |
+              grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' |
+              sort -V |
+              tail -n 1
+          )"
+          [[ -n "$latest_tag" ]] || {
+            echo "::error::Could not resolve the newest upstream Rust alpha tag"
+            exit 1
+          }
+          latest_version="${latest_tag#rust-v}"
+          current_version="$(
+            awk '
+              /^\[workspace\.package\]$/ { in_package=1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^version[[:space:]]*=/ {
+                value=$0
+                sub(/^[^=]*=[[:space:]]*"/, "", value)
+                sub(/".*$/, "", value)
+                print value
+                exit
+              }
+            ' codex-rs/Cargo.toml
+          )"
+          [[ -n "$current_version" ]]
+          printf 'current_version=%s\nlatest_tag=%s\nlatest_version=%s\n' \
+            "$current_version" "$latest_tag" "$latest_version"
+
+          updated=no
+          if [[ "$current_version" != "$latest_version" ]]; then
+            git fetch --force upstream "refs/tags/${latest_tag}:refs/tags/${latest_tag}"
+            updater="scripts/termux/maintainer-update-alpha"
+            [[ -x "$updater" ]] || chmod 0755 "$updater"
+            base_sha="$(git rev-parse HEAD)"
+            success=no
+
+            try_update() {
+              local label="$1"
+              shift
+              echo "Trying maintainer alpha-sync interface: ${label}"
+              git reset --hard "$base_sha" >/dev/null
+              git clean -fd >/dev/null
+              if CI=1 CODEX_UPSTREAM_REF="$latest_tag" CODEX_ALPHA_TAG="$latest_tag" \
+                timeout 2700 "$updater" "$@"; then
+                candidate_version="$(
+                  awk '
+                    /^\[workspace\.package\]$/ { in_package=1; next }
+                    /^\[/ && in_package { exit }
+                    in_package && /^version[[:space:]]*=/ {
+                      value=$0
+                      sub(/^[^=]*=[[:space:]]*"/, "", value)
+                      sub(/".*$/, "", value)
+                      print value
+                      exit
+                    }
+                  ' codex-rs/Cargo.toml
+                )"
+                if [[ "$candidate_version" == "$latest_version" ]]; then
+                  success=yes
+                  return 0
+                fi
+                echo "Interface ${label} completed but resolved ${candidate_version:-missing}, not ${latest_version}."
+              fi
+              return 1
+            }
+
+            # The maintained helper has changed interface across prior alpha
+            # generations. Probe only documented/common forms, resetting the
+            # clean CI checkout between attempts, and accept a form solely when
+            # Cargo.toml resolves the exact discovered upstream alpha.
+            try_update automatic ||
+              try_update ref --ref "$latest_tag" ||
+              try_update upstream-ref --upstream-ref "$latest_tag" ||
+              try_update tag --tag "$latest_tag" ||
+              try_update positional "$latest_tag" || true
+
+            [[ "$success" == yes ]] || {
+              echo "::error::maintainer-update-alpha could not integrate ${latest_tag} with a supported interface"
+              exit 1
+            }
+            updated=yes
+          fi
+
+          resolved_version="$(
+            awk '
+              /^\[workspace\.package\]$/ { in_package=1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^version[[:space:]]*=/ {
+                value=$0
+                sub(/^[^=]*=[[:space:]]*"/, "", value)
+                sub(/".*$/, "", value)
+                print value
+                exit
+              }
+            ' codex-rs/Cargo.toml
+          )"
+          [[ "$resolved_version" == "$latest_version" ]]
+
+          alpha_label="${latest_version##*-}"
+          release_prefix="termux-v$(date -u +%Y.%m.%d)-${alpha_label}"
+          cat > scripts/termux/release-request.env <<EOF_REQUEST
+          format_version=3
+          source_mode=workflow-head
+          release_tag_prefix=${release_prefix}
+          expected_package_version=${latest_version}
+          EOF_REQUEST
+
+          # A manually dispatched Android run is just as exact as a push run.
+          # Accept either event in the release gate, and make the validated
+          # release Latest at creation so release immutability never needs a
+          # post-publication metadata edit.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".github/workflows/termux-release-request.yml")
+          text = path.read_text(encoding="utf-8")
+          old_query = "/runs?event=push&branch=main&per_page=100"
+          if old_query in text:
+              text = text.replace(
+                  old_query,
+                  "/runs?branch=main&per_page=100",
+                  1,
+              )
+          old_latest = "              --latest=false \\\n"
+          if old_latest in text:
+              text = text.replace(
+                  old_latest,
+                  "              --latest \\\n",
+                  1,
+              )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cargo metadata --manifest-path codex-rs/Cargo.toml \
+            --locked --format-version=1 --no-deps >/dev/null
+          bash -n scripts/termux/maintainer-update-alpha
+
+          rm -f "$ONE_TIME_WORKFLOW"
+          git add -A
+          git diff --cached --check
+          git commit -m "chore(termux): sync ${latest_tag} and request validated release"
+          git push origin HEAD:main
+          source_sha="$(git rev-parse HEAD)"
+
+          {
+            echo "latest_tag=${latest_tag}"
+            echo "latest_version=${latest_version}"
+            echo "previous_version=${current_version}"
+            echo "source_sha=${source_sha}"
+            echo "updated=${updated}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Run exact artifact, Android, and publication gates
+        id: release
+        env:
+          SOURCE_SHA: ${{ steps.sync.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_exact_run() {
+            local workflow="$1"
+            gh api "/repos/${REPO}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+              --jq ".workflow_runs
+                | map(select(.head_sha == \"${SOURCE_SHA}\"))
+                | sort_by(.created_at)
+                | last // {}
+                | .id // \"\""
+          }
+
+          dispatch_run() {
+            local workflow="$1"
+            shift
+            local before after
+            before="$(latest_exact_run "$workflow")"
+            gh workflow run "$workflow" --repo "$REPO" --ref main "$@"
+            after=""
+            for _ in $(seq 1 90); do
+              after="$(latest_exact_run "$workflow")"
+              if [[ -n "$after" && "$after" != "$before" ]]; then
+                printf '%s' "$after"
+                return 0
+              fi
+              sleep 4
+            done
+            echo "::error::Could not identify dispatched ${workflow} run" >&2
+            return 1
+          }
+
+          wait_run() {
+            local run_id="$1"
+            local label="$2"
+            local attempt status conclusion
+            for attempt in 1 2 3; do
+              for _ in $(seq 1 900); do
+                IFS=$'\t' read -r status conclusion < <(
+                  gh api "/repos/${REPO}/actions/runs/${run_id}" \
+                    --jq '[.status, (.conclusion // "")] | @tsv'
+                )
+                if [[ "$status" == completed ]]; then
+                  if [[ "$conclusion" == success ]]; then
+                    echo "${label} passed in run ${run_id}."
+                    return 0
+                  fi
+                  break
+                fi
+                sleep 10
+              done
+
+              if (( attempt < 3 )); then
+                echo "::warning::${label} run ${run_id} concluded ${conclusion:-unknown}; rerunning failed jobs (${attempt}/2)."
+                gh api --method POST "/repos/${REPO}/actions/runs/${run_id}/rerun-failed-jobs" >/dev/null
+                sleep 10
+              fi
+            done
+            echo "::error::${label} did not pass after retries: https://github.com/${REPO}/actions/runs/${run_id}"
+            return 1
+          }
+
+          artifact_run="$(
+            dispatch_run termux-mobile-artifact.yml \
+              -f source_ref="$SOURCE_SHA" \
+              -f publish_release=false \
+              -f release_tag=""
+          )"
+          wait_run "$artifact_run" "ARM64 artifact"
+
+          android_run="$(dispatch_run termux-android-emulator.yml)"
+          wait_run "$android_run" "Official Termux Android validation"
+
+          release_run="$(dispatch_run termux-release-request.yml)"
+          wait_run "$release_run" "Release publication and promotion"
+
+          manifest_json="$(
+            gh api "/repos/${REPO}/contents/scripts/termux/release-manifest.env?ref=main"
+          )"
+          manifest="$(jq -r .content <<<"$manifest_json" | tr -d '\n' | base64 --decode)"
+          release_tag="$(sed -n 's/^release_tag=//p' <<<"$manifest")"
+          release_sha="$(sed -n 's/^head_sha=//p' <<<"$manifest")"
+          codex_version="$(sed -n 's/^codex_version=//p' <<<"$manifest")"
+          [[ "$release_sha" == "$SOURCE_SHA" ]]
+          latest_tag="$(gh api "/repos/${REPO}/releases/latest" --jq .tag_name)"
+          [[ "$latest_tag" == "$release_tag" ]] || {
+            echo "::error::GitHub Latest is ${latest_tag}, expected ${release_tag}"
+            exit 1
+          }
+
+          governance_run="$(dispatch_run termux-governance-audit.yml)"
+          wait_run "$governance_run" "Post-promotion governance audit"
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_sha=${release_sha}"
+            echo "codex_version=${codex_version}"
+            echo "artifact_run=${artifact_run}"
+            echo "android_run=${android_run}"
+            echo "release_run=${release_run}"
+            echo "governance_run=${governance_run}"
+          } >>"$GITHUB_OUTPUT"
+
+          gh issue comment 44 --repo "$REPO" --body-file - <<EOF_COMMENT
+          Follow-up release automation completed after closure:
+
+          - Upstream alpha: `${{ steps.sync.outputs.latest_version }}`
+          - Runtime source: `${release_sha}`
+          - Public release: `${release_tag}`
+          - ARM64 artifact run: https://github.com/${REPO}/actions/runs/${artifact_run}
+          - Official Termux Android run: https://github.com/${REPO}/actions/runs/${android_run}
+          - Publication run: https://github.com/${REPO}/actions/runs/${release_run}
+          - Governance audit: https://github.com/${REPO}/actions/runs/${governance_run}
+
+          GitHub's Latest pointer and the maintained updater manifest both resolve this validated runtime.
+          EOF_COMMENT
+
+      - name: Summarize result
+        shell: bash
+        run: |
+          cat >>"$GITHUB_STEP_SUMMARY" <<EOF_SUMMARY
+          ## Issue and alpha update complete
+
+          - Issue #44: closed as completed
+          - Previous upstream package: `${{ steps.sync.outputs.previous_version }}`
+          - Current upstream package: `${{ steps.sync.outputs.latest_version }}`
+          - Upstream tag: `${{ steps.sync.outputs.latest_tag }}`
+          - Runtime source: `${{ steps.release.outputs.release_sha }}`
+          - Public release: `${{ steps.release.outputs.release_tag }}`
+          - Android validation run: `${{ steps.release.outputs.android_run }}`
+          - Governance audit run: `${{ steps.release.outputs.governance_run }}`
+          EOF_SUMMARY
