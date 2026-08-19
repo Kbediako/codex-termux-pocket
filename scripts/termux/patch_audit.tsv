@@ -42,7 +42,7 @@ subject	termux: close x64 zig-linker benchmark spike	tooling	Fork workflow-only 
 subject	termux: narrow mobile APT cache paths	tooling	Fork workflow-only cache-hygiene follow-up that keeps only reusable APT archive payloads and removes save-time warnings; runtime/install/auth behavior unchanged.
 subject	ci: replace setup-zig action with local installer	tooling	Fork workflow-only CI hygiene change that removes the Node20-based setup-zig action in favor of a repo-local Zig installer pinned to the same version; runtime/install/auth behavior unchanged.
 subject	docs: format exec plan after zig installer change	docs	Formats the living ExecPlan after the Zig-installer CI hygiene update; runtime/install/auth behavior unchanged.
-subject	ci: replace setup-bazelisk action with local installer	tooling	Fork workflow-only CI hygiene change that removes the Node20-based Bazelisk action in favor of a repo-local Bazelisk installer pinned to the same version family; runtime/install/auth behavior unchanged.
+subject	ci: replace setup-bazelisk action with local installer	tooling	Fork workflow-only CI hygiene change that removes the Node20-based setup-bazelisk action in favor of a repo-local Bazelisk installer pinned to the same version family; runtime/install/auth behavior unchanged.
 subject	Raise the MCP server recursion limit (#35414)	build-only	Upstream post-alpha build fix that raises the MCP server library and binary recursion limit to 256 and updates one test fixture; runtime and Termux launcher behavior are unchanged.
 subject	termux: refresh lockfile after alpha.123.0-alpha.2 rebase	build-only	Refreshes workspace package versions in Cargo.lock and keeps the fork artifact build graph consistent for --locked alpha.123.0-alpha.2 builds.
 subject	termux: keep temporal ICU lock graph compatible on alpha.123	build-only	Pins the ICU/temporal portion of Cargo.lock back to the temporal_rs-compatible minor versions for alpha.123 remote artifact builds.
@@ -71,3 +71,11 @@ subject	termux: publish alpha.148.0-alpha.5 runtime	tooling	Pins the exact publi
 subject	termux: test Linux sandbox on hosted runners	tooling	Fork workflow only; validates the Linux sandbox on public x64 and ARM64 Ubuntu runners without executing it on Android.
 subject	termux: refresh lockfile after 0.148.0-alpha.20 merge	build-only	Refreshes the complete workspace and target-specific dependency graph after merging the maintained Termux patch stack with the upstream alpha.
 subject	termux: align alpha.20 and harden mobile releases	security-critical	Aligns the Android runtime with alpha.20 and hardens verified archives, pinned build inputs, installed-tree repair, storage checks, rollback, retention, SBOM, and provenance.
+subject	ci: stage final issue 44 hardening	tooling	One-time workflow staging used to complete repository hardening without weakening the protected branch.
+subject	ci: run final issue 44 hardening	tooling	One-time workflow trigger used after the workflow existed on the protected default branch.
+subject	termux: pin public installer bootstrap	security-critical	Pins the README bootstrap to an immutable commit so later main changes cannot silently replace the downloaded installer.
+subject	termux: audit final hardening and alpha update commits	tooling	Classifies final issue-hardening and protected-branch alpha-maintenance commits.
+subject	termux: require control-plane release gate	security-critical	Requires an exact-source successful Termux control-plane run before any formal runtime publication.
+subject	chore: remove final issue 44 hardening workflow	tooling	Removes the temporary workflow after final repository hardening is committed.
+subject	ci: stage protected alpha update	tooling	One-time protected-branch workflow used to rebase the maintained Termux patch stack onto a newer OpenAI alpha.
+subject	termux: update to 0.149.0-alpha.1	runtime-critical	Rebases the maintained Android/Termux patch stack onto the verified OpenAI 0.149.0-alpha.1 source and refreshes release controls.
