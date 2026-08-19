@@ -1,0 +1,50 @@
+name: trigger-finish-repository-cleanup-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/trigger-finish-repository-cleanup-once.yml"
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_WORKFLOW: finish-repository-cleanup-and-alpha-release-once.yml
+      SELF_PATH: .github/workflows/trigger-finish-repository-cleanup-once.yml
+    steps:
+      - name: Dispatch and monitor final maintenance workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(gh workflow run "$TARGET_WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref main)"
+          echo "$output"
+          run_id="${output##*/}"
+          [[ "$run_id" =~ ^[0-9]+$ ]]
+
+          for _ in $(seq 1 1200); do
+            run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+            status="$(jq -r .status <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+            if [[ "$status" == "completed" ]]; then
+              [[ "$conclusion" == "success" ]] || exit 1
+              break
+            fi
+            sleep 15
+          done
+          [[ "$status" == "completed" && "$conclusion" == "success" ]]
+
+          meta="$(gh api "/repos/${GITHUB_REPOSITORY}/contents/${SELF_PATH}?ref=main")"
+          sha="$(jq -r .sha <<<"$meta")"
+          gh api --method DELETE \
+            "/repos/${GITHUB_REPOSITORY}/contents/${SELF_PATH}" \
+            -f message="chore: remove one-time repository cleanup workflow" \
+            -f sha="$sha" \
+            -f branch=main >/dev/null
