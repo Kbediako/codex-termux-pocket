@@ -4,724 +4,474 @@ set -Eeuo pipefail
 : "${GH_TOKEN:?GH_TOKEN is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+: "${GITHUB_SHA:?GITHUB_SHA is required}"
 
 repo="$GITHUB_REPOSITORY"
-owner="${repo%%/*}"
 run_url="https://github.com/${repo}/actions/runs/${GITHUB_RUN_ID}"
-log_file="${RUNNER_TEMP}/repair-release-and-clean-repo.log"
-report_file="${RUNNER_TEMP}/repair-release-and-clean-repo.md"
-final_subject=""
-final_sha=""
-release_run_id=""
-latest_tag=""
-latest_version=""
-release_tag=""
+log_file="${RUNNER_TEMP}/validated-alpha-publication.log"
 
-mkdir -p "$(dirname "$log_file")"
-: >"$log_file"
-: >"$report_file"
+SOURCE_SHA="329147e2fab2ddf5f9e8e607efc2a3ba1f5f712c"
+PACKAGE_VERSION="0.149.0-alpha.1"
+RELEASE_TAG="termux-v2026.08.19-alpha.1-329147e2fa"
+EXPECTED_CODEX_VERSION="codex-cli 329147e"
+CONTROL_RUN_ID="32209449072"
+ARTIFACT_RUN_ID="32209918341"
+ANDROID_RUN_ID="32209449113"
+
 exec > >(tee -a "$log_file") 2>&1
 
-declare -a merged_prs=()
-declare -a unresolved_prs=()
-declare -a deleted_branches=()
-declare -a preserved_branches=()
-declare -A updated_pr=()
-declare -A rerun_pr=()
-
-append_report() {
-  printf '%s\n' "$*" >>"$report_file"
-}
-
-post_report() {
-  local heading="$1"
-  local body="${RUNNER_TEMP}/issue-report.md"
-  {
-    printf '## %s\n\n' "$heading"
-    cat "$report_file"
-    printf '\nWorkflow: %s\n' "$run_url"
-  } >"$body"
-  gh issue comment 44 --repo "$repo" --body-file "$body" >/dev/null 2>&1 || true
+post_comment() {
+  local body="$1"
+  gh issue comment 44 --repo "$repo" --body "$body"
 }
 
 on_error() {
-  local rc=$?
+  local status=$?
   trap - ERR
-  append_report ""
-  append_report "### Failure"
-  append_report "The repair stopped with exit code \`${rc}\`. No unverified release was promoted."
-  append_report ""
-  append_report '<details><summary>Log tail</summary>'
-  append_report ""
-  append_report '```text'
-  tail -n 220 "$log_file" >>"$report_file" 2>/dev/null || true
-  append_report '```'
-  append_report '</details>'
-  post_report "Repository cleanup / latest-alpha repair failed"
-  exit "$rc"
+  set +e
+  excerpt="$(tail -n 180 "$log_file" 2>/dev/null || true)"
+  post_comment "## Latest alpha publication failed
+
+Workflow: ${run_url}
+
+\`\`\`text
+${excerpt}
+\`\`\`
+
+The previously promoted runtime remains the fallback unless this run explicitly recorded a completed release and manifest promotion before the failure."
+  exit "$status"
 }
 trap on_error ERR
 
-retry_api() {
-  local attempt
-  for attempt in $(seq 1 8); do
-    if gh api "$@"; then
-      return 0
-    fi
-    sleep $((attempt * 3))
-  done
-  return 1
+post_comment "Validated 0.149.0-alpha.1 publication started: ${run_url}"
+
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git fetch --no-tags origin main
+main_sha="$(git rev-parse origin/main)"
+[[ "$main_sha" == "$GITHUB_SHA" ]] || {
+  echo "main advanced to ${main_sha}; expected workflow source ${GITHUB_SHA}" >&2
+  exit 1
 }
+git checkout -B main "$GITHUB_SHA"
 
-cancel_stale_runs() {
-  local current_id="$GITHUB_RUN_ID"
-  local run_id
-  mapfile -t stale_runs < <(
-    gh api --paginate "/repos/${repo}/actions/runs?per_page=100" \
-      --jq ".workflow_runs[]
-        | select(.id != ${current_id})
-        | select(.status != \"completed\")
-        | select(
-            ((.head_branch // \"\") | startswith(\"observer/\"))
-            or ((.path // \"\") | test(\"close-44-and-sync|update-latest-alpha-once|finish-issue-44|observe-alpha-149|cancel-stale-alpha|repair-release-and-clean-repo\"))
-            or ((.path // \"\") | test(\"termux-release-request.yml|termux-mobile-artifact.yml|termux-android-emulator.yml\"))
-          )
-        | .id" 2>/dev/null || true
-  )
-  for run_id in "${stale_runs[@]:-}"; do
-    [[ -n "$run_id" ]] || continue
-    echo "Cancelling stale workflow run ${run_id}"
-    gh api --method POST "/repos/${repo}/actions/runs/${run_id}/cancel" >/dev/null 2>&1 || true
-  done
-}
-
-pr_checks_state() {
-  local pr="$1"
-  local json
-  json="$(gh pr view "$pr" --repo "$repo" --json statusCheckRollup)"
-  jq -r '
-    (.statusCheckRollup // []) as $checks
-    | if ($checks | length) == 0 then
-        "pass"
-      elif any($checks[];
-        ((.conclusion // .state // "") as $s
-          | ["FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE"]
-          | index($s) != null)) then
-        "fail"
-      elif any($checks[];
-        ((.__typename // "") == "CheckRun" and ((.status // "") != "COMPLETED" or (.conclusion // "") == ""))
-        or ((.__typename // "") == "StatusContext" and ((.state // "") == "PENDING" or (.state // "") == "EXPECTED"))) then
-        "pending"
-      else
-        "pass"
-      end
-  ' <<<"$json"
-}
-
-rerun_failed_pr_checks() {
-  local pr="$1"
-  local checks link run_id
-  checks="$(gh pr checks "$pr" --repo "$repo" --json bucket,link 2>/dev/null || true)"
-  [[ -n "$checks" ]] || return 1
-  while IFS= read -r link; do
-    [[ -n "$link" ]] || continue
-    run_id="$(sed -nE 's#.*?/actions/runs/([0-9]+).*#\1#p' <<<"$link" | head -n1)"
-    [[ -n "$run_id" ]] || continue
-    echo "Rerunning failed checks for PR #${pr} via run ${run_id}"
-    gh run rerun "$run_id" --repo "$repo" --failed >/dev/null 2>&1 || \
-      gh run rerun "$run_id" --repo "$repo" >/dev/null 2>&1 || true
-  done < <(jq -r '.[]? | select(.bucket == "fail" or .bucket == "cancel") | .link // empty' <<<"$checks")
-}
-
-handle_dependabot_prs() {
-  local cycle pr meta title url base draft mergeable merge_state checks_state progress pending
-  echo "Inspecting open Dependabot pull requests"
-
-  for cycle in $(seq 1 32); do
-    mapfile -t prs < <(
-      gh pr list --repo "$repo" --state open --author app/dependabot --limit 100 \
-        --json number --jq '.[].number'
-    )
-    ((${#prs[@]} > 0)) || break
-
-    progress=0
-    pending=0
-    for pr in "${prs[@]}"; do
-      meta="$(gh pr view "$pr" --repo "$repo" \
-        --json number,title,url,baseRefName,headRefName,isDraft,mergeable,mergeStateStatus)"
-      title="$(jq -r .title <<<"$meta")"
-      url="$(jq -r .url <<<"$meta")"
-      base="$(jq -r .baseRefName <<<"$meta")"
-      draft="$(jq -r .isDraft <<<"$meta")"
-      mergeable="$(jq -r .mergeable <<<"$meta")"
-      merge_state="$(jq -r .mergeStateStatus <<<"$meta")"
-
-      if [[ "$base" != "main" || "$draft" == "true" ]]; then
-        unresolved_prs+=("#${pr} — ${title} (${url}): not a ready PR against main")
-        continue
-      fi
-
-      if [[ "$mergeable" == "CONFLICTING" || "$merge_state" == "DIRTY" ]]; then
-        unresolved_prs+=("#${pr} — ${title} (${url}): merge conflict")
-        continue
-      fi
-
-      if [[ "$merge_state" == "BEHIND" && -z "${updated_pr[$pr]:-}" ]]; then
-        echo "Updating Dependabot PR #${pr} from main"
-        if gh pr update-branch "$pr" --repo "$repo" >/dev/null 2>&1; then
-          updated_pr[$pr]=1
-          pending=1
-          continue
-        fi
-      fi
-
-      if [[ "$mergeable" == "UNKNOWN" ]]; then
-        pending=1
-        continue
-      fi
-
-      checks_state="$(pr_checks_state "$pr")"
-      case "$checks_state" in
-        pending)
-          pending=1
-          continue
-          ;;
-        fail)
-          if [[ -z "${rerun_pr[$pr]:-}" ]]; then
-            rerun_failed_pr_checks "$pr" || true
-            rerun_pr[$pr]=1
-            pending=1
-            continue
-          fi
-          unresolved_prs+=("#${pr} — ${title} (${url}): checks still failing after one rerun")
-          continue
-          ;;
-        pass)
-          echo "Merging green Dependabot PR #${pr}: ${title}"
-          if gh pr merge "$pr" --repo "$repo" --squash --delete-branch; then
-            merged_prs+=("#${pr} — ${title} (${url})")
-            progress=1
-            sleep 5
-            break
-          fi
-          pending=1
-          ;;
-      esac
-    done
-
-    ((progress == 1)) && continue
-    if ((pending == 1 && cycle < 32)); then
-      sleep 30
-      continue
-    fi
-    break
-  done
-
-  mapfile -t remaining < <(
-    gh pr list --repo "$repo" --state open --author app/dependabot --limit 100 \
-      --json number,title,url --jq '.[] | "#\(.number) — \(.title) (\(.url))"'
-  )
-  if ((${#remaining[@]} > 0)); then
-    local item already
-    for item in "${remaining[@]}"; do
-      already=0
-      for recorded in "${unresolved_prs[@]:-}"; do
-        [[ "$recorded" == "${item%% —*}"* ]] && already=1
-      done
-      ((already == 1)) || unresolved_prs+=("${item}: not safely mergeable in this pass")
-    done
-  fi
-}
-
-encode_ref() {
-  jq -rn --arg value "$1" '$value | @uri'
-}
-
-delete_remote_branch() {
-  local branch="$1"
-  local encoded
-  encoded="$(encode_ref "$branch")"
-  if gh api --method DELETE "/repos/${repo}/git/refs/heads/${encoded}" >/dev/null 2>&1; then
-    deleted_branches+=("${branch}")
-    echo "Deleted branch ${branch}"
-  fi
-}
-
-cleanup_branches() {
-  local branch open_count sha
-  git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
-  mapfile -t branches < <(
-    gh api --paginate "/repos/${repo}/branches?per_page=100" --jq '.[].name'
-  )
-  for branch in "${branches[@]}"; do
-    [[ "$branch" != "main" ]] || continue
-
-    if [[ "$branch" == observer/* ]]; then
-      delete_remote_branch "$branch"
-      continue
-    fi
-
-    open_count="$(
-      gh api --method GET "/repos/${repo}/pulls" \
-        -f state=open -f head="${owner}:${branch}" --jq 'length' 2>/dev/null || echo 0
-    )"
-    if [[ "$open_count" =~ ^[0-9]+$ ]] && ((open_count > 0)); then
-      preserved_branches+=("${branch} — open pull request")
-      continue
-    fi
-
-    if [[ "$branch" == dependabot/* ]]; then
-      delete_remote_branch "$branch"
-      continue
-    fi
-
-    sha="$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null || true)"
-    if [[ -n "$sha" ]] && git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
-      delete_remote_branch "$branch"
-    else
-      preserved_branches+=("${branch} — contains unmerged commits")
-    fi
-  done
-}
-
-patch_release_workflows() {
-  python3 - <<'PY'
-from pathlib import Path
-
-release = Path('.github/workflows/termux-release-request.yml')
-text = release.read_text(encoding='utf-8')
-lines = text.splitlines(keepends=True)
-out = []
-in_create = False
-inserted = False
-for line in lines:
-    if 'gh release create "$RELEASE_TAG"' in line:
-        in_create = True
-    if in_create and '--latest' in line:
-        continue
-    if in_create and '"${release_files[@]/#/dist/}"' in line:
-        out.append('              --latest \\\n')
-        inserted = True
-        in_create = False
-    out.append(line)
-if not inserted:
-    raise SystemExit('Could not locate the gh release create asset line')
-text = ''.join(out)
-text = text.replace(
-    'Native Android/Termux emulator validation passed before publication.',
-    'Exact-source Termux control-plane and native Android/Termux validation passed before publication.'
-)
-text = text.replace(
-    '/actions/workflows/${workflow}/runs?event=push&branch=main&per_page=100',
-    '/actions/workflows/${workflow}/runs?branch=main&per_page=100'
-)
-release.write_text(text, encoding='utf-8')
-
-channel = Path('.github/workflows/termux-release-channel.yml')
-text = channel.read_text(encoding='utf-8')
-lines = text.splitlines(keepends=True)
-out = []
-skipping = False
-removed = False
-for line in lines:
-    if not skipping and line.lstrip().startswith('gh api --method PATCH'):
-        skipping = True
-        removed = True
-        continue
-    if skipping:
-        if 'make_latest=true' in line:
-            skipping = False
-        continue
-    out.append(line)
-text = ''.join(out)
-text = text.replace('Mark promoted runtime as Latest', 'Verify promoted runtime is Latest')
-text = text.replace(
-    "# A release is intentionally created as non-latest until all publication checks\n# pass. Once the gated release workflow completes, promote the repository\n# manifest's release to GitHub's Latest channel and run the public-channel audit.\n",
-    "# The gated release workflow creates the immutable release as Latest. Once it\n# completes, verify the repository manifest and Latest channel agree, then run\n# the public-channel audit.\n"
-)
-if not removed and '--method PATCH' in text and 'make_latest=true' in text:
-    raise SystemExit('Could not remove immutable-release PATCH operation')
-channel.write_text(text, encoding='utf-8')
-PY
-}
-
-remove_temporary_files() {
-  rm -f \
-    .github/workflows/close-44-and-sync-latest-alpha-once.yml \
-    .github/workflows/close-44-and-sync-latest-alpha-once-v2.yml \
-    .github/workflows/finish-issue-44-hardening-once.yml \
-    .github/workflows/update-latest-alpha-once.yml \
-    .github/workflows/repair-release-and-clean-repo-once.yml \
-    .github/scripts/repair-release-and-clean-repo-once.sh \
-    .github/repair-release-trigger
-  rm -rf .github/observations
-}
-
-resolve_latest_alpha() {
-  git remote remove upstream >/dev/null 2>&1 || true
-  git remote add upstream https://github.com/openai/codex.git
-  git fetch --force --no-tags upstream \
-    '+refs/heads/latest-alpha-cli:refs/remotes/upstream/latest-alpha-cli' \
-    '+refs/tags/rust-v*:refs/tags/rust-v*'
-
-  latest_tag="$(
-    git tag --merged refs/remotes/upstream/latest-alpha-cli --list 'rust-v*-alpha.*' \
-      | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' \
-      | sort -V \
-      | tail -n1
-  )"
-  [[ -n "$latest_tag" ]] || {
-    echo 'No valid OpenAI alpha tag was found on latest-alpha-cli.' >&2
-    return 1
-  }
-  latest_version="${latest_tag#rust-v}"
-  echo "Latest upstream alpha: ${latest_tag}"
-}
-
-workspace_version() {
-  awk '
-    /^\[workspace\.package\]$/ { in_package=1; next }
-    /^\[/ && in_package { exit }
-    in_package && /^version[[:space:]]*=/ {
-      value=$0
-      sub(/^[^=]*=[[:space:]]*"/, "", value)
-      sub(/".*$/, "", value)
-      print value
-      exit
-    }
-  ' codex-rs/Cargo.toml
-}
-
-merge_latest_alpha_if_needed() {
-  local current_version merge_status
-  current_version="$(workspace_version)"
-  if [[ "$current_version" == "$latest_version" ]] && \
-     git merge-base --is-ancestor "${latest_tag}^{commit}" HEAD; then
-    echo "main already contains ${latest_tag}"
-    return 0
-  fi
-
-  echo "Merging ${latest_tag} into protected main without rewriting history"
-  set +e
-  git merge --no-ff --no-commit -X ours "${latest_tag}^{commit}"
-  merge_status=$?
-  set -e
-  if ((merge_status != 0)); then
-    [[ -f .git/MERGE_HEAD ]] || return "$merge_status"
-    for path in \
-      .github/workflows/python-runtime-release.yml \
-      .github/workflows/python-sdk-release.yml \
-      .github/workflows/rust-release.yml; do
-      if git ls-files -u -- "$path" | grep -q .; then
-        git rm -f -- "$path"
-      fi
-    done
-  fi
-
-  mapfile -t unresolved < <(git diff --name-only --diff-filter=U)
-  if ((${#unresolved[@]} > 0)); then
-    printf 'Unresolved upstream merge paths:\n' >&2
-    printf '  %s\n' "${unresolved[@]}" >&2
-    return 1
-  fi
-
-  TARGET_VERSION="$latest_version" python3 - <<'PY'
-from pathlib import Path
-import os
-import re
-path = Path('codex-rs/Cargo.toml')
-text = path.read_text(encoding='utf-8')
-pattern = re.compile(r'(?ms)(^\[workspace\.package\]\n(?:.*?\n)*?^version\s*=\s*")[^"]+("\s*$)')
-text, count = pattern.subn(lambda m: m.group(1) + os.environ['TARGET_VERSION'] + m.group(2), text, count=1)
-if count != 1:
-    raise SystemExit('workspace.package version was not found exactly once')
-path.write_text(text, encoding='utf-8')
-PY
-
-  local cargo_v8 pinned_v8
-  cargo_v8="$(sed -nE 's/^v8[[:space:]]*=[[:space:]]*"=([^"]+)"/\1/p' codex-rs/Cargo.toml | head -n1)"
-  pinned_v8="$(sed -n 's/^rusty_v8_version=//p' scripts/termux/build-inputs.env)"
-  [[ -z "$cargo_v8" || "$cargo_v8" == "$pinned_v8" ]] || {
-    echo "Rusty V8 changed to ${cargo_v8}, but immutable build inputs still pin ${pinned_v8}." >&2
-    echo 'Refusing to guess new archive digests.' >&2
-    return 1
-  }
-
-  (
-    cd codex-rs
-    cargo metadata --format-version=1 >/dev/null
-    cargo metadata --locked --format-version=1 >/dev/null
-  )
-}
-
-classify_patch_subjects() {
-  FINAL_SUBJECT="$final_subject" LATEST_TAG="$latest_tag" python3 - <<'PY'
-from pathlib import Path
-import os
-import re
-import subprocess
-
-audit_path = Path('scripts/termux/patch_audit.tsv')
-text = audit_path.read_text(encoding='utf-8')
-subjects = set()
-for line in text.splitlines():
-    fields = line.split('\t')
-    if len(fields) >= 2 and fields[0] == 'subject':
-        subjects.add(fields[1])
-
-log = subprocess.check_output(
-    ['git', 'log', '--format=%s', f"{os.environ['LATEST_TAG']}..HEAD"],
-    text=True,
-).splitlines()
-log.append(os.environ['FINAL_SUBJECT'])
-
-new_lines = []
-unknown = []
-for subject in dict.fromkeys(log):
-    if not subject or subject in subjects:
-        continue
-    if re.match(r'^(build\(deps(?:-[^)]+)?\):|chore\(deps(?:-[^)]+)?\):|Bump )', subject, re.I):
-        classification = 'tooling'
-        reason = 'Automated dependency maintenance validated by the fork CI before release.'
-    elif subject.startswith(('ci:', 'chore:', 'termux: request validated', 'termux: promote')):
-        classification = 'tooling'
-        reason = 'Repository, CI, or release-control maintenance; shipped runtime behavior is unchanged.'
-    elif subject.startswith('termux: update to '):
-        classification = 'runtime-critical'
-        reason = 'Integrates the maintained Android/Termux patch stack with the verified upstream alpha.'
-    elif subject == os.environ['FINAL_SUBJECT']:
-        classification = 'security-critical'
-        reason = 'Cleans temporary automation and makes the validated immutable runtime Latest at creation.'
-    else:
-        unknown.append(subject)
-        continue
-    new_lines.append(f"subject\t{subject}\t{classification}\t{reason}\n")
-    subjects.add(subject)
-
-if unknown:
-    raise SystemExit('Unclassified retained commit subjects:\n  ' + '\n  '.join(unknown))
-if new_lines:
-    audit_path.write_text(text + ''.join(new_lines), encoding='utf-8')
-PY
-}
-
-validate_final_tree() {
-  bash -n \
-    scripts/termux/codex-cargo-check \
-    scripts/termux/codex-update-alpha \
-    scripts/termux/install-codex-termux \
-    scripts/termux/maintainer-update-alpha \
-    scripts/termux/smoke-test-artifact \
-    scripts/termux/termux-mobile-lib.sh \
-    scripts/termux/tests/run-tests
-  python3 -m py_compile scripts/termux/generate-sbom.py
-  ruby -e 'require "yaml"; Dir[".github/workflows/termux-*.yml"].sort.each { |path| YAML.load_file(path, aliases: true) }'
-  bash scripts/termux/tests/run-tests
-  (cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
-  git diff --check
-}
-
-find_exact_run() {
+cancel_active_runs() {
   local workflow="$1"
-  local sha="$2"
-  gh api "/repos/${repo}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
-    --jq ".workflow_runs
-      | map(select(.head_sha == \"${sha}\"))
-      | sort_by(.created_at) | reverse | .[0].id // empty"
+  local response run_id
+  response="$(
+    gh api "/repos/${repo}/actions/workflows/${workflow}/runs?branch=main&per_page=100" 2>/dev/null || true
+  )"
+  [[ -n "$response" ]] || return 0
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    [[ "$run_id" == "$GITHUB_RUN_ID" ]] && continue
+    echo "Cancelling stale ${workflow} run ${run_id}"
+    gh api --method POST "/repos/${repo}/actions/runs/${run_id}/cancel" >/dev/null || true
+  done < <(
+    jq -r '.workflow_runs[]
+      | select(.status == "queued" or .status == "pending" or .status == "in_progress" or .status == "waiting" or .status == "requested")
+      | .id' <<<"$response"
+  )
 }
 
-wait_run() {
+for stale_workflow in \
+  publish-validated-alpha-149-once.yml \
+  trigger-publish-validated-alpha-149-once.yml \
+  finish-repository-cleanup-and-alpha-release-once.yml \
+  trigger-finish-repository-cleanup-once.yml \
+  update-latest-alpha-once.yml; do
+  cancel_active_runs "$stale_workflow"
+done
+
+python3 - <<'PY'
+from pathlib import Path
+
+release_path = Path('.github/workflows/termux-release-request.yml')
+text = release_path.read_text(encoding='utf-8')
+
+
+def replace_or_verify(old: str, new: str, label: str) -> None:
+    global text
+    old_count = text.count(old)
+    new_count = text.count(new)
+    if old_count == 1:
+        text = text.replace(old, new, 1)
+    elif old_count == 0 and new_count == 1:
+        return
+    else:
+        raise SystemExit(
+            f'{label}: expected one old match or one existing new match; '
+            f'found old={old_count}, new={new_count}'
+        )
+
+
+replace_or_verify(
+    '      - "scripts/termux/release-request.env"\n'
+    '      - ".github/workflows/termux-release-request.yml"\n',
+    '      - "scripts/termux/release-request.env"\n',
+    'release self-trigger',
+)
+replace_or_verify(
+    '''          main_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha
+          )"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || {
+            echo "::error::main advanced to ${main_sha}; refusing to publish stale workflow head ${GITHUB_SHA}"
+            exit 1
+          }
+''',
+    '''          git fetch --no-tags origin main
+          main_sha="$(git rev-parse origin/main)"
+          git merge-base --is-ancestor "$GITHUB_SHA" "$main_sha" || {
+            echo "::error::Validated source ${GITHUB_SHA} is not an ancestor of current main ${main_sha}"
+            exit 1
+          }
+''',
+    'main ancestry gate',
+)
+replace_or_verify(
+    '              --latest=false \\\n',
+    '              --latest \\\n',
+    'Latest creation flag',
+)
+latest_gate = '''          latest_tag="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
+          )"
+          [[ "$latest_tag" == "$RELEASE_TAG" ]] || {
+            echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${RELEASE_TAG}"
+            exit 1
+          }
+
+'''
+if latest_gate not in text:
+    marker = '''          fi
+
+      - name: Verify anonymous public release downloads
+'''
+    if text.count(marker) != 1:
+        raise SystemExit('Latest verification gate: insertion marker not found exactly once')
+    text = text.replace(
+        marker,
+        '          fi\n\n' + latest_gate +
+        '      - name: Verify anonymous public release downloads\n',
+        1,
+    )
+release_path.write_text(text, encoding='utf-8')
+
+channel_path = Path('.github/workflows/termux-release-channel.yml')
+channel_path.write_text('''name: termux-release-channel
+run-name: Verify validated Termux release channel
+
+# The publisher marks a validated release as Latest in the release-creation
+# transaction. This workflow never mutates an immutable published release; it
+# verifies that the promoted manifest and GitHub Latest endpoint agree.
+on:
+  workflow_run:
+    workflows:
+      - termux-release-request
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: termux-release-channel
+  cancel-in-progress: true
+
+jobs:
+  verify-latest:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    name: Verify promoted runtime is Latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout promoted main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Verify the promoted release is Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="scripts/termux/release-manifest.env"
+
+          read_value() {
+            local key="$1"
+            local value
+            value="$(sed -n "s/^${key}=//p" "$manifest")"
+            if [[ -z "$value" || "$(grep -c "^${key}=" "$manifest")" -ne 1 ]]; then
+              echo "::error file=${manifest}::Expected exactly one non-empty ${key}= entry"
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+
+          repository="$(read_value repository)"
+          release_tag="$(read_value release_tag)"
+          head_sha="$(read_value head_sha)"
+          [[ "$repository" == "$GITHUB_REPOSITORY" ]]
+          [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          release_json="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
+          )"
+          release_target="$(jq -r .target_commitish <<<"$release_json")"
+          draft="$(jq -r .draft <<<"$release_json")"
+          [[ "$release_target" == "$head_sha" ]]
+          [[ "$draft" == "false" ]]
+
+          latest_tag="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
+          )"
+          [[ "$latest_tag" == "$release_tag" ]] || {
+            echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${release_tag}"
+            exit 1
+          }
+
+          {
+            echo "### Termux release channel"
+            echo
+            echo "- Latest release: \`${release_tag}\`"
+            echo "- Runtime commit: \`${head_sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run post-promotion governance audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run termux-governance-audit.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
+''', encoding='utf-8')
+PY
+
+rm -f \
+  .github/workflows/finish-repository-cleanup-and-alpha-release-once.yml \
+  .github/workflows/trigger-finish-repository-cleanup-once.yml \
+  .github/workflows/update-latest-alpha-once.yml \
+  .github/workflows/publish-validated-alpha-149-once.yml \
+  .github/workflows/trigger-publish-validated-alpha-149-once.yml \
+  .github/repair-release-go
+
+ruby -e 'require "yaml"; YAML.load_file(".github/workflows/termux-release-request.yml", aliases: true); YAML.load_file(".github/workflows/termux-release-channel.yml", aliases: true)'
+git diff --check
+git add -A
+if ! git diff --cached --quiet; then
+  git commit -m "fix(termux): publish validated alphas as Latest"
+  git push origin HEAD:main
+fi
+
+verify_run() {
   local run_id="$1"
   local label="$2"
-  local max_loops="${3:-960}"
-  local status conclusion
-  for _ in $(seq 1 "$max_loops"); do
-    status="$(gh api "/repos/${repo}/actions/runs/${run_id}" --jq .status)"
-    conclusion="$(gh api "/repos/${repo}/actions/runs/${run_id}" --jq '.conclusion // ""')"
+  local run_json
+  run_json="$(gh api "/repos/${repo}/actions/runs/${run_id}")"
+  [[ "$(jq -r .head_sha <<<"$run_json")" == "$SOURCE_SHA" ]] || {
+    echo "${label} run ${run_id} validated a different source" >&2
+    exit 1
+  }
+  [[ "$(jq -r .status <<<"$run_json")" == "completed" ]]
+  [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]] || {
+    echo "${label} run ${run_id} was not successful" >&2
+    exit 1
+  }
+}
+
+verify_run "$CONTROL_RUN_ID" "Termux control-plane"
+verify_run "$ARTIFACT_RUN_ID" "ARM64 artifact"
+verify_run "$ANDROID_RUN_ID" "Android/Termux"
+
+rm -rf dist
+mkdir -p dist
+gh run download "$ARTIFACT_RUN_ID" \
+  --repo "$repo" \
+  --name codex-termux-aarch64-unknown-linux-musl \
+  --dir dist
+
+cd dist
+for file in \
+  codex-termux-aarch64-unknown-linux-musl.tar.gz \
+  metadata.env \
+  SHA256SUMS \
+  codex-termux-sbom.spdx.json; do
+  [[ -f "$file" ]] || { echo "Missing ${file}" >&2; exit 1; }
+done
+sha256sum --check --strict SHA256SUMS
+python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' codex-termux-sbom.spdx.json
+
+metadata_value() {
+  local key="$1"
+  local value
+  value="$(sed -n "s/^${key}=//p" metadata.env)"
+  [[ -n "$value" && "$(grep -c "^${key}=" metadata.env)" -eq 1 ]]
+  printf '%s' "$value"
+}
+
+head_sha="$(metadata_value head_sha)"
+codex_version="$(metadata_value codex_version)"
+target="$(metadata_value target)"
+archive_size_bytes="$(metadata_value archive_size_bytes)"
+runtime_size_bytes="$(metadata_value runtime_size_bytes)"
+[[ "$head_sha" == "$SOURCE_SHA" ]]
+[[ "$codex_version" == "$EXPECTED_CODEX_VERSION" ]]
+[[ "$target" == "aarch64-unknown-linux-musl" ]]
+[[ "$archive_size_bytes" == "$(stat -c '%s' codex-termux-aarch64-unknown-linux-musl.tar.gz)" ]]
+
+archive_sha256="$(sha256sum codex-termux-aarch64-unknown-linux-musl.tar.gz | awk '{print $1}')"
+printf '%s\n' \
+  'format_version=2' \
+  "repository=${repo}" \
+  "release_tag=${RELEASE_TAG}" \
+  "head_sha=${SOURCE_SHA}" \
+  "codex_version=${EXPECTED_CODEX_VERSION}" \
+  "archive_sha256=${archive_sha256}" \
+  "archive_size_bytes=${archive_size_bytes}" \
+  "runtime_size_bytes=${runtime_size_bytes}" \
+  > release-manifest.env
+
+release_files=(
+  codex-termux-aarch64-unknown-linux-musl.tar.gz
+  metadata.env
+  SHA256SUMS
+  codex-termux-sbom.spdx.json
+  release-manifest.env
+)
+if gh release view "$RELEASE_TAG" --repo "$repo" >/dev/null 2>&1; then
+  existing_dir="$(mktemp -d)"
+  gh release download "$RELEASE_TAG" --repo "$repo" --dir "$existing_dir"
+  for file in "${release_files[@]}"; do
+    cmp --silent "$file" "$existing_dir/$file" || {
+      echo "Existing immutable release asset differs: ${file}" >&2
+      exit 1
+    }
+  done
+else
+  gh release create "$RELEASE_TAG" \
+    --repo "$repo" \
+    --target "$SOURCE_SHA" \
+    --title "Codex Termux ${PACKAGE_VERSION} (${EXPECTED_CODEX_VERSION})" \
+    --notes "Verified complete Termux runtime for OpenAI Codex CLI ${PACKAGE_VERSION}. Exact-source ARM64 artifact, Termux control-plane, and official Android/Termux emulator validation passed before publication." \
+    --latest \
+    "${release_files[@]}"
+fi
+
+latest_tag="$(gh api "/repos/${repo}/releases/latest" --jq .tag_name)"
+[[ "$latest_tag" == "$RELEASE_TAG" ]] || {
+  echo "GitHub Latest resolved to ${latest_tag}, expected ${RELEASE_TAG}" >&2
+  exit 1
+}
+
+public_dir="$(mktemp -d)"
+base="https://github.com/${repo}/releases/download/${RELEASE_TAG}"
+for file in "${release_files[@]}"; do
+  curl --fail --location --silent --show-error --retry 8 \
+    "${base}/${file}" -o "${public_dir}/${file}"
+  cmp --silent "$file" "${public_dir}/${file}"
+done
+(cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
+
+cd "$GITHUB_WORKSPACE"
+git pull --ff-only origin main
+cp dist/release-manifest.env scripts/termux/release-manifest.env
+git add scripts/termux/release-manifest.env
+if ! git diff --cached --quiet; then
+  git commit -m "termux: promote ${RELEASE_TAG}"
+  git push origin HEAD:main
+fi
+promotion_sha="$(git rev-parse HEAD)"
+
+for workflow in termux-control-plane.yml termux-release-channel.yml termux-governance-audit.yml; do
+  gh workflow run "$workflow" --repo "$repo" --ref main
+  echo "Dispatched ${workflow} for ${promotion_sha}"
+done
+
+wait_for_workflow() {
+  local workflow="$1"
+  local label="$2"
+  local run_id="" status="" conclusion="" state=""
+  for _ in $(seq 1 160); do
+    state="$(
+      gh api "/repos/${repo}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+        --jq ".workflow_runs
+          | map(select(.head_sha == \"${promotion_sha}\" and .event == \"workflow_dispatch\"))
+          | first // {}
+          | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
+          | @tsv"
+    )"
+    IFS=$'\t' read -r run_id status conclusion <<<"$state"
     if [[ "$status" == "completed" ]]; then
-      echo "${label} run ${run_id}: ${conclusion}"
-      [[ "$conclusion" == "success" ]]
-      return
+      [[ "$conclusion" == "success" ]] || {
+        echo "${label} run ${run_id} concluded ${conclusion}" >&2
+        exit 1
+      }
+      printf '%s' "$run_id"
+      return 0
     fi
     sleep 15
   done
-  echo "Timed out waiting for ${label} run ${run_id}" >&2
+  echo "${label} did not complete successfully" >&2
   return 1
 }
 
-wait_for_exact_run_id() {
-  local workflow="$1"
-  local sha="$2"
-  local id
-  for _ in $(seq 1 120); do
-    id="$(find_exact_run "$workflow" "$sha")"
-    if [[ -n "$id" ]]; then
-      printf '%s' "$id"
-      return 0
-    fi
-    sleep 5
-  done
-  return 1
+post_control_run="$(wait_for_workflow termux-control-plane.yml 'Termux control-plane')"
+release_channel_run="$(wait_for_workflow termux-release-channel.yml 'Termux release channel')"
+governance_run="$(wait_for_workflow termux-governance-audit.yml 'Termux governance audit')"
+
+manifest_tag="$(sed -n 's/^release_tag=//p' scripts/termux/release-manifest.env)"
+latest_tag="$(gh api "/repos/${repo}/releases/latest" --jq .tag_name)"
+[[ "$manifest_tag" == "$RELEASE_TAG" && "$latest_tag" == "$RELEASE_TAG" ]]
+
+mapfile -t open_prs < <(gh pr list --repo "$repo" --state open --limit 100 --json number --jq '.[].number')
+(( ${#open_prs[@]} == 0 )) || {
+  printf 'Open PRs remain: %s\n' "${open_prs[*]}" >&2
+  exit 1
+}
+mapfile -t branches < <(gh api --paginate "/repos/${repo}/branches?per_page=100" --jq '.[].name')
+[[ "${#branches[@]}" -eq 1 && "${branches[0]}" == "main" ]] || {
+  printf 'Unexpected branches remain:\n' >&2
+  printf '  %s\n' "${branches[@]}" >&2
+  exit 1
 }
 
-collect_failed_run() {
-  local run_id="$1"
-  local name="$2"
-  append_report ""
-  append_report "### Failed ${name} run"
-  append_report "Run: https://github.com/${repo}/actions/runs/${run_id}"
-  append_report ""
-  append_report '<details><summary>Failed log excerpt</summary>'
-  append_report ""
-  append_report '```text'
-  gh run view "$run_id" --repo "$repo" --log-failed 2>&1 | tail -n 240 >>"$report_file" || true
-  append_report '```'
-  append_report '</details>'
-}
+git pull --ff-only origin main
+rm -f \
+  .github/repair-release-trigger \
+  .github/scripts/repair-release-and-clean-repo-once.sh \
+  .github/workflows/repair-release-and-clean-repo-once.yml \
+  .github/workflows/finish-repository-cleanup-and-alpha-release-once.yml \
+  .github/workflows/trigger-finish-repository-cleanup-once.yml \
+  .github/workflows/update-latest-alpha-once.yml \
+  .github/workflows/publish-validated-alpha-149-once.yml \
+  .github/workflows/trigger-publish-validated-alpha-149-once.yml \
+  .github/repair-release-go
 
-main() {
-  append_report "Repair started from ${run_url}."
-  gh issue comment 44 --repo "$repo" \
-    --body "A final repository-cleanup and latest-alpha release repair has started: ${run_url}" >/dev/null 2>&1 || true
-
-  cancel_stale_runs
-  handle_dependabot_prs
-
-  git fetch --prune origin main '+refs/heads/*:refs/remotes/origin/*'
-  git checkout -B main refs/remotes/origin/main
-  cleanup_branches
-
-  resolve_latest_alpha
-  merge_latest_alpha_if_needed
-  patch_release_workflows
-  remove_temporary_files
-
-  final_subject="termux: finalize ${latest_version} release and repository cleanup"
-  local alpha_number release_prefix nonce
-  alpha_number="${latest_version##*-alpha.}"
-  release_prefix="termux-v$(date -u +%Y.%m.%d)-alpha.${alpha_number}"
-  nonce="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
-  cat > scripts/termux/release-request.env <<EOF
-# release_nonce=${nonce}
-format_version=3
-source_mode=workflow-head
-release_tag_prefix=${release_prefix}
-expected_package_version=${latest_version}
-EOF
-
-  classify_patch_subjects
-  validate_final_tree
-
-  git add -A
-  git diff --cached --check
-  git diff --cached --quiet && {
-    echo 'Final release request produced no changes.' >&2
-    return 1
-  }
-  git config user.name 'github-actions[bot]'
-  git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-  git commit -m "$final_subject"
-  final_sha="$(git rev-parse HEAD)"
+git add -A
+if ! git diff --cached --quiet; then
+  git commit -m "chore: remove one-time release repair workflows"
   git push origin HEAD:main
-  echo "Final protected-main source: ${final_sha}"
+fi
 
-  # GITHUB_TOKEN pushes do not emit another push workflow chain, so dispatch
-  # the exact-source gates explicitly. The release workflow accepts both push
-  # and workflow_dispatch Android validation after the patch above.
-  gh workflow run termux-control-plane.yml --repo "$repo" --ref main
-  gh workflow run termux-android-emulator.yml --repo "$repo" --ref main
-  gh workflow run termux-release-request.yml --repo "$repo" --ref main
+post_comment "## Latest alpha publication completed
 
-  release_run_id="$(wait_for_exact_run_id termux-release-request.yml "$final_sha")"
-  [[ -n "$release_run_id" ]]
-  if ! wait_run "$release_run_id" 'release request' 960; then
-    collect_failed_run "$release_run_id" 'release request'
-    return 1
-  fi
+- Release: [${RELEASE_TAG}](https://github.com/${repo}/releases/tag/${RELEASE_TAG})
+- Package: \`${PACKAGE_VERSION}\`
+- Runtime source: \`${SOURCE_SHA}\`
+- Binary: \`${EXPECTED_CODEX_VERSION}\`
+- Archive SHA-256: \`${archive_sha256}\`
+- Post-promotion control-plane: [${post_control_run}](https://github.com/${repo}/actions/runs/${post_control_run})
+- Release-channel verification: [${release_channel_run}](https://github.com/${repo}/actions/runs/${release_channel_run})
+- Governance audit: [${governance_run}](https://github.com/${repo}/actions/runs/${governance_run})
 
-  local manifest_json manifest_text manifest_sha latest_release_tag governance_start governance_run_id
-  for _ in $(seq 1 120); do
-    manifest_json="$(gh api "/repos/${repo}/contents/scripts/termux/release-manifest.env?ref=main")"
-    manifest_text="$(jq -r .content <<<"$manifest_json" | tr -d '\n' | base64 --decode)"
-    manifest_sha="$(sed -n 's/^head_sha=//p' <<<"$manifest_text")"
-    release_tag="$(sed -n 's/^release_tag=//p' <<<"$manifest_text")"
-    [[ "$manifest_sha" == "$final_sha" && -n "$release_tag" ]] && break
-    sleep 10
-  done
-  [[ "$manifest_sha" == "$final_sha" && -n "$release_tag" ]] || {
-    echo 'Release workflow succeeded but the promoted manifest does not target the final source.' >&2
-    return 1
-  }
+The promoted manifest and GitHub Latest endpoint both resolve to this immutable 0.149.0-alpha.1 release. There are no open pull requests and only \`main\` remains."
 
-  for _ in $(seq 1 120); do
-    latest_release_tag="$(gh api "/repos/${repo}/releases/latest" --jq .tag_name 2>/dev/null || true)"
-    [[ "$latest_release_tag" == "$release_tag" ]] && break
-    sleep 10
-  done
-  [[ "$latest_release_tag" == "$release_tag" ]] || {
-    echo "GitHub Latest is ${latest_release_tag:-missing}, expected ${release_tag}" >&2
-    return 1
-  }
-
-  governance_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  gh workflow run termux-governance-audit.yml --repo "$repo" --ref main
-  governance_run_id=""
-  for _ in $(seq 1 120); do
-    governance_run_id="$(
-      gh api "/repos/${repo}/actions/workflows/termux-governance-audit.yml/runs?branch=main&per_page=30" \
-        --jq ".workflow_runs
-          | map(select(.created_at >= \"${governance_start}\"))
-          | sort_by(.created_at) | reverse | .[0].id // empty"
-    )"
-    [[ -n "$governance_run_id" ]] && break
-    sleep 5
-  done
-  [[ -n "$governance_run_id" ]]
-  wait_run "$governance_run_id" 'governance audit' 160
-
-  # A second pass removes branches whose PRs became merged during this run.
-  git fetch --prune origin main '+refs/heads/*:refs/remotes/origin/*'
-  cleanup_branches
-
-  append_report ""
-  append_report "### Completed"
-  append_report "- Issue #44 remains closed with every accepted item checked."
-  append_report "- Upstream alpha: \`${latest_tag}\` (\`${latest_version}\`)."
-  append_report "- Released source: \`${final_sha}\`."
-  append_report "- Promoted immutable release: \`${release_tag}\`."
-  append_report "- GitHub Latest resolves to the promoted release."
-  append_report "- Exact-source release run: https://github.com/${repo}/actions/runs/${release_run_id}"
-  append_report "- Post-promotion governance audit: https://github.com/${repo}/actions/runs/${governance_run_id}"
-
-  append_report ""
-  append_report "### Dependabot"
-  if ((${#merged_prs[@]} > 0)); then
-    append_report "Merged ${#merged_prs[@]} green Dependabot PR(s):"
-    for item in "${merged_prs[@]}"; do append_report "- ${item}"; done
-  else
-    append_report "- No open Dependabot PR was both green and mergeable."
-  fi
-  if ((${#unresolved_prs[@]} > 0)); then
-    append_report ""
-    append_report "Not merged because they were not demonstrably safe:"
-    printf '%s\n' "${unresolved_prs[@]}" | awk '!seen[$0]++ {print "- "$0}' >>"$report_file"
-  fi
-
-  append_report ""
-  append_report "### Branch cleanup"
-  if ((${#deleted_branches[@]} > 0)); then
-    printf '%s\n' "${deleted_branches[@]}" | awk '!seen[$0]++ {print "- Deleted `"$0"`"}' >>"$report_file"
-  else
-    append_report "- No removable non-main branches remained."
-  fi
-  if ((${#preserved_branches[@]} > 0)); then
-    append_report ""
-    append_report "Preserved because they still contain unique work or an open PR:"
-    printf '%s\n' "${preserved_branches[@]}" | awk '!seen[$0]++ {print "- `"$0"`"}' >>"$report_file"
-  fi
-
-  post_report "Repository cleanup and latest-alpha release completed"
-  trap - ERR
-}
-
-main "$@"
+trap - ERR
