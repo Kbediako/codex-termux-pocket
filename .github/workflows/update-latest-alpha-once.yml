@@ -1,0 +1,43 @@
+name: update-latest-alpha-once
+run-name: Execute final repository cleanup and latest-alpha publication
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update-latest-alpha-once.yml"
+      - ".github/repair-release-go"
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: repair-release-and-clean-repo-once
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    name: Run the staged repair worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout protected main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: true
+
+      - name: Execute cleanup and immutable release repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/repair-release-go
+          bash .github/scripts/repair-release-and-clean-repo-once.sh
