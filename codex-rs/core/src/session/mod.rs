@@ -204,7 +204,7 @@ use codex_protocol::exec_output::StreamOutput;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod environment;
-mod extension_metrics;
+pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
 mod input_queue;
@@ -422,6 +422,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) environment_selections: Vec<TurnEnvironmentSelection>,
     pub(crate) thread_extension_init: ExtensionDataInit,
     pub(crate) client_mcp_extensions: ClientMcpExtensions,
+    pub(crate) reserved_thread_id: Option<ThreadId>,
     pub(crate) analytics_events_client: Option<AnalyticsEventsClient>,
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
@@ -514,6 +515,7 @@ impl Session {
             environment_selections,
             thread_extension_init,
             client_mcp_extensions,
+            reserved_thread_id,
             analytics_events_client,
             thread_store,
             attestation_provider,
@@ -693,6 +695,8 @@ impl Session {
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
+            allow_login_shell: config.permissions.allow_login_shell,
+            shell_environment_policy: config.permissions.shell_environment_policy.clone(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             legacy_fallback_cwd: config.cwd.clone(),
             codex_home: config.codex_home.clone(),
@@ -742,6 +746,7 @@ impl Session {
             thread_extension_init,
             client_mcp_extensions,
             agent_control,
+            reserved_thread_id,
             environment_manager,
             inherited_environments,
             analytics_events_client,
@@ -1593,12 +1598,14 @@ impl Session {
             if mcp_inputs_changed {
                 self.mark_mcp_runtime_dirty();
             }
-            let environment_config = updated.turn_environment_config();
+            let environment_config = updated.inferred_environment_config();
             if let Some(environments) = &updates.environments {
                 self.services
                     .turn_environments
                     .update_selections(&environments.environments, &environment_config);
-            } else if state.session_configuration.turn_environment_config() != environment_config {
+            } else if state.session_configuration.inferred_environment_config()
+                != environment_config
+            {
                 self.services
                     .turn_environments
                     .update_thread_config(&environment_config);
@@ -2122,6 +2129,7 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+        self.services.mcp_runtime.observe_event(&event.msg);
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -3185,6 +3193,19 @@ impl Session {
         }
         .or_cancel(cancellation_token)
         .await?;
+        let mut selected_plugins = self
+            .services
+            .thread_extension_data
+            .get::<codex_extension_api::SelectedPluginSnapshot>()
+            .map(|snapshot| snapshot.as_ref().clone())
+            .unwrap_or_default();
+        selected_plugins.plugins.retain(|plugin| {
+            ready_selected_capability_roots
+                .iter()
+                .any(|root| root.id == plugin.selected_root_id)
+        });
+        extension_data.insert(selected_plugins.clone());
+        turn_context.extension_data.insert(selected_plugins);
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
@@ -3326,6 +3347,7 @@ impl Session {
         let compacted_item = CompactedItem {
             message: metadata.message,
             replacement_history: Some(items.clone()),
+            mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
             window_number: Some(metadata.window_number),
             first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
             previous_window_id: metadata
@@ -4179,7 +4201,6 @@ async fn build_hooks_config(
         plugin_hook_load_warnings,
         shell_program: hook_shell_program,
         shell_args: hook_shell_argv,
-        mcp_executor: None,
     }
 }
 

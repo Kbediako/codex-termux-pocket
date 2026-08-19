@@ -12,9 +12,11 @@ use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::permissions::RawFileSystemSandboxPolicy;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
@@ -64,6 +66,10 @@ impl TurnEnvironment {
             unreachable!("ready turn environments always carry resolved configuration")
         };
         config
+    }
+
+    pub(crate) fn shell_environment_policy(&self) -> &ShellEnvironmentPolicy {
+        &self.config().shell_environment_policy
     }
 
     #[cfg(test)]
@@ -439,7 +445,7 @@ impl TurnContext {
         }
     }
 
-    fn non_legacy_file_system_sandbox_policy(&self) -> Option<FileSystemSandboxPolicy> {
+    fn non_legacy_file_system_sandbox_policy(&self) -> Option<RawFileSystemSandboxPolicy> {
         // Omit the derived split filesystem policy when it is equivalent to
         // the legacy sandbox policy. This keeps turn-context payloads stable
         // while both fields exist; once callers consume only the split policy,
@@ -451,8 +457,11 @@ impl TurnContext {
                 &self.cwd,
             );
         let file_system_sandbox_policy = self.file_system_sandbox_policy();
+        // `permission_profile` below is authoritative and serializes the same
+        // runtime entries, so this compatibility field may omit an unrenderable policy.
         (file_system_sandbox_policy != legacy_file_system_sandbox_policy)
-            .then_some(file_system_sandbox_policy)
+            .then(|| file_system_sandbox_policy.try_into().ok())
+            .flatten()
     }
 
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
@@ -469,6 +478,7 @@ impl TurnContext {
             approvals_reviewer: Some(self.config.approvals_reviewer),
             sandbox_policy: self.sandbox_policy(),
             permission_profile: Some(self.permission_profile()),
+            active_permission_profile: self.config.permissions.active_permission_profile(),
             network: self.turn_context_network_item(),
             file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info.slug.clone(),
@@ -712,12 +722,12 @@ impl Session {
                         previous_permission_profile != next_permission_profile;
                     let previous_config = notify_config_contributors
                         .then(|| self.build_effective_session_config(&state.session_configuration));
-                    let environment_config = next.turn_environment_config();
+                    let environment_config = next.inferred_environment_config();
                     if let Some(environments) = &updates.environments {
                         self.services
                             .turn_environments
                             .update_selections(&environments.environments, &environment_config);
-                    } else if state.session_configuration.turn_environment_config()
+                    } else if state.session_configuration.inferred_environment_config()
                         != environment_config
                     {
                         self.services

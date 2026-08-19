@@ -5,6 +5,7 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::hook_mcp_executor::CoreHookMcpExecutor;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
@@ -16,6 +17,7 @@ use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
@@ -25,6 +27,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::security_risk::SecurityRiskScore;
 use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
@@ -90,6 +93,8 @@ pub(crate) struct SessionConfiguration {
     /// active profile id, and profile-defined workspace roots in sync by using
     /// the methods below instead of mutating the fields independently.
     pub(super) permission_profile_state: PermissionProfileState,
+    pub(super) allow_login_shell: bool,
+    pub(super) shell_environment_policy: ShellEnvironmentPolicy,
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
 
     /// Legacy thread cwd used when a turn does not select an environment.
@@ -136,13 +141,13 @@ impl SessionConfiguration {
         &self.permission_profile_state
     }
 
-    pub(super) fn turn_environment_config(&self) -> EnvironmentConfig {
+    pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
-            allow_login_shell: self
-                .original_config_do_not_use
-                .permissions
-                .allow_login_shell,
+            allow_login_shell: self.allow_login_shell,
             permission_profile: self.permission_profile_state.snapshot(),
+            shell_environment_policy: self.shell_environment_policy.clone(),
+            exec_policy: None,
+            network_policy: None,
             selected_capability_roots: Vec::new(),
         }
     }
@@ -605,6 +610,7 @@ impl Session {
         mut thread_extension_init: ExtensionDataInit,
         client_mcp_extensions: ClientMcpExtensions,
         agent_control: AgentControl,
+        reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
@@ -663,11 +669,20 @@ impl Session {
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
-        let thread_id = match &initial_history {
-            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+        let thread_id = match (&initial_history, reserved_thread_id) {
+            (
+                InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_),
+                Some(thread_id),
+            ) => thread_id,
+            (InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_), None) => {
                 agent_control.generate_thread_id()
             }
-            InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
+            (InitialHistory::Resumed(resumed_history), None) => resumed_history.conversation_id,
+            (InitialHistory::Resumed(_), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "reserved thread ID cannot be used when resuming a thread"
+                ));
+            }
         };
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
@@ -715,6 +730,18 @@ impl Session {
             config.current_time_reminder.as_ref(),
             external_time_provider,
         )?;
+        if thread_extension_init.get::<SecurityRiskScore>().is_none()
+            && let Some(score) = initial_history
+                .get_rollout_items()
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    RolloutItem::SecurityRiskScore(score) => Some(score),
+                    _ => None,
+                })
+        {
+            thread_extension_init.insert(score.clone());
+        }
         let selected_capability_roots =
             match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
                 Some(roots) => roots.as_ref().clone(),
@@ -1070,14 +1097,14 @@ impl Session {
             let turn_environments = Arc::new(ThreadEnvironments::new(
                 environment_manager,
                 default_shell.clone(),
-                session_configuration.turn_environment_config(),
+                session_configuration.inferred_environment_config(),
                 shell_snapshot,
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
             turn_environments.update_selections(
                 environment_selections,
-                &session_configuration.turn_environment_config(),
+                &session_configuration.inferred_environment_config(),
             );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
@@ -1170,13 +1197,24 @@ impl Session {
                     (None, None)
                 };
 
+            // Hooks and extensions share one stable thread-owned MCP runtime handle.
+            let mcp_runtime = Arc::new(McpRuntime::empty(
+                mcp_projection.config.prefix_mcp_tool_names,
+            ));
             let hooks_config = build_hooks_config(
                 &config,
                 plugins_manager.as_ref(),
                 resolved_environments.single_local_environment(),
             )
             .await;
-            let (hooks, async_hook_results) = Hooks::new(hooks_config, thread_id)?;
+            let (hooks, async_hook_results) = Hooks::new(
+                hooks_config,
+                thread_id,
+                Arc::new(CoreHookMcpExecutor {
+                    runtime: Arc::clone(&mcp_runtime),
+                    thread_id,
+                }),
+            )?;
             for warning in hooks.startup_warnings() {
                 post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
@@ -1193,10 +1231,23 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            // Extensions need a stable thread-owned resource client before the Session exists.
-            let mcp_runtime = Arc::new(McpRuntime::empty(
-                mcp_projection.config.prefix_mcp_tool_names,
-            ));
+            for item in initial_history.get_rollout_items() {
+                match item {
+                    RolloutItem::Compacted(compacted) => {
+                        if let Some(checkpoint) = &compacted.mcp_resource_origins {
+                            mcp_runtime.restore_resource_origin_checkpoint(checkpoint);
+                        }
+                    }
+                    RolloutItem::EventMsg(event) => mcp_runtime.observe_event(event),
+                    RolloutItem::SessionMeta(_)
+                    | RolloutItem::ResponseItem(_)
+                    | RolloutItem::InterAgentCommunication(_)
+                    | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::WorldState(_)
+                    | RolloutItem::SecurityRiskScore(_) => {}
+                }
+            }
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             session_extension_data.insert(analytics_events_client.clone());
@@ -1382,9 +1433,6 @@ impl Session {
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
             {
-                sess.services
-                    .plugins_manager
-                    .set_auth_mode(latest_auth.as_ref().map(CodexAuth::api_auth_mode));
                 sess.services
                     .mcp_manager
                     .runtime_config_for_step(

@@ -206,6 +206,14 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppBrowser,
+    /// Allow the in-app chat pane in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppChat,
+    /// Allow in-app dictation in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppDictation,
     /// Allow desktop apps to perform in-app updates.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -254,6 +262,8 @@ pub enum Feature {
     MentionsV2,
     /// Allow request_user_input in Default collaboration mode.
     DefaultModeRequestUserInput,
+    /// Allow sending a user-visible message without ending the current turn.
+    SendAsyncMessage,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
     /// Reuse encrypted parent compaction when restarting Guardian review sessions.
@@ -1211,6 +1221,18 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::InAppChat,
+        key: "in_app_chat",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppDictation,
+        key: "in_app_dictation",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::InAppUpdates,
         key: "in_app_updates",
         stage: Stage::Stable,
@@ -1327,6 +1349,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::DefaultModeRequestUserInput,
         key: "default_mode_request_user_input",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SendAsyncMessage,
+        key: "send_async_message",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

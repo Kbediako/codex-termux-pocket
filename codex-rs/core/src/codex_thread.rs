@@ -734,6 +734,23 @@ impl CodexThread {
     pub async fn read_mcp_resource(
         &self,
         server: &str,
+        params: ReadResourceRequestParams,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
+        let result = self
+            .session
+            .services
+            .mcp_runtime
+            .latest_read_resource(server, params)
+            .await?;
+
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Reads an app resource using the current authority of its originating tool call.
+    pub async fn read_mcp_resource_for_call(
+        &self,
+        call_id: &str,
         uri: &str,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
@@ -741,7 +758,7 @@ impl CodexThread {
             .session
             .services
             .mcp_runtime
-            .latest_read_resource(server, ReadResourceRequestParams::new(uri))
+            .read_resource_for_call(self.session.thread_id, call_id, uri)
             .await?;
 
         Ok(serde_json::to_value(result)?)

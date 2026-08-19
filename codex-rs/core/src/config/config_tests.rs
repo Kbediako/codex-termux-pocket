@@ -73,6 +73,7 @@ use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_model_provider::ProviderCapabilities;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
@@ -358,6 +359,7 @@ fn parses_bundled_skills_config() {
         r#"
 [skills]
 include_instructions = false
+max_context_tokens = 1200
 
 [skills.bundled]
 enabled = false
@@ -370,9 +372,12 @@ enabled = false
         Some(SkillsConfig {
             bundled: Some(BundledSkillsConfig { enabled: false }),
             include_instructions: Some(false),
+            max_context_tokens: std::num::NonZeroUsize::new(1_200),
             config: Vec::new(),
         })
     );
+
+    assert!(toml::from_str::<ConfigToml>("[skills]\nmax_context_tokens = 0\n").is_err());
 }
 
 #[test]
@@ -525,7 +530,8 @@ async fn load_config_resolves_non_prefixed_mcp_tool_servers() -> std::io::Result
 
         assert_eq!(config.non_prefixed_mcp_tool_servers, expected_servers);
         assert_eq!(config.prefix_mcp_tool_names(), expected_prefix);
-        let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+        let plugins_manager =
+            plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
         let mcp_config = config.to_mcp_config(&plugins_manager).await;
         assert_eq!(mcp_config.prefix_mcp_tool_names, expected_prefix);
         assert_eq!(
@@ -2222,14 +2228,14 @@ async fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: cwd_root.clone(),
+                    path: cwd_root.clone().into(),
                 },
                 access: FileSystemAccessMode::Write,
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: cwd_root.join("docs"),
+                    path: cwd_root.join("docs").into(),
                 },
                 access: FileSystemAccessMode::Read,
                 missing_path_behavior: None,
@@ -2350,6 +2356,196 @@ async fn permission_profile_override_populates_runtime_permissions() -> std::io:
     assert_eq!(
         &config.legacy_sandbox_policy(),
         &SandboxPolicy::DangerFullAccess
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_permission_profile_id_wins_over_configured_default() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let config_toml = toml::from_str(
+        r#"
+default_permissions = ":read-only"
+
+[permissions.dev]
+extends = ":workspace"
+"#,
+    )
+    .expect("permission profile config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            persisted_permission_profile_id: Some("dev".to_string()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.permissions.active_permission_profile(),
+        Some(ActivePermissionProfile {
+            id: "dev".to_string(),
+            extends: Some(BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
+        })
+    );
+    assert_eq!(
+        config.legacy_sandbox_policy(),
+        SandboxPolicy::new_workspace_write_policy()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_persisted_permission_profile_id_uses_configured_default() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let project_key = cwd.path().to_string_lossy().to_string();
+
+    for (configured_default, configured_sandbox, expected_active_profile) in [
+        (
+            Some(BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string()),
+            None,
+            Some(ActivePermissionProfile::read_only()),
+        ),
+        (None, Some(SandboxMode::ReadOnly), None),
+    ] {
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                default_permissions: configured_default,
+                sandbox_mode: configured_sandbox,
+                projects: Some(HashMap::from([(
+                    project_key.clone(),
+                    ProjectConfig {
+                        trust_level: Some(TrustLevel::Trusted),
+                    },
+                )])),
+                ..Default::default()
+            },
+            ConfigOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                persisted_permission_profile_id: Some("removed-profile".to_string()),
+                ..Default::default()
+            },
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(
+            config.permissions.active_permission_profile(),
+            expected_active_profile
+        );
+        assert_eq!(
+            config.permissions.effective_permission_profile(),
+            PermissionProfile::read_only()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_persisted_permission_profile_uses_configured_default() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    for invalid_profile in [
+        "extends = \"removed-parent\"",
+        "extends = \":read-only\"\n\n[permissions.dev.filesystem]\nglob_scan_max_depth = 0",
+    ] {
+        let config_toml = toml::from_str(&format!(
+            "default_permissions = \":danger-full-access\"\n\n[permissions.dev]\n{invalid_profile}"
+        ))
+        .expect("permission profile config should deserialize");
+
+        let config = Config::load_from_base_config_with_overrides(
+            config_toml,
+            ConfigOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                persisted_permission_profile_id: Some("dev".to_string()),
+                ..Default::default()
+            },
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(
+            config.permissions.active_permission_profile(),
+            Some(ActivePermissionProfile::new(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+            ))
+        );
+        assert_eq!(
+            config.permissions.effective_permission_profile(),
+            PermissionProfile::Disabled
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_profile_cycle_uses_configured_default() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let config_toml = toml::from_str(
+        r#"
+default_permissions = ":danger-full-access"
+
+[permissions.dev]
+extends = "base"
+
+[permissions.base]
+extends = "dev"
+"#,
+    )
+    .expect("permission profile config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            persisted_permission_profile_id: Some("dev".to_string()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.permissions.active_permission_profile(),
+        Some(ActivePermissionProfile::new(
+            BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+        ))
+    );
+    assert_eq!(
+        config.permissions.effective_permission_profile(),
+        PermissionProfile::Disabled
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_explicit_default_permissions_remains_an_error() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            default_permissions: Some("removed-profile".to_string()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("explicit missing profile should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "default_permissions requires a `[permissions]` table"
     );
     Ok(())
 }
@@ -2919,7 +3115,8 @@ async fn explicit_builtin_workspace_profile_ignores_legacy_workspace_write_setti
     assert!(
         !policy.entries.iter().any(|entry| matches!(
             &entry.path,
-            FileSystemPath::Path { path } if path.as_path() == extra_root.path()
+            FileSystemPath::Path { path }
+                if path.to_abs_path().is_ok_and(|path| path.as_path() == extra_root.path())
         )),
         "explicit :workspace should not inherit sandbox_workspace_write roots as concrete grants, \
          policy: {policy:?}"
@@ -4433,7 +4630,7 @@ exclude_slash_tmp = true
                     file_system_policy
                         .entries
                         .contains(&FileSystemSandboxEntry {
-                            path: FileSystemPath::Path { path: cwd.abs() },
+                            path: cwd.abs().into(),
                             access: FileSystemAccessMode::Write,
                             missing_path_behavior: None,
                         })
@@ -4443,7 +4640,7 @@ exclude_slash_tmp = true
                         .entries
                         .contains(&FileSystemSandboxEntry {
                             path: FileSystemPath::Path {
-                                path: extra_root.clone(),
+                                path: extra_root.clone().into(),
                             },
                             access: FileSystemAccessMode::Write,
                             missing_path_behavior: None,
@@ -4458,7 +4655,8 @@ exclude_slash_tmp = true
                                     path: AbsolutePathBuf::resolve_path_against_base(
                                         subpath,
                                         cwd.path()
-                                    ),
+                                    )
+                                    .into(),
                                 },
                                 access: FileSystemAccessMode::Read,
                                 missing_path_behavior: Some(
@@ -5237,7 +5435,8 @@ async fn rebuild_preserving_session_layers_refreshes_plugin_derived_mcp_config()
     let config = thread_config
         .rebuild_preserving_session_layers(&refreshed_config)
         .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5299,7 +5498,8 @@ enabled = true
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5367,7 +5567,8 @@ url = "https://sample.example/mcp"
         )
         .build()
         .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5469,7 +5670,8 @@ enabled = true
         )
         .build()
         .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5727,6 +5929,53 @@ async fn config_resolves_explicit_keyring_auth_store_mode() -> std::io::Result<(
             env!("CARGO_PKG_VERSION"),
         ),
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_applies_managed_auth_store_and_chatgpt_base_url() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let managed_store = AuthCredentialsStoreMode::Keyring;
+    let managed_url = "https://managed.example/backend-api/";
+    let requirements = codex_config::ConfigRequirements {
+        cli_auth_credentials_store: Some(Sourced::new(managed_store, RequirementSource::Unknown)),
+        chatgpt_base_url: Some(Sourced::new(
+            managed_url.to_string(),
+            RequirementSource::Unknown,
+        )),
+        ..Default::default()
+    };
+    let config_layer_stack = ConfigLayerStack::new(
+        Vec::new(),
+        requirements,
+        codex_config::ConfigRequirementsToml::default(),
+    )?;
+
+    let config = Config::load_config_with_layer_stack(
+        LOCAL_FS.as_ref(),
+        ConfigToml {
+            cli_auth_credentials_store: Some(AuthCredentialsStoreMode::File),
+            chatgpt_base_url: Some("https://user.example/backend-api/".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+        config_layer_stack,
+    )
+    .await?;
+
+    assert_eq!(config.cli_auth_credentials_store_mode, managed_store);
+    assert_eq!(config.chatgpt_base_url, managed_url);
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("Configured value for `cli_auth_credentials_store` is overridden")
+    }));
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("Configured value for `chatgpt_base_url` is overridden")
+    }));
 
     Ok(())
 }
@@ -6486,7 +6735,8 @@ async fn to_mcp_config_preserves_apps_feature_from_config() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
 
     config.apps_mcp_product_sku = Some("tpp".to_string());
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
@@ -6513,7 +6763,8 @@ async fn to_mcp_config_flows_mcp_tool_prefix_from_feature() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert!(mcp_config.prefix_mcp_tool_names);
@@ -6549,7 +6800,8 @@ async fn to_mcp_config_flows_mcp_2026_feature_from_config() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert_eq!(mcp_config.protocol_mode, codex_mcp::McpProtocolMode::Legacy);
@@ -6573,7 +6825,8 @@ async fn to_mcp_config_preserves_auth_elicitation_feature_from_config() -> std::
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = plugins_manager_for_config(&config, /*auth_mode*/ None);
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert_eq!(
@@ -9483,6 +9736,8 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
     let requirements_toml = codex_config::ConfigRequirementsToml {
         allowed_login_methods: None,
         allowed_chatgpt_workspaces: None,
+        cli_auth_credentials_store: None,
+        chatgpt_base_url: None,
         sqlite_home: None,
         log_dir: None,
         model_catalog_json: None,
@@ -10318,32 +10573,46 @@ async fn permission_profile_override_falls_back_when_disallowed_by_requirements(
 #[tokio::test]
 async fn active_profile_is_cleared_when_requirements_force_fallback() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .harness_overrides(ConfigOverrides {
+    for overrides in [
+        ConfigOverrides {
             default_permissions: Some(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string()),
             ..Default::default()
-        })
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
+        },
+        ConfigOverrides {
+            persisted_permission_profile_id: Some(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
             ),
-        )
-        .build()
-        .await?;
+            ..Default::default()
+        },
+    ] {
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .harness_overrides(overrides)
+            .cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                    r#"allowed_sandbox_modes = ["read-only"]"#,
+                ),
+            )
+            .build()
+            .await?;
 
-    assert_eq!(
-        config.permissions.effective_permission_profile(),
-        PermissionProfile::read_only()
-    );
-    assert_eq!(config.permissions.active_permission_profile(), None);
-    assert!(
-        config.startup_warnings.iter().any(|warning| warning
-            .contains("Configured value for `permission_profile` is disallowed by requirements")),
-        "{:?}",
-        config.startup_warnings
-    );
+        assert_eq!(
+            config.permissions.effective_permission_profile(),
+            PermissionProfile::read_only()
+        );
+        assert_eq!(config.permissions.active_permission_profile(), None);
+        assert!(
+            config
+                .startup_warnings
+                .iter()
+                .any(|warning| warning.contains(
+                    "Configured value for `permission_profile` is disallowed by requirements"
+                )),
+            "{:?}",
+            config.startup_warnings
+        );
+    }
     Ok(())
 }
 
@@ -10389,7 +10658,7 @@ async fn permission_profile_override_preserves_split_write_roots() -> std::io::R
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: outside_root.clone(),
+                path: outside_root.clone().into(),
             },
             access: FileSystemAccessMode::Write,
             missing_path_behavior: None,
@@ -10598,6 +10867,50 @@ browser_use_full_cdp_access = false
     assert!(!config.features.enabled(Feature::InAppBrowser));
     assert!(!config.features.enabled(Feature::BrowserUse));
     assert!(!config.features.enabled(Feature::BrowserUseFullCdpAccess));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_app_chat_feature_requirements_are_valid() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+in_app_chat = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert!(!config.features.enabled(Feature::InAppChat));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_app_dictation_feature_requirements_are_valid() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+in_app_dictation = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert!(!config.features.enabled(Feature::InAppDictation));
 
     Ok(())
 }
@@ -11808,35 +12121,6 @@ experimental_realtime_start_instructions = "start instructions from config"
     assert_eq!(
         config.experimental_realtime_start_instructions.as_deref(),
         Some("start instructions from config")
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn experimental_thread_config_endpoint_loads_from_config_toml() -> std::io::Result<()> {
-    let cfg: ConfigToml = toml::from_str(
-        r#"
-experimental_thread_config_endpoint = "http://127.0.0.1:8061"
-"#,
-    )
-    .expect("TOML deserialization should succeed");
-
-    assert_eq!(
-        cfg.experimental_thread_config_endpoint.as_deref(),
-        Some("http://127.0.0.1:8061")
-    );
-
-    let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
-
-    assert_eq!(
-        config.experimental_thread_config_endpoint.as_deref(),
-        Some("http://127.0.0.1:8061")
     );
     Ok(())
 }

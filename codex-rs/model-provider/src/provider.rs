@@ -7,6 +7,7 @@ use std::sync::Arc;
 use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
+use codex_api::TransportError;
 use codex_api::is_azure_responses_provider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -69,6 +70,15 @@ impl Default for ProviderCapabilities {
 pub struct ProviderAccountState {
     pub account: Option<ProviderAccount>,
     pub requires_openai_auth: bool,
+}
+
+/// Outcome of a provider-owned attempt to recover from an authentication failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderUnauthorizedRecovery {
+    /// The provider has no provider-specific authentication recovery configured.
+    NotConfigured,
+    /// The provider recovered its authentication state and the request can be retried.
+    Recovered,
 }
 
 /// Error returned when a provider cannot construct its app-visible account state.
@@ -159,6 +169,24 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// to think through whether Codex should have a unified provider-specific auth
     /// manager throughout the codebase; that is a larger refactor than this change.
     fn auth_manager(&self) -> Option<Arc<AuthManager>>;
+
+    /// Returns whether this transport failure can be recovered by provider-scoped authentication.
+    ///
+    /// The default preserves existing unauthorized-response handling. Providers with other
+    /// authentication failure shapes may recognize additional response or request-signing errors.
+    fn is_recoverable_auth_error(&self, error: &TransportError) -> bool {
+        matches!(
+            error,
+            TransportError::Http { status, .. } if *status == http::StatusCode::UNAUTHORIZED
+        )
+    }
+
+    /// Attempts provider-owned authentication recovery before using the auth manager.
+    fn recover_from_unauthorized(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
+        Box::pin(async { Ok(ProviderUnauthorizedRecovery::NotConfigured) })
+    }
 
     /// Returns the current provider-scoped auth value, if one is configured.
     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>>;
@@ -469,6 +497,7 @@ mod tests {
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_models_manager::ModelsManagerConfig;
     use codex_models_manager::manager::RefreshStrategy;
     use codex_protocol::account::PlanType;
     use codex_protocol::config_types::ModelProviderAuthInfo;
@@ -854,6 +883,21 @@ mod tests {
             )
             .await;
         assert_eq!(uncached_catalog, catalog);
+        let model_info = manager
+            .get_model_info(
+                "openai.gpt-5.6-sol",
+                &ModelsManagerConfig {
+                    model_context_window: Some(1_000_000),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let mut expected_model_info = manager
+            .get_model_info("openai.gpt-5.6-sol", &ModelsManagerConfig::default())
+            .await;
+        expected_model_info.context_window = Some(872_000);
+        assert_eq!(model_info, expected_model_info);
+
         let models = catalog
             .models
             .iter()

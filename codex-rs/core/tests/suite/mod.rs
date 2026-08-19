@@ -16,6 +16,21 @@ use ctor::ctor;
 #[ctor]
 pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
     configure_test_binary_dispatch("codex-core-tests", |exe_name, argv1| {
+        #[cfg(windows)]
+        if exe_name.eq_ignore_ascii_case("powershell.exe")
+            || exe_name.eq_ignore_ascii_case("powershell.evil")
+            || exe_name.eq_ignore_ascii_case("pwsh.exe")
+        {
+            let executable = std::env::current_exe().expect("locate fake PowerShell executable");
+            if executable
+                .with_file_name(".codex-executable-identity-fixture")
+                .is_file()
+            {
+                let marker = executable.with_file_name("attacker-executed");
+                std::fs::write(marker, b"ran").expect("record fake PowerShell execution");
+                std::process::exit(0);
+            }
+        }
         if argv1 == Some(CODEX_CORE_APPLY_PATCH_ARG1) {
             return TestBinaryDispatchMode::DispatchArg0Only;
         }
@@ -62,6 +77,7 @@ mod cyber_exec_policy;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
+mod executable_identity;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
 mod external_auth;
@@ -133,6 +149,7 @@ mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
 mod search_tool;
+mod send_user_message_async;
 mod shell_command;
 mod shell_serialization;
 mod shell_snapshot;

@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use codex_extension_api::ResponseItem;
 pub(crate) use codex_features::GuardianV2TranscriptSource as TranscriptSource;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::plaintext_agent_message_content;
@@ -13,6 +16,8 @@ pub(crate) const MAX_TOOL_ENTRY_TOKENS: usize = 1_000;
 pub(crate) const MAX_MESSAGE_TRANSCRIPT_TOKENS: usize = 10_000;
 pub(crate) const MAX_TOOL_TRANSCRIPT_TOKENS: usize = 10_000;
 pub(crate) const MAX_RECENT_NON_USER_ENTRIES: usize = 40;
+const MAX_TRANSCRIPT_IMAGES: usize = 4;
+const MAX_TRANSCRIPT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MANUAL_APPROVAL_DEVELOPER_PREFIX: &str =
     "The user has manually approved a specific action that was previously `Rejected`.";
 
@@ -29,9 +34,41 @@ struct TranscriptEntry {
     tokens: usize,
 }
 
+fn retained_tokens(
+    entries: &[TranscriptEntry],
+    retained: &VecDeque<usize>,
+    kind: TranscriptEntryKind,
+) -> usize {
+    retained
+        .iter()
+        .filter_map(|&index| {
+            let entry = &entries[index];
+            (entry.kind == kind).then_some(entry.tokens)
+        })
+        .sum()
+}
+
+fn evict_oldest_matching(
+    entries: &[TranscriptEntry],
+    retained: &mut VecDeque<usize>,
+    count: usize,
+    mut matches: impl FnMut(TranscriptEntryKind) -> bool,
+) {
+    let mut remaining = count;
+    retained.retain(|&index| {
+        if remaining > 0 && matches(entries[index].kind) {
+            remaining -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptConfig {
     pub(crate) sources: Vec<TranscriptSource>,
+    pub(crate) include_images: bool,
     pub(crate) max_message_entry_tokens: usize,
     pub(crate) max_tool_entry_tokens: usize,
     pub(crate) max_message_transcript_tokens: usize,
@@ -43,6 +80,7 @@ impl Default for TranscriptConfig {
     fn default() -> Self {
         Self {
             sources: vec![TranscriptSource::ToolCalls, TranscriptSource::ToolOutputs],
+            include_images: false,
             max_message_entry_tokens: MAX_MESSAGE_ENTRY_TOKENS,
             max_tool_entry_tokens: MAX_TOOL_ENTRY_TOKENS,
             max_message_transcript_tokens: MAX_MESSAGE_TRANSCRIPT_TOKENS,
@@ -53,6 +91,75 @@ impl Default for TranscriptConfig {
 }
 
 impl TranscriptConfig {
+    pub(crate) fn images<'a>(
+        &self,
+        items: impl IntoIterator<Item = &'a ResponseItem>,
+        node_repl_images: impl IntoIterator<Item = ContentItem>,
+    ) -> Vec<ContentItem> {
+        if !self.include_images {
+            return Vec::new();
+        }
+
+        let mut images = VecDeque::new();
+        let mut image_bytes = 0usize;
+        let mut include_image = |image_url: &str, detail: Option<ImageDetail>| {
+            if image_url.len() > MAX_TRANSCRIPT_IMAGE_BYTES {
+                return;
+            }
+            while images.len() >= MAX_TRANSCRIPT_IMAGES
+                || image_bytes + image_url.len() > MAX_TRANSCRIPT_IMAGE_BYTES
+            {
+                let Some(ContentItem::InputImage { image_url, .. }) = images.pop_front() else {
+                    break;
+                };
+                image_bytes -= image_url.len();
+            }
+            image_bytes += image_url.len();
+            images.push_back(ContentItem::InputImage {
+                image_url: image_url.to_owned(),
+                detail,
+            });
+        };
+
+        for item in items {
+            match item {
+                ResponseItem::Message { role, content, .. }
+                    if matches!(role.as_str(), "user" | "assistant") =>
+                {
+                    for item in content {
+                        if let ContentItem::InputImage { image_url, detail } = item {
+                            include_image(image_url, *detail);
+                        }
+                    }
+                }
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. }
+                    if self.sources.contains(&TranscriptSource::ToolOutputs) =>
+                {
+                    if let Some(content) = output.content_items() {
+                        for item in content {
+                            if let FunctionCallOutputContentItem::InputImage { image_url, detail } =
+                                item
+                            {
+                                include_image(image_url, *detail);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.sources.contains(&TranscriptSource::ToolOutputs) {
+            for image in node_repl_images {
+                if let ContentItem::InputImage { image_url, detail } = image {
+                    include_image(&image_url, detail);
+                }
+            }
+        }
+
+        images.into_iter().collect()
+    }
+
     pub(crate) fn build<'a>(
         &self,
         items: impl IntoIterator<Item = &'a ResponseItem>,
@@ -212,7 +319,6 @@ impl TranscriptConfig {
 
         let mut included = vec![false; entries.len()];
         let mut message_tokens = 0;
-        let mut tool_tokens = 0;
         let user_indices = entries
             .iter()
             .enumerate()
@@ -244,34 +350,67 @@ impl TranscriptConfig {
             message_tokens += entries[index].tokens;
         }
 
-        let mut retained_non_user_entries = 0;
-        for (index, entry) in entries.iter().enumerate().rev() {
-            if entry.kind == TranscriptEntryKind::User
-                || retained_non_user_entries >= self.max_recent_non_user_entries
-            {
+        let available_message_tokens = self
+            .max_message_transcript_tokens
+            .saturating_sub(message_tokens);
+        let mut retained_non_user = VecDeque::new();
+
+        // Replay the transcript as an append-only bounded buffer. When a new entry would overflow
+        // a budget, remove half of the existing entries in that pool before appending it. This
+        // keeps the retained prefix stable between overflow points without storing sampler state.
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.kind == TranscriptEntryKind::User {
                 continue;
             }
 
-            let fits_budget = match entry.kind {
-                TranscriptEntryKind::Tool => {
-                    tool_tokens + entry.tokens <= self.max_tool_transcript_tokens
-                }
-                TranscriptEntryKind::Message => {
-                    message_tokens + entry.tokens <= self.max_message_transcript_tokens
-                }
+            let token_budget = match entry.kind {
+                TranscriptEntryKind::Tool => self.max_tool_transcript_tokens,
+                TranscriptEntryKind::Message => available_message_tokens,
                 TranscriptEntryKind::User => unreachable!("user entries were selected separately"),
             };
-            if !fits_budget {
+
+            // An entry that cannot fit on its own must not evict retained evidence.
+            if entry.tokens > token_budget || self.max_recent_non_user_entries == 0 {
                 continue;
             }
 
-            included[index] = true;
-            retained_non_user_entries += 1;
-            match entry.kind {
-                TranscriptEntryKind::Tool => tool_tokens += entry.tokens,
-                TranscriptEntryKind::Message => message_tokens += entry.tokens,
-                TranscriptEntryKind::User => unreachable!("user entries were selected separately"),
+            if retained_tokens(&entries, &retained_non_user, entry.kind)
+                .saturating_add(entry.tokens)
+                > token_budget
+            {
+                let retained_kind_count = retained_non_user
+                    .iter()
+                    .filter(|&&retained_index| entries[retained_index].kind == entry.kind)
+                    .count();
+                evict_oldest_matching(
+                    &entries,
+                    &mut retained_non_user,
+                    retained_kind_count.div_ceil(2),
+                    |kind| kind == entry.kind,
+                );
+                while retained_tokens(&entries, &retained_non_user, entry.kind)
+                    .saturating_add(entry.tokens)
+                    > token_budget
+                {
+                    evict_oldest_matching(
+                        &entries,
+                        &mut retained_non_user,
+                        /*count*/ 1,
+                        |kind| kind == entry.kind,
+                    );
+                }
             }
+
+            if retained_non_user.len().saturating_add(1) > self.max_recent_non_user_entries {
+                let entries_to_evict = retained_non_user.len().div_ceil(2);
+                evict_oldest_matching(&entries, &mut retained_non_user, entries_to_evict, |_| true);
+            }
+
+            retained_non_user.push_back(index);
+        }
+
+        for index in retained_non_user {
+            included[index] = true;
         }
 
         entries

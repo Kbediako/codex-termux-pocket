@@ -88,6 +88,9 @@ pub enum GuardianV2TranscriptSource {
 pub struct GuardianV2TranscriptConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<GuardianV2TranscriptSource>>,
+    /// Include recent screenshots from messages and configured tool outputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_images: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 100000))]
     pub max_message_entry_tokens: Option<usize>,
@@ -117,6 +120,8 @@ pub struct GuardianV2ConfigToml {
     #[schemars(range(min = 0.0, max = 1.0))]
     pub review_threshold: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tool_call_lag: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 100000))]
@@ -124,6 +129,9 @@ pub struct GuardianV2ConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 100000))]
     pub max_classifier_instruction_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 100, max = 100000))]
+    pub max_parent_compaction_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript: Option<GuardianV2TranscriptConfigToml>,
 }
@@ -166,6 +174,10 @@ where
         (
             "max_classifier_instruction_tokens",
             config.max_classifier_instruction_tokens,
+        ),
+        (
+            "max_parent_compaction_tokens",
+            config.max_parent_compaction_tokens,
         ),
         ("transcript max_message_entry_tokens", message_entry),
         ("transcript max_tool_entry_tokens", tool_entry),

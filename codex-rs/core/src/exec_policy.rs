@@ -15,6 +15,7 @@ use codex_execpolicy::MatchOptions;
 use codex_execpolicy::NetworkRuleProtocol;
 use codex_execpolicy::Policy;
 use codex_execpolicy::PolicyParser;
+use codex_execpolicy::RequirementsExecPolicy;
 use codex_execpolicy::RuleMatch;
 use codex_execpolicy::blocking_append_allow_prefix_rule;
 use codex_execpolicy::blocking_append_network_rule;
@@ -40,6 +41,7 @@ use codex_shell_command::bash::parse_shell_lc_single_command_prefix;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use shlex::try_join as shlex_try_join;
 
+mod executable_identity;
 mod model_policy;
 
 pub(crate) use model_policy::AllowPrefixRules;
@@ -282,6 +284,7 @@ pub(crate) struct ExecApprovalRequest<'a> {
     pub(crate) command: &'a [String],
     pub(crate) approval_policy: AskForApproval,
     pub(crate) permission_profile: PermissionProfile,
+    pub(crate) environment_policy: Option<&'a RequirementsExecPolicy>,
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
     pub(crate) sandbox_permissions: SandboxPermissions,
     pub(crate) prefix_rule: Option<Vec<String>>,
@@ -313,21 +316,31 @@ impl ExecPolicyManager {
         &self,
         req: ExecApprovalRequest<'_>,
     ) -> ExecApprovalRequirement {
+        let commands = commands_for_exec_policy(req.command);
+        self.create_exec_approval_requirement_for_parsed_commands(req, commands)
+            .await
+    }
+
+    async fn create_exec_approval_requirement_for_parsed_commands(
+        &self,
+        req: ExecApprovalRequest<'_>,
+        ExecPolicyCommands {
+            commands,
+            used_complex_parsing,
+            command_origin,
+        }: ExecPolicyCommands,
+    ) -> ExecApprovalRequirement {
         let ExecApprovalRequest {
             command,
             approval_policy,
             permission_profile,
+            environment_policy,
             windows_sandbox_level,
             sandbox_permissions,
             prefix_rule,
             allow_prefix_rules,
         } = req;
-        let exec_policy = self.current_for_prefix_rules(allow_prefix_rules);
-        let ExecPolicyCommands {
-            commands,
-            used_complex_parsing,
-            command_origin,
-        } = commands_for_exec_policy(command);
+        let exec_policy = self.current_for_environment(environment_policy, allow_prefix_rules);
         // Keep heredoc prefix parsing for the rules that apply to this model,
         // but avoid reusable approvals for cyber models or when only the
         // heredoc fallback parser matched.

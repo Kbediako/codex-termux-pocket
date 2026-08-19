@@ -160,14 +160,10 @@ impl Session {
         };
         loop {
             let auth = self.services.auth_manager.auth_cached();
-            if self
+            if !self
                 .services
-                .plugins_manager
-                .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode))
-                || !self
-                    .services
-                    .mcp_runtime
-                    .current_auth_matches(auth.as_ref())
+                .mcp_runtime
+                .current_auth_matches(auth.as_ref())
             {
                 self.mark_mcp_runtime_dirty();
             }
@@ -180,9 +176,6 @@ impl Session {
                 published: false,
             };
             let auth = self.services.auth_manager.auth().await;
-            self.services
-                .plugins_manager
-                .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
             let desired = self.latest_mcp_desired_state(auth).await;
             let selected_capability_roots = self
                 .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -237,9 +230,6 @@ impl Session {
             .await
             .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
         let auth = self.services.auth_manager.auth().await;
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
         let desired = self.latest_mcp_desired_state(auth).await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -269,6 +259,7 @@ impl Session {
                 executor_capability_discovery.as_deref(),
             )
             .await;
+        let selected_plugins = mcp_projection.selected_plugins.clone();
         let input = self.build_mcp_runtime_input(
             &desired,
             mcp_projection,
@@ -279,7 +270,9 @@ impl Session {
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
         );
-        self.services.mcp_runtime.replace_fresh(input).await
+        let refreshed = self.services.mcp_runtime.replace_fresh(input).await;
+        self.services.thread_extension_data.insert(selected_plugins);
+        refreshed
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {
@@ -623,9 +616,6 @@ impl Session {
             return;
         };
         let auth = self.services.auth_manager.auth().await;
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
         {
             let mut state = self.state.lock().await;
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();

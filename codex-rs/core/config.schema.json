@@ -603,6 +603,12 @@
             "in_app_browser": {
               "type": "boolean"
             },
+            "in_app_chat": {
+              "type": "boolean"
+            },
+            "in_app_dictation": {
+              "type": "boolean"
+            },
             "in_app_updates": {
               "type": "boolean"
             },
@@ -715,6 +721,9 @@
               "type": "boolean"
             },
             "secret_auth_storage": {
+              "type": "boolean"
+            },
+            "send_async_message": {
               "type": "boolean"
             },
             "shell_snapshot": {
@@ -1251,6 +1260,17 @@
           "minimum": 100.0,
           "type": "integer"
         },
+        "max_parent_compaction_tokens": {
+          "format": "uint",
+          "maximum": 100000.0,
+          "minimum": 100.0,
+          "type": "integer"
+        },
+        "max_tool_call_lag": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "reasoning_effort": {
           "$ref": "#/definitions/ReasoningEffort"
         },
@@ -1270,6 +1290,10 @@
       "additionalProperties": false,
       "description": "Bounds and optional sources for the Guardian v2 conversation transcript.",
       "properties": {
+        "include_images": {
+          "description": "Include recent screenshots from messages and configured tool outputs.",
+          "type": "boolean"
+        },
         "max_message_entry_tokens": {
           "format": "uint",
           "maximum": 100000.0,
@@ -3231,6 +3255,12 @@
         "include_instructions": {
           "description": "Whether turns receive the automatic skills instructions block.",
           "type": "boolean"
+        },
+        "max_context_tokens": {
+          "description": "Maximum tokens used by the available-skills catalog. Defaults to 2% of the model context window and is capped at 10,000 tokens when set.",
+          "format": "uint",
+          "minimum": 1.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -3442,6 +3472,13 @@
             }
           ],
           "default": {
+            "agents": {
+              "new_task": null,
+              "rename": null,
+              "search": null,
+              "stop": null,
+              "toggle_grouping": null
+            },
             "approval": {
               "approve": null,
               "approve_for_prefix": null,
@@ -3487,6 +3524,7 @@
             "global": {
               "clear_terminal": null,
               "copy": null,
+              "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
               "queue": null,
@@ -3693,6 +3731,53 @@
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TuiAgentsKeymap": {
+      "additionalProperties": false,
+      "description": "Shortcuts specific to the shared agents overview.",
+      "properties": {
+        "new_task": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Start composing a new agent task."
+        },
+        "rename": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Rename the selected task."
+        },
+        "search": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Search the available agent tasks."
+        },
+        "stop": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Stop the selected running task."
+        },
+        "toggle_grouping": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Toggle grouping tasks by status or project."
         }
       },
       "type": "object"
@@ -4017,6 +4102,14 @@
           ],
           "description": "Copy the last agent response to the clipboard."
         },
+        "open_agents": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open the shared agent-session overview."
+        },
         "open_external_editor": {
           "allOf": [
             {
@@ -4096,6 +4189,20 @@
       "additionalProperties": false,
       "description": "Raw keymap configuration from `[tui.keymap]`.\n\nEach context contains action-level overrides. Missing actions inherit from built-in defaults, and selected chat/composer actions can fall back through `global` during runtime resolution.\n\nThis type is intentionally a persistence shape, not the structure used by input handlers. Runtime consumers should resolve it into `RuntimeKeymap` first so precedence, empty-list unbinding, and duplicate-key validation are applied consistently.",
       "properties": {
+        "agents": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiAgentsKeymap"
+            }
+          ],
+          "default": {
+            "new_task": null,
+            "rename": null,
+            "search": null,
+            "stop": null,
+            "toggle_grouping": null
+          }
+        },
         "approval": {
           "allOf": [
             {
@@ -4175,6 +4282,7 @@
           "default": {
             "clear_terminal": null,
             "copy": null,
+            "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
             "queue": null,
@@ -5169,10 +5277,6 @@
       "description": "Experimental / do not use. Replaces the synthesized realtime startup context appended to websocket session instructions. An empty string disables startup context injection entirely.",
       "type": "string"
     },
-    "experimental_thread_config_endpoint": {
-      "description": "Experimental / do not use. When set, app-server fetches thread-scoped config from a remote service at this endpoint.",
-      "type": "string"
-    },
     "experimental_thread_store": {
       "allOf": [
         {
@@ -5361,6 +5465,12 @@
         "in_app_browser": {
           "type": "boolean"
         },
+        "in_app_chat": {
+          "type": "boolean"
+        },
+        "in_app_dictation": {
+          "type": "boolean"
+        },
         "in_app_updates": {
           "type": "boolean"
         },
@@ -5473,6 +5583,9 @@
           "type": "boolean"
         },
         "secret_auth_storage": {
+          "type": "boolean"
+        },
+        "send_async_message": {
           "type": "boolean"
         },
         "shell_snapshot": {

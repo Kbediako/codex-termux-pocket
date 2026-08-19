@@ -7,8 +7,6 @@ use codex_code_mode::GrpcCodeModeSessionProvider;
 use codex_code_mode::WebSocketCodeModeSessionProvider;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
-use codex_config::RemoteThreadConfigLoader;
-use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
@@ -121,6 +119,7 @@ mod skills_watcher;
 mod thread_state;
 mod thread_status;
 mod transport;
+mod turn_cost_worker;
 
 pub use crate::code_mode_host::AppServerCodeModeHostArgs;
 pub use crate::code_mode_host::CodeModeHostTransport;
@@ -146,13 +145,6 @@ enum LogFormat {
 }
 
 type StderrLogLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
-
-fn configured_thread_config_loader(config: &Config) -> Arc<dyn ThreadConfigLoader> {
-    match config.experimental_thread_config_endpoint.as_deref() {
-        Some(endpoint) => Arc::new(RemoteThreadConfigLoader::new(endpoint)),
-        None => Arc::new(NoopThreadConfigLoader),
-    }
-}
 
 /// Control-plane messages from the processor/transport side to the outbound router task.
 ///
@@ -502,9 +494,6 @@ pub async fn run_main_with_transport_options(
         .await
     {
         Ok(config) => {
-            let discovered_thread_config_loader = configured_thread_config_loader(&config);
-            config_manager
-                .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
             let auth_manager =
                 AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
                     .await

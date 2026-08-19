@@ -207,12 +207,17 @@ mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
+mod agents_overview;
+mod agents_overview_view;
+pub(crate) use agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
 mod background_requests;
 mod config_persistence;
+mod connector_mentions;
 mod event_dispatch;
+mod file_change_approvals;
 mod history_pagination;
 mod history_ui;
 mod input;
@@ -228,12 +233,14 @@ mod session_lifecycle;
 mod side;
 mod startup;
 mod startup_prompts;
+mod thread_event_buffer;
 mod thread_events;
 mod thread_goal_actions;
 mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
 mod transcript_export;
+mod working_directory;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -522,6 +529,8 @@ pub(crate) struct App {
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
     launch_cwd: PathBuf,
+    /// Resume anchor selected by `/cd`; ordinary resumes retain the immutable launch cwd.
+    runtime_working_directory_override: Option<PathBuf>,
     pub(crate) state_db: Option<StateDbHandle>,
     cli_kv_overrides: Vec<(String, TomlValue)>,
     harness_overrides: ConfigOverrides,
@@ -587,6 +596,7 @@ pub(crate) struct App {
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
@@ -857,7 +867,24 @@ impl App {
     }
 
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
+        let dashboard_visible = self
+            .chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+            .is_some();
+        if std::mem::replace(
+            &mut self.agents_overview.rendered_full_screen,
+            dashboard_visible,
+        ) && !dashboard_visible
+        {
+            self.schedule_immediate_resize_reflow(tui);
+            self.maybe_run_resize_reflow(tui, screen_size)?;
+        }
         self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
+            let desired_height = if dashboard_visible {
+                screen_size.height
+            } else {
+                desired_height
+            };
             let mut rendered_area = Rect::default();
             tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
                 let area = frame.area();

@@ -322,6 +322,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -383,7 +384,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::App
                 | SlashCommand::Side
                 | SlashCommand::Btw
-                | SlashCommand::Agent
+                | SlashCommand::Agents
                 | SlashCommand::MultiAgents
                 | SlashCommand::Vim
                 | SlashCommand::Keymap
@@ -515,7 +516,7 @@ pub(crate) struct ChatComposer {
     toggle_shortcuts_keys: Vec<KeyBinding>,
     history_search_previous_keys: Vec<KeyBinding>,
     history_search_next_keys: Vec<KeyBinding>,
-    editor_keymap: EditorKeymap,
+    editor_keymap: Arc<EditorKeymap>,
     vim_normal_keymap: VimNormalKeymap,
 }
 
@@ -707,6 +708,7 @@ impl ChatComposer {
             editor_keymap: default_editor_keymap,
             vim_normal_keymap: default_vim_normal_keymap,
         };
+        this.draft.textarea.set_keymap_bindings(&default_keymap);
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
@@ -4975,7 +4977,8 @@ mod tests {
     #[test]
     fn parent_owned_thread_allows_bare_navigation_commands() {
         for (command, expected) in [
-            ("/agent", SlashCommand::Agent),
+            ("/agents", SlashCommand::Agents),
+            ("/subagents", SlashCommand::MultiAgents),
             ("/side", SlashCommand::Side),
             ("/btw", SlashCommand::Btw),
             ("/diff ", SlashCommand::Diff),
@@ -5001,7 +5004,7 @@ mod tests {
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .0;
 
-        assert_eq!(result, InputResult::Command(SlashCommand::Agent));
+        assert_eq!(result, InputResult::Command(SlashCommand::Agents));
     }
 
     #[test]
@@ -11222,8 +11225,10 @@ mod tests {
         assert!(matches!(result, InputResult::Submitted { .. }));
 
         let mut keymap = RuntimeKeymap::defaults();
-        keymap.editor.move_up = vec![key_hint::plain(KeyCode::F(2))];
+        Arc::make_mut(&mut keymap.editor).move_up = vec![key_hint::plain(KeyCode::F(2))];
         composer.set_keymap_bindings(&keymap);
+        assert!(Arc::ptr_eq(&composer.editor_keymap, &keymap.editor));
+        assert_eq!(Arc::strong_count(&keymap.editor), 3);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert!(composer.draft.textarea.is_empty());
@@ -12181,8 +12186,16 @@ mod tests {
         );
 
         let count = LARGE_PASTE_CHAR_THRESHOLD; // 1000 in current config
-        let chars: Vec<char> = vec!['z'; count];
-        type_chars_humanlike(&mut composer, &chars);
+        let mut now = Instant::now();
+        let step = ChatComposer::recommended_paste_flush_delay();
+        for _ in 0..count {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+                now,
+            );
+            now += step;
+            let _ = composer.handle_paste_burst_flush(now);
+        }
 
         assert_eq!(composer.draft.textarea.text(), "z".repeat(count));
         assert!(composer.draft.pending_pastes.is_empty());

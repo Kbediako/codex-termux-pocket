@@ -288,11 +288,11 @@ impl McpConnectionSet {
         let mut tools = Vec::with_capacity(listed_tools.len());
         let mut calls = std::collections::HashMap::with_capacity(listed_tools.len());
         for tool_info in listed_tools {
-            if !crate::tool_is_model_visible(&tool_info) {
-                continue;
-            }
+            let model_visible = crate::tool_is_model_visible(&tool_info);
             let Some(client) = clients.client(&tool_info.server_name) else {
-                tools.push(tool_info);
+                if model_visible {
+                    tools.push(tool_info);
+                }
                 continue;
             };
             let Some(call) = self.prepare_call(&tool_info, client, Arc::clone(&config), *revision)
@@ -311,7 +311,9 @@ impl McpConnectionSet {
                 ),
                 call,
             );
-            tools.push(tool_info);
+            if model_visible {
+                tools.push(tool_info);
+            }
         }
         McpBinding::new(
             Arc::clone(self),
@@ -321,6 +323,82 @@ impl McpConnectionSet {
             tools,
             calls,
         )
+    }
+
+    /// Captures an exact live client and filtered tool without starting or reconnecting a server.
+    ///
+    /// The prepared call retains the current catalog revision so subsequent execution cannot
+    /// silently drift to a different connection, tool catalog, or managed configuration.
+    pub(crate) async fn prepare_connected_call(
+        self: &Arc<Self>,
+        config: Arc<crate::McpConfig>,
+        server: &str,
+        tool: &str,
+    ) -> Option<PreparedMcpCall> {
+        // Only consider servers and tools allowed by the current configuration.
+        let view = self.servers.get(server)?;
+        if !view.tool_filter.allows(tool) {
+            return None;
+        }
+
+        // Reuse an existing connection without starting or reconnecting the server.
+        let mut client = view.connection.client.ready_client()?;
+        if client.client.is_closed().await {
+            return None;
+        }
+        client.tool_timeout = view.tool_timeout;
+
+        // Snapshot the revision before reading tools so concurrent refreshes invalidate the call.
+        let revision = *self.tool_catalog_revision.read().await;
+
+        // Codex Apps catalogs can refresh independently of their MCP connection.
+        let server_tools = if server == CODEX_APPS_MCP_SERVER_NAME {
+            self.codex_apps_tools_override
+                .read()
+                .await
+                .clone()
+                .unwrap_or_else(|| client.tools.clone())
+        } else {
+            client.tools.clone()
+        };
+
+        // Filter and annotate tools using the same rules as the rest of the MCP runtime.
+        let server_tools = filter_tools(server_tools, &view.tool_filter);
+        let server_tools = if server == CODEX_APPS_MCP_SERVER_NAME {
+            prepare_codex_apps_tools_for_model(server_tools, &self.tool_plugin_provenance)
+        } else {
+            crate::rmcp_client::prepare_regular_mcp_tools_for_model(
+                server_tools,
+                &self.tool_plugin_provenance,
+            )
+        };
+
+        // Look up the requested tool and attach its server's policy metadata.
+        let tool_info = server_tools
+            .into_iter()
+            .find(|tool_info| tool_info.tool.name.as_ref() == tool)
+            .map(|tool_info| Self::with_server_metadata(tool_info, &view.metadata))?;
+
+        // Reject tools from connectors that an administrator disabled in managed requirements.
+        if server == CODEX_APPS_MCP_SERVER_NAME
+            && tool_info
+                .connector_id
+                .as_deref()
+                .and_then(|connector_id| {
+                    config
+                        .config_layer_stack
+                        .requirements_toml()
+                        .apps
+                        .as_ref()?
+                        .apps
+                        .get(connector_id)
+                })
+                .is_some_and(|requirements| requirements.enabled == Some(false))
+        {
+            return None;
+        }
+
+        self.prepare_call(&tool_info, Arc::new(client), config, revision)
     }
 
     fn prepare_call(
