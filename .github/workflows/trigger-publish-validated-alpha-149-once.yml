@@ -1,4 +1,5 @@
 name: trigger-publish-validated-alpha-149-once
+# Follow-up push triggers this workflow after it exists on protected main.
 
 on:
   push:
