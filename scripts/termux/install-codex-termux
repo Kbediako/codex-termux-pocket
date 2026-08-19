@@ -2,7 +2,7 @@
 set -euo pipefail
 
 FORK_URL="${CODEX_TERMUX_FORK_URL:-https://github.com/Kbediako/codex-termux-pocket.git}"
-INSTALL_DIR="${CODEX_SRC_DIR:-$HOME/.local/share/codex-termux-pocket/repo}"
+INSTALL_DIR="${CODEX_TERMUX_CHECKOUT_DIR:-$HOME/.local/share/codex-termux-pocket/repo}"
 helper_temporary=""
 
 cleanup() {
@@ -62,7 +62,7 @@ command -v node >/dev/null 2>&1 \
   || bootstrap_die 'Node.js was installed but node is not on PATH; restart Termux and rerun the installer.'
 
 if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
-  bootstrap_die "$INSTALL_DIR exists but is not a Git checkout; move it or set CODEX_SRC_DIR to an unused path."
+  bootstrap_die "$INSTALL_DIR exists but is not a Git checkout; move it or set CODEX_TERMUX_CHECKOUT_DIR to an unused path."
 fi
 
 mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -72,10 +72,10 @@ if [[ ! -d "$INSTALL_DIR/.git" ]]; then
 fi
 
 if [[ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]]; then
-  bootstrap_die "$INSTALL_DIR has local changes; they were left untouched. Commit/stash them or use a separate CODEX_SRC_DIR."
+  bootstrap_die "$INSTALL_DIR has local changes; they were left untouched. Commit/stash them or use a separate CODEX_TERMUX_CHECKOUT_DIR."
 fi
 if [[ "$(git -C "$INSTALL_DIR" branch --show-current)" != "main" ]]; then
-  bootstrap_die "$INSTALL_DIR is not on main; it was left untouched. Use a separate CODEX_SRC_DIR for installation."
+  bootstrap_die "$INSTALL_DIR is not on main; it was left untouched. Use a separate CODEX_TERMUX_CHECKOUT_DIR for installation."
 fi
 
 bootstrap_configure_remotes "$INSTALL_DIR"
@@ -111,7 +111,7 @@ for helper in "${helpers[@]}"; do
     if ! awk -v install_dir_shell="$install_dir_shell" '
       BEGIN { replacements = 0 }
       /^CODEX_SRC_DIR="\$\{CODEX_SRC_DIR:-\$HOME\/codex\}"$/ {
-        print "CODEX_SRC_DIR=${CODEX_SRC_DIR:-" install_dir_shell "}"
+        print "CODEX_SRC_DIR=\"${CODEX_TERMUX_CHECKOUT_DIR:-" install_dir_shell "}\""
         replacements++
         next
       }
@@ -141,7 +141,7 @@ if [[ -z "$(termux_metadata_value "$helper_dir/release-manifest.env" release_tag
   pkg install -y gh
 fi
 
-CODEX_SRC_DIR="$INSTALL_DIR" "$helper_dir/codex-update-alpha" update
+CODEX_TERMUX_CHECKOUT_DIR="$INSTALL_DIR" "$helper_dir/codex-update-alpha" update
 "$helper_dir/smoke-test-artifact" --installed
 
 cat <<'SUMMARY'
