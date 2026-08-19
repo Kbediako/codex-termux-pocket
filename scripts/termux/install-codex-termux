@@ -79,7 +79,7 @@ if [[ "$(git -C "$INSTALL_DIR" branch --show-current)" != "main" ]]; then
 fi
 
 bootstrap_configure_remotes "$INSTALL_DIR"
-git -C "$INSTAL_DIR" fetch --prune origin main
+git -C "$INSTALL_DIR" fetch --prune origin main
 if ! git -C "$INSTALL_DIR" merge-base --is-ancestor HEAD origin/main; then
   bootstrap_die 'local main has diverged from origin/main; refusing to rewrite it. No files were reset.'
 fi
@@ -100,7 +100,8 @@ helpers=(
   smoke-test-artifact
   codex-cargo-check
   termux-mobile-lib.sh
-  release-manifest.env)
+  release-manifest.env
+)
 install_dir_shell="$(printf '%q' "$INSTALL_DIR")"
 for helper in "${helpers[@]}"; do
   source_path="$INSTALL_DIR/scripts/termux/$helper"
@@ -109,7 +110,7 @@ for helper in "${helpers[@]}"; do
   if [[ "$helper" == "codex-update-alpha" ]]; then
     if ! awk -v install_dir_shell="$install_dir_shell" '
       BEGIN { replacements = 0 }
-      /^CODEX_SRC_DIR="\$\;CODEX_SRC_DIR:-\$HOME\/codex\}"$/ {
+      /^CODEX_SRC_DIR="\$\{CODEX_SRC_DIR:-\$HOME\/codex\}"$/ {
         print "CODEX_SRC_DIR=${CODEX_SRC_DIR:-" install_dir_shell "}"
         replacements++
         next
