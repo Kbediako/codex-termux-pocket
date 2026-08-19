@@ -1,4 +1,5 @@
 name: finish-issue-44-hardening-once
+# This second commit intentionally triggers the one-time workflow after it exists on main.
 
 on:
   push:
