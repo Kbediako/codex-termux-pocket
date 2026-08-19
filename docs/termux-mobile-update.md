@@ -10,8 +10,9 @@ the known-broken Android/V8 source build.
 including Node.js for bundled plugin MCP servers, clones or fast-forwards the
 managed helper checkout at `~/.local/share/codex-termux-pocket/repo`, copies the
 helpers to `$PREFIX/bin`, installs the maintained runtime, and runs an
-end-to-end smoke test. Your own `~/codex` working tree is never used unless you
-explicitly set `CODEX_SRC_DIR` to that path.
+end-to-end smoke test. Your own `~/codex` working tree is never used. Set
+`CODEX_TERMUX_CHECKOUT_DIR` only to choose a different dedicated helper
+checkout.
 
 Its Git remotes have deliberately separate roles:
 
@@ -159,7 +160,7 @@ paths with `proot`, exports the Termux CA variables, and uses
 - A checksum, commit, version, target, sidecar, or executable failure is fatal.
   Do not bypass it or install files manually.
 - A dirty or divergent managed checkout is never stashed or reset. Set
-  `CODEX_SRC_DIR` only when intentionally choosing a different dedicated helper
-  checkout.
+  `CODEX_TERMUX_CHECKOUT_DIR` only when intentionally choosing a different
+  dedicated helper checkout.
 - No phone fallback runs Cargo. Maintainer source maintenance is described in
   [Termux Maintainer Guide](./termux-maintainer.md).
