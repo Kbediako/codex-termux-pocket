@@ -129,6 +129,71 @@ jobs:
             echo "- Tag: ${release_tag}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Require exact Termux control-plane validation
+        id: control_plane_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow="termux-control-plane.yml"
+
+          latest_exact_run() {
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+              --jq ".workflow_runs
+                | map(select(.head_sha == \"${SOURCE_SHA}\"))
+                | first // {}
+                | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
+                | @tsv"
+          }
+
+          run_state="$(latest_exact_run)"
+          IFS=$'\t' read -r run_id status conclusion <<<"$run_state"
+          if [[ -z "$run_id" ]]; then
+            echo "Dispatching ${workflow} for exact source ${SOURCE_SHA}"
+            gh workflow run "$workflow" \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref main
+          fi
+
+          run_id=""
+          for _ in $(seq 1 160); do
+            run_state="$(latest_exact_run)"
+            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
+            if [[ -n "$candidate_id" ]]; then
+              run_id="$candidate_id"
+              case "$status" in
+                completed)
+                  [[ "$conclusion" == "success" ]] || {
+                    echo "::error::Termux control-plane run ${run_id} concluded ${conclusion}"
+                    exit 1
+                  }
+                  break
+                  ;;
+                queued|in_progress|pending|requested|waiting)
+                  ;;
+                *)
+                  echo "::warning::Termux control-plane run ${run_id} has status ${status:-unknown}"
+                  ;;
+              esac
+            fi
+            sleep 15
+          done
+
+          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
+            echo "::error::No successful exact Termux control-plane run completed for ${SOURCE_SHA}"
+            exit 1
+          }
+          resolved_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"
+          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::Control-plane run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
+            exit 1
+          }
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "Validated Termux control-plane run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Ensure exact workflow-head aarch64 artifact
         id: artifact_run
         env:
@@ -408,7 +473,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "Codex Termux ${CODEX_VERSION}" \
-              --notes "Verified complete Termux runtime for ${HEAD_SHA}. Native Android/Termux emulator validation passed before publication." \
+              --notes "Verified complete Termux runtime for ${HEAD_SHA}. Native Android/Termux emulator validation and exact-source Termux control-plane validation passed before publication." \
               --latest=false \
               "${release_files[@]/#/dist/}"
           fi
