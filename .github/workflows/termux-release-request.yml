@@ -1,31 +1,33 @@
 name: termux-release-request
-run-name: Publish Termux runtime from ${{ github.sha }}
+run-name: Publish validated Termux runtime from ${{ github.sha }}
 
+# Publication is driven by an explicit exact-source request. Runtime source,
+# validation runs, release identity, and the workflow-control commit are kept
+# separate so harmless descendants of the validated source cannot invalidate it.
 on:
   push:
     branches:
       - main
     paths:
-      - "scripts/termux/release-request.env"
-      - ".github/workflows/termux-release-request.yml"
+      - "scripts/termux/release-publication.env"
   workflow_dispatch:
 
-concurrency:
-  group: termux-release-request-${{ github.ref_name }}
-  cancel-in-progress: false
-
 permissions:
-  actions: write
+  actions: read
   contents: write
   id-token: write
   attestations: write
   artifact-metadata: write
 
+concurrency:
+  group: termux-release-request
+  cancel-in-progress: false
+
 jobs:
   publish-validated-runtime:
-    name: Publish and promote validated Termux runtime
+    name: Publish complete immutable release as Latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 60
 
     steps:
       - name: Checkout release controls
@@ -35,12 +37,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate release request and workflow-head source
+      - name: Validate explicit release request
         id: request
         shell: bash
         run: |
           set -euo pipefail
-          request_file="scripts/termux/release-request.env"
+          request_file="scripts/termux/release-publication.env"
 
           read_value() {
             local key="$1"
@@ -55,7 +57,7 @@ jobs:
 
           invalid_lines="$(
             grep -Env \
-              '^(format_version|source_mode|release_tag_prefix|expected_package_version)=[^[:space:]].*$|^[[:space:]]*(#.*)?$' \
+              '^(format_version|source_sha|release_tag|expected_package_version|expected_codex_version|control_run_id|artifact_run_id|android_run_id)=[^[:space:]].*$|^[[:space:]]*(#.*)?$' \
               "$request_file" || true
           )"
           if [[ -n "$invalid_lines" ]]; then
@@ -65,37 +67,34 @@ jobs:
           fi
 
           format_version="$(read_value format_version)"
-          source_mode="$(read_value source_mode)"
-          release_tag_prefix="$(read_value release_tag_prefix)"
+          source_sha="$(read_value source_sha)"
+          release_tag="$(read_value release_tag)"
           expected_package_version="$(read_value expected_package_version)"
+          expected_codex_version="$(read_value expected_codex_version)"
+          control_run_id="$(read_value control_run_id)"
+          artifact_run_id="$(read_value artifact_run_id)"
+          android_run_id="$(read_value android_run_id)"
 
-          [[ "$format_version" == "3" ]] || {
-            echo "::error file=${request_file}::Unsupported format_version=${format_version}"
-            exit 1
-          }
-          [[ "$source_mode" == "workflow-head" ]] || {
-            echo "::error file=${request_file}::source_mode must be workflow-head"
-            exit 1
-          }
-          [[ "$release_tag_prefix" =~ ^termux-v[0-9A-Za-z._-]+$ ]] || {
-            echo "::error file=${request_file}::release_tag_prefix must match termux-v..."
-            exit 1
-          }
-          [[ "$expected_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]] || {
-            echo "::error file=${request_file}::Unexpected expected_package_version format"
-            exit 1
-          }
-          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
-            echo "::error::Termux releases must run from refs/heads/main, not ${GITHUB_REF}"
-            exit 1
-          }
+          [[ "$format_version" == "1" ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
+          [[ "$release_tag" == *"-${source_sha:0:10}" ]]
+          [[ "$expected_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          [[ "$expected_codex_version" == "codex-cli ${source_sha:0:7}" ]]
+          [[ "$control_run_id" =~ ^[0-9]+$ ]]
+          [[ "$artifact_run_id" =~ ^[0-9]+$ ]]
+          [[ "$android_run_id" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
 
-          source_sha="$GITHUB_SHA"
-          [[ "$(git rev-parse HEAD)" == "$source_sha" ]]
+          git fetch --no-tags origin main
           git cat-file -e "${source_sha}^{commit}"
+          git merge-base --is-ancestor "$source_sha" origin/main || {
+            echo "::error::Validated source ${source_sha} is not an ancestor of protected main"
+            exit 1
+          }
 
           package_version="$(
-            awk '
+            git show "${source_sha}:codex-rs/Cargo.toml" | awk '
               /^\[workspace\.package\]$/ { in_package=1; next }
               /^\[/ && in_package { exit }
               in_package && /^version[[:space:]]*=/ {
@@ -105,241 +104,101 @@ jobs:
                 print value
                 exit
               }
-            ' codex-rs/Cargo.toml
+            '
           )"
           [[ "$package_version" == "$expected_package_version" ]] || {
-            echo "::error file=codex-rs/Cargo.toml::Workflow-head package version ${package_version:-missing} does not match ${expected_package_version}"
+            echo "::error::Source package version ${package_version:-missing} does not match ${expected_package_version}"
             exit 1
           }
 
-          expected_codex_version="codex-cli ${source_sha:0:7}"
-          release_tag="${release_tag_prefix}-${source_sha:0:10}"
-
-          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "expected_package_version=${expected_package_version}" >> "$GITHUB_OUTPUT"
-          echo "expected_codex_version=${expected_codex_version}" >> "$GITHUB_OUTPUT"
           {
-            echo "### Requested Termux release"
+            echo "source_sha=${source_sha}"
+            echo "release_tag=${release_tag}"
+            echo "expected_package_version=${expected_package_version}"
+            echo "expected_codex_version=${expected_codex_version}"
+            echo "control_run_id=${control_run_id}"
+            echo "artifact_run_id=${artifact_run_id}"
+            echo "android_run_id=${android_run_id}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Exact-source release request"
             echo
-            echo "- Runtime commit: ${source_sha}"
-            echo "- Source mode: ${source_mode}"
-            echo "- Package version: ${expected_package_version}"
-            echo "- Binary version: ${expected_codex_version}"
-            echo "- Tag: ${release_tag}"
+            echo "- Source: \`${source_sha}\`"
+            echo "- Package: \`${expected_package_version}\`"
+            echo "- Binary: \`${expected_codex_version}\`"
+            echo "- Tag: \`${release_tag}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Require exact Termux control-plane validation
-        id: control_plane_run
+      - name: Verify exact successful validation runs
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          CONTROL_RUN_ID: ${{ steps.request.outputs.control_run_id }}
+          ARTIFACT_RUN_ID: ${{ steps.request.outputs.artifact_run_id }}
+          ANDROID_RUN_ID: ${{ steps.request.outputs.android_run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          workflow="termux-control-plane.yml"
 
-          latest_exact_run() {
-            gh api \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
-              --jq ".workflow_runs
-                | map(select(.head_sha == \"${SOURCE_SHA}\"))
-                | first // {}
-                | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
-                | @tsv"
+          verify_run() {
+            local run_id="$1"
+            local expected_path="$2"
+            local label="$3"
+            local run_json
+            run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+            [[ "$(jq -r .head_sha <<<"$run_json")" == "$SOURCE_SHA" ]] || {
+              echo "::error::${label} run ${run_id} used a different source"
+              exit 1
+            }
+            [[ "$(jq -r .path <<<"$run_json")" == "$expected_path" ]] || {
+              echo "::error::${label} run ${run_id} used an unexpected workflow"
+              exit 1
+            }
+            [[ "$(jq -r .status <<<"$run_json")" == "completed" ]]
+            [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]] || {
+              echo "::error::${label} run ${run_id} is not successful"
+              exit 1
+            }
           }
 
-          run_state="$(latest_exact_run)"
-          IFS=$'\t' read -r run_id status conclusion <<<"$run_state"
-          if [[ -z "$run_id" ]]; then
-            echo "Dispatching ${workflow} for exact source ${SOURCE_SHA}"
-            gh workflow run "$workflow" \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref main
-          fi
+          verify_run "$CONTROL_RUN_ID" ".github/workflows/termux-control-plane.yml" "Termux control-plane"
+          verify_run "$ARTIFACT_RUN_ID" ".github/workflows/termux-mobile-artifact.yml" "ARM64 artifact"
+          verify_run "$ANDROID_RUN_ID" ".github/workflows/termux-android-emulator.yml" "Android/Termux"
 
-          run_id=""
-          for _ in $(seq 1 160); do
-            run_state="$(latest_exact_run)"
-            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
-            if [[ -n "$candidate_id" ]]; then
-              run_id="$candidate_id"
-              case "$status" in
-                completed)
-                  [[ "$conclusion" == "success" ]] || {
-                    echo "::error::Termux control-plane run ${run_id} concluded ${conclusion}"
-                    exit 1
-                  }
-                  break
-                  ;;
-                queued|in_progress|pending|requested|waiting)
-                  ;;
-                *)
-                  echo "::warning::Termux control-plane run ${run_id} has status ${status:-unknown}"
-                  ;;
-              esac
-            fi
-            sleep 15
-          done
-
-          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
-            echo "::error::No successful exact Termux control-plane run completed for ${SOURCE_SHA}"
-            exit 1
-          }
-          resolved_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"
-          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
-            echo "::error::Control-plane run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
-            exit 1
-          }
-          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
-          echo "Validated Termux control-plane run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Ensure exact workflow-head aarch64 artifact
-        id: artifact_run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          workflow="termux-mobile-artifact.yml"
-
-          latest_exact_run() {
-            gh api \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
-              --jq ".workflow_runs
-                | map(select(.head_sha == \"${SOURCE_SHA}\"))
-                | first // {}
-                | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
-                | @tsv"
-          }
-
-          run_state="$(latest_exact_run)"
-          IFS=$'\t' read -r run_id status conclusion <<<"$run_state"
-
-          if [[ -z "$run_id" ]]; then
-            echo "Dispatching ${workflow} for exact source ${SOURCE_SHA}"
-            gh workflow run "$workflow" \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref main \
-              -f source_ref="$SOURCE_SHA"
-          fi
-
-          run_id=""
-          for _ in $(seq 1 480); do
-            run_state="$(latest_exact_run)"
-            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
-            if [[ -n "$candidate_id" ]]; then
-              run_id="$candidate_id"
-              case "$status" in
-                completed)
-                  [[ "$conclusion" == "success" ]] || {
-                    echo "::error::Exact aarch64 artifact run ${run_id} concluded ${conclusion}"
-                    exit 1
-                  }
-                  break
-                  ;;
-                queued|in_progress|pending|requested|waiting)
-                  ;;
-                *)
-                  echo "::warning::Exact aarch64 artifact run ${run_id} has status ${status:-unknown}"
-                  ;;
-              esac
-            fi
-            sleep 15
-          done
-
-          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
-            echo "::error::No successful exact aarch64 artifact run completed for ${SOURCE_SHA}"
-            exit 1
-          }
-
-          resolved_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha
+          artifact_json="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}/artifacts?per_page=100"
           )"
-          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
-            echo "::error::Artifact run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
-            exit 1
-          }
-
-          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
-          echo "Validated aarch64 artifact run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Wait for exact native Android/Termux validation
-        id: android_run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          workflow="termux-android-emulator.yml"
-          run_id=""
-
-          for _ in $(seq 1 360); do
-            run_state="$(
-              gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?event=push&branch=main&per_page=100" \
-                --jq ".workflow_runs
-                  | map(select(.head_sha == \"${SOURCE_SHA}\"))
-                  | first // {}
-                  | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
-                  | @tsv"
-            )"
-            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
-            if [[ -n "$candidate_id" ]]; then
-              run_id="$candidate_id"
-              case "$status" in
-                completed)
-                  [[ "$conclusion" == "success" ]] || {
-                    echo "::error::Android/Termux validation run ${run_id} concluded ${conclusion}"
-                    exit 1
-                  }
-                  break
-                  ;;
-                queued|in_progress|pending|requested|waiting)
-                  ;;
-              esac
-            fi
-            sleep 20
-          done
-
-          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
-            echo "::error::No successful Android/Termux validation completed for ${SOURCE_SHA}"
-            exit 1
-          }
-
-          resolved_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha
+          artifact_count="$(
+            jq --arg name codex-termux-aarch64-unknown-linux-musl \
+              '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+              <<<"$artifact_json"
           )"
-          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
-            echo "::error::Android run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
+          [[ "$artifact_count" == "1" ]] || {
+            echo "::error::Expected one unexpired exact ARM64 artifact, found ${artifact_count}"
             exit 1
           }
 
-          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
-          echo "Validated Android/Termux run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Download validated aarch64 artifact
+      - name: Download exact validated ARM64 artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ steps.artifact_run.outputs.run_id }}
+          ARTIFACT_RUN_ID: ${{ steps.request.outputs.artifact_run_id }}
         shell: bash
         run: |
           set -euo pipefail
           rm -rf dist
           mkdir -p dist
-          gh run download "$RUN_ID" \
+          gh run download "$ARTIFACT_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name codex-termux-aarch64-unknown-linux-musl \
             --dir dist
 
-      - name: Revalidate artifact and generate immutable release manifest
+      - name: Revalidate artifact and create final release manifest
         id: manifest
         env:
-          EXPECTED_CODEX_VERSION: ${{ steps.request.outputs.expected_codex_version }}
-          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
           SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+          EXPECTED_CODEX_VERSION: ${{ steps.request.outputs.expected_codex_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -351,10 +210,14 @@ jobs:
             codex-termux-sbom.spdx.json
           )
           for file in "${required_files[@]}"; do
-            [[ -f "$file" ]] || { echo "::error::Missing artifact file: $file"; exit 1; }
+            [[ -f "$file" && ! -L "$file" ]] || {
+              echo "::error::Missing or unsafe artifact file: ${file}"
+              exit 1
+            }
           done
           sha256sum --check --strict SHA256SUMS
-          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' codex-termux-sbom.spdx.json
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            codex-termux-sbom.spdx.json
 
           metadata_value() {
             local key="$1"
@@ -375,21 +238,11 @@ jobs:
           runtime_size_bytes="$(metadata_value runtime_size_bytes)"
 
           [[ "$metadata_format" == "2" ]]
-          [[ "$head_sha" == "$SOURCE_SHA" ]] || {
-            echo "::error::Artifact commit ${head_sha} does not match requested commit ${SOURCE_SHA}"
-            exit 1
-          }
-          [[ "$head_sha" == "$GITHUB_SHA" ]] || {
-            echo "::error::Release target ${head_sha} must equal workflow head ${GITHUB_SHA}"
-            exit 1
-          }
-          [[ "$codex_version" == "$EXPECTED_CODEX_VERSION" ]] || {
-            echo "::error::Artifact binary version ${codex_version} does not match ${EXPECTED_CODEX_VERSION}"
-            exit 1
-          }
+          [[ "$head_sha" == "$SOURCE_SHA" ]]
+          [[ "$codex_version" == "$EXPECTED_CODEX_VERSION" ]]
           [[ "$target" == "aarch64-unknown-linux-musl" ]]
-          [[ "$archive_size_bytes" =~ ^[0-9]+$ ]]
-          [[ "$runtime_size_bytes" =~ ^[0-9]+$ ]]
+          [[ "$archive_size_bytes" =~ ^[0-9]+$ && "$archive_size_bytes" -gt 0 ]]
+          [[ "$runtime_size_bytes" =~ ^[0-9]+$ && "$runtime_size_bytes" -gt 0 ]]
           [[ "$archive_size_bytes" == "$(stat -c '%s' codex-termux-aarch64-unknown-linux-musl.tar.gz)" ]]
 
           archive_sha256="$(sha256sum codex-termux-aarch64-unknown-linux-musl.tar.gz | awk '{print $1}')"
@@ -404,11 +257,13 @@ jobs:
             "runtime_size_bytes=${runtime_size_bytes}" \
             > release-manifest.env
 
-          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
-          echo "codex_version=${codex_version}" >> "$GITHUB_OUTPUT"
-          echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
+          {
+            echo "archive_sha256=${archive_sha256}"
+            echo "archive_size_bytes=${archive_size_bytes}"
+            echo "runtime_size_bytes=${runtime_size_bytes}"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Attest Termux runtime build provenance
+      - name: Attest final publication set
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
@@ -418,32 +273,79 @@ jobs:
             dist/codex-termux-sbom.spdx.json
             dist/release-manifest.env
 
-      - name: Attest Termux runtime SPDX SBOM
+      - name: Attest final SPDX SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/codex-termux-aarch64-unknown-linux-musl.tar.gz
           sbom-path: dist/codex-termux-sbom.spdx.json
 
-      - name: Publish immutable-by-contract public release
+      - name: Stage complete draft and publish it as Latest once
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
           RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
-          HEAD_SHA: ${{ steps.manifest.outputs.head_sha }}
-          CODEX_VERSION: ${{ steps.manifest.outputs.codex_version }}
+          PACKAGE_VERSION: ${{ steps.request.outputs.expected_package_version }}
+          CODEX_VERSION: ${{ steps.request.outputs.expected_codex_version }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$HEAD_SHA" == "$GITHUB_SHA" ]] || {
-            echo "::error::Refusing to create a release for non-workflow-head commit ${HEAD_SHA}"
-            exit 1
-          }
-          main_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha
+
+          existing_release="$(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -sc --arg tag "$RELEASE_TAG" \
+                  '[.[] | .[] | select(.tag_name == $tag)] | first // empty'
           )"
-          [[ "$main_sha" == "$GITHUB_SHA" ]] || {
-            echo "::error::main advanced to ${main_sha}; refusing to publish stale workflow head ${GITHUB_SHA}"
+          if [[ -n "$existing_release" ]]; then
+            existing_id="$(jq -r .id <<<"$existing_release")"
+            existing_draft="$(jq -r .draft <<<"$existing_release")"
+            existing_target="$(jq -r .target_commitish <<<"$existing_release")"
+            if [[ "$existing_draft" == "true" && "$existing_target" == "$SOURCE_SHA" ]]; then
+              echo "Removing an abandoned draft for the exact requested source."
+              gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/releases/${existing_id}" >/dev/null
+            else
+              echo "::error::Release ${RELEASE_TAG} already exists and will not be modified"
+              exit 1
+            fi
+          fi
+
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Protected tag ${RELEASE_TAG} already exists; refusing to move or delete it"
             exit 1
-          }
+          fi
+
+          notes="$(cat <<EOF
+          Verified complete Termux runtime for OpenAI Codex CLI ${PACKAGE_VERSION}.
+
+          Exact-source Termux control-plane, production ARM64 artifact, and native Android/Termux emulator validation all completed successfully before publication.
+
+          Runtime source: ${SOURCE_SHA}
+          Binary identity: ${CODEX_VERSION}
+          EOF
+          )"
+          jq -n \
+            --arg tag_name "$RELEASE_TAG" \
+            --arg target_commitish "$SOURCE_SHA" \
+            --arg name "Codex Termux ${PACKAGE_VERSION} (${CODEX_VERSION})" \
+            --arg body "$notes" \
+            '{
+              tag_name: $tag_name,
+              target_commitish: $target_commitish,
+              name: $name,
+              body: $body,
+              draft: true,
+              prerelease: false
+            }' > "$RUNNER_TEMP/create-release.json"
+
+          release_json="$(
+            gh api --method POST "/repos/${GITHUB_REPOSITORY}/releases" \
+              --input "$RUNNER_TEMP/create-release.json"
+          )"
+          release_id="$(jq -r .id <<<"$release_json")"
+          upload_url="$(jq -r .upload_url <<<"$release_json")"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
+          upload_url="${upload_url%%\{*}"
 
           release_files=(
             codex-termux-aarch64-unknown-linux-musl.tar.gz
@@ -452,33 +354,55 @@ jobs:
             codex-termux-sbom.spdx.json
             release-manifest.env
           )
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            existing_dir="$(mktemp -d)"
-            gh release download "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --dir "$existing_dir"
-            for file in "${release_files[@]}"; do
-              [[ -f "$existing_dir/$file" ]] || {
-                echo "::error::Existing release ${RELEASE_TAG} is missing ${file}"
-                exit 1
-              }
-              cmp --silent "dist/$file" "$existing_dir/$file" || {
-                echo "::error::Existing release ${RELEASE_TAG} has mismatched immutable asset ${file}"
-                exit 1
-              }
-            done
-            echo "Release ${RELEASE_TAG} already exists with byte-identical assets." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "Codex Termux ${CODEX_VERSION}" \
-              --notes "Verified complete Termux runtime for ${HEAD_SHA}. Native Android/Termux emulator validation and exact-source Termux control-plane validation passed before publication." \
-              --latest=false \
-              "${release_files[@]/#/dist/}"
-          fi
+          for file in "${release_files[@]}"; do
+            encoded_name="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$file")"
+            gh api --method POST "${upload_url}?name=${encoded_name}" \
+              --header 'Content-Type: application/octet-stream' \
+              --input "dist/${file}" >/dev/null
+          done
 
-      - name: Verify anonymous public release downloads
+          draft_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
+          [[ "$(jq -r .draft <<<"$draft_json")" == "true" ]]
+          expected_assets="$(printf '%s\n' "${release_files[@]}" | LC_ALL=C sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"$draft_json" | LC_ALL=C sort)"
+          [[ "$actual_assets" == "$expected_assets" ]] || {
+            echo "::error::Draft release assets are incomplete"
+            diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          }
+          for file in "${release_files[@]}"; do
+            local_size="$(stat -c '%s' "dist/${file}")"
+            remote_size="$(jq -r --arg name "$file" '.assets[] | select(.name == $name) | .size' <<<"$draft_json")"
+            [[ "$local_size" == "$remote_size" ]] || {
+              echo "::error::Uploaded asset size mismatch for ${file}"
+              exit 1
+            }
+          done
+
+          # This is the only release update. The release is still a draft here,
+          # so the transaction simultaneously publishes the complete asset set
+          # and designates it as GitHub Latest. No published release is patched.
+          jq -n '{draft:false, prerelease:false, make_latest:"true"}' \
+            > "$RUNNER_TEMP/publish-release.json"
+          published_json="$(
+            gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --input "$RUNNER_TEMP/publish-release.json"
+          )"
+          [[ "$(jq -r .draft <<<"$published_json")" == "false" ]]
+          [[ "$(jq -r .prerelease <<<"$published_json")" == "false" ]]
+          [[ "$(jq -r .tag_name <<<"$published_json")" == "$RELEASE_TAG" ]]
+          [[ "$(jq -r .target_commitish <<<"$published_json")" == "$SOURCE_SHA" ]]
+
+          latest_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          [[ "$latest_tag" == "$RELEASE_TAG" ]] || {
+            echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${RELEASE_TAG}"
+            exit 1
+          }
+
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "html_url=$(jq -r .html_url <<<"$published_json")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify anonymous public downloads byte-for-byte
         env:
           RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
         shell: bash
@@ -486,25 +410,35 @@ jobs:
           set -euo pipefail
           public_dir="$(mktemp -d)"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
-          for file in \
-            codex-termux-aarch64-unknown-linux-musl.tar.gz \
-            metadata.env \
-            SHA256SUMS \
-            codex-termux-sbom.spdx.json \
-            release-manifest.env; do
-            curl --fail --location --silent --show-error --retry 5 \
+          release_files=(
+            codex-termux-aarch64-unknown-linux-musl.tar.gz
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+            release-manifest.env
+          )
+          for file in "${release_files[@]}"; do
+            curl --fail --location --silent --show-error --retry 8 \
               "${base}/${file}" -o "${public_dir}/${file}"
-            cmp --silent "dist/${file}" "${public_dir}/${file}"
+            cmp --silent "dist/${file}" "${public_dir}/${file}" || {
+              echo "::error::Anonymous download differs for ${file}"
+              exit 1
+            }
           done
           (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            "$public_dir/codex-termux-sbom.spdx.json"
 
-      - name: Promote release manifest on main
+      - name: Promote verified release manifest on protected main
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
+          latest_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          [[ "$latest_tag" == "$RELEASE_TAG" ]]
+
           manifest_response="$(
             gh api "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env?ref=main"
           )"
@@ -512,9 +446,10 @@ jobs:
           current_manifest="$(mktemp)"
           jq -r .content <<<"$manifest_response" | tr -d '\n' | base64 --decode > "$current_manifest"
           if cmp --silent dist/release-manifest.env "$current_manifest"; then
-            echo "Release manifest already promotes ${RELEASE_TAG}; no commit required." >> "$GITHUB_STEP_SUMMARY"
+            echo "Manifest already promotes ${RELEASE_TAG}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
           encoded_manifest="$(base64 -w0 dist/release-manifest.env)"
           gh api --method PUT \
             "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env" \
@@ -522,4 +457,21 @@ jobs:
             -f content="$encoded_manifest" \
             -f sha="$manifest_sha" \
             -f branch=main >/dev/null
-          echo "Promoted ${RELEASE_TAG} to scripts/termux/release-manifest.env" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "### Publication completed"
+            echo
+            echo "- Release: ${{ steps.release.outputs.html_url }}"
+            echo "- Latest tag: \`${RELEASE_TAG}\`"
+            echo "- Archive SHA-256: \`${{ steps.manifest.outputs.archive_sha256 }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove known stray test branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/__should_not_exist" >/dev/null 2>&1; then
+            gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/__should_not_exist" >/dev/null
+          fi

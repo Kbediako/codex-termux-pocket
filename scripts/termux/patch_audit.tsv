@@ -79,3 +79,30 @@ subject	termux: require control-plane release gate	security-critical	Requires an
 subject	chore: remove final issue 44 hardening workflow	tooling	Removes the temporary workflow after final repository hardening is committed.
 subject	ci: stage protected alpha update	tooling	One-time protected-branch workflow used to rebase the maintained Termux patch stack onto a newer OpenAI alpha.
 subject	termux: update to 0.149.0-alpha.1	runtime-critical	Rebases the maintained Android/Termux patch stack onto the verified OpenAI 0.149.0-alpha.1 source and refreshes release controls.
+subject	ci: resolve expected upstream workflow deletions	tooling	Protected-branch workflow maintenance only.
+subject	ci: set merged workspace alpha version explicitly	build-only	Sets the merged workspace package version needed for the alpha build.
+subject	termux: request validated 0.149.0-alpha.1 release	tooling	Exact-source release-control request only; runtime sources were already validated.
+subject	chore: close release follow-up and sync latest alpha	tooling	Release follow-up and repository-state maintenance only.
+subject	ci: harden one-time latest-alpha orchestration	tooling	One-time release-orchestration hardening only.
+subject	ci: independently recheck promoted alpha governance	tooling	Temporary governance verification orchestration only.
+subject	chore: remove post-alpha governance workflow	tooling	Removes temporary governance orchestration.
+subject	chore: clean temporary alpha orchestration	tooling	Cleans temporary workflow orchestration files.
+subject	chore: remove temporary alpha orchestration	tooling	Removes temporary workflow orchestration files.
+subject	ci: stage repository cleanup and alpha release	tooling	One-time repository cleanup and release staging only.
+subject	ci: stage repository cleanup and release repair	tooling	One-time repository cleanup and release repair staging only.
+subject	ci: add repository cleanup and release repair worker	tooling	Adds a one-time release repair helper only.
+subject	ci: stage repository cleanup and release repair workflow	tooling	One-time release-repair workflow staging only.
+subject	ci: run final repository cleanup and release repair	tooling	One-time release-repair trigger only.
+subject	ci: arm final repository cleanup and release repair	tooling	One-time release-repair trigger only.
+subject	Bump regex-lite from 0.1.8 to 0.1.9 in /codex-rs (#52)	runtime-critical	Updates a production runtime dependency in the maintained Codex workspace.
+subject	chore(deps): bump crossbeam-channel from 0.5.15 to 0.5.16 in /codex-rs (#51)	runtime-critical	Updates a production runtime dependency in the maintained Codex workspace.
+subject	ci: stage validated alpha.149 publication	tooling	One-time validated-release publication staging only.
+subject	ci: arm validated alpha.149 publisher	tooling	One-time validated-release publication trigger only.
+subject	ci: run validated alpha.149 publisher	tooling	One-time validated-release publication trigger only.
+subject	ci: focus release repair on validated alpha publication	tooling	One-time publication-repair orchestration only.
+subject	ci: run focused validated alpha release repair	tooling	One-time publication-repair trigger only.
+subject	ci: restage focused alpha release repair	tooling	One-time publication-repair restaging only.
+subject	ci: stage final alpha publication repair	tooling	One-time publication-repair staging only.
+subject	ci: stage deterministic alpha publication repair	tooling	One-time deterministic publication-repair staging only.
+subject	fix(termux): publish complete validated release as Latest	tooling	Repairs permanent release workflows and removes failed one-time orchestration.
+subject	termux: promote termux-v2026.08.19-alpha.1-329147e2fa	tooling	Promotes the verified public release manifest after publication.

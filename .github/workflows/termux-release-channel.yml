@@ -1,36 +1,30 @@
 name: termux-release-channel
-run-name: Promote validated Termux release channel
+run-name: Verify validated Termux release channel
 
-# A release is intentionally created as non-latest until all publication checks
-# pass. Once the gated release workflow completes, promote the repository
-# manifest's release to GitHub's Latest channel and run the public-channel audit.
+# The publisher makes the complete draft Latest in its one publication
+# transaction. This workflow is verification-only and never mutates a published
+# immutable release.
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/termux-release-channel.yml"
-  workflow_run:
-    workflows:
-      - termux-release-request
-    types:
-      - completed
+      - "scripts/termux/release-manifest.env"
   workflow_dispatch:
 
 permissions:
   actions: write
-  contents: write
+  contents: read
 
 concurrency:
   group: termux-release-channel
   cancel-in-progress: true
 
 jobs:
-  promote-latest:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    name: Mark promoted runtime as Latest
+  verify-latest:
+    name: Verify promoted runtime is Latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout promoted main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -38,7 +32,7 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Mark the promoted release as Latest
+      - name: Verify release identity, assets, and Latest channel
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -60,40 +54,76 @@ jobs:
           repository="$(read_value repository)"
           release_tag="$(read_value release_tag)"
           head_sha="$(read_value head_sha)"
+          codex_version="$(read_value codex_version)"
+          archive_sha256="$(read_value archive_sha256)"
+          archive_size_bytes="$(read_value archive_size_bytes)"
           [[ "$repository" == "$GITHUB_REPOSITORY" ]]
           [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$codex_version" == "codex-cli ${head_sha:0:7}" ]]
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$archive_size_bytes" =~ ^[0-9]+$ && "$archive_size_bytes" -gt 0 ]]
 
-          release_json="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
+          release_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
+          [[ "$(jq -r .target_commitish <<<"$release_json")" == "$head_sha" ]]
+          [[ "$(jq -r .draft <<<"$release_json")" == "false" ]]
+          [[ "$(jq -r .prerelease <<<"$release_json")" == "false" ]]
+
+          expected_assets="$(printf '%s\n' \
+            codex-termux-aarch64-unknown-linux-musl.tar.gz \
+            metadata.env \
+            SHA256SUMS \
+            codex-termux-sbom.spdx.json \
+            release-manifest.env | LC_ALL=C sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | LC_ALL=C sort)"
+          [[ "$actual_assets" == "$expected_assets" ]] || {
+            echo "::error::Published release assets are incomplete or unexpected"
+            exit 1
+          }
+
+          archive_json="$(
+            jq -c '.assets[] | select(.name == "codex-termux-aarch64-unknown-linux-musl.tar.gz")' \
+              <<<"$release_json"
           )"
-          release_id="$(jq -r .id <<<"$release_json")"
-          release_target="$(jq -r .target_commitish <<<"$release_json")"
-          draft="$(jq -r .draft <<<"$release_json")"
-          [[ "$release_id" =~ ^[0-9]+$ ]]
-          [[ "$release_target" == "$head_sha" ]]
-          [[ "$draft" == "false" ]]
+          [[ "$(jq -r .size <<<"$archive_json")" == "$archive_size_bytes" ]]
+          remote_digest="$(jq -r '.digest // empty' <<<"$archive_json")"
+          if [[ -n "$remote_digest" ]]; then
+            [[ "$remote_digest" == "sha256:${archive_sha256}" ]]
+          fi
 
-          gh api --method PATCH \
-            "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -f make_latest=true >/dev/null
-
-          latest_tag="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name
-          )"
+          latest_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
           [[ "$latest_tag" == "$release_tag" ]] || {
             echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${release_tag}"
             exit 1
           }
+
+          public_dir="$(mktemp -d)"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}"
+          for file in \
+            codex-termux-aarch64-unknown-linux-musl.tar.gz \
+            metadata.env \
+            SHA256SUMS \
+            codex-termux-sbom.spdx.json \
+            release-manifest.env; do
+            curl --fail --location --silent --show-error --retry 5 \
+              "${base}/${file}" -o "${public_dir}/${file}"
+          done
+          cmp --silent "$manifest" "$public_dir/release-manifest.env"
+          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
+          [[ "$(sha256sum "$public_dir/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            "$public_dir/codex-termux-sbom.spdx.json"
 
           {
             echo "### Termux release channel"
             echo
             echo "- Latest release: \`${release_tag}\`"
             echo "- Runtime commit: \`${head_sha}\`"
+            echo "- Binary: \`${codex_version}\`"
+            echo "- Archive SHA-256: \`${archive_sha256}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run post-promotion governance audit
+      - name: Dispatch post-verification governance audit
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
