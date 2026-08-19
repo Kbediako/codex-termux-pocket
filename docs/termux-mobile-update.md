@@ -7,9 +7,11 @@ the known-broken Android/V8 source build.
 ## What the installer configures
 
 `install-codex-termux` is safe to rerun. It installs required Termux packages,
-including Node.js for bundled plugin MCP servers, clones or fast-forwards
-`~/codex`, copies the helpers to `$PREFIX/bin`, installs the maintained runtime,
-and runs an end-to-end smoke test.
+including Node.js for bundled plugin MCP servers, clones or fast-forwards the
+managed helper checkout at `~/.local/share/codex-termux-pocket/repo`, copies the
+helpers to `$PREFIX/bin`, installs the maintained runtime, and runs an
+end-to-end smoke test. Your own `~/codex` working tree is never used unless you
+explicitly set `CODEX_SRC_DIR` to that path.
 
 Its Git remotes have deliberately separate roles:
 
@@ -17,17 +19,19 @@ Its Git remotes have deliberately separate roles:
 - `upstream` is `https://github.com/openai/codex.git`, supplies OpenAI tags, and
   has a disabled push URL.
 
-An existing checkout is updated only when it is clean, on `main`, and can
+The managed checkout is updated only when it is clean, on `main`, and can
 fast-forward. Anything dirty, divergent, or unrelated is left untouched with
 an actionable error.
 
 ## Artifact trust and layout
 
-The maintained release provides three files:
+The maintained release provides five files:
 
 - `codex-termux-aarch64-unknown-linux-musl.tar.gz`
 - `metadata.env`
 - `SHA256SUMS`
+- `codex-termux-sbom.spdx.json`
+- `release-manifest.env`
 
 The committed `scripts/termux/release-manifest.env` pins its release tag, exact
 source commit, reported Codex version, and archive SHA-256. The installer checks
@@ -60,7 +64,7 @@ codex-update-alpha update
 ```
 
 Before reading the maintained release pointer, the updater fetches `origin/main`
-and fast-forwards the dedicated clean checkout. It refuses dirty, non-`main`,
+and fast-forwards the dedicated managed checkout. It refuses dirty, non-`main`,
 or divergent state instead of stashing, resetting, or rebasing it.
 
 Compare the installed runtime with the maintained release and separately show
@@ -154,7 +158,8 @@ paths with `proot`, exports the Termux CA variables, and uses
 - Rerun `install-codex-termux`; all normal operations are idempotent.
 - A checksum, commit, version, target, sidecar, or executable failure is fatal.
   Do not bypass it or install files manually.
-- A dirty/divergent checkout is never stashed or reset. Use a separate
-  `CODEX_SRC_DIR` if the checkout contains your work.
+- A dirty or divergent managed checkout is never stashed or reset. Set
+  `CODEX_SRC_DIR` only when intentionally choosing a different dedicated helper
+  checkout.
 - No phone fallback runs Cargo. Maintainer source maintenance is described in
   [Termux Maintainer Guide](./termux-maintainer.md).

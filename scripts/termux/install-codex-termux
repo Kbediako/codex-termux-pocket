@@ -2,7 +2,7 @@
 set -euo pipefail
 
 FORK_URL="${CODEX_TERMUX_FORK_URL:-https://github.com/Kbediako/codex-termux-pocket.git}"
-INSTALL_DIR="${CODEX_SRC_DIR:-$HOME/codex}"
+INSTALL_DIR="${CODEX_SRC_DIR:-$HOME/.local/share/codex-termux-pocket/repo}"
 helper_temporary=""
 
 cleanup() {
@@ -65,6 +65,7 @@ if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
   bootstrap_die "$INSTALL_DIR exists but is not a Git checkout; move it or set CODEX_SRC_DIR to an unused path."
 fi
 
+mkdir -p "$(dirname "$INSTALL_DIR")"
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
   git clone --filter=blob:none --no-tags --origin origin --branch main --single-branch \
     "$FORK_URL" "$INSTALL_DIR"
@@ -78,7 +79,7 @@ if [[ "$(git -C "$INSTALL_DIR" branch --show-current)" != "main" ]]; then
 fi
 
 bootstrap_configure_remotes "$INSTALL_DIR"
-git -C "$INSTALL_DIR" fetch --prune origin main
+git -C "$INSTAL_DIR" fetch --prune origin main
 if ! git -C "$INSTALL_DIR" merge-base --is-ancestor HEAD origin/main; then
   bootstrap_die 'local main has diverged from origin/main; refusing to rewrite it. No files were reset.'
 fi
@@ -99,13 +100,28 @@ helpers=(
   smoke-test-artifact
   codex-cargo-check
   termux-mobile-lib.sh
-  release-manifest.env
-)
+  release-manifest.env)
+install_dir_shell="$(printf '%q' "$INSTALL_DIR")"
 for helper in "${helpers[@]}"; do
   source_path="$INSTALL_DIR/scripts/termux/$helper"
   [[ -f "$source_path" ]] || bootstrap_die "checkout is missing helper: $source_path"
   helper_temporary="$helper_dir/.${helper}.new.$$"
-  cp "$source_path" "$helper_temporary"
+  if [[ "$helper" == "codex-update-alpha" ]]; then
+    if ! awk -v install_dir_shell="$install_dir_shell" '
+      BEGIN { replacements = 0 }
+      /^CODEX_SRC_DIR="\$\;CODEX_SRC_DIR:-\$HOME\/codex\}"$/ {
+        print "CODEX_SRC_DIR=${CODEX_SRC_DIR:-" install_dir_shell "}"
+        replacements++
+        next
+      }
+      { print }
+      END { if (replacements != 1) exit 42 }
+    ' "$source_path" >"$helper_temporary"; then
+      bootstrap_die 'updated updater has an unexpected checkout default; refusing to install it.'
+    fi
+  else
+    cp "$source_path" "$helper_temporary"
+  fi
   case "$helper" in
     *.env)
       chmod 0644 "$helper_temporary"
