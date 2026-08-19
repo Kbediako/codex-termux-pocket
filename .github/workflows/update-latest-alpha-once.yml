@@ -97,6 +97,29 @@ jobs:
             exit 1
           fi
 
+          # Cargo.toml differs across the two release lines only at the
+          # workspace version in the conflicted hunk. Keep the fork's other
+          # manifest settings and set the verified upstream alpha explicitly.
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          path = Path("codex-rs/Cargo.toml")
+          text = path.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r"(?ms)(^\[workspace\.package\]\n(?:.*?\n)*?^version\s*=\s*\")[^\"]+(\"\s*$)"
+          )
+          updated, count = pattern.subn(
+              lambda match: match.group(1) + os.environ["TARGET_VERSION"] + match.group(2),
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("workspace package version was not found exactly once")
+          path.write_text(updated, encoding="utf-8")
+          PY
+
           package_version="$(
             awk '
               /^\[workspace\.package\]$/ { in_package=1; next }
