@@ -1,0 +1,130 @@
+name: record-alpha149-publication-result-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/record-alpha149-publication.trigger"
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 310
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SELF_PATH: .github/workflows/record-alpha149-publication-result-once.yml
+      TRIGGER_PATH: .github/record-alpha149-publication.trigger
+      SUCCESS_PATH: .github/alpha149-publication-SUCCESS.env
+      FAILURE_PATH: .github/alpha149-publication-FAILURE.env
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 1
+          token: ${{ github.token }}
+
+      - name: Wait for publisher and record verified result
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher_id=""
+          publisher_status=""
+          publisher_conclusion=""
+          publisher_url=""
+          publisher_sha=""
+          for _ in $(seq 1 1200); do
+            runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100")"
+            state="$(
+              jq -r '[.workflow_runs[] | select(.name == "publish-alpha149-explicit-v2-once")] | sort_by(.created_at) | reverse | first // {} | [(.id // ""), (.status // ""), (.conclusion // ""), (.html_url // ""), (.head_sha // "")] | @tsv' <<<"$runs"
+            )"
+            IFS=$'\t' read -r publisher_id publisher_status publisher_conclusion publisher_url publisher_sha <<<"$state"
+            if [[ -n "$publisher_id" && "$publisher_status" == completed ]]; then
+              break
+            fi
+            sleep 15
+          done
+
+          rm -f "$SUCCESS_PATH" "$FAILURE_PATH"
+          if [[ -z "$publisher_id" || "$publisher_status" != completed || "$publisher_conclusion" != success ]]; then
+            {
+              echo 'status=failure'
+              echo "publisher_run_id=${publisher_id}"
+              echo "publisher_status=${publisher_status}"
+              echo "publisher_conclusion=${publisher_conclusion}"
+              echo "publisher_url=${publisher_url}"
+              echo "publisher_source_sha=${publisher_sha}"
+            } >"$FAILURE_PATH"
+          else
+            git fetch origin main
+            git checkout -B main origin/main
+            manifest=scripts/termux/release-manifest.env
+            tag="$(sed -n 's/^release_tag=//p' "$manifest")"
+            source_sha="$(sed -n 's/^head_sha=//p' "$manifest")"
+            binary="$(sed -n 's/^codex_version=//p' "$manifest")"
+            archive_sha="$(sed -n 's/^archive_sha256=//p' "$manifest")"
+            latest="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+            latest_tag="$(jq -r .tag_name <<<"$latest")"
+            latest_url="$(jq -r .html_url <<<"$latest")"
+            latest_draft="$(jq -r .draft <<<"$latest")"
+            tag_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha)"
+            open_dependabot="$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" --jq '[.[] | select(.user.login == "dependabot[bot]")] | length')"
+            mapfile -t branches < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name')
+
+            test "$tag" != 'termux-v2026.08.17-alpha.20-fb052f4aa8'
+            test "$latest_tag" = "$tag"
+            test "$latest_draft" = false
+            test "$tag_sha" = "$source_sha"
+            test "$binary" = "codex-cli ${source_sha:0:7}"
+            test "$open_dependabot" = 0
+            test "${#branches[@]}" -eq 1
+            test "${branches[0]}" = main
+
+            release_runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-release-request.yml/runs?branch=main&per_page=100")"
+            release_state="$(jq -r --arg sha "$source_sha" '[.workflow_runs[] | select(.head_sha == $sha)] | first // {} | [(.id // ""), (.status // ""), (.conclusion // ""), (.html_url // "")] | @tsv' <<<"$release_runs")"
+            IFS=$'\t' read -r release_id release_status release_conclusion release_url <<<"$release_state"
+            test "$release_status" = completed
+            test "$release_conclusion" = success
+
+            android_runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/termux-android-emulator.yml/runs?branch=main&per_page=100")"
+            android_state="$(jq -r --arg sha "$source_sha" '[.workflow_runs[] | select(.head_sha == $sha)] | first // {} | [(.id // ""), (.status // ""), (.conclusion // ""), (.html_url // "")] | @tsv' <<<"$android_runs")"
+            IFS=$'\t' read -r android_id android_status android_conclusion android_url <<<"$android_state"
+            test "$android_status" = completed
+            test "$android_conclusion" = success
+
+            {
+              echo 'status=success'
+              echo "release_tag=${tag}"
+              echo "source_sha=${source_sha}"
+              echo "codex_version=${binary}"
+              echo "archive_sha256=${archive_sha}"
+              echo "latest_url=${latest_url}"
+              echo "publisher_run_id=${publisher_id}"
+              echo "publisher_url=${publisher_url}"
+              echo "release_run_id=${release_id}"
+              echo "release_run_url=${release_url}"
+              echo "android_run_id=${android_id}"
+              echo "android_run_url=${android_url}"
+              echo 'open_dependabot_prs=0'
+              echo 'branches=main'
+            } >"$SUCCESS_PATH"
+          fi
+
+          rm -f "$SELF_PATH" "$TRIGGER_PATH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: stage final alpha publication repair'
+          git push origin HEAD:main
+
+          if [[ -f "$FAILURE_PATH" ]]; then
+            gh issue comment 44 --repo "$GITHUB_REPOSITORY" --body "Alpha publication repair did not complete successfully. Diagnostic state has been committed to \`${FAILURE_PATH}\`: publisher run \`${publisher_id}\` ended \`${publisher_status}/${publisher_conclusion}\`."
+            exit 1
+          fi
