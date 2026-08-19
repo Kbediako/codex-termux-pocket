@@ -16,7 +16,7 @@ platforms, use [OpenAI Codex](https://github.com/openai/codex).
 Install Termux from F-Droid or the tested [Termux GitHub](https://github.com/termux/termux-app/releases/tag/v0.118.3) v0.118.3 release, then paste:
 
 ```shell
-pkg update -y && pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/main/scripts/termux/install-codex-termux | bash
+pkg update -y && pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/7135ead8e55e50a6d72fec5806d655861451d49e/scripts/termux/install-codex-termux | bash
 ```
 
 Then run `codex login` and choose the browser flow. The installer is idempotent,
