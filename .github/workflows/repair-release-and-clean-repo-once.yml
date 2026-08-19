@@ -1,0 +1,55 @@
+name: repair-release-and-clean-repo-once
+run-name: Clean repository and publish the verified latest alpha
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/repair-release-trigger"
+      - ".github/scripts/repair-release-and-clean-repo-once.sh"
+      - ".github/workflows/repair-release-and-clean-repo-once.yml"
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: repair-release-and-clean-repo-once
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    name: Dependabot, branches, and immutable Latest release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout protected main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: true
+
+      - name: Check one-time trigger
+        id: trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="$(tr -d '[:space:]' < .github/repair-release-trigger)"
+          if [[ "$state" == "armed" ]]; then
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Staged only; waiting for the explicit armed commit."
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clean repository and publish latest alpha
+        if: steps.trigger.outputs.armed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/repair-release-and-clean-repo-once.sh
