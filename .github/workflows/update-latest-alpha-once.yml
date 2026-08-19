@@ -63,10 +63,37 @@ jobs:
           # both histories, while accepting every non-conflicting upstream
           # change. This creates a normal two-parent merge commit, so protected
           # main advances without rewriting history or requiring a force push.
+          set +e
           git merge --no-ff --no-commit -X ours "$resolved_target"
-          if git diff --name-only --diff-filter=U | grep -q .; then
+          merge_status=$?
+          set -e
+
+          if (( merge_status != 0 )); then
+            test -f .git/MERGE_HEAD || {
+              echo "git merge failed before creating a merge state" >&2
+              exit "$merge_status"
+            }
+
+            # These upstream release workflows were intentionally removed from
+            # the Android/Termux fork. Upstream edited them after the fork
+            # deletion, which produces modify/delete conflicts. Retain the fork
+            # deletion rather than reintroducing irrelevant release machinery.
+            expected_deleted_conflicts=(
+              .github/workflows/python-runtime-release.yml
+              .github/workflows/python-sdk-release.yml
+              .github/workflows/rust-release.yml
+            )
+            for path in "${expected_deleted_conflicts[@]}"; do
+              if git ls-files -u -- "$path" | grep -q .; then
+                git rm -f -- "$path"
+              fi
+            done
+          fi
+
+          mapfile -t unresolved < <(git diff --name-only --diff-filter=U)
+          if (( ${#unresolved[@]} > 0 )); then
             echo "Unresolved merge paths:" >&2
-            git diff --name-only --diff-filter=U >&2
+            printf '  %s\n' "${unresolved[@]}" >&2
             exit 1
           fi
 
