@@ -1,0 +1,135 @@
+name: finish-issue-44-hardening-once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/finish-issue-44-hardening-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Finish issue 44 repository hardening
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact main revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Pin bootstrap and require the control-plane release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path("README.md")
+          readme_text = readme.read_text(encoding="utf-8")
+          mutable = "https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/main/scripts/termux/install-codex-termux"
+          pinned = "https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/5797ea1be011cdf43cb897814835b421decf9f54/scripts/termux/install-codex-termux"
+          if readme_text.count(mutable) != 1:
+              raise SystemExit("README mutable bootstrap URL was not found exactly once")
+          readme.write_text(readme_text.replace(mutable, pinned), encoding="utf-8")
+
+          workflow = Path(".github/workflows/termux-release-request.yml")
+          workflow_text = workflow.read_text(encoding="utf-8")
+          marker = "      - name: Ensure exact workflow-head aarch64 artifact\n"
+          if workflow_text.count(marker) != 1:
+              raise SystemExit("release workflow insertion marker was not found exactly once")
+          gate = r'''      - name: Require exact Termux control-plane validation
+        id: control_plane_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow="termux-control-plane.yml"
+
+          latest_exact_run() {
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&per_page=100" \
+              --jq ".workflow_runs
+                | map(select(.head_sha == \"${SOURCE_SHA}\"))
+                | first // {}
+                | [(.id // \"\"), (.status // \"\"), (.conclusion // \"\")]
+                | @tsv"
+          }
+
+          run_state="$(latest_exact_run)"
+          IFS=$'\t' read -r run_id status conclusion <<<"$run_state"
+          if [[ -z "$run_id" ]]; then
+            echo "Dispatching ${workflow} for exact source ${SOURCE_SHA}"
+            gh workflow run "$workflow" \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref main
+          fi
+
+          run_id=""
+          for _ in $(seq 1 160); do
+            run_state="$(latest_exact_run)"
+            IFS=$'\t' read -r candidate_id status conclusion <<<"$run_state"
+            if [[ -n "$candidate_id" ]]; then
+              run_id="$candidate_id"
+              case "$status" in
+                completed)
+                  [[ "$conclusion" == "success" ]] || {
+                    echo "::error::Termux control-plane run ${run_id} concluded ${conclusion}"
+                    exit 1
+                  }
+                  break
+                  ;;
+                queued|in_progress|pending|requested|waiting)
+                  ;;
+                *)
+                  echo "::warning::Termux control-plane run ${run_id} has status ${status:-unknown}"
+                  ;;
+              esac
+            fi
+            sleep 15
+          done
+
+          [[ -n "$run_id" && "$status" == "completed" && "$conclusion" == "success" ]] || {
+            echo "::error::No successful exact Termux control-plane run completed for ${SOURCE_SHA}"
+            exit 1
+          }
+          resolved_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"
+          [[ "$resolved_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::Control-plane run ${run_id} resolved ${resolved_sha}, expected ${SOURCE_SHA}"
+            exit 1
+          }
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "Validated Termux control-plane run: ${run_id}" >> "$GITHUB_STEP_SUMMARY"
+
+'''
+          workflow.write_text(workflow_text.replace(marker, gate + marker), encoding="utf-8")
+
+          audit = Path("scripts/termux/patch_audit.tsv")
+          audit_text = audit.read_text(encoding="utf-8")
+          entry = (
+              "subject\ttermux: finish issue 44 hardening\tsecurity-critical\t"
+              "Pins the public bootstrap to an immutable commit and makes formal release publication wait for the exact-source Termux control-plane gate.\n"
+          )
+          if entry not in audit_text:
+              audit.write_text(audit_text + entry, encoding="utf-8")
+          PY
+
+          git rm .github/workflows/finish-issue-44-hardening-once.yml
+          git diff --check
+
+      - name: Commit and push final hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md .github/workflows/termux-release-request.yml scripts/termux/patch_audit.tsv
+          git commit -m "termux: finish issue 44 hardening"
+          git push origin HEAD:main
