@@ -102,7 +102,7 @@ def main() -> None:
     required_publisher_tokens = (
         "Publish complete immutable release as Latest",
         "draft: true",
-        "make_latest:\"true\"",
+        'make_latest:"true"',
         "Verify anonymous public downloads byte-for-byte",
         "Promote verified release manifest on protected main",
     )
