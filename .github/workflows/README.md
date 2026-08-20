@@ -1,36 +1,59 @@
 # Workflow Strategy
 
-This repository is an Android/Termux-focused Codex CLI fork. The workflow set
-is intentionally limited to checks and release operations that protect the
-supported Termux runtime.
+This repository is an Android/Termux-focused Codex CLI fork. Its workflow set is
+intentionally limited to checks, artifact builds, device validation, publication,
+and public-channel auditing for the supported Termux runtime.
+
+Historical Actions entries can outlive the YAML file that created them. Names
+such as `observe-alpha-149-status`, `observe-alpha-149-ci`, and
+`Codex CLI Release Detector` may therefore remain visible in old run history,
+but they are not retained workflows and cannot start new runs from `main`.
 
 ## Routine checks
 
-- `blocking-ci.yml` (`fork-ci`) emits one compact `Termux fork checks` job for
-  workflow and script syntax, locked Cargo metadata, Rust formatting, and
-  dependency policy.
-- `termux-control-plane.yml` validates the installer, updater, artifact
-  contract, shell helpers, and workflow wiring when those inputs change.
-- `termux-linux-sandbox.yml` tests the Linux sandbox on x86_64 and ARM64 when
-  the sandbox or its direct build inputs change.
-- `termux-mobile-artifact.yml` builds the supported ARM64 Termux runtime only
-  when Rust or native build inputs change. It remains manually dispatchable for
-  exact refs; formal channel publication is owned by the release-request flow.
+- `blocking-ci.yml` (`fork-ci`) runs the broad, relatively inexpensive baseline
+  on every pull request and `main` push: workflow topology and YAML, shell and
+  Python syntax, locked Cargo metadata, Rust formatting, and dependency policy.
+- `termux-control-plane.yml` is the path-filtered ARM64 contract gate for the
+  installer, updater, helper tests, locked dependency graph, and Termux workflow
+  wiring.
+- `termux-linux-sandbox.yml` separately tests the Linux sandbox on public x64 and
+  ARM64 Ubuntu runners when its implementation or direct inputs change.
 
-## Release and device validation
+## Artifact and device validation
 
-- `termux-android-emulator.yml` is not routine CI. It runs manually or when a
-  device-validation request changes, so a flaky or still-in-development Android
-  scenario does not make ordinary pushes red.
-- `termux-release-request.yml` reads the explicit exact-source evidence in
-  `scripts/termux/release-publication.env`, revalidates the control-plane,
-  production ARM64, and native Android runs, stages every final asset on a draft,
-  then publishes that complete draft as GitHub Latest in one transaction.
-- `termux-release-channel.yml` is verification-only. It checks the promoted
-  manifest, release identity, asset set, anonymous downloads, checksums, and
-  GitHub's Latest endpoint; it never mutates a published release.
-- `termux-governance-audit.yml` independently checks the promoted public release
-  identity, checksums, tag, and governance state.
+- `termux-mobile-artifact.yml` builds, validates, attests, and uploads the
+  production ARM64 runtime. It is build-only and has no release-write authority.
+- `termux-android-emulator.yml` is the expensive native Android/Termux gate. It
+  runs for release requests, changes to the device gate itself, or a deliberate
+  manual dispatch rather than ordinary housekeeping pushes.
 
-Inherited Windows, macOS, Bazel, SDK, Python, upstream release, contributor-bot,
-and OpenAI-internal workflows have been removed from this fork.
+## Release path
+
+1. `termux-release-request.yml` is the only release publisher. It reads the exact
+   source, release identity, and successful validation run IDs from
+   `scripts/termux/release-publication.env`.
+2. It re-verifies the control-plane, ARM64 artifact, Android/Termux evidence,
+   checksums, SBOM, attestations, and final assets before publishing the complete
+   immutable release as GitHub Latest in the initial publication transaction.
+3. It anonymously byte-verifies the public assets and `/releases/latest` before
+   promoting `scripts/termux/release-manifest.env`.
+4. `termux-release-channel.yml` is read-only verification. It proves the promoted
+   manifest already identifies the immutable GitHub Latest release.
+5. `termux-governance-audit.yml` independently audits the promoted public channel
+   when Termux release/governance inputs change, on a daily schedule, or manually.
+
+## Permanent workflow inventory
+
+- `blocking-ci.yml`
+- `termux-control-plane.yml`
+- `termux-linux-sandbox.yml`
+- `termux-mobile-artifact.yml`
+- `termux-android-emulator.yml`
+- `termux-release-request.yml`
+- `termux-release-channel.yml`
+- `termux-governance-audit.yml`
+
+`.github/scripts/validate-termux-workflow-topology.py` enforces this inventory,
+rejects observer/monitor/repair/one-time workflow names, and ensures only the
+release-request workflow can write a GitHub release.

@@ -22,23 +22,23 @@ reruns the locked check. Review `codex-rs/Cargo.lock`; when dependency changes
 require it, run `just bazel-lock-update` and include `MODULE.bazel.lock`.
 Classify every retained Termux commit in `scripts/termux/patch_audit.tsv`.
 
-To validate/refresh only the lockfile after manual conflict work:
+To validate or refresh only the lockfile after manual conflict work:
 
 ```shell
 scripts/termux/maintainer-update-alpha --lock-only
 ```
 
-## Build and publish the runtime
+## Build the runtime
 
 Dispatch `.github/workflows/termux-mobile-artifact.yml` with an exact commit SHA.
-The workflow run title is `Termux runtime <SHA>`, which lets the updater reuse a
-queued or running match without dispatching a duplicate.
+The workflow run title is `Termux runtime <SHA>`, which lets the updater and the
+formal publisher identify the exact build without dispatching a duplicate.
 
 CI first runs the locked Cargo metadata gate, before APT caches, cross-toolchain
 setup, V8 downloads, or compilation. A stale lockfile therefore fails quickly
 with the refresh command instead of consuming an ARM build slot.
 
-The workflow then:
+The build workflow then:
 
 1. Builds and strips `bwrap`, records its SHA-256, and embeds that digest while
    compiling the matching Codex binaries.
@@ -47,25 +47,60 @@ The workflow then:
 3. Writes canonical package metadata plus artifact commit/version metadata.
 4. Creates `SHA256SUMS`, extracts the archive again, checks every required file,
    compares executable version to metadata, and runs the bundle smoke test.
-5. Uploads the Actions artifact only after all validation passes.
+5. Generates the SPDX SBOM and provenance attestations for manual exact-ref runs.
+6. Uploads the Actions artifact only after all validation passes.
 
-For a public no-login end-user release, set `publish_release=true` and provide a
-new immutable `termux-v...` release tag. The separate publication job alone has
-`contents: write`; the build retains `contents: read`. Publication refuses to
-overwrite an existing release.
+`termux-mobile-artifact.yml` is deliberately build-only. It cannot publish a
+GitHub release and has no `contents: write` permission.
 
-The release includes a generated `release-manifest.env`. Copy its exact values
-into `scripts/termux/release-manifest.env`, review them, and commit that small
-pointer update. Fresh installs then use curl against the public release and do
-not need `gh auth login`.
+## Validate Android and the control plane
+
+The exact runtime source must also have successful runs of:
+
+- `.github/workflows/termux-control-plane.yml`
+- `.github/workflows/termux-android-emulator.yml`
+
+Do not substitute a successful run from another commit. Record the exact source
+SHA and the three successful run IDs before preparing publication.
+
+## Publish a validated runtime
+
+Publication is owned only by `.github/workflows/termux-release-request.yml`.
+Write the exact release evidence to `scripts/termux/release-publication.env`:
+
+```text
+format_version=1
+source_sha=<40-character commit SHA>
+release_tag=termux-v<version-or-date>-<source prefix>
+expected_package_version=<X.Y.Z-alpha.N>
+expected_codex_version=codex-cli <7-character source prefix>
+control_run_id=<successful control-plane run>
+artifact_run_id=<successful ARM64 artifact run>
+android_run_id=<successful Android/Termux run>
+```
+
+Review and commit that file on protected `main`. The release workflow then
+re-fetches and validates all three exact-source runs, downloads and verifies the
+artifact, checks the SBOM and attestations, stages every final asset in a draft,
+and publishes the complete immutable release as GitHub Latest in the initial
+publication transaction.
+
+Only after anonymous asset downloads, checksums, release identity, and
+`/releases/latest` verify does the workflow promote
+`scripts/termux/release-manifest.env`. Fresh installs then use the public release
+without requiring `gh auth login`.
+
+`termux-release-channel.yml` is read-only post-promotion verification.
+`termux-governance-audit.yml` independently checks the public channel when the
+manifest or release controls change, on its daily schedule, or manually.
 
 ## Failed or delayed builds
 
 - Queued and running builds may exceed the phone's local wait; they continue on
   GitHub and can be resumed by run ID.
-- Do not dispatch another build while an exact queued/running run exists.
+- Do not dispatch another build while an exact queued or running run exists.
 - A failed exact run is reported with its URL and is not duplicated
   automatically. Fix the first failing step, then deliberately rerun or dispatch.
-- Never publish or pin a manifest until the workflow's artifact-content
-  validation has passed.
+- Never publish or pin a manifest until the artifact, control-plane, and
+  Android/Termux validations have all passed for the same exact source.
 - Never use the local Android/V8 source build as an end-user fallback.

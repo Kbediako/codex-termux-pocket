@@ -3,6 +3,8 @@ run-name: Termux runtime ${{ inputs.source_ref || github.sha }}
 
 # Build the production ARM64 runtime only when its source or native build
 # inputs change. Routine workflow/docs housekeeping is covered by fork-ci.
+# This workflow is build-only; formal publication belongs to
+# termux-release-request.yml after all exact-source gates pass.
 on:
   push:
     branches:
@@ -23,15 +25,6 @@ on:
     inputs:
       source_ref:
         description: Git ref to build for Termux (branch, tag, or commit SHA)
-        required: false
-        default: ""
-      publish_release:
-        description: Publish the validated bundle as a public GitHub release
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: Immutable release tag (required when publish_release is true)
         required: false
         default: ""
 
@@ -568,78 +561,3 @@ jobs:
         with:
           path: ${{ runner.temp }}/codex-musl-tools-${{ env.TARGET }}/
           key: termux-musl-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.TARGET }}-${{ hashFiles('.github/scripts/install-musl-build-tools.sh') }}
-
-  publish-termux-release:
-    name: Publish validated Termux release
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
-    needs: build-termux-artifact
-    runs-on: ubuntu-24.04
-    environment: termux-release
-    permissions:
-      contents: write
-    steps:
-      - name: Validate immutable release inputs
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^termux-v[0-9A-Za-z._-]+$ ]]; then
-            echo "::error::release_tag must be a non-empty termux-v... tag"
-            exit 1
-          fi
-
-      - name: Download validated build artifact
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          name: codex-termux-aarch64-unknown-linux-musl
-          path: dist
-
-      - name: Recheck checksums and create release manifest
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          HEAD_SHA: ${{ needs.build-termux-artifact.outputs.head_sha }}
-          CODEX_VERSION: ${{ needs.build-termux-artifact.outputs.codex_version }}
-          ARCHIVE_SHA256: ${{ needs.build-termux-artifact.outputs.archive_sha256 }}
-          ARCHIVE_SIZE_BYTES: ${{ needs.build-termux-artifact.outputs.archive_size_bytes }}
-          RUNTIME_SIZE_BYTES: ${{ needs.build-termux-artifact.outputs.runtime_size_bytes }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum --check --strict SHA256SUMS
-          cat > release-manifest.env <<EOF
-          format_version=2
-          repository=${GITHUB_REPOSITORY}
-          release_tag=${RELEASE_TAG}
-          head_sha=${HEAD_SHA}
-          codex_version=${CODEX_VERSION}
-          archive_sha256=${ARCHIVE_SHA256}
-          archive_size_bytes=${ARCHIVE_SIZE_BYTES}
-          runtime_size_bytes=${RUNTIME_SIZE_BYTES}
-          EOF
-
-      - name: Publish new public release without overwriting assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          HEAD_SHA: ${{ needs.build-termux-artifact.outputs.head_sha }}
-          CODEX_VERSION: ${{ needs.build-termux-artifact.outputs.codex_version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $RELEASE_TAG already exists; refusing to replace immutable runtime assets"
-            exit 1
-          fi
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$HEAD_SHA" \
-            --title "Codex Termux ${CODEX_VERSION}" \
-            --notes "Verified complete Termux runtime for ${HEAD_SHA}." \
-            --latest=false \
-            dist/codex-termux-aarch64-unknown-linux-musl.tar.gz \
-            dist/metadata.env \
-            dist/SHA256SUMS \
-            dist/codex-termux-sbom.spdx.json \
-            dist/release-manifest.env

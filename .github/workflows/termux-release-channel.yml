@@ -1,9 +1,9 @@
 name: termux-release-channel
-run-name: Verify validated Termux release channel
 
-# The publisher makes the complete draft Latest in its one publication
-# transaction. This workflow is verification-only and never mutates a published
-# immutable release.
+# Verify that a promoted manifest points to the already-published immutable
+# GitHub Latest release. The manifest push independently triggers the scheduled
+# governance workflow, so this workflow performs no mutation or duplicate
+# workflow dispatch.
 on:
   push:
     branches:
@@ -13,26 +13,25 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
-  group: termux-release-channel
-  cancel-in-progress: true
+  group: termux-release-channel-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  verify-latest:
-    name: Verify promoted runtime is Latest
+  verify-latest-release:
+    name: Verify promoted immutable release is already Latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout promoted main
+      - name: Checkout promoted manifest
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: main
           persist-credentials: false
 
-      - name: Verify release identity, assets, and Latest channel
+      - name: Verify release identity, immutable assets and Latest
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -51,84 +50,125 @@ jobs:
             printf '%s' "$value"
           }
 
+          invalid_lines="$(
+            grep -Env \
+              '^(format_version|repository|release_tag|head_sha|codex_version|archive_sha256|archive_size_bytes|runtime_size_bytes)=[^[:space:]].*$|^[[:space:]]*(#.*)?$' \
+              "$manifest" || true
+          )"
+          [[ -z "$invalid_lines" ]] || {
+            printf '%s\n' "$invalid_lines" >&2
+            exit 1
+          }
+
+          format_version="$(read_value format_version)"
           repository="$(read_value repository)"
           release_tag="$(read_value release_tag)"
           head_sha="$(read_value head_sha)"
           codex_version="$(read_value codex_version)"
           archive_sha256="$(read_value archive_sha256)"
           archive_size_bytes="$(read_value archive_size_bytes)"
+          runtime_size_bytes="$(read_value runtime_size_bytes)"
+
+          [[ "$format_version" == "2" ]]
           [[ "$repository" == "$GITHUB_REPOSITORY" ]]
           [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$codex_version" == "codex-cli ${head_sha:0:7}" ]]
           [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$archive_size_bytes" =~ ^[0-9]+$ && "$archive_size_bytes" -gt 0 ]]
+          [[ "$archive_size_bytes" =~ ^[0-9]+$ ]]
+          [[ "$runtime_size_bytes" =~ ^[0-9]+$ ]]
 
-          release_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
-          [[ "$(jq -r .target_commitish <<<"$release_json")" == "$head_sha" ]]
-          [[ "$(jq -r .draft <<<"$release_json")" == "false" ]]
-          [[ "$(jq -r .prerelease <<<"$release_json")" == "false" ]]
-
-          expected_assets="$(printf '%s\n' \
-            codex-termux-aarch64-unknown-linux-musl.tar.gz \
-            metadata.env \
-            SHA256SUMS \
-            codex-termux-sbom.spdx.json \
-            release-manifest.env | LC_ALL=C sort)"
-          actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | LC_ALL=C sort)"
-          [[ "$actual_assets" == "$expected_assets" ]] || {
-            echo "::error::Published release assets are incomplete or unexpected"
-            exit 1
-          }
-
-          archive_json="$(
-            jq -c '.assets[] | select(.name == "codex-termux-aarch64-unknown-linux-musl.tar.gz")' \
-              <<<"$release_json"
+          encoded_tag="$(jq -rn --arg value "$release_tag" '$value|@uri')"
+          release_json="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}"
           )"
-          [[ "$(jq -r .size <<<"$archive_json")" == "$archive_size_bytes" ]]
-          remote_digest="$(jq -r '.digest // empty' <<<"$archive_json")"
-          if [[ -n "$remote_digest" ]]; then
-            [[ "$remote_digest" == "sha256:${archive_sha256}" ]]
-          fi
+          anonymous_release="$(
+            curl --fail --location --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
+          )"
+          latest_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          anonymous_latest="$(
+            curl --fail --location --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"
+          )"
 
-          latest_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          [[ "$latest_tag" == "$release_tag" ]] || {
-            echo "::error::GitHub Latest resolved to ${latest_tag}, expected ${release_tag}"
-            exit 1
-          }
+          expected_assets_json='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
+          for document in "$release_json" "$anonymous_release"; do
+            jq -e \
+              --arg tag "$release_tag" \
+              --arg source "$head_sha" \
+              --argjson assets "$expected_assets_json" \
+              '.tag_name == $tag
+               and .target_commitish == $source
+               and .draft == false
+               and .prerelease == false
+               and .immutable == true
+               and ([.assets[].name] | sort) == $assets' \
+              <<<"$document" >/dev/null
+          done
+          jq -e --arg tag "$release_tag" '.tag_name == $tag' <<<"$latest_json" >/dev/null
+          jq -e --arg tag "$release_tag" '.tag_name == $tag' <<<"$anonymous_latest" >/dev/null
 
           public_dir="$(mktemp -d)"
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}"
+          while IFS=$'\t' read -r asset_name asset_url; do
+            curl --fail --location --silent --show-error --retry 5 \
+              "$asset_url" -o "${public_dir}/${asset_name}"
+          done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' <<<"$anonymous_release")
+          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
+
+          [[ "$(sha256sum "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
+          [[ "$(stat -c '%s' "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz")" == "$archive_size_bytes" ]]
+          cmp --silent "$manifest" "${public_dir}/release-manifest.env"
+          grep -Fx "head_sha=${head_sha}" "${public_dir}/metadata.env"
+          grep -Fx "codex_version=${codex_version}" "${public_dir}/metadata.env"
+          grep -Fx "runtime_size_bytes=${runtime_size_bytes}" "${public_dir}/metadata.env"
+
+          verified_release=false
+          for _ in $(seq 1 40); do
+            if gh release verify "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              verified_release=true
+              break
+            fi
+            sleep 3
+          done
+          [[ "$verified_release" == "true" ]] || {
+            gh release verify "$release_tag" --repo "$GITHUB_REPOSITORY"
+            exit 1
+          }
+
           for file in \
             codex-termux-aarch64-unknown-linux-musl.tar.gz \
             metadata.env \
             SHA256SUMS \
             codex-termux-sbom.spdx.json \
             release-manifest.env; do
-            curl --fail --location --silent --show-error --retry 5 \
-              "${base}/${file}" -o "${public_dir}/${file}"
+            verified_asset=false
+            for _ in $(seq 1 40); do
+              if gh release verify-asset "$release_tag" "${public_dir}/${file}" \
+                --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                verified_asset=true
+                break
+              fi
+              sleep 3
+            done
+            [[ "$verified_asset" == "true" ]] || {
+              gh release verify-asset "$release_tag" "${public_dir}/${file}" \
+                --repo "$GITHUB_REPOSITORY"
+              exit 1
+            }
           done
-          cmp --silent "$manifest" "$public_dir/release-manifest.env"
-          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
-          [[ "$(sha256sum "$public_dir/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
-          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
-            "$public_dir/codex-termux-sbom.spdx.json"
 
           {
-            echo "### Termux release channel"
+            echo '### Release channel verification'
             echo
-            echo "- Latest release: \`${release_tag}\`"
-            echo "- Runtime commit: \`${head_sha}\`"
-            echo "- Binary: \`${codex_version}\`"
-            echo "- Archive SHA-256: \`${archive_sha256}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Dispatch post-verification governance audit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh workflow run termux-governance-audit.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main
+            echo "- Manifest tag: ${release_tag}"
+            echo "- Latest API tag: $(jq -r .tag_name <<<"$anonymous_latest")"
+            echo "- Runtime source: ${head_sha}"
+            echo "- Immutable: $(jq -r .immutable <<<"$anonymous_release")"
+            echo "- Assets: $(jq -r '.assets | length' <<<"$anonymous_release") byte-verified files"
+          } >>"$GITHUB_STEP_SUMMARY"
