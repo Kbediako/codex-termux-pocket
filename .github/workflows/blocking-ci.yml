@@ -89,11 +89,11 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
-  verify-policy-alignment:
-    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: verify mutable release workflow alignment' }}"
-    name: Verify mutable-release workflow alignment
+  audit-policy-alignment-runs:
+    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: audit mutable release push checks' }}"
+    name: Audit mutable-release policy push checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       actions: write
       issues: write
@@ -101,89 +101,73 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       ISSUE_NUMBER: ${{ github.event.issue.number }}
+      TARGET_SHA: 476bda4f7c55910365b95245e467b661df20b7b6
+      OBSOLETE_RUN_ID: "32531459416"
     steps:
-      - name: Dispatch, wait for, and record maintained workflow checks
+      - name: Cancel obsolete observer and record actual push runs
         shell: bash
         run: |
           set -euo pipefail
-          main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
-          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh run cancel "$OBSOLETE_RUN_ID" --repo "$GITHUB_REPOSITORY" || true
 
           initial_body="$(cat <<EOF_BODY
           state=running
-          main_sha=${main_sha}
-          observer_run_id=${GITHUB_RUN_ID}
-          observer_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          target_sha=${TARGET_SHA}
+          audit_run_id=${GITHUB_RUN_ID}
+          audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          obsolete_observer_run_id=${OBSOLETE_RUN_ID}
           EOF_BODY
           )"
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
             -f body="$initial_body" >/dev/null
 
-          dispatch_and_find() {
-            local workflow="$1"
-            shift
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main "$@"
-            local run_id=""
-            for _ in $(seq 1 90); do
-              runs="$(
-                gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
-                  --event workflow_dispatch --limit 100 \
-                  --json databaseId,headSha,createdAt,status,conclusion,url,workflowName
+          expected=(
+            fork-ci
+            termux-control-plane
+            termux-release-channel
+            termux-governance-audit
+          )
+
+          runs='[]'
+          all_complete=false
+          for _ in $(seq 1 60); do
+            runs="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --commit "$TARGET_SHA" \
+                --limit 100 \
+                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
+            )"
+            all_complete=true
+            for workflow in "${expected[@]}"; do
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
               )"
-              run_id="$(
-                jq -r --arg sha "$main_sha" --arg started "$started_at" \
-                  '[.[] | select(.headSha == $sha and .createdAt >= $started)]
-                   | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
-              )"
-              if [[ "$run_id" =~ ^[0-9]+$ ]]; then
-                printf '%s\n' "$run_id"
-                return 0
-              fi
-              sleep 2
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              [[ "$status" == "completed" ]] || all_complete=false
             done
-            echo "::error::workflow ${workflow} did not expose a matching run"
-            return 1
-          }
-
-          fork_ci_run_id="$(dispatch_and_find blocking-ci.yml)"
-          control_run_id="$(dispatch_and_find termux-control-plane.yml)"
-          channel_run_id="$(dispatch_and_find termux-release-channel.yml)"
-          governance_run_id="$(dispatch_and_find termux-governance-audit.yml)"
-
-          wait_for_run() {
-            local run_id="$1"
-            for _ in $(seq 1 360); do
-              document="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status,conclusion,url,workflowName,headSha,event)"
-              status="$(jq -r .status <<<"$document")"
-              if [[ "$status" == "completed" ]]; then
-                printf '%s\n' "$document"
-                return 0
-              fi
-              sleep 5
-            done
-            echo "::error::run ${run_id} did not complete before the observer timeout"
-            return 1
-          }
-
-          fork_ci="$(wait_for_run "$fork_ci_run_id")"
-          control="$(wait_for_run "$control_run_id")"
-          channel="$(wait_for_run "$channel_run_id")"
-          governance="$(wait_for_run "$governance_run_id")"
+            [[ "$all_complete" == "true" ]] && break
+            sleep 5
+          done
 
           report="$(mktemp)"
           {
             echo 'state=completed'
-            echo "main_sha=${main_sha}"
+            echo "target_sha=${TARGET_SHA}"
             overall=success
-
-            emit_result() {
-              local label="$1"
-              local run_id="$2"
-              local document="$3"
-              local status conclusion url
-              status="$(jq -r .status <<<"$document")"
-              conclusion="$(jq -r '.conclusion // "missing"' <<<"$document")"
-              url="$(jq -r .url <<<"$document")"
+            for workflow in "${expected[@]}"; do
+              label="${workflow//-/_}"
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
+              )"
+              run_id="$(jq -r '.databaseId // "missing"' <<<"$row")"
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              conclusion="$(jq -r '.conclusion // "missing"' <<<"$row")"
+              url="$(jq -r '.url // "missing"' <<<"$row")"
               echo "${label}_run_id=${run_id}"
               echo "${label}_status=${status}"
               echo "${label}_conclusion=${conclusion}"
@@ -191,18 +175,15 @@ jobs:
               if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
                 overall=failure
               fi
-            }
-
-            emit_result fork_ci "$fork_ci_run_id" "$fork_ci"
-            emit_result control_plane "$control_run_id" "$control"
-            emit_result release_channel "$channel_run_id" "$channel"
-            emit_result governance_audit "$governance_run_id" "$governance"
-
+            done
             echo "overall=${overall}"
-            echo "observer_run_id=${GITHUB_RUN_ID}"
-            echo "observer_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "audit_run_id=${GITHUB_RUN_ID}"
+            echo "audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "obsolete_observer_cancelled=${OBSOLETE_RUN_ID}"
           } >"$report"
+
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
             -f body="$(cat "$report")" >/dev/null
 
+          [[ "$all_complete" == "true" ]]
           grep -Fx 'overall=success' "$report"
