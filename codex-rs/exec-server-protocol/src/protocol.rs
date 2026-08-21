@@ -97,7 +97,7 @@ pub struct EnvironmentInfo {
     /// On Windows, a command's `TEMP` or `TMP` overrides take precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporary_directories: Option<Vec<PathUri>>,
-    /// Executor-native temporary directory for private, child-visible sidecars.
+    /// Executor-native temporary directory for child-visible sidecars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temp_dir: Option<PathUri>,
     /// Optional executor features that clients must gate before sending newer request fields.
@@ -361,6 +361,8 @@ pub struct TerminateResponse {
 #[serde(rename_all = "camelCase")]
 pub struct FsReadFileParams {
     pub path: PathUri,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
@@ -414,6 +416,8 @@ pub struct FsCloseResponse {}
 pub struct FsWriteFileParams {
     pub path: PathUri,
     pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
@@ -426,10 +430,9 @@ pub struct FsWriteFileResponse {}
 pub struct FsCreateDirectoryParams {
     pub path: PathUri,
     pub recursive: Option<bool>,
-    pub sandbox: Option<FileSystemSandboxContext>,
-    /// Atomically restrict a newly created, non-recursive directory to its owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private: Option<bool>,
+    pub follow_symlinks: Option<bool>,
+    pub sandbox: Option<FileSystemSandboxContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +443,8 @@ pub struct FsCreateDirectoryResponse {}
 #[serde(rename_all = "camelCase")]
 pub struct FsGetMetadataParams {
     pub path: PathUri,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
@@ -504,6 +509,8 @@ pub struct FsRemoveParams {
     pub path: PathUri,
     pub recursive: Option<bool>,
     pub force: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 

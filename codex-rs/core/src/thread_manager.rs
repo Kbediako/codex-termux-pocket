@@ -325,6 +325,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) agent_control: AgentControl,
     pub(crate) session_source: SessionSource,
     pub(crate) parent_thread_id: Option<ThreadId>,
+    pub(crate) environment_selections: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
@@ -835,19 +836,22 @@ impl ThreadManager {
         }
     }
 
-    /// Moves a persisted thread to, within, or out of a server-ordered section.
+    /// Moves a thread to, within, or out of a server-ordered section.
     pub async fn move_thread_to_section(
         &self,
         thread_id: ThreadId,
         section: Option<&str>,
         before_thread_id: Option<ThreadId>,
     ) -> CodexResult<()> {
-        if let Ok(thread) = self.get_thread(thread_id).await
-            && thread.config_snapshot().await.ephemeral
-        {
-            return Err(CodexErr::InvalidRequest(format!(
-                "ephemeral thread does not support section moves: {thread_id}"
-            )));
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support section moves: {thread_id}"
+                )));
+            }
+            // Explicit placement must work before the first turn materializes the thread.
+            thread.ensure_rollout_materialized().await;
+            thread.flush_rollout().await?;
         }
 
         self.state
@@ -1679,15 +1683,17 @@ impl ThreadManagerState {
             agent_control,
             session_source,
             parent_thread_id,
+            environment_selections,
             inherited_environments,
             inherited_exec_policy,
         } = options;
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let thread_source = initial_history.get_resumed_thread_source();
-        let environments = inherited_environments
-            .as_ref()
-            .filter(|_| initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2))
-            .map(TurnEnvironmentSnapshot::to_selections);
+        let environments = environment_selections.or_else(|| {
+            inherited_environments
+                .as_ref()
+                .map(TurnEnvironmentSnapshot::to_selections)
+        });
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),

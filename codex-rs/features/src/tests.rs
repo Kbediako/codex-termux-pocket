@@ -60,6 +60,26 @@ fn executor_capability_discovery_is_an_opt_in_map_feature() {
 }
 
 #[test]
+fn cwd_relative_turn_diffs_is_an_opt_in_map_feature() {
+    let mut features = Features::with_defaults();
+    assert!(!features.enabled(Feature::CwdRelativeTurnDiffs));
+
+    features.apply_map(&BTreeMap::from([(
+        "cwd_relative_turn_diffs".to_string(),
+        true,
+    )]));
+
+    assert!(features.enabled(Feature::CwdRelativeTurnDiffs));
+
+    features.apply_map(&BTreeMap::from([(
+        "cwd_relative_turn_diffs".to_string(),
+        false,
+    )]));
+
+    assert!(!features.enabled(Feature::CwdRelativeTurnDiffs));
+}
+
+#[test]
 fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
         if spec.default_enabled {
@@ -140,7 +160,11 @@ max_tool_call_lag = 2
 reasoning_effort = "minimal"
 max_action_tokens = 512
 max_classifier_instruction_tokens = 256
+reuse_parent_compaction = false
 max_parent_compaction_tokens = 384
+
+[guardianv2.review_scope]
+sandboxed_exec_commands = true
 
 [guardianv2.transcript]
 sources = ["tool_outputs", "reasoning"]
@@ -164,7 +188,11 @@ max_recent_non_user_entries = 12
             reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Minimal),
             max_action_tokens: Some(512),
             max_classifier_instruction_tokens: Some(256),
+            reuse_parent_compaction: Some(false),
             max_parent_compaction_tokens: Some(384),
+            review_scope: Some(crate::GuardianV2ReviewScopeConfigToml {
+                sandboxed_exec_commands: Some(true),
+            }),
             transcript: Some(crate::GuardianV2TranscriptConfigToml {
                 sources: Some(vec![
                     crate::GuardianV2TranscriptSource::ToolOutputs,

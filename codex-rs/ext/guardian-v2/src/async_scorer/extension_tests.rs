@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use codex_core::config::Config;
+use codex_core::context::NodeReplReviewEvidence;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionMetrics;
@@ -57,10 +58,11 @@ use super::REVIEW_FALLBACK_METRIC;
 use super::StrictReviewReason;
 use super::TOOL_CALL_LAG_METRIC;
 use super::encrypted_parent_compaction;
-use crate::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
-use crate::config::DEFAULT_PARENT_COMPACTION_TOKENS;
-use crate::sampler::CLASSIFICATION_TOKEN_USAGE_METRIC;
-use crate::sampler::MODEL;
+use super::should_classify_tool;
+use crate::async_scorer::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
+use crate::async_scorer::config::DEFAULT_PARENT_COMPACTION_TOKENS;
+use crate::async_scorer::sampler::CLASSIFICATION_TOKEN_USAGE_METRIC;
+use crate::async_scorer::sampler::MODEL;
 
 const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";
@@ -109,7 +111,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     )));
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
-    crate::install(
+    super::install(
         &mut builder,
         auth_manager.clone(),
         Arc::downgrade(&test.thread_manager),
@@ -254,6 +256,91 @@ fn fail_closed_score_preserves_classification_order() {
         thread_store.get::<SecurityRiskScore>().as_deref(),
         Some(&fail_closed_score)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
+    let sandboxed = ToolPayload::Function {
+        arguments: r#"{"cmd":"pwd"}"#.to_owned(),
+    };
+    let additional_permissions = ToolPayload::Function {
+        arguments: r#"{"cmd":"pwd","sandbox_permissions":"with_additional_permissions"}"#
+            .to_owned(),
+    };
+    let unsandboxed = ToolPayload::Function {
+        arguments: r#"{"cmd":"pwd","sandbox_permissions":"require_escalated"}"#.to_owned(),
+    };
+
+    for tool_name in ["exec_command", "shell_command"] {
+        let tool_name = ToolName::plain(tool_name);
+        assert!(!should_classify_tool(
+            &tool_name, &sandboxed, /*sandboxed_exec_commands*/ false
+        ));
+        assert!(!should_classify_tool(
+            &tool_name,
+            &additional_permissions,
+            /*sandboxed_exec_commands*/ false
+        ));
+        assert!(should_classify_tool(
+            &tool_name,
+            &unsandboxed,
+            /*sandboxed_exec_commands*/ false
+        ));
+        assert!(should_classify_tool(
+            &tool_name, &sandboxed, /*sandboxed_exec_commands*/ true
+        ));
+    }
+    assert!(should_classify_tool(
+        &ToolName::plain("read_file"),
+        &sandboxed,
+        /*sandboxed_exec_commands*/ false
+    ));
+    assert!(should_classify_tool(
+        &ToolName::namespaced("mcp", "exec_command"),
+        &sandboxed,
+        /*sandboxed_exec_commands*/ false
+    ));
+    skip_if_no_network!(Ok(()));
+
+    let fixture = GuardianFailureFixture::new().await?;
+    let thread_store = fixture.test.codex.thread_extension_data();
+    let score_progress = thread_store
+        .get::<GuardianV2ScoreProgress>()
+        .expect("Guardian v2 should track score progress per thread");
+    let latest_scored_tool_call = score_progress
+        .latest_scored_tool_call
+        .load(Ordering::Acquire);
+    let turn_store = ExtensionData::new("turn-1");
+    let tool_name = ToolName::plain("exec_command");
+    let payload = ToolPayload::Function {
+        arguments: r#"{"cmd":"pwd"}"#.to_owned(),
+    };
+
+    fixture.registry.tool_lifecycle_contributors()[0]
+        .on_tool_start(ToolStartInput {
+            session_store: &fixture.session_store,
+            thread_store,
+            turn_store: &turn_store,
+            turn_id: "turn-1",
+            call_id: "call-2",
+            tool_name: &tool_name,
+            payload: &payload,
+            conversation_history: Arc::new(TestConversationHistory(Vec::new())),
+            source: ToolCallSource::Direct,
+        })
+        .await;
+
+    assert_eq!(
+        score_progress.latest_tool_call.load(Ordering::Acquire),
+        latest_scored_tool_call + 1
+    );
+    assert_eq!(
+        score_progress
+            .latest_scored_tool_call
+            .load(Ordering::Acquire),
+        latest_scored_tool_call
+    );
+    Ok(())
 }
 
 #[test]
@@ -496,7 +583,7 @@ async fn sample_configured_conversation_history(
     config.model_provider = provider_info;
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
-    crate::install(
+    super::install(
         &mut builder,
         auth_manager,
         Arc::downgrade(&test.thread_manager),
@@ -1145,15 +1232,18 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
     let model_defaults = GuardianV2ModelConfig {
         classifier_instructions: Some("Use the experimental model-owned prompt.".to_owned()),
         review_threshold_basis_points: Some(6_000),
+        max_tool_call_lag: Some(2),
         reasoning_effort: Some(ReasoningEffort::Minimal),
         transcript: Some(GuardianV2TranscriptModelConfig {
             sources: Some(vec!["reasoning".to_owned()]),
+            include_images: Some(true),
             max_message_entry_tokens: Some(128),
             max_message_transcript_tokens: Some(256),
             ..Default::default()
         }),
         max_action_tokens: Some(128),
         max_classifier_instruction_tokens: Some(256),
+        reuse_parent_compaction: Some(false),
         max_parent_compaction_tokens: Some(384),
     };
     let conversation_history = vec![
@@ -1226,13 +1316,19 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
 
     let session_store = ExtensionData::new("session-1");
     let thread_store = test.codex.thread_extension_data();
+    let guardian_config = thread_store
+        .get::<crate::async_scorer::config::GuardianV2Config>()
+        .expect("Guardian v2 configuration should be installed");
     assert_eq!(
-        thread_store
-            .get::<crate::config::GuardianV2Config>()
-            .expect("Guardian v2 configuration should be installed")
-            .max_parent_compaction_tokens,
-        384
+        (
+            guardian_config.max_tool_call_lag,
+            guardian_config.reuse_parent_compaction,
+            guardian_config.max_parent_compaction_tokens,
+            guardian_config.transcript.include_images,
+        ),
+        (2, false, 384, true)
     );
+    assert!(thread_store.get::<NodeReplReviewEvidence>().is_some());
     tokio::time::timeout(Duration::from_secs(5), async {
         while thread_store.get::<SecurityRiskScore>().is_none() {
             tokio::task::yield_now().await;
@@ -1356,7 +1452,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
             "role": "developer",
             "content": [{
                 "type": "input_text",
-                "text": crate::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
                     "{{ tenant_policy_config }}",
                     TEST_GUARDIAN_POLICY,
                 ),
@@ -1483,7 +1579,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             "role": "developer",
             "content": [{
                 "type": "input_text",
-                "text": crate::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
                     "{{ tenant_policy_config }}",
                     TEST_CATALOG_GUARDIAN_POLICY,
                 ),
@@ -1521,7 +1617,7 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
         .as_str()
         .expect("Luna request should contain developer instructions");
 
-    let (prefix, suffix) = crate::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, suffix) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(instructions.starts_with(&format!("{prefix}Reject unsafe uploads.")));
@@ -1530,8 +1626,10 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
     assert!(instructions.ends_with(suffix));
     assert!(
         instructions.len()
-            <= TruncationPolicy::Tokens(crate::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS)
-                .byte_budget()
+            <= TruncationPolicy::Tokens(
+                crate::async_scorer::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS,
+            )
+            .byte_budget()
     );
 
     Ok(())
@@ -1652,7 +1750,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         .get_model_info(MODEL, &config.to_models_manager_config())
         .await;
     let mut builder = ExtensionRegistryBuilder::new();
-    crate::install(
+    super::install(
         &mut builder,
         auth_manager,
         Arc::downgrade(&test.thread_manager),
@@ -1725,7 +1823,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
     assert_eq!(request["input"][0]["type"], "additional_tools");
     let developer_message = &request["input"][1];
     assert_eq!(developer_message["role"], "developer");
-    let (prefix, _) = crate::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, _) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(
@@ -1819,6 +1917,63 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
                     && tags == &[("outcome".to_owned(), "failure".to_owned())]
         )
     }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_can_disable_parent_compaction_reuse() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let oversized_compaction = ResponseItem::Compaction {
+        id: Some(ResponseItemId::from_server("cmp_oversized".to_owned())),
+        encrypted_content: "a".repeat(TruncationPolicy::Tokens(/*limit*/ 256).byte_budget()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let conversation_history = vec![
+        oversized_compaction,
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: "Inspect the repository guidelines.".to_owned(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let configuration = "[features.guardianv2]\nenabled = true\nreuse_parent_compaction = false\nmax_parent_compaction_tokens = 256\n";
+    let (request, test, _registry) = sample_configured_conversation_history(
+        conversation_history,
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        configuration,
+        /*model_defaults*/ None,
+    )
+    .await?;
+
+    let input = request["input"]
+        .as_array()
+        .expect("Luna request input should be an array");
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[2]["role"], "user");
+    assert!(
+        input
+            .iter()
+            .all(|item| item["type"] != "compaction" && item["type"] != "context_compaction")
+    );
+
+    let thread_store = test.codex.thread_extension_data();
+    let score = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(score) = thread_store.get::<SecurityRiskScore>() {
+                return score;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(score.scores.get("action_risk"), Some(&0.8));
 
     Ok(())
 }

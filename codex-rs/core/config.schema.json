@@ -256,13 +256,6 @@
       "description": "Determines the conditions under which the user is consulted to approve running the command proposed by Codex.",
       "oneOf": [
         {
-          "description": "Under this policy, only \"known safe\" commands—as determined by `is_safe_command()`—that **only read files** are auto‑approved. Everything else will ask the user to approve.",
-          "enum": [
-            "untrusted"
-          ],
-          "type": "string"
-        },
-        {
           "description": "The model decides when to ask the user for approval.",
           "enum": [
             "on-request"
@@ -350,6 +343,35 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "AwsAuthRefreshConfig": {
+      "additionalProperties": false,
+      "description": "Command used to refresh AWS credentials for a model provider.",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed to the refresh command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "Executable to invoke directly, without a shell.",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "default": 300000,
+          "description": "Maximum time to wait for the refresh command to complete.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
       "type": "object"
     },
     "BundledSkillsConfig": {
@@ -518,6 +540,9 @@
             },
             "current_time_reminder": {
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
+            },
+            "cwd_relative_turn_diffs": {
+              "type": "boolean"
             },
             "default_mode_request_user_input": {
               "type": "boolean"
@@ -1274,6 +1299,12 @@
         "reasoning_effort": {
           "$ref": "#/definitions/ReasoningEffort"
         },
+        "reuse_parent_compaction": {
+          "type": "boolean"
+        },
+        "review_scope": {
+          "$ref": "#/definitions/GuardianV2ReviewScopeConfigToml"
+        },
         "review_threshold": {
           "format": "double",
           "maximum": 1.0,
@@ -1282,6 +1313,17 @@
         },
         "transcript": {
           "$ref": "#/definitions/GuardianV2TranscriptConfigToml"
+        }
+      },
+      "type": "object"
+    },
+    "GuardianV2ReviewScopeConfigToml": {
+      "additionalProperties": false,
+      "description": "Optional tool-call categories available to the Guardian v2 classifier.",
+      "properties": {
+        "sandboxed_exec_commands": {
+          "description": "Include sandboxed shell command calls in Guardian v2 classification.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1871,6 +1913,14 @@
       "additionalProperties": false,
       "description": "AWS SigV4 auth configuration for a model provider.",
       "properties": {
+        "auth_refresh": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AwsAuthRefreshConfig"
+            }
+          ],
+          "description": "Optional command used to reauthenticate after a refreshable AWS auth failure."
+        },
         "profile": {
           "description": "AWS profile name to use. When unset, the AWS SDK default chain decides.",
           "type": "string"
@@ -3580,6 +3630,7 @@
               "open_line_above": null,
               "open_line_below": null,
               "paste_after": null,
+              "replace_char": null,
               "start_change_operator": null,
               "start_delete_operator": null,
               "start_yank_operator": null,
@@ -4359,6 +4410,7 @@
             "open_line_above": null,
             "open_line_below": null,
             "paste_after": null,
+            "replace_char": null,
             "start_change_operator": null,
             "start_delete_operator": null,
             "start_yank_operator": null,
@@ -4765,6 +4817,14 @@
             }
           ],
           "description": "Paste after cursor (`p`)."
+        },
+        "replace_char": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Replace the character under the cursor (`r`)."
         },
         "start_change_operator": {
           "allOf": [
@@ -5380,6 +5440,9 @@
         },
         "current_time_reminder": {
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
+        },
+        "cwd_relative_turn_diffs": {
+          "type": "boolean"
         },
         "default_mode_request_user_input": {
           "type": "boolean"

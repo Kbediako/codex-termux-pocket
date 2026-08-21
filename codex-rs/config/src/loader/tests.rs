@@ -1,17 +1,59 @@
 use super::*;
+use crate::ConfigRequirementsToml;
 use codex_file_system::CopyOptions;
 use codex_file_system::CreateDirectoryOptions;
 use codex_file_system::ExecutorFileSystemFuture;
 use codex_file_system::FileMetadata;
 use codex_file_system::FileSystemReadStream;
 use codex_file_system::FileSystemSandboxContext;
+use codex_file_system::GetMetadataOptions;
 use codex_file_system::ReadDirectoryEntry;
+use codex_file_system::ReadFileOptions;
 use codex_file_system::RemoveOptions;
+use codex_file_system::WriteFileOptions;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
 pub(super) struct TestFileSystem;
+
+#[tokio::test]
+async fn managed_browser_import_denial_survives_user_and_session_config() {
+    let tmp = tempdir().expect("tempdir");
+    let allow = "[in_app_browser]\nallow_external_browser_settings_import = true";
+    let deny = "[in_app_browser]\nallow_external_browser_settings_import = false";
+    let requirements_path = tmp.path().join("requirements.toml");
+    std::fs::write(&requirements_path, allow).expect("write system requirements");
+    std::fs::write(tmp.path().join(CONFIG_TOML_FILE), allow).expect("write user config");
+    let mut loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    loader_overrides.system_requirements_path = Some(requirements_path);
+
+    let stack = load_config_layers_state(
+        &TestFileSystem,
+        tmp.path(),
+        /*cwd*/ None,
+        &[(
+            "in_app_browser.allow_external_browser_settings_import".to_string(),
+            TomlValue::Boolean(true),
+        )],
+        ConfigLoadOptions {
+            loader_overrides,
+            strict_config: false,
+            cloud_config_bundle:
+                crate::test_support::CloudConfigBundleFixture::enterprise_requirement(deny)
+                    .add_enterprise_requirement("[in_app_browser]")
+                    .into_loader(),
+        },
+        &crate::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load managed browser import requirement");
+
+    assert_eq!(
+        stack.requirements_toml(),
+        &toml::from_str::<ConfigRequirementsToml>(deny).expect("expected requirement"),
+    );
+}
 
 impl ExecutorFileSystem for TestFileSystem {
     fn canonicalize<'a>(
@@ -29,6 +71,7 @@ impl ExecutorFileSystem for TestFileSystem {
     fn read_file<'a>(
         &'a self,
         path: &'a PathUri,
+        _options: ReadFileOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
         Box::pin(async move {
@@ -54,6 +97,7 @@ impl ExecutorFileSystem for TestFileSystem {
         &'a self,
         _path: &'a PathUri,
         _contents: Vec<u8>,
+        _options: WriteFileOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(async move { unimplemented!("test filesystem only supports reads") })
@@ -71,6 +115,7 @@ impl ExecutorFileSystem for TestFileSystem {
     fn get_metadata<'a>(
         &'a self,
         path: &'a PathUri,
+        _options: GetMetadataOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
         Box::pin(async move {

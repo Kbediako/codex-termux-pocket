@@ -1315,11 +1315,11 @@ impl UnifiedExecProcessManager {
             })
     }
 
-    pub(super) async fn collect_output_until_deadline(
-        output: &OutputHandles,
+    pub(super) async fn collect_output_until_deadline<const MAX_BYTES: usize>(
+        output: &OutputHandles<MAX_BYTES>,
         mut pause_state: Option<watch::Receiver<bool>>,
         mut deadline: Instant,
-    ) -> HeadTailBuffer {
+    ) -> HeadTailBuffer<MAX_BYTES> {
         const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
 
         let OutputHandles {
@@ -1339,12 +1339,12 @@ impl UnifiedExecProcessManager {
                 &mut post_exit_deadline,
             )
             .await;
-            let drained_output: HeadTailBuffer;
+            let drained_output: HeadTailBuffer<MAX_BYTES>;
             let has_drained_output: bool;
             let mut wait_for_output = None;
             {
                 let mut guard = output_buffer.lock().await;
-                drained_output = guard.drain();
+                drained_output = std::mem::take(&mut *guard);
                 has_drained_output =
                     drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0;
                 if !has_drained_output {

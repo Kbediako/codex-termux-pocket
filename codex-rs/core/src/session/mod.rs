@@ -123,6 +123,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
@@ -178,6 +179,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::client::ModelClient;
+use crate::codex_thread::CodexThreadSettingsOverrides;
 use crate::codex_thread::ThreadConfigSnapshot;
 #[cfg(test)]
 use crate::compact::collect_user_messages;
@@ -264,6 +266,7 @@ pub(crate) struct PreviousTurnSettings {
 
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::guardian::GuardianReviewSessionManager;
+use crate::mcp::McpEnvironmentScope;
 use crate::mcp::McpManager;
 use crate::mcp::McpThreadIdentity;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
@@ -1649,6 +1652,20 @@ impl Session {
         state
             .session_configuration
             .thread_config_snapshot(self.services.turn_environments.selections())
+    }
+
+    pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .thread_settings_snapshot(&self.services.turn_environments.selections())
+    }
+
+    pub(crate) async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .restorable_thread_settings(self.services.turn_environments.selections())
     }
 
     pub(crate) async fn set_app_server_client_info(
@@ -3137,8 +3154,12 @@ impl Session {
         let environments = turn_context.environments.refresh_readiness();
         self.services
             .agents_md_manager
-            .refresh(&turn_context.config, &environments)
-            .await;
+            .refresh(
+                &turn_context.config,
+                &environments,
+                turn_context.windows_sandbox_level,
+            )
+            .await?;
         let loaded_agents_md = self.services.agents_md_manager.get_loaded().await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
@@ -3161,9 +3182,8 @@ impl Session {
             if !discovery.sandbox_contexts().is_empty() {
                 extension_data.insert(discovery.sandbox_contexts().clone());
             }
-        } else if !turn_context
-            .config
-            .permissions
+        } else if !environments
+            .permission_profile_or_else(|| turn_context.permission_profile())
             .file_system_sandbox_policy()
             .has_full_disk_read_access()
         {
@@ -3594,6 +3614,8 @@ impl Session {
                     Some(serde_json::json!({
                         "threadId": self.thread_id().to_string(),
                     })),
+                    /*requested_timeout*/ None,
+                    /*wait_for_server*/ true,
                 )
                 .await
                 .ok()

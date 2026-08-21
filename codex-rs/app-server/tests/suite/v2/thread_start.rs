@@ -1640,8 +1640,9 @@ async fn thread_start_with_nested_git_cwd_respects_effective_permissions_for_pro
 
     let repo_root = TempDir::new()?;
     std::fs::create_dir(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let nested = repo_root.path().join("nested/project");
-    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(nested.join(".git"))?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1838,6 +1839,11 @@ fn create_config_toml_with_profile_workspace_root(
             r#"
 [permissions.dev.workspace_roots]
 "{profile_root_key}" = true
+
+# This test only exercises workspace roots; Windows restricted-token sandboxes
+# cannot enforce a filesystem policy without root read access.
+[permissions.dev.filesystem]
+":root" = "read"
 
 [permissions.dev.filesystem.":workspace_roots"]
 "." = "write"

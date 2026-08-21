@@ -107,6 +107,26 @@ pub enum CodeModeToolCallStatus {
     Interrupted,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlToolCallFact {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub call_id: String,
+    pub cell_id: Option<String>,
+    pub tool_name: String,
+    pub started_at_ms: u64,
+    pub completed_at_ms: u64,
+    pub status: ControlToolCallStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlToolCallStatus {
+    Completed,
+    Failed,
+    Rejected,
+    Interrupted,
+}
+
 pub fn build_track_events_context(
     model_slug: String,
     thread_id: String,
@@ -521,6 +541,7 @@ pub(crate) enum AnalyticsFact {
 pub(crate) enum CustomAnalyticsFact {
     ArtifactOperation(ArtifactOperationInput),
     CodeModeToolCall(CodeModeToolCallFact),
+    ControlToolCall(ControlToolCallFact),
     SubAgentThreadStarted(SubAgentThreadStartedInput),
     Compaction(Box<CodexCompactionEvent>),
     Goal(Box<CodexGoalEvent>),

@@ -1,12 +1,35 @@
 use codex_features::GuardianV2ConfigToml;
+use codex_features::GuardianV2ReviewScopeConfigToml;
+use codex_features::GuardianV2TranscriptConfigToml;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
+use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::TruncationPolicy;
 use pretty_assertions::assert_eq;
 
 use super::DEFAULT_CLASSIFIER_INSTRUCTIONS;
 use super::GuardianV2Config;
-use crate::transcript::truncate_entry;
+use crate::async_scorer::transcript::truncate_entry;
+
+#[test]
+fn sandboxed_exec_commands_are_excluded_by_default() {
+    let config = GuardianV2Config::from_overrides(GuardianV2ConfigToml::default()).unwrap();
+
+    assert!(!config.sandboxed_exec_commands);
+}
+
+#[test]
+fn sandboxed_exec_commands_can_be_included() {
+    let config = GuardianV2Config::from_overrides(GuardianV2ConfigToml {
+        review_scope: Some(GuardianV2ReviewScopeConfigToml {
+            sandboxed_exec_commands: Some(true),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert!(config.sandboxed_exec_commands);
+}
 
 #[test]
 fn template_policy_is_substituted_before_the_single_truncation() {
@@ -122,5 +145,51 @@ fn model_prompt_and_explicit_threshold_precedence_are_preserved() {
             .unwrap()
             .review_threshold,
         0.5,
+    );
+}
+
+#[test]
+fn model_runtime_settings_preserve_local_overrides() {
+    let defaults = GuardianV2ModelConfig {
+        max_tool_call_lag: Some(1),
+        reuse_parent_compaction: Some(false),
+        transcript: Some(GuardianV2TranscriptModelConfig {
+            include_images: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let inherited = GuardianV2Config::from_overrides(GuardianV2ConfigToml::default())
+        .unwrap()
+        .with_model_defaults(Some(&defaults))
+        .unwrap();
+    assert_eq!(
+        (
+            inherited.max_tool_call_lag,
+            inherited.reuse_parent_compaction,
+            inherited.transcript.include_images,
+        ),
+        (1, false, true)
+    );
+
+    let overridden = GuardianV2Config::from_overrides(GuardianV2ConfigToml {
+        max_tool_call_lag: Some(4),
+        reuse_parent_compaction: Some(true),
+        transcript: Some(GuardianV2TranscriptConfigToml {
+            include_images: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap()
+    .with_model_defaults(Some(&defaults))
+    .unwrap();
+    assert_eq!(
+        (
+            overridden.max_tool_call_lag,
+            overridden.reuse_parent_compaction,
+            overridden.transcript.include_images,
+        ),
+        (4, true, false)
     );
 }

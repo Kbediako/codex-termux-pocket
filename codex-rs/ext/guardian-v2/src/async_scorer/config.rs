@@ -5,14 +5,14 @@ use codex_features::GuardianV2TranscriptConfigToml;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::ReasoningEffort;
 
-use crate::transcript::MAX_MESSAGE_ENTRY_TOKENS;
-use crate::transcript::MAX_MESSAGE_TRANSCRIPT_TOKENS;
-use crate::transcript::MAX_RECENT_NON_USER_ENTRIES;
-use crate::transcript::MAX_TOOL_ENTRY_TOKENS;
-use crate::transcript::MAX_TOOL_TRANSCRIPT_TOKENS;
-use crate::transcript::TranscriptConfig;
-use crate::transcript::TranscriptSource;
-use crate::transcript::truncate_entry;
+use super::transcript::MAX_MESSAGE_ENTRY_TOKENS;
+use super::transcript::MAX_MESSAGE_TRANSCRIPT_TOKENS;
+use super::transcript::MAX_RECENT_NON_USER_ENTRIES;
+use super::transcript::MAX_TOOL_ENTRY_TOKENS;
+use super::transcript::MAX_TOOL_TRANSCRIPT_TOKENS;
+use super::transcript::TranscriptConfig;
+use super::transcript::TranscriptSource;
+use super::transcript::truncate_entry;
 
 pub(crate) const DEFAULT_MODEL_CONTEXT_ITEM_TOKENS: usize = 10_000;
 pub(crate) const DEFAULT_PARENT_COMPACTION_TOKENS: usize = 25_000;
@@ -32,7 +32,9 @@ pub(crate) struct GuardianV2Config {
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) max_action_tokens: usize,
     pub(crate) max_classifier_instruction_tokens: usize,
+    pub(crate) reuse_parent_compaction: bool,
     pub(crate) max_parent_compaction_tokens: usize,
+    pub(crate) sandboxed_exec_commands: bool,
     pub(crate) transcript: TranscriptConfig,
 }
 
@@ -73,6 +75,9 @@ impl GuardianV2Config {
                     .review_threshold_basis_points
                     .map(|basis_points| f64::from(basis_points) / 10_000.0)
             });
+            configured.max_tool_call_lag = configured
+                .max_tool_call_lag
+                .or(model_defaults.max_tool_call_lag);
             configured.reasoning_effort = configured
                 .reasoning_effort
                 .or_else(|| model_defaults.reasoning_effort.clone());
@@ -82,6 +87,9 @@ impl GuardianV2Config {
             configured.max_classifier_instruction_tokens = configured
                 .max_classifier_instruction_tokens
                 .or(model_defaults.max_classifier_instruction_tokens);
+            configured.reuse_parent_compaction = configured
+                .reuse_parent_compaction
+                .or(model_defaults.reuse_parent_compaction);
             configured.max_parent_compaction_tokens = configured
                 .max_parent_compaction_tokens
                 .or(model_defaults.max_parent_compaction_tokens);
@@ -107,6 +115,9 @@ impl GuardianV2Config {
                             .collect::<Result<Vec<_>, _>>()?,
                     );
                 }
+                transcript.include_images = transcript
+                    .include_images
+                    .or(model_transcript.include_images);
                 transcript.max_message_entry_tokens = transcript
                     .max_message_entry_tokens
                     .or(model_transcript.max_message_entry_tokens);
@@ -232,7 +243,13 @@ impl GuardianV2Config {
             reasoning_effort: configured.reasoning_effort.unwrap_or(ReasoningEffort::Low),
             max_action_tokens,
             max_classifier_instruction_tokens,
+            reuse_parent_compaction: configured.reuse_parent_compaction.unwrap_or(true),
             max_parent_compaction_tokens,
+            sandboxed_exec_commands: configured
+                .review_scope
+                .as_ref()
+                .and_then(|review_scope| review_scope.sandboxed_exec_commands)
+                .unwrap_or(false),
             transcript: TranscriptConfig {
                 sources: transcript_config
                     .and_then(|transcript| transcript.sources.clone())

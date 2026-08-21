@@ -14,6 +14,7 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::SelectedCapabilityRootsStatus;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EnvironmentConnectionEvent;
@@ -358,6 +359,18 @@ impl ThreadEnvironments {
             .map_or_else(Vec::new, |environment| {
                 Self::primary_workspace_roots_for(std::slice::from_ref(&environment.selection))
             })
+    }
+
+    /// Returns installed owner configuration without treating pending attachments as ready.
+    pub(crate) fn primary_config_for(
+        selections: &[TurnEnvironmentSelection],
+    ) -> Option<&EnvironmentConfig> {
+        match &selections.first()?.config {
+            EnvironmentConfigState::Ready(config) => Some(config),
+            EnvironmentConfigState::FromThread
+            | EnvironmentConfigState::Pending
+            | EnvironmentConfigState::Failed(_) => None,
+        }
     }
 
     pub(crate) fn primary_workspace_roots_for(
@@ -713,6 +726,16 @@ impl TurnEnvironmentSnapshot {
         self.turn_environments().next()
     }
 
+    /// Returns the primary environment's resolved permissions, or the provided fallback.
+    pub(crate) fn permission_profile_or_else(
+        &self,
+        fallback: impl FnOnce() -> PermissionProfile,
+    ) -> PermissionProfile {
+        self.primary()
+            .map(TurnEnvironment::permission_profile_with_workspace_roots)
+            .unwrap_or_else(fallback)
+    }
+
     pub(crate) fn local(&self) -> Option<&TurnEnvironment> {
         self.turn_environments()
             .find(|environment| !environment.environment.is_remote())
@@ -814,6 +837,7 @@ mod tests {
             permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
             shell_environment_policy: Default::default(),
             exec_policy: None,
+            mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
         }
@@ -988,6 +1012,7 @@ url = "ws://127.0.0.1:8765"
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,
+            mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
         };
@@ -1223,6 +1248,7 @@ url = "ws://127.0.0.1:8765"
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,
+            mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
         };
@@ -1559,6 +1585,7 @@ url = "ws://127.0.0.1:8765"
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,
+            mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
         };
@@ -1605,6 +1632,7 @@ url = "ws://127.0.0.1:8765"
             permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
             shell_environment_policy: Default::default(),
             exec_policy: None,
+            mcp_policy: None,
             network_policy: None,
             selected_capability_roots: vec![root("parent-root")],
         };

@@ -73,6 +73,7 @@ use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_model_provider::ProviderCapabilities;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
@@ -947,6 +948,88 @@ profile = "codex-bedrock"
     );
 }
 
+#[tokio::test]
+async fn managed_residency_warns_about_provider_header_overrides_without_mutating_config()
+-> std::io::Result<()> {
+    for enforce_residency in [None, Some(ResidencyRequirement::Us)] {
+        let cfg = toml::from_str::<ConfigToml>(
+            r#"
+model_provider = "custom-openai"
+
+[model_providers.custom-openai]
+name = "OpenAI"
+http_headers = { "X-OpenAI-Internal-Codex-Residency" = "request-override", "x-provider-header" = "preserved" }
+env_http_headers = { "x-openai-internal-codex-residency" = "CODEX_TEST_UNSET_RESIDENCY_HEADER", "x-provider-env-header" = "CODEX_TEST_UNSET_PROVIDER_HEADER" }
+"#,
+        )
+        .expect("existing provider configuration should remain loadable");
+        let requirements = ConfigRequirements {
+            enforce_residency: ConstrainedWithSource::new(
+                Constrained::allow_only(enforce_residency),
+                enforce_residency.map(|_| RequirementSource::Unknown),
+            ),
+            ..Default::default()
+        };
+        let requirements_toml = ConfigRequirementsToml {
+            enforce_residency,
+            ..Default::default()
+        };
+        let config_layer_stack =
+            ConfigLayerStack::new(Vec::new(), requirements, requirements_toml)?;
+        let config = Config::load_config_with_layer_stack(
+            LOCAL_FS.as_ref(),
+            cfg,
+            ConfigOverrides::default(),
+            tempdir()?.abs(),
+            config_layer_stack,
+        )
+        .await?;
+
+        let static_headers = config
+            .model_provider
+            .http_headers
+            .as_ref()
+            .expect("static headers should remain configured");
+        let environment_headers = config
+            .model_provider
+            .env_http_headers
+            .as_ref()
+            .expect("environment-backed headers should remain configured");
+        assert_eq!(
+            static_headers
+                .get("X-OpenAI-Internal-Codex-Residency")
+                .map(String::as_str),
+            Some("request-override")
+        );
+        assert_eq!(
+            environment_headers
+                .get(RESIDENCY_HEADER_NAME)
+                .map(String::as_str),
+            Some("CODEX_TEST_UNSET_RESIDENCY_HEADER")
+        );
+        assert_eq!(
+            static_headers.get("x-provider-header").map(String::as_str),
+            Some("preserved")
+        );
+        assert_eq!(
+            environment_headers
+                .get("x-provider-env-header")
+                .map(String::as_str),
+            Some("CODEX_TEST_UNSET_PROVIDER_HEADER")
+        );
+
+        let expected_warning = format!(
+            "Ignoring `{RESIDENCY_HEADER_NAME}` in `model_providers.custom-openai` because managed residency is required."
+        );
+        assert_eq!(
+            config.startup_warnings.contains(&expected_warning),
+            enforce_residency.is_some()
+        );
+    }
+
+    Ok(())
+}
+
 #[test]
 fn accepts_amazon_bedrock_aws_profile_override() {
     let cfg = toml::from_str::<ConfigToml>(
@@ -1085,7 +1168,7 @@ supports_websockets = true
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
+        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, and `aws.auth_refresh`; other non-default provider fields are not supported"
     ));
 }
 
@@ -8285,6 +8368,7 @@ async fn agent_role_file_without_developer_instructions_is_dropped_with_warning(
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8456,6 +8540,7 @@ async fn discovered_agent_role_file_without_name_is_dropped_with_warning() -> st
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8656,6 +8741,7 @@ async fn discovers_multiple_standalone_agent_role_files() -> std::io::Result<()>
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8787,6 +8873,7 @@ async fn mixed_legacy_and_standalone_agent_role_sources_merge_with_precedence()
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8933,6 +9020,7 @@ async fn higher_precedence_agent_role_can_inherit_description_from_lower_layer()
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -9314,7 +9402,7 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
 fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
     let toml = r#"
 model = "o3"
-approval_policy = "untrusted"
+approval_policy = "on-request"
 
 [analytics]
 enabled = true
@@ -9756,6 +9844,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         allow_remote_control: None,
         computer_use: None,
         browser_use: None,
+        in_app_browser: None,
         windows: None,
         feature_requirements: None,
         hooks: None,
@@ -10342,6 +10431,41 @@ mcp_oauth_callback_url = "https://example.com/callback"
 }
 
 #[tokio::test]
+async fn untrusted_parent_repo_with_incomplete_child_git_keeps_unless_trusted_approval_policy()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo = TempDir::new()?;
+    let cwd = repo.path().join("sub");
+    std::fs::create_dir_all(repo.path().join(".git"))?;
+    std::fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::create_dir_all(cwd.join(".git"))?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            projects: Some(HashMap::from([(
+                repo.path().to_string_lossy().to_string(),
+                ProjectConfig {
+                    trust_level: Some(TrustLevel::Untrusted),
+                },
+            )])),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            cwd: Some(cwd),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.permissions.approval_policy.value(),
+        AskForApproval::UnlessTrusted
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let test_project_dir = TempDir::new()?;
@@ -10365,7 +10489,7 @@ async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow:
     )
     .await?;
 
-    // Verify that untrusted projects get UnlessTrusted approval policy
+    // Verify that untrusted projects get the internal always-prompt policy.
     assert_eq!(
         config.permissions.approval_policy.value(),
         AskForApproval::UnlessTrusted,
@@ -10765,8 +10889,7 @@ trust_level = "untrusted"
 }
 
 #[tokio::test]
-async fn explicit_approval_policy_falls_back_when_disallowed_by_requirements() -> std::io::Result<()>
-{
+async fn explicit_untrusted_approval_policy_is_rejected() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -10774,19 +10897,17 @@ async fn explicit_approval_policy_falls_back_when_disallowed_by_requirements() -
 "#,
     )?;
 
-    let config = ConfigBuilder::without_managed_config_for_tests()
+    let error = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approval_policies = ["on-request"]"#,
-            ),
-        )
         .build()
-        .await?;
-    assert_eq!(
-        config.permissions.approval_policy.value(),
-        AskForApproval::OnRequest
+        .await
+        .expect_err("untrusted approval policy should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("approval_policy = \"untrusted\" is no longer supported"),
+        "unexpected error: {error}"
     );
     Ok(())
 }

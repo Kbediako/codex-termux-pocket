@@ -22,6 +22,7 @@ pub use feature_configs::CurrentTimeReminderConfigToml;
 pub use feature_configs::CurrentTimeReminderDeliveryMode;
 pub use feature_configs::CurrentTimeSource;
 pub use feature_configs::GuardianV2ConfigToml;
+pub use feature_configs::GuardianV2ReviewScopeConfigToml;
 pub use feature_configs::GuardianV2TranscriptConfigToml;
 pub use feature_configs::GuardianV2TranscriptSource;
 pub use feature_configs::MultiAgentV2ConfigToml;
@@ -146,6 +147,8 @@ pub enum Feature {
     ShellSnapshot,
     /// Allow turns to start while selected executors are still starting.
     DeferredExecutor,
+    /// Use the current working directory for turn diff display paths.
+    CwdRelativeTurnDiffs,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
     /// Enable startup memory extraction and file-backed memory consolidation.
@@ -262,7 +265,7 @@ pub enum Feature {
     MentionsV2,
     /// Allow request_user_input in Default collaboration mode.
     DefaultModeRequestUserInput,
-    /// Allow sending a user-visible message without ending the current turn.
+    /// Removed compatibility flag for model-enabled async user messaging.
     SendAsyncMessage,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
@@ -875,6 +878,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::CwdRelativeTurnDiffs,
+        key: "cwd_relative_turn_diffs",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::JsRepl,
         key: "js_repl",
         stage: Stage::Removed,
@@ -1355,7 +1364,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::SendAsyncMessage,
         key: "send_async_message",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {

@@ -1063,14 +1063,13 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     }
 
     if !turn_context.session_source.is_non_root_agent()
-        && features.enabled(Feature::SendAsyncMessage)
         && turn_context
             .model_info
             .experimental_supported_tools
             .iter()
             .any(|tool| tool == "send_user_message_async")
     {
-        registry.add(SendUserMessageAsyncHandler);
+        registry.add_with_exposure(SendUserMessageAsyncHandler, ToolExposure::DirectModelOnly);
     }
 
     if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {

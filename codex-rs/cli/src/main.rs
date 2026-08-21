@@ -1189,6 +1189,9 @@ async fn cli_main(
             codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
         }
         Some(Subcommand::McpServer(McpServerCommand { strict_config })) => {
+            eprintln!(
+                "warning: `codex mcp-server` is deprecated and will be removed in a future release."
+            );
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
@@ -2809,6 +2812,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         strict_config,
         approval_policy,
         web_search,
+        no_alt_screen,
         prompt,
         mut config_overrides,
         ..
@@ -2828,6 +2832,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     if web_search {
         interactive.web_search = true;
     }
+    interactive.no_alt_screen |= no_alt_screen;
     if strict_config {
         interactive.strict_config = true;
     }
@@ -3975,6 +3980,18 @@ mod tests {
         assert!(interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
+    }
+
+    #[test]
+    fn resume_and_fork_preserve_no_alt_screen() {
+        for (command, finalize) in [
+            ("resume", finalize_resume_from_args as fn(&[&str]) -> TuiCli),
+            ("fork", finalize_fork_from_args as fn(&[&str]) -> TuiCli),
+        ] {
+            assert!(finalize(&["codex", command, "--no-alt-screen"]).no_alt_screen);
+            assert!(finalize(&["codex", "--no-alt-screen", command]).no_alt_screen);
+            assert!(!finalize(&["codex", command]).no_alt_screen);
+        }
     }
 
     #[test]

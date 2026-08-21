@@ -1,11 +1,11 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
-use codex_features::Feature;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
@@ -53,15 +53,10 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn() -> Resul
     .await;
     let test = test_codex()
         .with_model_info_override("gpt-5.2", |model| {
+            model.tool_mode = Some(ToolMode::CodeModeOnly);
             model
                 .experimental_supported_tools
                 .push("send_user_message_async".to_string());
-        })
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::SendAsyncMessage)
-                .expect("test config should allow enabling async messages");
         })
         .build_with_auto_env(&server)
         .await?;

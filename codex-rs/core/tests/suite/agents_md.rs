@@ -10,9 +10,15 @@ use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_home::CodexHomeUserInstructionsProvider;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -28,10 +34,13 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_no_remote_env;
+use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::RecordingUserInstructionsProvider;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -188,11 +197,17 @@ async fn agents_override_is_preferred_over_agents_md() -> Result<()> {
             let override_md = cwd.join("AGENTS.override.md");
             let agents_md_uri = executor_path_uri(&agents_md)?;
             let override_md_uri = executor_path_uri(&override_md)?;
-            fs.write_file(&agents_md_uri, b"base doc".to_vec(), /*sandbox*/ None)
-                .await?;
+            fs.write_file(
+                &agents_md_uri,
+                b"base doc".to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
             fs.write_file(
                 &override_md_uri,
                 b"override doc".to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -226,13 +241,17 @@ async fn configured_fallback_is_used_when_agents_candidate_is_directory() -> Res
                 let fallback_uri = executor_path_uri(&fallback)?;
                 fs.create_directory(
                     &agents_dir_uri,
-                    CreateDirectoryOptions { recursive: true },
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
                     /*sandbox*/ None,
                 )
                 .await?;
                 fs.write_file(
                     &fallback_uri,
                     b"fallback doc".to_vec(),
+                    Default::default(),
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -272,25 +291,31 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
 
                 fs.create_directory(
                     &nested_uri,
-                    CreateDirectoryOptions { recursive: true },
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
                     /*sandbox*/ None,
                 )
                 .await?;
                 fs.write_file(
                     &root_agents_uri,
                     b"root doc".to_vec(),
+                    Default::default(),
                     /*sandbox*/ None,
                 )
                 .await?;
                 fs.write_file(
                     &git_marker_uri,
                     b"gitdir: /tmp/mock-git-dir\n".to_vec(),
+                    Default::default(),
                     /*sandbox*/ None,
                 )
                 .await?;
                 fs.write_file(
                     &nested_agents_uri,
                     b"child doc".to_vec(),
+                    Default::default(),
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -412,6 +437,7 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
             fs.write_file(
                 &agents_md_uri,
                 b"project doc".to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -436,6 +462,182 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("instructions message");
     assert!(instructions.contains("global doc\n\n--- project-doc ---\n\nproject doc"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_project_without_instructions_starts_successfully() -> Result<()> {
+    skip_if_target_windows!(
+        Ok(()),
+        "Windows restricted-token sandbox cannot enforce deny-read policies"
+    );
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        let mut file_system_policy = FileSystemSandboxPolicy::read_only();
+        file_system_policy.entries.push(FileSystemSandboxEntry::new(
+            config.cwd.join("private.txt").into(),
+            FileSystemAccessMode::Deny,
+        ));
+        config
+            .permissions
+            .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                &file_system_policy,
+                NetworkSandboxPolicy::Restricted,
+            ))
+            .expect("test config should allow a restricted read policy");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    assert_eq!(
+        test.codex.instruction_sources().await,
+        Vec::<PathUri>::new()
+    );
+    test.submit_text_turn("continue without project instructions")
+        .await?;
+    response_mock.single_request();
+
+    Ok(())
+}
+
+/// Thread creation fails when sandboxing prevents project instructions from loading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_project_instructions_fail_thread_creation() -> Result<()> {
+    skip_if_target_windows!(
+        Ok(()),
+        "Windows restricted-token sandbox cannot enforce deny-read policies"
+    );
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    write_global_file(home.as_ref(), GLOBAL_AGENTS_FILENAME, GLOBAL_INSTRUCTIONS)?;
+
+    let mut builder = test_codex()
+        .with_home(home)
+        .with_config(|config| {
+            let mut file_system_policy = FileSystemSandboxPolicy::read_only();
+            file_system_policy.entries.push(FileSystemSandboxEntry::new(
+                config.cwd.join(GLOBAL_AGENTS_FILENAME).into(),
+                FileSystemAccessMode::Deny,
+            ));
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                    &file_system_policy,
+                    NetworkSandboxPolicy::Restricted,
+                ))
+                .expect("test config should allow a restricted read policy");
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            fs.write_file(
+                &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
+                PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        });
+    let error = match builder.build_with_auto_env(&server).await {
+        Ok(_) => {
+            anyhow::bail!("thread creation must fail when project instructions are unreadable")
+        }
+        Err(error) => error,
+    };
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("AGENTS.md"),
+        "thread creation should report the unreadable project instructions: {error}"
+    );
+
+    Ok(())
+}
+
+/// Tightening permissions fails the turn before stale project instructions reach the model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tightening_environment_read_permissions_invalidates_cached_project_instructions()
+-> Result<()> {
+    skip_if_target_windows!(
+        Ok(()),
+        "Windows restricted-token sandbox cannot enforce deny-read policies"
+    );
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let mut builder = test_codex().with_workspace_setup(|cwd, fs| async move {
+        fs.write_file(
+            &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
+            PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
+            Default::default(),
+            /*sandbox*/ None,
+        )
+        .await?;
+        Ok(())
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    assert_eq!(
+        test.codex.instruction_sources().await,
+        vec![test.workspace_path_uri(GLOBAL_AGENTS_FILENAME)?]
+    );
+
+    let mut file_system_policy = FileSystemSandboxPolicy::read_only();
+    file_system_policy.entries.push(FileSystemSandboxEntry::new(
+        test.config.cwd.join(GLOBAL_AGENTS_FILENAME).into(),
+        FileSystemAccessMode::Deny,
+    ));
+    let permission_profile = PermissionProfile::from_runtime_permissions(
+        &file_system_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(permission_profile, test.config.cwd.as_path());
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "inspect instructions after tightening permissions".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    let EventMsg::Error(error) =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!();
+    };
+    assert!(
+        error.message.contains("AGENTS.md"),
+        "turn should report the unreadable project instructions: {}",
+        error.message
+    );
+
+    assert_eq!(
+        test.codex.instruction_sources().await,
+        Vec::<PathUri>::new()
+    );
+    assert!(
+        response_mock.requests().is_empty(),
+        "the denied turn must fail before sending a model request"
+    );
 
     Ok(())
 }
@@ -468,6 +670,7 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
             fs.write_file(
                 &project_agents_uri,
                 PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -538,6 +741,7 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
             fs.write_file(
                 &agents_md_uri,
                 PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -564,6 +768,7 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
         .write_file(
             &test.workspace_path_uri(GLOBAL_AGENTS_FILENAME)?,
             NEW_PROJECT_INSTRUCTIONS.as_bytes().to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;
@@ -646,6 +851,7 @@ async fn multi_environment_project_instructions_share_one_byte_budget() -> Resul
             fs.write_file(
                 &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
                 b"ABCDE".to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -728,6 +934,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
             fs.write_file(
                 &executor_path_uri(cwd.join(GLOBAL_AGENTS_FILENAME))?,
                 b"remote project instructions".to_vec(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -776,6 +983,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
         .write_file(
             &executor_path_uri(test.config.cwd.join(GLOBAL_AGENTS_OVERRIDE_FILENAME))?,
             b"new remote project instructions".to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await?;

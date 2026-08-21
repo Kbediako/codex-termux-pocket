@@ -242,7 +242,10 @@ async fn create_workspace_directory(
     test.fs()
         .create_directory(
             &abs_path_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -356,6 +359,7 @@ async fn exec_command_uses_installed_environment_shell_policy_with_explicit_over
                     ..Default::default()
                 },
                 exec_policy: None,
+                mcp_policy: None,
                 network_policy: None,
                 selected_capability_roots: Vec::new(),
             },

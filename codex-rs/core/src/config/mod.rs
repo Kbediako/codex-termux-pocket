@@ -31,6 +31,7 @@ use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
+use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::permissions_toml::PermissionsToml;
 use codex_config::sandbox_mode_requirement_for_permission_profile;
 use codex_config::types::ApprovalsReviewer;
@@ -57,6 +58,7 @@ use codex_core_plugins::PluginLoadOutcome;
 use codex_core_plugins::PluginsConfigInput;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadFileOptions;
 use codex_features::CodeModeConfigToml;
 use codex_features::CurrentTimeReminderConfigToml;
 use codex_features::CurrentTimeReminderDeliveryMode;
@@ -185,6 +187,11 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+
+/// Signals that a public config selected the retired `untrusted` approval policy.
+#[derive(Debug, thiserror::Error)]
+#[error("approval_policy = \"untrusted\" is no longer supported; remove this setting")]
+pub struct UnsupportedUntrustedApprovalPolicyError;
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -3554,6 +3561,12 @@ impl Config {
             }
             configured_network_proxy_config.enabled = true;
         }
+        if cfg.approval_policy == Some(AskForApproval::UnlessTrusted) {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                UnsupportedUntrustedApprovalPolicyError,
+            ));
+        }
         let approval_policy_was_explicit =
             approval_policy_override.is_some() || cfg.approval_policy.is_some();
         let mut approval_policy = approval_policy_override
@@ -4247,7 +4260,7 @@ impl Config {
 
         let path_uri = PathUri::from_abs_path(path);
         let contents = fs
-            .read_file_text(&path_uri, /*sandbox*/ None)
+            .read_file_text(&path_uri, ReadFileOptions::default(), /*sandbox*/ None)
             .await
             .map_err(|e| {
                 std::io::Error::new(
@@ -4304,7 +4317,33 @@ impl Config {
             .is_some()
     }
 
-    pub(crate) fn network_proxy_spec_for_active_permission_profile(
+    /// Resolves a named permission profile from effective config and managed requirements.
+    pub fn resolve_permission_profile(
+        &self,
+        profile_name: &str,
+    ) -> std::io::Result<PermissionProfileToml> {
+        let cfg: ConfigToml = self
+            .config_layer_stack
+            .effective_config()
+            .try_into()
+            .map_err(|err| {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "failed to read effective config for selected permission profile: {err}"
+                    ),
+                )
+            })?;
+        let permissions = merge_managed_permission_profiles(
+            cfg.permissions.as_ref(),
+            self.config_layer_stack.requirements_toml(),
+        )?
+        .unwrap_or_default();
+
+        permissions::resolve_permission_profile(&permissions, profile_name)
+    }
+
+    pub fn network_proxy_spec_for_active_permission_profile(
         &self,
         active_permission_profile: &ActivePermissionProfile,
         permission_profile: &PermissionProfile,
