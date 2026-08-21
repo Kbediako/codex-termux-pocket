@@ -105,6 +105,14 @@ jobs:
 
           expected_assets_json='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
 
+          boolean_field() {
+            local document="$1"
+            local field="$2"
+            jq -r --arg field "$field" \
+              'if has($field) then (.[$field] | tostring) else "missing" end' \
+              <<<"$document"
+          }
+
           verify_release_document() {
             local label="$1"
             local document="$2"
@@ -120,17 +128,17 @@ jobs:
               echo "::error::${label} release target is ${actual}, expected ${head_sha}"
               exit 1
             }
-            actual="$(jq -r '.draft // "missing"' <<<"$document")"
+            actual="$(boolean_field "$document" draft)"
             [[ "$actual" == "false" ]] || {
               echo "::error::${label} release draft state is ${actual}, expected false"
               exit 1
             }
-            actual="$(jq -r '.prerelease // "missing"' <<<"$document")"
+            actual="$(boolean_field "$document" prerelease)"
             [[ "$actual" == "false" ]] || {
               echo "::error::${label} release prerelease state is ${actual}, expected false"
               exit 1
             }
-            actual="$(jq -r '.immutable // "missing"' <<<"$document")"
+            actual="$(boolean_field "$document" immutable)"
             [[ "$actual" == "true" ]] || {
               echo "::error::${label} release immutable state is ${actual}, expected true (API ${api_version})"
               exit 1
@@ -212,6 +220,6 @@ jobs:
             echo "- Manifest tag: ${release_tag}"
             echo "- Latest API tag: ${anonymous_latest_tag}"
             echo "- Runtime source: ${head_sha}"
-            echo "- Immutable: $(jq -r .immutable <<<"$anonymous_release")"
+            echo "- Immutable: $(boolean_field "$anonymous_release" immutable)"
             echo "- Assets: $(jq -r '.assets | length' <<<"$anonymous_release") byte-verified files"
           } >>"$GITHUB_STEP_SUMMARY"
