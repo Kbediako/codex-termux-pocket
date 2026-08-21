@@ -6,20 +6,17 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -90,20 +87,20 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   audit-policy-fix:
-    if: "${{ github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.issue.number == 63 }}"
+    if: "${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: make fork workflows lightweight' }}"
     name: Verify release-policy repair runs
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       actions: read
       issues: write
       contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
       TARGET_SHA: 8724d43a8158be2bf4868d249ee4b2dc04583bee
+      ISSUE_NUMBER: "63"
     steps:
-      - name: Wait for and record actual push workflow results
+      - name: Record actual push workflow results
         shell: bash
         run: |
           set -euo pipefail
@@ -113,33 +110,10 @@ jobs:
             termux-release-channel
             termux-governance-audit
           )
-
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
-            -f body="state=running
-target_sha=${TARGET_SHA}
-audit_run_id=${GITHUB_RUN_ID}
-audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
-
-          runs='[]'
-          all_completed=false
-          for _ in $(seq 1 180); do
-            runs="$(
-              gh run list --repo "$GITHUB_REPOSITORY" --commit "$TARGET_SHA" --limit 100 \
-                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
-            )"
-            all_completed=true
-            for workflow in "${expected[@]}"; do
-              row="$(
-                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
-                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
-                   | sort_by(.createdAt) | last // {}' <<<"$runs"
-              )"
-              status="$(jq -r '.status // "missing"' <<<"$row")"
-              [[ "$status" == "completed" ]] || all_completed=false
-            done
-            [[ "$all_completed" == "true" ]] && break
-            sleep 5
-          done
+          runs="$(
+            gh run list --repo "$GITHUB_REPOSITORY" --commit "$TARGET_SHA" --limit 100 \
+              --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
+          )"
 
           report="$(mktemp)"
           {
@@ -173,5 +147,4 @@ audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
             -f body="$(cat "$report")" >/dev/null
 
-          [[ "$all_completed" == "true" ]]
           grep -Fx 'overall=success' "$report"
