@@ -11,10 +11,11 @@ import sys
 source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 text = source.read_text(encoding="utf-8")
-old = """pkg update -y
+
+package_old = """pkg update -y
 pkg install -y bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
 """
-new = """export DEBIAN_FRONTEND=noninteractive
+package_new = """export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
 export NEEDRESTART_MODE=a
 apt-get update
@@ -23,12 +24,30 @@ apt-get -y \\
   -o Dpkg::Options::=--force-confold \\
   install bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
 """
-count = text.count(old)
-if count != 1:
+package_count = text.count(package_old)
+if package_count != 1:
     raise SystemExit(
-        f"expected exactly one Termux package bootstrap block, found {count}"
+        f"expected exactly one Termux package bootstrap block, found {package_count}"
     )
-destination.write_text(text.replace(old, new, 1), encoding="utf-8")
+text = text.replace(package_old, package_new, 1)
+
+mirror_old = r'''git clone --bare "\${HOME}/codex-ci" "\${HOME}/codex-control-origin.git"
+git --git-dir="\${HOME}/codex-control-origin.git" update-ref refs/heads/main "\${CONTROL_SHA}"
+'''
+mirror_new = mirror_old + r'''# The production installer requests a partial clone from GitHub. The CI-only
+# local SSH mirror must advertise the same upload-pack filter capability or Git
+# repeatedly falls back to individual unfiltered object requests inside ADB.
+git --git-dir="\${HOME}/codex-control-origin.git" config uploadpack.allowFilter true
+git --git-dir="\${HOME}/codex-control-origin.git" config uploadpack.allowAnySHA1InWant true
+'''
+mirror_count = text.count(mirror_old)
+if mirror_count != 1:
+    raise SystemExit(
+        f"expected exactly one local Git mirror block, found {mirror_count}"
+    )
+text = text.replace(mirror_old, mirror_new, 1)
+
+destination.write_text(text, encoding="utf-8")
 PY
 
 chmod 0755 "$patched_script"
