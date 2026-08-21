@@ -7,7 +7,7 @@ on:
   push:
     branches: [main]
   issues:
-    types: [opened]
+    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
@@ -90,7 +90,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   audit-policy-fix:
-    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: verify release-policy repair' }}"
+    if: "${{ github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.issue.number == 63 }}"
     name: Verify release-policy repair runs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
