@@ -1,15 +1,16 @@
 name: termux-release-channel
 run-name: Verify promoted Termux release channel
 
-# Verify that the promoted manifest points to the complete GitHub Latest
-# release. Repository-level release editing remains enabled by owner policy,
-# so this workflow verifies the release's current identity and bytes every time
-# it runs. It never mutates a published release.
+# Verify that the promoted manifest points to the complete GitHub Latest release.
+# Repository-level release editing remains enabled by owner policy, so this
+# workflow continuously verifies the current public identity, bytes, checksums,
+# SBOM, and provenance attestations. It never mutates a published release.
 on:
   push:
     branches:
       - main
     paths:
+      - ".github/scripts/audit-termux-public-channel.py"
       - ".github/workflows/termux-release-channel.yml"
       - "scripts/termux/release-manifest.env"
   workflow_dispatch:
@@ -33,155 +34,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify release identity, assets and Latest
+      - name: Verify public release identity and channel
+        shell: bash
+        run: python3 .github/scripts/audit-termux-public-channel.py
+
+      - name: Verify public bytes and provenance attestations
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           manifest="scripts/termux/release-manifest.env"
-          api_version="2022-11-28"
+          release_tag="$(sed -n 's/^release_tag=//p' "$manifest")"
+          head_sha="$(sed -n 's/^head_sha=//p' "$manifest")"
+          archive_sha256="$(sed -n 's/^archive_sha256=//p' "$manifest")"
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/termux-release-request.yml"
 
-          read_value() {
-            local key="$1"
-            local value
-            value="$(sed -n "s/^${key}=//p" "$manifest")"
-            if [[ -z "$value" || "$(grep -c "^${key}=" "$manifest")" -ne 1 ]]; then
-              echo "::error file=${manifest}::Expected exactly one non-empty ${key}= entry"
-              exit 1
-            fi
-            printf '%s' "$value"
-          }
-
-          invalid_lines="$(
-            grep -Env \
-              '^(format_version|repository|release_tag|head_sha|codex_version|archive_sha256|archive_size_bytes|runtime_size_bytes)=[^[:space:]].*$|^[[:space:]]*(#.*)?$' \
-              "$manifest" || true
-          )"
-          [[ -z "$invalid_lines" ]] || {
-            printf '%s\n' "$invalid_lines" >&2
-            exit 1
-          }
-
-          format_version="$(read_value format_version)"
-          repository="$(read_value repository)"
-          release_tag="$(read_value release_tag)"
-          head_sha="$(read_value head_sha)"
-          codex_version="$(read_value codex_version)"
-          archive_sha256="$(read_value archive_sha256)"
-          archive_size_bytes="$(read_value archive_size_bytes)"
-          runtime_size_bytes="$(read_value runtime_size_bytes)"
-
-          [[ "$format_version" == "2" ]]
-          [[ "$repository" == "$GITHUB_REPOSITORY" ]]
           [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$codex_version" == "codex-cli ${head_sha:0:7}" ]]
           [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$archive_size_bytes" =~ ^[0-9]+$ && "$archive_size_bytes" -gt 0 ]]
-          [[ "$runtime_size_bytes" =~ ^[0-9]+$ && "$runtime_size_bytes" -gt 0 ]]
 
-          encoded_tag="$(jq -rn --arg value "$release_tag" '$value|@uri')"
-          release_json="$(
-            gh api \
-              -H "X-GitHub-Api-Version: ${api_version}" \
-              "/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}"
-          )"
-          anonymous_release="$(
-            curl --fail --location --silent --show-error \
-              -H 'Accept: application/vnd.github+json' \
-              -H "X-GitHub-Api-Version: ${api_version}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
-          )"
-          latest_json="$(
-            gh api \
-              -H "X-GitHub-Api-Version: ${api_version}" \
-              "/repos/${GITHUB_REPOSITORY}/releases/latest"
-          )"
-          anonymous_latest="$(
-            curl --fail --location --silent --show-error \
-              -H 'Accept: application/vnd.github+json' \
-              -H "X-GitHub-Api-Version: ${api_version}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"
-          )"
-
-          expected_assets_json='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
-
-          verify_release_document() {
-            local label="$1"
-            local document="$2"
-            local actual
-
-            actual="$(jq -r '.tag_name // "missing"' <<<"$document")"
-            [[ "$actual" == "$release_tag" ]] || {
-              echo "::error::${label} release tag is ${actual}, expected ${release_tag}"
-              exit 1
-            }
-            actual="$(jq -r '.target_commitish // "missing"' <<<"$document")"
-            [[ "$actual" == "$head_sha" ]] || {
-              echo "::error::${label} release target is ${actual}, expected ${head_sha}"
-              exit 1
-            }
-            actual="$(jq -r 'if has("draft") then (.draft | tostring) else "missing" end' <<<"$document")"
-            [[ "$actual" == "false" ]] || {
-              echo "::error::${label} release draft state is ${actual}, expected false"
-              exit 1
-            }
-            actual="$(jq -r 'if has("prerelease") then (.prerelease | tostring) else "missing" end' <<<"$document")"
-            [[ "$actual" == "false" ]] || {
-              echo "::error::${label} release prerelease state is ${actual}, expected false"
-              exit 1
-            }
-            actual="$(jq -c '[.assets[].name] | sort' <<<"$document")"
-            [[ "$actual" == "$expected_assets_json" ]] || {
-              echo "::error::${label} release asset set is ${actual}, expected ${expected_assets_json}"
-              exit 1
-            }
-          }
-
-          verify_release_document authenticated "$release_json"
-          verify_release_document anonymous "$anonymous_release"
-
-          latest_tag="$(jq -r '.tag_name // "missing"' <<<"$latest_json")"
-          [[ "$latest_tag" == "$release_tag" ]] || {
-            echo "::error::Authenticated Latest is ${latest_tag}, expected ${release_tag}"
-            exit 1
-          }
-          anonymous_latest_tag="$(jq -r '.tag_name // "missing"' <<<"$anonymous_latest")"
-          [[ "$anonymous_latest_tag" == "$release_tag" ]] || {
-            echo "::error::Anonymous Latest is ${anonymous_latest_tag}, expected ${release_tag}"
-            exit 1
-          }
-
+          release_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
           public_dir="$(mktemp -d)"
           while IFS=$'\t' read -r asset_name asset_url; do
             curl --fail --location --silent --show-error --retry 5 \
               "$asset_url" -o "${public_dir}/${asset_name}"
-          done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' <<<"$anonymous_release")
+          done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' <<<"$release_json")
 
           (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
           [[ "$(sha256sum "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
-          [[ "$(stat -c '%s' "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz")" == "$archive_size_bytes" ]]
           cmp --silent "$manifest" "${public_dir}/release-manifest.env"
-          grep -Fx "head_sha=${head_sha}" "${public_dir}/metadata.env"
-          grep -Fx "codex_version=${codex_version}" "${public_dir}/metadata.env"
-          grep -Fx "runtime_size_bytes=${runtime_size_bytes}" "${public_dir}/metadata.env"
           python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
             "${public_dir}/codex-termux-sbom.spdx.json"
-
-          verified_release=false
-          for _ in $(seq 1 40); do
-            if gh release verify "$release_tag" \
-              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              verified_release=true
-              break
-            fi
-            sleep 3
-          done
-          [[ "$verified_release" == "true" ]] || {
-            gh release verify "$release_tag" --repo "$GITHUB_REPOSITORY"
-            exit 1
-          }
 
           for file in \
             codex-termux-aarch64-unknown-linux-musl.tar.gz \
@@ -189,28 +73,18 @@ jobs:
             SHA256SUMS \
             codex-termux-sbom.spdx.json \
             release-manifest.env; do
-            verified_asset=false
-            for _ in $(seq 1 40); do
-              if gh release verify-asset "$release_tag" "${public_dir}/${file}" \
-                --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-                verified_asset=true
-                break
-              fi
-              sleep 3
-            done
-            [[ "$verified_asset" == "true" ]] || {
-              gh release verify-asset "$release_tag" "${public_dir}/${file}" \
-                --repo "$GITHUB_REPOSITORY"
-              exit 1
-            }
+            gh attestation verify "${public_dir}/${file}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" >/dev/null
           done
 
           {
             echo '### Release channel verification'
             echo
-            echo "- Manifest tag: ${release_tag}"
-            echo "- Latest API tag: ${anonymous_latest_tag}"
-            echo "- Runtime source: ${head_sha}"
-            echo "- Assets: $(jq -r '.assets | length' <<<"$anonymous_release") byte-verified files"
-            echo "- Repository release editing: enabled by owner policy"
+            echo "- Release: \`${release_tag}\`"
+            echo "- Runtime source: \`${head_sha}\`"
+            echo '- GitHub Latest: `verified`'
+            echo '- Public assets: `byte- and checksum-verified`'
+            echo '- Provenance attestations: `verified`'
+            echo '- Repository release editing: `enabled by owner policy`'
           } >>"$GITHUB_STEP_SUMMARY"
