@@ -23,22 +23,16 @@ jobs:
     name: Record exact-source validation run
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      issues: write
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      STATUS_BRANCH: alpha-validation-status
-      STATUS_PATH: .github/alpha-validation-status.env
     steps:
       - name: Record fork CI run ID before validation
         shell: bash
         run: |
           set -euo pipefail
-          status_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
-          )"
-          status_file="$(mktemp)"
-          cat >"$status_file" <<EOF
-          format_version=1
+          body="$(cat <<EOF
           state=validating-fork-ci
           source_sha=${GITHUB_SHA}
           fork_ci_run_id=${GITHUB_RUN_ID}
@@ -46,12 +40,9 @@ jobs:
           artifact_run_id=
           android_run_id=
           EOF
-          gh api --method PUT \
-            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-            -f message="ci: record fork CI alpha validation run" \
-            -f content="$(base64 -w0 "$status_file")" \
-            -f sha="$status_sha" \
-            -f branch="$STATUS_BRANCH" >/dev/null
+          )"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/55" \
+            -f body="$body" >/dev/null
 
   validate:
     if: ${{ github.event_name != 'issues' || github.event.issue.number == 55 }}
@@ -134,11 +125,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       actions: write
-      contents: write
+      issues: write
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      STATUS_BRANCH: alpha-validation-status
-      STATUS_PATH: .github/alpha-validation-status.env
     steps:
       - name: Dispatch and record exact-source validation runs
         shell: bash
@@ -189,12 +179,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --ref main
           android_run_id="$(find_run termux-android-emulator.yml)"
 
-          status_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
-          )"
-          status_file="$(mktemp)"
-          cat >"$status_file" <<EOF
-          format_version=1
+          body="$(cat <<EOF
           state=dispatched
           source_sha=${source_sha}
           fork_ci_run_id=${GITHUB_RUN_ID}
@@ -202,12 +187,9 @@ jobs:
           artifact_run_id=${artifact_run_id}
           android_run_id=${android_run_id}
           EOF
-          gh api --method PUT \
-            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-            -f message="ci: record exact-source alpha validation runs" \
-            -f content="$(base64 -w0 "$status_file")" \
-            -f sha="$status_sha" \
-            -f branch="$STATUS_BRANCH" >/dev/null
+          )"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/55" \
+            -f body="$body" >/dev/null
 
           {
             echo '### Exact-source Termux validation dispatched'
