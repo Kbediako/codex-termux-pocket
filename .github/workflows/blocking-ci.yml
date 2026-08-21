@@ -90,17 +90,17 @@ jobs:
     if: "${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: make fork workflows lightweight' }}"
     name: Verify release-policy repair runs
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       actions: read
       issues: write
       contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TARGET_SHA: 8724d43a8158be2bf4868d249ee4b2dc04583bee
+      TARGET_SHA: f83aaa3fe28389b91bb408cfebe1ba5bda27972f
       ISSUE_NUMBER: "63"
     steps:
-      - name: Record actual push workflow results
+      - name: Wait for and record actual push workflow results
         shell: bash
         run: |
           set -euo pipefail
@@ -110,10 +110,27 @@ jobs:
             termux-release-channel
             termux-governance-audit
           )
-          runs="$(
-            gh run list --repo "$GITHUB_REPOSITORY" --commit "$TARGET_SHA" --limit 100 \
-              --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
-          )"
+
+          runs='[]'
+          all_completed=false
+          for _ in $(seq 1 180); do
+            runs="$(
+              gh run list --repo "$GITHUB_REPOSITORY" --commit "$TARGET_SHA" --limit 100 \
+                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
+            )"
+            all_completed=true
+            for workflow in "${expected[@]}"; do
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
+              )"
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              [[ "$status" == "completed" ]] || all_completed=false
+            done
+            [[ "$all_completed" == "true" ]] && break
+            sleep 5
+          done
 
           report="$(mktemp)"
           {
@@ -147,4 +164,5 @@ jobs:
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
             -f body="$(cat "$report")" >/dev/null
 
+          [[ "$all_completed" == "true" ]]
           grep -Fx 'overall=success' "$report"
