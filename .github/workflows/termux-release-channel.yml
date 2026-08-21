@@ -35,6 +35,8 @@ jobs:
           persist-credentials: false
 
       - name: Verify public release identity and channel
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: python3 .github/scripts/audit-termux-public-channel.py
 
