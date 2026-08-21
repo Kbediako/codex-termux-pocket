@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'push' || github.event.head_commit.message != 'ci: stage upstream alpha sync' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -85,3 +86,145 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  sync-upstream-alpha:
+    if: ${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: stage upstream alpha sync' }}
+    name: Merge official 0.149.0-alpha.7.1 and refresh lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      UPSTREAM_TAG: rust-v0.149.0-alpha.7.1
+      UPSTREAM_COMMIT: 0e015a7a0eef52047fea8ded24f8b32afbafd527
+      PACKAGE_VERSION: 0.149.0-alpha.7.1
+    steps:
+      - name: Checkout protected main with complete history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Merge exact upstream alpha and retain the Termux surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha="$(git rev-parse HEAD)"
+          test "$base_sha" = "$GITHUB_SHA"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch --no-tags upstream \
+            "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+          test "$(git rev-parse "${UPSTREAM_TAG}^{commit}")" = "$UPSTREAM_COMMIT"
+
+          git merge --no-ff --no-commit -X ours "$UPSTREAM_TAG" || true
+
+          # Resolve any remaining content or modify/delete conflict in favour of
+          # the maintained Termux side. Non-conflicting upstream changes remain.
+          while IFS= read -r path; do
+            if git checkout --ours -- "$path" 2>/dev/null; then
+              git add -- "$path"
+            else
+              git rm -f --ignore-unmatch -- "$path"
+            fi
+          done < <(git diff --name-only --diff-filter=U)
+
+          restore_from_base() {
+            local path="$1"
+            if git cat-file -e "${base_sha}:${path}" 2>/dev/null; then
+              git checkout "$base_sha" -- "$path"
+            else
+              git rm -rf --ignore-unmatch -- "$path"
+            fi
+          }
+
+          # These paths are owned by the focused Termux fork rather than the
+          # upstream release branch.
+          for path in \
+            .github/CODEOWNERS \
+            .github/actions/setup-bazel-ci/action.yml \
+            .github/assets \
+            .github/repository-governance-status.json \
+            .github/scripts \
+            .github/termux-android-validation.json \
+            .github/workflows \
+            .prettierignore \
+            AGENTS.md \
+            EXECPLAN_voice.md \
+            EXECPLAN_voice_porcu.md \
+            EXEC_PLAN.md \
+            EXEC_PLAN_TERMUX_INSTALL.md \
+            EXEC_PLAN_mobile_build_acceleration.md \
+            PLANS.md \
+            README.md \
+            docs/contributing.md \
+            docs/termux-agent-safety.md \
+            docs/termux-alpha-log.md \
+            docs/termux-maintainer.md \
+            docs/termux-mobile-update.md \
+            scripts/termux; do
+            restore_from_base "$path"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("codex-rs/Cargo.toml")
+          text = path.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r"(?ms)(^\[workspace\.package\]\n.*?^version\s*=\s*\")([^\"]+)(\")"
+          )
+          updated, count = pattern.subn(
+              lambda match: match.group(1) + "0.149.0-alpha.7.1" + match.group(3),
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update workspace package version")
+          path.write_text(updated, encoding="utf-8")
+          PY
+
+          cat > scripts/termux/upstream-alpha.env <<EOF
+          format_version=1
+          tag=${UPSTREAM_TAG}
+          commit=${UPSTREAM_COMMIT}
+          EOF
+
+          cat > scripts/termux/release-request.env <<EOF
+          # Exact-source validation request for the protected alpha update.
+          format_version=3
+          source_mode=workflow-head
+          release_tag_prefix=termux-v2026.08.21-alpha.7.1
+          expected_package_version=${PACKAGE_VERSION}
+          EOF
+
+          cat >> scripts/termux/patch_audit.tsv <<'EOF'
+          subject	ci: stage upstream alpha sync	tooling	Temporary protected-main hook used to run the maintained upstream merge transaction.
+          subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
+          EOF
+
+          cargo metadata --manifest-path codex-rs/Cargo.toml \
+            --format-version=1 >/dev/null
+          cargo metadata --manifest-path codex-rs/Cargo.toml \
+            --locked --format-version=1 >/dev/null
+          cargo fmt --manifest-path codex-rs/Cargo.toml --all -- --check
+          bash scripts/termux/tests/run-tests
+          git diff --check
+
+          git add -A
+          git diff --cached --quiet && {
+            echo "::error::Upstream merge produced no staged update"
+            exit 1
+          }
+          git commit -m "termux: update to ${PACKAGE_VERSION}"
+          test "$(git rev-parse HEAD^2)" = "$UPSTREAM_COMMIT"
+          git push origin HEAD:main
