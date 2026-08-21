@@ -1,105 +1,183 @@
 name: fork-ci
 
-# Temporary protected-main maintenance hook. This file is restored to the
-# permanent fork CI definition immediately after the exact upstream merge.
+# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
+# sandbox, and release gates live in dedicated path-filtered or manual workflows.
 on:
+  pull_request: {}
+  push:
+    branches: [main]
   issues:
     types: [reopened]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: alpha-sync-149-7-1
+  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  sync-upstream-alpha:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
-    name: Merge official 0.149.0-alpha.7.1 and refresh lockfile
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      STATUS_BRANCH: alpha-sync-status
-      STATUS_PATH: .github/alpha-sync-status.env
-      UPSTREAM_TAG: rust-v0.149.0-alpha.7.1
-      UPSTREAM_COMMIT: 0e015a7a0eef52047fea8ded24f8b32afbafd527
-      PACKAGE_VERSION: 0.149.0-alpha.7.1
+  validate:
+    if: ${{ github.event_name != 'issues' || github.event.issue.number == 56 }}
+    name: Termux fork checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout protected main with complete history
+      - name: Checkout exact revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
-      - name: Publish observable start status
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          file_sha="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
-          )"
-          status_file="$(mktemp)"
-          cat >"$status_file" <<EOF
-          format_version=1
-          state=running
-          source_commit=${GITHUB_SHA}
-          upstream_tag=${UPSTREAM_TAG}
-          upstream_commit=${UPSTREAM_COMMIT}
-          detail=checkout-complete
-          merge_commit=
-          run_id=${GITHUB_RUN_ID}
-          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          EOF
-          gh api --method PUT \
-            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-            -f message="ci: alpha sync running checkout-complete" \
-            -f content="$(base64 -w0 "$status_file")" \
-            -f sha="$file_sha" \
-            -f branch="$STATUS_BRANCH" >/dev/null
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: rustfmt
 
-      - name: Merge, refresh lockfile, validate and push
-        id: merge
-        shell: bash
-        run: bash .github/scripts/sync-upstream-alpha-temp.sh
+      - name: Validate workflow YAML
+        run: |
+          set -euo pipefail
+          ruby <<'RUBY'
+          require "yaml"
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+            YAML.safe_load(File.read(path), aliases: true)
+          end
+          RUBY
 
-      - name: Publish observable final status
-        if: always()
-        continue-on-error: true
-        env:
-          JOB_STATUS: ${{ job.status }}
-          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+      - name: Validate permanent workflow topology
+        run: python3 .github/scripts/validate-termux-workflow-topology.py
+
+      - name: Validate Bash entrypoints
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git grep -Il '^#!.*bash' --)
+
+      - name: Validate Python helpers
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t python_files < <(
+            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
+          )
+          if (( ${#python_files[@]} > 0 )); then
+            python3 -m py_compile "${python_files[@]}"
+          fi
+
+      - name: Validate locked Cargo metadata
+        working-directory: codex-rs
+        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
+
+      - name: Check Rust formatting
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust dependency policy
+        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
+        with:
+          rust-version: 1.95.0
+          manifest-path: ./codex-rs/Cargo.toml
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  dispatch-exact-source-gates:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 56 }}
+    needs: validate
+    name: Dispatch exact-source Termux gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STATUS_BRANCH: alpha-validation-status
+      STATUS_PATH: .github/alpha-validation-status.env
+    steps:
+      - name: Dispatch and record exact-source validation runs
         shell: bash
         run: |
           set -euo pipefail
-          file_sha="$(
+          source_sha="$GITHUB_SHA"
+          main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" == "$source_sha" ]] || {
+            echo "::error::main advanced from ${source_sha} to ${main_sha} before validation dispatch"
+            exit 1
+          }
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          find_run() {
+            local workflow="$1"
+            local run_id=""
+            for _ in $(seq 1 60); do
+              runs="$(
+                gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+                  --event workflow_dispatch --limit 50 \
+                  --json databaseId,headSha,createdAt,url,status,conclusion,displayTitle
+              )"
+              run_id="$(
+                jq -r --arg sha "$source_sha" --arg started "$started_at" \
+                  '[.[] | select(.headSha == $sha and .createdAt >= $started)]
+                   | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
+              )"
+              if [[ "$run_id" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$run_id"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::workflow ${workflow} did not expose an exact-source run"
+            return 1
+          }
+
+          gh workflow run termux-control-plane.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main
+          control_run_id="$(find_run termux-control-plane.yml)"
+
+          gh workflow run termux-mobile-artifact.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main \
+            -f source_ref="$source_sha"
+          artifact_run_id="$(find_run termux-mobile-artifact.yml)"
+
+          gh workflow run termux-android-emulator.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main
+          android_run_id="$(find_run termux-android-emulator.yml)"
+
+          status_sha="$(
             gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
           )"
           status_file="$(mktemp)"
           cat >"$status_file" <<EOF
           format_version=1
-          state=${JOB_STATUS}
-          source_commit=${GITHUB_SHA}
-          upstream_tag=${UPSTREAM_TAG}
-          upstream_commit=${UPSTREAM_COMMIT}
-          detail=job-${JOB_STATUS}
-          merge_commit=${MERGE_SHA}
-          run_id=${GITHUB_RUN_ID}
-          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          state=dispatched
+          source_sha=${source_sha}
+          fork_ci_run_id=${GITHUB_RUN_ID}
+          control_run_id=${control_run_id}
+          artifact_run_id=${artifact_run_id}
+          android_run_id=${android_run_id}
           EOF
           gh api --method PUT \
             "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-            -f message="ci: alpha sync ${JOB_STATUS}" \
+            -f message="ci: record exact-source alpha validation runs" \
             -f content="$(base64 -w0 "$status_file")" \
-            -f sha="$file_sha" \
+            -f sha="$status_sha" \
             -f branch="$STATUS_BRANCH" >/dev/null
+
+          {
+            echo '### Exact-source Termux validation dispatched'
+            echo
+            echo "- Source: \`${source_sha}\`"
+            echo "- Fork CI: \`${GITHUB_RUN_ID}\`"
+            echo "- Control plane: \`${control_run_id}\`"
+            echo "- ARM64 artifact: \`${artifact_run_id}\`"
+            echo "- Android/Termux: \`${android_run_id}\`"
+          } >>"$GITHUB_STEP_SUMMARY"
