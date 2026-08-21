@@ -14,6 +14,7 @@ REPO = os.environ["GITHUB_REPOSITORY"]
 MANIFEST = Path("scripts/termux/release-manifest.env")
 SUMMARY = Path(os.environ["GITHUB_STEP_SUMMARY"])
 API_VERSION = "2022-11-28"
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
 
 
 def fail(message: str) -> None:
@@ -38,16 +39,23 @@ def parse_env(path: Path, allowed: set[str], required: set[str]) -> dict[str, st
     return values
 
 
-def request(url: str, *, json_result: bool = False, method: str = "GET"):
-    req = urllib.request.Request(
-        url,
-        method=method,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "codex-termux-governance-audit",
-            "X-GitHub-Api-Version": API_VERSION,
-        },
-    )
+def request(
+    url: str,
+    *,
+    json_result: bool = False,
+    method: str = "GET",
+    authenticated: bool = False,
+):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "codex-termux-governance-audit",
+        "X-GitHub-Api-Version": API_VERSION,
+    }
+    if authenticated:
+        if not GH_TOKEN:
+            fail("GH_TOKEN is required for GitHub API audit requests")
+        headers["Authorization"] = f"Bearer {GH_TOKEN}"
+    req = urllib.request.Request(url, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=120) as response:
         if method == "HEAD":
             return response.status
@@ -92,8 +100,16 @@ def main() -> None:
 
     tag = urllib.parse.quote(manifest["release_tag"], safe="")
     api = f"https://api.github.com/repos/{REPO}"
-    release = request(f"{api}/releases/tags/{tag}", json_result=True)
-    latest = request(f"{api}/releases/latest", json_result=True)
+    release = request(
+        f"{api}/releases/tags/{tag}",
+        json_result=True,
+        authenticated=True,
+    )
+    latest = request(
+        f"{api}/releases/latest",
+        json_result=True,
+        authenticated=True,
+    )
     if release.get("draft") or release.get("prerelease"):
         fail("promoted release is not a final public release")
     if release.get("tag_name") != manifest["release_tag"]:
@@ -167,9 +183,17 @@ def main() -> None:
     if sums.get("codex-termux-aarch64-unknown-linux-musl.tar.gz") != manifest["archive_sha256"]:
         fail("SHA256SUMS archive digest mismatch")
 
-    tag_ref = request(f"{api}/git/ref/tags/{tag}", json_result=True)["object"]
+    tag_ref = request(
+        f"{api}/git/ref/tags/{tag}",
+        json_result=True,
+        authenticated=True,
+    )["object"]
     if tag_ref["type"] == "tag":
-        tag_ref = request(tag_ref["url"], json_result=True)["object"]
+        tag_ref = request(
+            tag_ref["url"],
+            json_result=True,
+            authenticated=True,
+        )["object"]
     if tag_ref["type"] != "commit" or tag_ref["sha"] != manifest["head_sha"]:
         fail("release tag no longer resolves to the promoted commit")
     if request(archive["browser_download_url"], method="HEAD") != 200:
