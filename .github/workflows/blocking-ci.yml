@@ -1,179 +1,87 @@
 name: fork-ci
 
-# Temporary bounded post-promotion dispatcher. The normal fork CI definition is
-# restored after the immutable release channel, governance, and control-plane
-# checks pass.
+# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
+# sandbox, and release gates live in dedicated path-filtered or manual workflows.
 on:
-  issues:
-    types: [reopened]
+  pull_request: {}
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: post-promotion-alpha-7-1
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  dispatch-post-promotion-checks:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 58 }}
-    name: Dispatch promoted-channel verification
+  validate:
+    name: Termux fork checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      actions: write
-      issues: write
-      contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Dispatch and record exact promoted-main checks
+    timeout-minutes: 25
+    defaults:
+      run:
         shell: bash
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Validate workflow YAML
         run: |
           set -euo pipefail
-          source_sha="$GITHUB_SHA"
-          main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
-          [[ "$main_sha" == "$source_sha" ]]
-          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ruby <<'RUBY'
+          require "yaml"
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+            YAML.safe_load(File.read(path), aliases: true)
+          end
+          RUBY
 
-          dispatch_and_find() {
-            local workflow="$1"
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main
-            for _ in $(seq 1 60); do
-              runs="$(
-                gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
-                  --event workflow_dispatch --limit 50 \
-                  --json databaseId,headSha,createdAt,url,status,conclusion
-              )"
-              run_id="$(
-                jq -r --arg sha "$source_sha" --arg started "$started_at" \
-                  '[.[] | select(.headSha == $sha and .createdAt >= $started)]
-                   | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
-              )"
-              if [[ "$run_id" =~ ^[0-9]+$ ]]; then
-                printf '%s\n' "$run_id"
-                return 0
-              fi
-              sleep 2
-            done
-            echo "::error::workflow ${workflow} did not expose a promoted-main run"
-            return 1
-          }
+      - name: Validate permanent workflow topology
+        run: python3 .github/scripts/validate-termux-workflow-topology.py
 
-          control_run_id="$(dispatch_and_find termux-control-plane.yml)"
-          channel_run_id="$(dispatch_and_find termux-release-channel.yml)"
-          governance_run_id="$(dispatch_and_find termux-governance-audit.yml)"
-
-          body="$(cat <<EOF
-          state=dispatched
-          source_sha=${source_sha}
-          control_run_id=${control_run_id}
-          channel_run_id=${channel_run_id}
-          governance_run_id=${governance_run_id}
-          EOF
-          )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/58" \
-            -f body="$body" >/dev/null
-
-          {
-            echo '### Promoted-channel verification dispatched'
-            echo
-            echo "- Main: \`${source_sha}\`"
-            echo "- Control plane: \`${control_run_id}\`"
-            echo "- Release channel: \`${channel_run_id}\`"
-            echo "- Governance audit: \`${governance_run_id}\`"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-  delete-temporary-branches:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 59 }}
-    name: Remove alpha maintenance branches
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Delete only the known temporary branches
-        shell: bash
+      - name: Validate Bash entrypoints
         run: |
           set -euo pipefail
-          branches=(
-            alpha-checkout-reuse-staging
-            alpha-sync-status
-            alpha-validation-status
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git grep -Il '^#!.*bash' --)
+
+      - name: Validate Python helpers
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t python_files < <(
+            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
           )
-          removed=()
-          for branch in "${branches[@]}"; do
-            encoded="$(jq -rn --arg value "$branch" '$value|@uri')"
-            if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${encoded}" >/dev/null 2>&1; then
-              gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${encoded}" >/dev/null
-              removed+=("$branch")
-            fi
-          done
-          body="state=completed\nremoved=$(IFS=,; echo "${removed[*]}")"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/59" \
-            -f body="$body" >/dev/null
-
-  enable-immutable-releases:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 60 }}
-    name: Enable repository release immutability
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Enable and verify immutable releases
-        shell: bash
-        run: |
-          set -euo pipefail
-          endpoint="https://api.github.com/repos/${GITHUB_REPOSITORY}/immutable-releases"
-          api_version="2026-03-10"
-          put_body="$(mktemp)"
-          get_body="$(mktemp)"
-
-          put_status="$(
-            curl --silent --show-error \
-              --output "$put_body" \
-              --write-out '%{http_code}' \
-              --request PUT \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "X-GitHub-Api-Version: ${api_version}" \
-              "$endpoint"
-          )"
-          get_status="$(
-            curl --silent --show-error \
-              --output "$get_body" \
-              --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "X-GitHub-Api-Version: ${api_version}" \
-              "$endpoint"
-          )"
-
-          enabled="false"
-          if [[ "$get_status" == "200" ]] && jq -e '.enabled == true' "$get_body" >/dev/null 2>&1; then
-            enabled="true"
+          if (( ${#python_files[@]} > 0 )); then
+            python3 -m py_compile "${python_files[@]}"
           fi
-          response="$(jq -c . "$get_body" 2>/dev/null || head -c 500 "$get_body")"
-          body="$(cat <<EOF
-          state=$([[ "$enabled" == "true" ]] && echo enabled || echo failed)
-          put_status=${put_status}
-          get_status=${get_status}
-          enabled=${enabled}
-          response=${response}
-          run_id=${GITHUB_RUN_ID}
-          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          EOF
-          )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/60" \
-            -f body="$body" >/dev/null
 
-          [[ "$put_status" == "204" || "$put_status" == "409" ]]
-          [[ "$enabled" == "true" ]]
+      - name: Validate locked Cargo metadata
+        working-directory: codex-rs
+        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
+
+      - name: Check Rust formatting
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust dependency policy
+        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
+        with:
+          rust-version: 1.95.0
+          manifest-path: ./codex-rs/Cargo.toml
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
