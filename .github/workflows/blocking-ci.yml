@@ -1,7 +1,8 @@
 name: fork-ci
 
 # Temporary bounded post-promotion dispatcher. The normal fork CI definition is
-# restored after the release channel, governance, and control-plane checks pass.
+# restored after the immutable release channel, governance, and control-plane
+# checks pass.
 on:
   issues:
     types: [reopened]
@@ -115,3 +116,64 @@ jobs:
           body="state=completed\nremoved=$(IFS=,; echo "${removed[*]}")"
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/59" \
             -f body="$body" >/dev/null
+
+  enable-immutable-releases:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 60 }}
+    name: Enable repository release immutability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Enable and verify immutable releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="https://api.github.com/repos/${GITHUB_REPOSITORY}/immutable-releases"
+          api_version="2026-03-10"
+          put_body="$(mktemp)"
+          get_body="$(mktemp)"
+
+          put_status="$(
+            curl --silent --show-error \
+              --output "$put_body" \
+              --write-out '%{http_code}' \
+              --request PUT \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: ${api_version}" \
+              "$endpoint"
+          )"
+          get_status="$(
+            curl --silent --show-error \
+              --output "$get_body" \
+              --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: ${api_version}" \
+              "$endpoint"
+          )"
+
+          enabled="false"
+          if [[ "$get_status" == "200" ]] && jq -e '.enabled == true' "$get_body" >/dev/null 2>&1; then
+            enabled="true"
+          fi
+          response="$(jq -c . "$get_body" 2>/dev/null || head -c 500 "$get_body")"
+          body="$(cat <<EOF
+          state=$([[ "$enabled" == "true" ]] && echo enabled || echo failed)
+          put_status=${put_status}
+          get_status=${get_status}
+          enabled=${enabled}
+          response=${response}
+          run_id=${GITHUB_RUN_ID}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          )"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/60" \
+            -f body="$body" >/dev/null
+
+          [[ "$put_status" == "204" || "$put_status" == "409" ]]
+          [[ "$enabled" == "true" ]]
