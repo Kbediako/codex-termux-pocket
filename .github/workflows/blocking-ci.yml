@@ -6,17 +6,20 @@ on:
   pull_request: {}
   push:
     branches: [main]
+  issues:
+    types: [reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -85,3 +88,98 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  observe-policy-alignment:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 60 }}
+    name: Verify policy-alignment push checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: 476bda4f7c55910365b95245e467b661df20b7b6
+    steps:
+      - name: Wait for all expected push workflows and record results
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            fork-ci
+            termux-control-plane
+            termux-release-channel
+            termux-governance-audit
+          )
+
+          completed=false
+          runs='[]'
+          for _ in $(seq 1 180); do
+            runs="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --commit "$TARGET_SHA" \
+                --limit 100 \
+                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
+            )"
+            all_found=true
+            all_completed=true
+            for workflow in "${expected[@]}"; do
+              count="$(
+                jq -r --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")] | length' \
+                  <<<"$runs"
+              )"
+              if [[ "$count" -lt 1 ]]; then
+                all_found=false
+                all_completed=false
+                continue
+              fi
+              status="$(
+                jq -r --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last | .status' <<<"$runs"
+              )"
+              [[ "$status" == "completed" ]] || all_completed=false
+            done
+            if [[ "$all_found" == "true" && "$all_completed" == "true" ]]; then
+              completed=true
+              break
+            fi
+            sleep 5
+          done
+
+          report="$(mktemp)"
+          {
+            echo 'state=completed'
+            echo "target_sha=${TARGET_SHA}"
+            overall=success
+            for workflow in "${expected[@]}"; do
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
+              )"
+              run_id="$(jq -r '.databaseId // "missing"' <<<"$row")"
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              conclusion="$(jq -r '.conclusion // "missing"' <<<"$row")"
+              url="$(jq -r '.url // "missing"' <<<"$row")"
+              echo "${workflow}_run_id=${run_id}"
+              echo "${workflow}_status=${status}"
+              echo "${workflow}_conclusion=${conclusion}"
+              echo "${workflow}_url=${url}"
+              if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
+                overall=failure
+              fi
+            done
+            echo "overall=${overall}"
+            echo "observer_run_id=${GITHUB_RUN_ID}"
+            echo "observer_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >"$report"
+
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/60" \
+            -f body="$(cat "$report")" >/dev/null
+
+          [[ "$completed" == "true" ]]
+          grep -Fx 'overall=success' "$report"
