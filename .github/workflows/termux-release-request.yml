@@ -79,7 +79,7 @@ jobs:
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
           [[ "$release_tag" == *"-${source_sha:0:10}" ]]
-          [[ "$expected_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          [[ "$expected_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+(\.[0-9]+)*$ ]]
           [[ "$expected_codex_version" == "codex-cli ${source_sha:0:7}" ]]
           [[ "$control_run_id" =~ ^[0-9]+$ ]]
           [[ "$artifact_run_id" =~ ^[0-9]+$ ]]
