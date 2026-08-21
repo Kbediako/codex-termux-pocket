@@ -34,14 +34,21 @@ but they are not retained workflows and cannot start new runs from `main`.
    source, release identity, and successful validation run IDs from
    `scripts/termux/release-publication.env`.
 2. It re-verifies the control-plane, ARM64 artifact, Android/Termux evidence,
-   checksums, SBOM, attestations, and final assets before publishing the complete
-   immutable release as GitHub Latest in the initial publication transaction.
+   checksums, SBOM, attestations, and final assets. It uploads the complete set to
+   a draft, then publishes that draft as GitHub Latest in one transaction.
 3. It anonymously byte-verifies the public assets and `/releases/latest` before
    promoting `scripts/termux/release-manifest.env`.
-4. `termux-release-channel.yml` is read-only verification. It proves the promoted
-   manifest already identifies the immutable GitHub Latest release.
+4. `termux-release-channel.yml` is read-only current-state verification. It
+   proves that the promoted manifest still identifies a complete GitHub Latest
+   release with the expected source, assets, metadata, checksums, and attestations.
 5. `termux-governance-audit.yml` independently audits the promoted public channel
    when Termux release/governance inputs change, on a daily schedule, or manually.
+
+Repository-level release editing intentionally remains enabled. Safety comes
+from exact-source validation, staging every final asset before publication,
+refusing to replace an existing tag or release, publishing as Latest in the
+draft-to-public transaction, and continuously re-verifying the current public
+bytes. No post-publication workflow edits an existing release.
 
 ## Permanent workflow inventory
 
@@ -55,5 +62,6 @@ but they are not retained workflows and cannot start new runs from `main`.
 - `termux-governance-audit.yml`
 
 `.github/scripts/validate-termux-workflow-topology.py` enforces this inventory,
-rejects observer/monitor/repair/one-time workflow names, and ensures only the
-release-request workflow can write a GitHub release.
+rejects observer/monitor/repair/one-time workflow names, ensures only the
+release-request workflow can write a GitHub release, and prevents the release
+channel from requiring repository-level release immutability.

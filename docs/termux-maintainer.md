@@ -81,14 +81,20 @@ android_run_id=<successful Android/Termux run>
 
 Review and commit that file on protected `main`. The release workflow then
 re-fetches and validates all three exact-source runs, downloads and verifies the
-artifact, checks the SBOM and attestations, stages every final asset in a draft,
-and publishes the complete immutable release as GitHub Latest in the initial
-publication transaction.
+artifact, checks the SBOM and attestations, and stages every final asset in a
+draft. Its only release update occurs while that object is still a draft: it
+publishes the complete set and designates it GitHub Latest in the same
+draft-to-public transaction. It never modifies an already-published release.
 
 Only after anonymous asset downloads, checksums, release identity, and
 `/releases/latest` verify does the workflow promote
 `scripts/termux/release-manifest.env`. Fresh installs then use the public release
 without requiring `gh auth login`.
+
+Repository-level release editing remains enabled by owner policy. The release
+channel and governance workflows therefore verify the current public tag,
+source, exact asset set, metadata, checksums, attestations, and Latest endpoint
+on every relevant run instead of relying on GitHub's immutability setting.
 
 `termux-release-channel.yml` is read-only post-promotion verification.
 `termux-governance-audit.yml` independently checks the public channel when the

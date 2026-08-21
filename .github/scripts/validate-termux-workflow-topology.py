@@ -67,7 +67,7 @@ def main() -> None:
         match = re.search(r"(?m)^name:\s*(.+?)\s*$", text)
         if not match:
             fail(f"{filename} has no top-level workflow name")
-        display_name = match.group(1).strip('"\'')
+        display_name = match.group(1).strip("\"'")
         previous = display_names.get(display_name)
         if previous:
             fail(
@@ -86,7 +86,10 @@ def main() -> None:
         "--latest=false",
     ):
         if forbidden in artifact:
-            fail(f"termux-mobile-artifact.yml contains forbidden publisher token {forbidden!r}")
+            fail(
+                "termux-mobile-artifact.yml contains forbidden publisher token "
+                f"{forbidden!r}"
+            )
 
     channel = read("termux-release-channel.yml")
     for forbidden in (
@@ -94,13 +97,18 @@ def main() -> None:
         "gh workflow run termux-governance-audit.yml",
         "--method PATCH",
         "make_latest",
+        "expected true (API",
+        ".immutable == true",
     ):
         if forbidden in channel:
-            fail(f"termux-release-channel.yml is not verification-only: {forbidden!r}")
+            fail(
+                "termux-release-channel.yml is not read-only current-state "
+                f"verification: {forbidden!r}"
+            )
 
     publisher = read("termux-release-request.yml")
     required_publisher_tokens = (
-        "Publish complete immutable release as Latest",
+        "Stage complete draft and publish it as Latest once",
         "draft: true",
         'make_latest:"true"',
         "Verify anonymous public downloads byte-for-byte",
@@ -121,7 +129,9 @@ def main() -> None:
             if forbidden in text:
                 fail(f"{filename} contains release-writer token {forbidden!r}")
 
-    print("workflow-topology: permanent workflow set and release ownership are valid")
+    print(
+        "workflow-topology: permanent workflow set and release ownership are valid"
+    )
 
 
 if __name__ == "__main__":

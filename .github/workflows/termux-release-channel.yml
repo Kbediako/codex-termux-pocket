@@ -1,14 +1,16 @@
 name: termux-release-channel
+run-name: Verify promoted Termux release channel
 
-# Verify that a promoted manifest points to the already-published immutable
-# GitHub Latest release. The manifest push independently triggers the scheduled
-# governance workflow, so this workflow performs no mutation or duplicate
-# workflow dispatch.
+# Verify that the promoted manifest points to the complete GitHub Latest
+# release. Repository-level release editing remains enabled by owner policy,
+# so this workflow verifies the release's current identity and bytes every time
+# it runs. It never mutates a published release.
 on:
   push:
     branches:
       - main
     paths:
+      - ".github/workflows/termux-release-channel.yml"
       - "scripts/termux/release-manifest.env"
   workflow_dispatch:
 
@@ -21,7 +23,7 @@ concurrency:
 
 jobs:
   verify-latest-release:
-    name: Verify promoted immutable release is already Latest
+    name: Verify promoted release is complete and Latest
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -31,14 +33,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify release identity, immutable assets and Latest
+      - name: Verify release identity, assets and Latest
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           manifest="scripts/termux/release-manifest.env"
-          api_version="2026-03-10"
+          api_version="2022-11-28"
 
           read_value() {
             local key="$1"
@@ -105,14 +107,6 @@ jobs:
 
           expected_assets_json='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
 
-          boolean_field() {
-            local document="$1"
-            local field="$2"
-            jq -r --arg field "$field" \
-              'if has($field) then (.[$field] | tostring) else "missing" end' \
-              <<<"$document"
-          }
-
           verify_release_document() {
             local label="$1"
             local document="$2"
@@ -128,19 +122,14 @@ jobs:
               echo "::error::${label} release target is ${actual}, expected ${head_sha}"
               exit 1
             }
-            actual="$(boolean_field "$document" draft)"
+            actual="$(jq -r 'if has("draft") then (.draft | tostring) else "missing" end' <<<"$document")"
             [[ "$actual" == "false" ]] || {
               echo "::error::${label} release draft state is ${actual}, expected false"
               exit 1
             }
-            actual="$(boolean_field "$document" prerelease)"
+            actual="$(jq -r 'if has("prerelease") then (.prerelease | tostring) else "missing" end' <<<"$document")"
             [[ "$actual" == "false" ]] || {
               echo "::error::${label} release prerelease state is ${actual}, expected false"
-              exit 1
-            }
-            actual="$(boolean_field "$document" immutable)"
-            [[ "$actual" == "true" ]] || {
-              echo "::error::${label} release immutable state is ${actual}, expected true (API ${api_version})"
               exit 1
             }
             actual="$(jq -c '[.assets[].name] | sort' <<<"$document")"
@@ -169,14 +158,16 @@ jobs:
             curl --fail --location --silent --show-error --retry 5 \
               "$asset_url" -o "${public_dir}/${asset_name}"
           done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' <<<"$anonymous_release")
-          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
 
+          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
           [[ "$(sha256sum "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
           [[ "$(stat -c '%s' "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz")" == "$archive_size_bytes" ]]
           cmp --silent "$manifest" "${public_dir}/release-manifest.env"
           grep -Fx "head_sha=${head_sha}" "${public_dir}/metadata.env"
           grep -Fx "codex_version=${codex_version}" "${public_dir}/metadata.env"
           grep -Fx "runtime_size_bytes=${runtime_size_bytes}" "${public_dir}/metadata.env"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+            "${public_dir}/codex-termux-sbom.spdx.json"
 
           verified_release=false
           for _ in $(seq 1 40); do
@@ -220,6 +211,6 @@ jobs:
             echo "- Manifest tag: ${release_tag}"
             echo "- Latest API tag: ${anonymous_latest_tag}"
             echo "- Runtime source: ${head_sha}"
-            echo "- Immutable: $(boolean_field "$anonymous_release" immutable)"
             echo "- Assets: $(jq -r '.assets | length' <<<"$anonymous_release") byte-verified files"
+            echo "- Repository release editing: enabled by owner policy"
           } >>"$GITHUB_STEP_SUMMARY"
