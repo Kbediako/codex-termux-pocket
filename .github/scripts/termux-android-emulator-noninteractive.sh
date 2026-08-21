@@ -47,6 +47,24 @@ if mirror_count != 1:
     )
 text = text.replace(mirror_old, mirror_new, 1)
 
+checkout_var_old = r'''export CODEX_SRC_DIR="\${HOME}/codex-ci"'''
+checkout_var_new = r'''export CODEX_TERMUX_CHECKOUT_DIR="\${HOME}/codex-ci"'''
+checkout_var_count = text.count(checkout_var_old)
+if checkout_var_count != 1:
+    raise SystemExit(
+        f"expected exactly one legacy installer checkout variable, found {checkout_var_count}"
+    )
+text = text.replace(checkout_var_old, checkout_var_new, 1)
+
+installer_old = r'''bash "\${CODEX_SRC_DIR}/scripts/termux/install-codex-termux"'''
+installer_new = r'''bash "\${CODEX_TERMUX_CHECKOUT_DIR}/scripts/termux/install-codex-termux"'''
+installer_count = text.count(installer_old)
+if installer_count != 1:
+    raise SystemExit(
+        f"expected exactly one installer invocation through CODEX_SRC_DIR, found {installer_count}"
+    )
+text = text.replace(installer_old, installer_new, 1)
+
 destination.write_text(text, encoding="utf-8")
 PY
 
