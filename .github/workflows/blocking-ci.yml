@@ -6,17 +6,20 @@ on:
   pull_request: {}
   push:
     branches: [main]
+  issues:
+    types: [opened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -85,3 +88,90 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  audit-policy-fix:
+    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: verify release-policy repair' }}"
+    name: Verify release-policy repair runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      TARGET_SHA: 8724d43a8158be2bf4868d249ee4b2dc04583bee
+    steps:
+      - name: Wait for and record actual push workflow results
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            fork-ci
+            termux-control-plane
+            termux-release-channel
+            termux-governance-audit
+          )
+
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+            -f body="state=running
+target_sha=${TARGET_SHA}
+audit_run_id=${GITHUB_RUN_ID}
+audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+
+          runs='[]'
+          all_completed=false
+          for _ in $(seq 1 180); do
+            runs="$(
+              gh run list --repo "$GITHUB_REPOSITORY" --commit "$TARGET_SHA" --limit 100 \
+                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
+            )"
+            all_completed=true
+            for workflow in "${expected[@]}"; do
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
+              )"
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              [[ "$status" == "completed" ]] || all_completed=false
+            done
+            [[ "$all_completed" == "true" ]] && break
+            sleep 5
+          done
+
+          report="$(mktemp)"
+          {
+            echo 'state=completed'
+            echo "target_sha=${TARGET_SHA}"
+            overall=success
+            for workflow in "${expected[@]}"; do
+              label="${workflow//-/_}"
+              row="$(
+                jq -c --arg workflow "$workflow" --arg sha "$TARGET_SHA" \
+                  '[.[] | select(.workflowName == $workflow and .headSha == $sha and .event == "push")]
+                   | sort_by(.createdAt) | last // {}' <<<"$runs"
+              )"
+              run_id="$(jq -r '.databaseId // "missing"' <<<"$row")"
+              status="$(jq -r '.status // "missing"' <<<"$row")"
+              conclusion="$(jq -r '.conclusion // "missing"' <<<"$row")"
+              url="$(jq -r '.url // "missing"' <<<"$row")"
+              echo "${label}_run_id=${run_id}"
+              echo "${label}_status=${status}"
+              echo "${label}_conclusion=${conclusion}"
+              echo "${label}_url=${url}"
+              if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
+                overall=failure
+              fi
+            done
+            echo "overall=${overall}"
+            echo "audit_run_id=${GITHUB_RUN_ID}"
+            echo "audit_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >"$report"
+
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+            -f body="$(cat "$report")" >/dev/null
+
+          [[ "$all_completed" == "true" ]]
+          grep -Fx 'overall=success' "$report"
