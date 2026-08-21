@@ -1,11 +1,8 @@
 name: fork-ci
 
-# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
-# sandbox, and release gates live in dedicated path-filtered or manual workflows.
+# Temporary bounded post-promotion dispatcher. The normal fork CI definition is
+# restored after the release channel, governance, and control-plane checks pass.
 on:
-  pull_request: {}
-  push:
-    branches: [main]
   issues:
     types: [reopened]
   workflow_dispatch:
@@ -14,113 +11,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: post-promotion-alpha-7-1
   cancel-in-progress: true
 
 jobs:
-  announce-exact-source-validation:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
-    name: Record exact-source validation run
-    runs-on: ubuntu-24.04
-    permissions:
-      issues: write
-      contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Record fork CI run ID before validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          body="$(cat <<EOF
-          state=validating-fork-ci
-          source_sha=${GITHUB_SHA}
-          fork_ci_run_id=${GITHUB_RUN_ID}
-          control_run_id=
-          artifact_run_id=
-          android_run_id=
-          EOF
-          )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/55" \
-            -f body="$body" >/dev/null
-
-  validate:
-    if: ${{ github.event_name != 'issues' || github.event.issue.number == 55 }}
-    name: Termux fork checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Checkout exact revision
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Set up repository CI environment
-        uses: ./.github/actions/setup-ci
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-
-      - name: Validate workflow YAML
-        run: |
-          set -euo pipefail
-          ruby <<'RUBY'
-          require "yaml"
-          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
-            YAML.safe_load(File.read(path), aliases: true)
-          end
-          RUBY
-
-      - name: Validate permanent workflow topology
-        run: python3 .github/scripts/validate-termux-workflow-topology.py
-
-      - name: Validate Bash entrypoints
-        run: |
-          set -euo pipefail
-          while IFS= read -r file; do
-            bash -n "$file"
-          done < <(git grep -Il '^#!.*bash' --)
-
-      - name: Validate Python helpers
-        run: |
-          set -euo pipefail
-          mapfile -d '' -t python_files < <(
-            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
-          )
-          if (( ${#python_files[@]} > 0 )); then
-            python3 -m py_compile "${python_files[@]}"
-          fi
-
-      - name: Validate locked Cargo metadata
-        working-directory: codex-rs
-        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
-
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt --all -- --check
-
-      - name: Check Rust dependency policy
-        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
-        with:
-          rust-version: 1.95.0
-          manifest-path: ./codex-rs/Cargo.toml
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  dispatch-exact-source-gates:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
-    needs:
-      - announce-exact-source-validation
-      - validate
-    name: Dispatch exact-source Termux gates
+  dispatch-post-promotion-checks:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 58 }}
+    name: Dispatch promoted-channel verification
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -130,26 +27,23 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Dispatch and record exact-source validation runs
+      - name: Dispatch and record exact promoted-main checks
         shell: bash
         run: |
           set -euo pipefail
           source_sha="$GITHUB_SHA"
           main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
-          [[ "$main_sha" == "$source_sha" ]] || {
-            echo "::error::main advanced from ${source_sha} to ${main_sha} before validation dispatch"
-            exit 1
-          }
+          [[ "$main_sha" == "$source_sha" ]]
           started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          find_run() {
+          dispatch_and_find() {
             local workflow="$1"
-            local run_id=""
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main
             for _ in $(seq 1 60); do
               runs="$(
                 gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
                   --event workflow_dispatch --limit 50 \
-                  --json databaseId,headSha,createdAt,url,status,conclusion,displayTitle
+                  --json databaseId,headSha,createdAt,url,status,conclusion
               )"
               run_id="$(
                 jq -r --arg sha "$source_sha" --arg started "$started_at" \
@@ -162,126 +56,62 @@ jobs:
               fi
               sleep 2
             done
-            echo "::error::workflow ${workflow} did not expose an exact-source run"
+            echo "::error::workflow ${workflow} did not expose a promoted-main run"
             return 1
           }
 
-          gh workflow run termux-control-plane.yml \
-            --repo "$GITHUB_REPOSITORY" --ref main
-          control_run_id="$(find_run termux-control-plane.yml)"
-
-          gh workflow run termux-mobile-artifact.yml \
-            --repo "$GITHUB_REPOSITORY" --ref main \
-            -f source_ref="$source_sha"
-          artifact_run_id="$(find_run termux-mobile-artifact.yml)"
-
-          gh workflow run termux-android-emulator.yml \
-            --repo "$GITHUB_REPOSITORY" --ref main
-          android_run_id="$(find_run termux-android-emulator.yml)"
+          control_run_id="$(dispatch_and_find termux-control-plane.yml)"
+          channel_run_id="$(dispatch_and_find termux-release-channel.yml)"
+          governance_run_id="$(dispatch_and_find termux-governance-audit.yml)"
 
           body="$(cat <<EOF
           state=dispatched
           source_sha=${source_sha}
-          fork_ci_run_id=${GITHUB_RUN_ID}
           control_run_id=${control_run_id}
-          artifact_run_id=${artifact_run_id}
-          android_run_id=${android_run_id}
+          channel_run_id=${channel_run_id}
+          governance_run_id=${governance_run_id}
           EOF
           )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/55" \
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/58" \
             -f body="$body" >/dev/null
 
           {
-            echo '### Exact-source Termux validation dispatched'
+            echo '### Promoted-channel verification dispatched'
             echo
-            echo "- Source: \`${source_sha}\`"
-            echo "- Fork CI: \`${GITHUB_RUN_ID}\`"
+            echo "- Main: \`${source_sha}\`"
             echo "- Control plane: \`${control_run_id}\`"
-            echo "- ARM64 artifact: \`${artifact_run_id}\`"
-            echo "- Android/Termux: \`${android_run_id}\`"
+            echo "- Release channel: \`${channel_run_id}\`"
+            echo "- Governance audit: \`${governance_run_id}\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
-  dispatch-release-publication:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 57 }}
-    name: Detect or dispatch atomic release publication
+  delete-temporary-branches:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 59 }}
+    name: Remove alpha maintenance branches
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
-      actions: write
+      contents: write
       issues: write
-      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: termux-v2026.08.21-alpha.7.1-6795630b06
-      SOURCE_SHA: 6795630b06bdc7e55eb0e4940f8e7bdc175c5eaf
     steps:
-      - name: Reuse any active publication or dispatch exactly one
+      - name: Delete only the known temporary branches
         shell: bash
         run: |
           set -euo pipefail
-          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          runs="$(
-            gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow termux-release-request.yml --limit 50 \
-              --json databaseId,status,conclusion,headSha,createdAt,url,event,displayTitle
-          )"
-
-          release_run_id="$(
-            jq -r '[.[] | select(.status == "queued" or .status == "in_progress")]
-                   | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
-          )"
-          state=existing-active
-
-          if [[ ! "$release_run_id" =~ ^[0-9]+$ ]]; then
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              state=release-already-published
-              release_run_id="$(
-                jq -r '[.[] | select(.conclusion == "success")]
-                       | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
-              )"
-            else
-              gh workflow run termux-release-request.yml \
-                --repo "$GITHUB_REPOSITORY" --ref main
-              state=dispatched
-              for _ in $(seq 1 60); do
-                runs="$(
-                  gh run list --repo "$GITHUB_REPOSITORY" \
-                    --workflow termux-release-request.yml --event workflow_dispatch \
-                    --limit 50 \
-                    --json databaseId,status,conclusion,headSha,createdAt,url,event,displayTitle
-                )"
-                release_run_id="$(
-                  jq -r --arg started "$started_at" \
-                    '[.[] | select(.createdAt >= $started)]
-                     | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
-                )"
-                [[ "$release_run_id" =~ ^[0-9]+$ ]] && break
-                sleep 2
-              done
-              [[ "$release_run_id" =~ ^[0-9]+$ ]] || {
-                echo "::error::release workflow did not expose a run"
-                exit 1
-              }
+          branches=(
+            alpha-checkout-reuse-staging
+            alpha-sync-status
+            alpha-validation-status
+          )
+          removed=()
+          for branch in "${branches[@]}"; do
+            encoded="$(jq -rn --arg value "$branch" '$value|@uri')"
+            if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${encoded}" >/dev/null 2>&1; then
+              gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${encoded}" >/dev/null
+              removed+=("$branch")
             fi
-          fi
-
-          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${release_run_id}"
-          body="$(cat <<EOF
-          state=${state}
-          source_sha=${SOURCE_SHA}
-          release_tag=${RELEASE_TAG}
-          release_run_id=${release_run_id}
-          run_url=${run_url}
-          EOF
-          )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/57" \
+          done
+          body="state=completed\nremoved=$(IFS=,; echo "${removed[*]}")"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/59" \
             -f body="$body" >/dev/null
-
-          {
-            echo '### Atomic Termux release publication'
-            echo
-            echo "- State: \`${state}\`"
-            echo "- Source: \`${SOURCE_SHA}\`"
-            echo "- Tag: \`${RELEASE_TAG}\`"
-            echo "- Run: ${run_url}"
-          } >>"$GITHUB_STEP_SUMMARY"
