@@ -200,3 +200,88 @@ jobs:
             echo "- ARM64 artifact: \`${artifact_run_id}\`"
             echo "- Android/Termux: \`${android_run_id}\`"
           } >>"$GITHUB_STEP_SUMMARY"
+
+  dispatch-release-publication:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 57 }}
+    name: Detect or dispatch atomic release publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: termux-v2026.08.21-alpha.7.1-6795630b06
+      SOURCE_SHA: 6795630b06bdc7e55eb0e4940f8e7bdc175c5eaf
+    steps:
+      - name: Reuse any active publication or dispatch exactly one
+        shell: bash
+        run: |
+          set -euo pipefail
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          runs="$(
+            gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow termux-release-request.yml --limit 50 \
+              --json databaseId,status,conclusion,headSha,createdAt,url,event,displayTitle
+          )"
+
+          release_run_id="$(
+            jq -r '[.[] | select(.status == "queued" or .status == "in_progress")]
+                   | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
+          )"
+          state=existing-active
+
+          if [[ ! "$release_run_id" =~ ^[0-9]+$ ]]; then
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              state=release-already-published
+              release_run_id="$(
+                jq -r '[.[] | select(.conclusion == "success")]
+                       | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
+              )"
+            else
+              gh workflow run termux-release-request.yml \
+                --repo "$GITHUB_REPOSITORY" --ref main
+              state=dispatched
+              for _ in $(seq 1 60); do
+                runs="$(
+                  gh run list --repo "$GITHUB_REPOSITORY" \
+                    --workflow termux-release-request.yml --event workflow_dispatch \
+                    --limit 50 \
+                    --json databaseId,status,conclusion,headSha,createdAt,url,event,displayTitle
+                )"
+                release_run_id="$(
+                  jq -r --arg started "$started_at" \
+                    '[.[] | select(.createdAt >= $started)]
+                     | sort_by(.createdAt) | last | .databaseId // empty' <<<"$runs"
+                )"
+                [[ "$release_run_id" =~ ^[0-9]+$ ]] && break
+                sleep 2
+              done
+              [[ "$release_run_id" =~ ^[0-9]+$ ]] || {
+                echo "::error::release workflow did not expose a run"
+                exit 1
+              }
+            fi
+          fi
+
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${release_run_id}"
+          body="$(cat <<EOF
+          state=${state}
+          source_sha=${SOURCE_SHA}
+          release_tag=${RELEASE_TAG}
+          release_run_id=${release_run_id}
+          run_url=${run_url}
+          EOF
+          )"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/57" \
+            -f body="$body" >/dev/null
+
+          {
+            echo '### Atomic Termux release publication'
+            echo
+            echo "- State: \`${state}\`"
+            echo "- Source: \`${SOURCE_SHA}\`"
+            echo "- Tag: \`${RELEASE_TAG}\`"
+            echo "- Run: ${run_url}"
+          } >>"$GITHUB_STEP_SUMMARY"
