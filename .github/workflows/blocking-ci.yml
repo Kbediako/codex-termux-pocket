@@ -6,20 +6,17 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -90,7 +87,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   observe-policy-alignment:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 60 }}
+    if: "${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: make fork workflows lightweight' }}"
     name: Verify policy-alignment push checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
