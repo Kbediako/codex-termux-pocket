@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' || github.event.issue.number == 56 }}
+    if: ${{ github.event_name != 'issues' || github.event.issue.number == 55 }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -90,7 +90,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   dispatch-exact-source-gates:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 56 }}
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
     needs: validate
     name: Dispatch exact-source Termux gates
     runs-on: ubuntu-24.04
