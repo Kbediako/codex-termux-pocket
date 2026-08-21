@@ -1,86 +1,87 @@
 name: fork-ci
 
-# One bounded observer bridges to the immediately following permanent cleanup
-# commit. The next commit restores the normal one-job workflow definition.
+# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
+# sandbox, and release gates live in dedicated path-filtered or manual workflows.
 on:
+  pull_request: {}
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-bridge-${{ github.sha }}
-  cancel-in-progress: false
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  observe-final-cleanup:
-    if: "${{ github.event.head_commit.message == 'ci: make fork workflows lightweight' }}"
-    name: Verify final permanent fork CI
+  validate:
+    name: Termux fork checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      actions: read
-      issues: write
-      contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      ISSUE_NUMBER: "63"
-    steps:
-      - name: Wait for the next main commit and its fork CI result
+    timeout-minutes: 25
+    defaults:
+      run:
         shell: bash
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Validate workflow YAML
         run: |
           set -euo pipefail
-          bridge_sha="$GITHUB_SHA"
-          target_sha=""
-          for _ in $(seq 1 120); do
-            candidate="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
-            if [[ "$candidate" != "$bridge_sha" ]]; then
-              target_sha="$candidate"
-              break
-            fi
-            sleep 2
-          done
-          [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]]
+          ruby <<'RUBY'
+          require "yaml"
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+            YAML.safe_load(File.read(path), aliases: true)
+          end
+          RUBY
 
-          run='{}'
-          for _ in $(seq 1 240); do
-            runs="$(
-              gh run list --repo "$GITHUB_REPOSITORY" --workflow blocking-ci.yml \
-                --event push --commit "$target_sha" --limit 20 \
-                --json databaseId,workflowName,headSha,event,status,conclusion,url,createdAt
-            )"
-            run="$(
-              jq -c --arg sha "$target_sha" \
-                '[.[] | select(.workflowName == "fork-ci" and .headSha == $sha and .event == "push")]
-                 | sort_by(.createdAt) | last // {}' <<<"$runs"
-            )"
-            status="$(jq -r '.status // "missing"' <<<"$run")"
-            [[ "$status" == "completed" ]] && break
-            sleep 3
-          done
+      - name: Validate permanent workflow topology
+        run: python3 .github/scripts/validate-termux-workflow-topology.py
 
-          run_id="$(jq -r '.databaseId // "missing"' <<<"$run")"
-          status="$(jq -r '.status // "missing"' <<<"$run")"
-          conclusion="$(jq -r '.conclusion // "missing"' <<<"$run")"
-          url="$(jq -r '.url // "missing"' <<<"$run")"
-          body="$(cat <<EOF
-          state=final-cleanup-verified
-          final_main_sha=${target_sha}
-          fork_ci_run_id=${run_id}
-          fork_ci_status=${status}
-          fork_ci_conclusion=${conclusion}
-          fork_ci_url=${url}
-          policy_commit=8724d43a8158be2bf4868d249ee4b2dc04583bee
-          policy_control_run_id=32533454291
-          policy_release_channel_run_id=32533454206
-          policy_governance_run_id=32533454325
-          bridge_run_id=${GITHUB_RUN_ID}
-          bridge_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          EOF
-          )"
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
-            -f body="$body" >/dev/null
+      - name: Validate Bash entrypoints
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git grep -Il '^#!.*bash' --)
 
-          [[ "$status" == "completed" ]]
-          [[ "$conclusion" == "success" ]]
+      - name: Validate Python helpers
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t python_files < <(
+            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
+          )
+          if (( ${#python_files[@]} > 0 )); then
+            python3 -m py_compile "${python_files[@]}"
+          fi
+
+      - name: Validate locked Cargo metadata
+        working-directory: codex-rs
+        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
+
+      - name: Check Rust formatting
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust dependency policy
+        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
+        with:
+          rust-version: 1.95.0
+          manifest-path: ./codex-rs/Cargo.toml
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
