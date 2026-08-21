@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'push' || github.event.head_commit.message != 'ci: stage upstream alpha sync' }}
+    if: ${{ github.event_name != 'push' || github.event.head_commit.message != 'ci: restage observable upstream alpha sync' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -88,13 +88,16 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   sync-upstream-alpha:
-    if: ${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: stage upstream alpha sync' }}
+    if: ${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: restage observable upstream alpha sync' }}
     name: Merge official 0.149.0-alpha.7.1 and refresh lockfile
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
     env:
+      GH_TOKEN: ${{ github.token }}
+      STATUS_BRANCH: alpha-sync-status
+      STATUS_PATH: .github/alpha-sync-status.env
       UPSTREAM_TAG: rust-v0.149.0-alpha.7.1
       UPSTREAM_COMMIT: 0e015a7a0eef52047fea8ded24f8b32afbafd527
       PACKAGE_VERSION: 0.149.0-alpha.7.1
@@ -106,15 +109,71 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: Publish observable start status
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          file_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
+          )"
+          status_file="$(mktemp)"
+          cat >"$status_file" <<EOF
+          format_version=1
+          state=running
+          source_commit=${GITHUB_SHA}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+          detail=checkout-complete
+          run_id=${GITHUB_RUN_ID}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          gh api --method PUT \
+            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
+            -f message="ci: alpha sync running" \
+            -f content="$(base64 -w0 "$status_file")" \
+            -f sha="$file_sha" \
+            -f branch="$STATUS_BRANCH" >/dev/null
+
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: rustfmt
 
       - name: Merge exact upstream alpha and retain the Termux surface
+        id: merge
         shell: bash
         run: |
           set -euo pipefail
+
+          publish_status() {
+            local state="$1"
+            local detail="$2"
+            local merge_sha="${3:-}"
+            local file_sha status_file
+            file_sha="$(
+              gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
+            )"
+            status_file="$(mktemp)"
+            cat >"$status_file" <<EOF
+          format_version=1
+          state=${state}
+          source_commit=${GITHUB_SHA}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+          detail=${detail}
+          merge_commit=${merge_sha}
+          run_id=${GITHUB_RUN_ID}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+            gh api --method PUT \
+              "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
+              -f message="ci: alpha sync ${state} ${detail}" \
+              -f content="$(base64 -w0 "$status_file")" \
+              -f sha="$file_sha" \
+              -f branch="$STATUS_BRANCH" >/dev/null
+          }
+
           base_sha="$(git rev-parse HEAD)"
           test "$base_sha" = "$GITHUB_SHA"
 
@@ -124,6 +183,7 @@ jobs:
           git fetch --no-tags upstream \
             "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
           test "$(git rev-parse "${UPSTREAM_TAG}^{commit}")" = "$UPSTREAM_COMMIT"
+          publish_status running upstream-fetched || true
 
           git merge --no-ff --no-commit -X ours "$UPSTREAM_TAG" || true
 
@@ -173,6 +233,7 @@ jobs:
             scripts/termux; do
             restore_from_base "$path"
           done
+          publish_status running merge-resolved || true
 
           python3 - <<'PY'
           from pathlib import Path
@@ -209,13 +270,17 @@ jobs:
 
           cat >> scripts/termux/patch_audit.tsv <<'EOF'
           subject	ci: stage upstream alpha sync	tooling	Temporary protected-main hook used to run the maintained upstream merge transaction.
+          subject	ci: restage observable upstream alpha sync	tooling	Temporary protected-main hook that exposes merge progress without adding a permanent workflow.
           subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
           EOF
 
+          publish_status running resolving-lockfile || true
           cargo metadata --manifest-path codex-rs/Cargo.toml \
             --format-version=1 >/dev/null
           cargo metadata --manifest-path codex-rs/Cargo.toml \
             --locked --format-version=1 >/dev/null
+
+          publish_status running running-regression-tests || true
           cargo fmt --manifest-path codex-rs/Cargo.toml --all -- --check
           bash scripts/termux/tests/run-tests
           git diff --check
@@ -226,5 +291,39 @@ jobs:
             exit 1
           }
           git commit -m "termux: update to ${PACKAGE_VERSION}"
+          merge_sha="$(git rev-parse HEAD)"
           test "$(git rev-parse HEAD^2)" = "$UPSTREAM_COMMIT"
+          echo "merge_sha=${merge_sha}" >> "$GITHUB_OUTPUT"
+          publish_status running pushing-main "$merge_sha" || true
           git push origin HEAD:main
+
+      - name: Publish observable final status
+        if: always()
+        continue-on-error: true
+        env:
+          JOB_STATUS: ${{ job.status }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          file_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
+          )"
+          status_file="$(mktemp)"
+          cat >"$status_file" <<EOF
+          format_version=1
+          state=${JOB_STATUS}
+          source_commit=${GITHUB_SHA}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+          detail=job-${JOB_STATUS}
+          merge_commit=${MERGE_SHA}
+          run_id=${GITHUB_RUN_ID}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          gh api --method PUT \
+            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
+            -f message="ci: alpha sync ${JOB_STATUS}" \
+            -f content="$(base64 -w0 "$status_file")" \
+            -f sha="$file_sha" \
+            -f branch="$STATUS_BRANCH" >/dev/null
