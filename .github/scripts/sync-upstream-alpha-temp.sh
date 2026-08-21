@@ -141,6 +141,7 @@ subject	ci: restage observable upstream alpha sync	tooling	Temporary protected-m
 subject	ci: arm issue-triggered upstream alpha sync	tooling	Temporary issue-triggered hook prepared after connector-authored pushes did not schedule the merge job.
 subject	ci: add observable alpha sync worker	tooling	Temporary merge worker used to regenerate the lockfile inside the repository CI environment.
 subject	ci: fix alpha sync issue trigger	tooling	Temporary issue-reopen trigger that avoids YAML ambiguity in the maintenance event selector.
+subject	ci: simulate Termux in alpha sync tests	tooling	Runs the existing helper fixtures under the same simulated Termux PREFIX used by the permanent control-plane workflow.
 subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
 EOF
 
@@ -152,10 +153,20 @@ cargo metadata --manifest-path codex-rs/Cargo.toml \
 
 publish_status running running-regression-tests || true
 cargo fmt --manifest-path codex-rs/Cargo.toml --all -- --check
+export PREFIX=/data/data/com.termux/files/usr
+export TERMUX_APK_RELEASE=F_DROID
+sudo mkdir -p "$PREFIX/bin"
+sudo ln -sfn /usr/bin/bash "$PREFIX/bin/bash"
 bash scripts/termux/tests/run-tests
 git diff --check
 
-git add -A
+git add -- \
+  codex-rs/Cargo.toml \
+  codex-rs/Cargo.lock \
+  scripts/termux/upstream-alpha.env \
+  scripts/termux/release-request.env \
+  scripts/termux/patch_audit.tsv
+
 git diff --cached --quiet && {
   echo "::error::Upstream merge produced no staged update"
   exit 1
