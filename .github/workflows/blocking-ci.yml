@@ -1,96 +1,21 @@
 name: fork-ci
 
-# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
-# sandbox, and release gates live in dedicated path-filtered or manual workflows.
+# Temporary protected-main maintenance hook. This file is restored to the
+# permanent fork CI definition immediately after the exact upstream merge.
 on:
-  pull_request: {}
-  push:
-    branches: [main]
   issues:
-    types: [opened]
-  workflow_dispatch:
+    types: [reopened]
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: alpha-sync-149-7-1
   cancel-in-progress: true
 
 jobs:
-  validate:
-    if: ${{ github.event_name != 'issues' }}
-    name: Termux fork checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Checkout exact revision
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Set up repository CI environment
-        uses: ./.github/actions/setup-ci
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-
-      - name: Validate workflow YAML
-        run: |
-          set -euo pipefail
-          ruby <<'RUBY'
-          require "yaml"
-          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
-            YAML.safe_load(File.read(path), aliases: true)
-          end
-          RUBY
-
-      - name: Validate permanent workflow topology
-        run: python3 .github/scripts/validate-termux-workflow-topology.py
-
-      - name: Validate Bash entrypoints
-        run: |
-          set -euo pipefail
-          while IFS= read -r file; do
-            bash -n "$file"
-          done < <(git grep -Il '^#!.*bash' --)
-
-      - name: Validate Python helpers
-        run: |
-          set -euo pipefail
-          mapfile -d '' -t python_files < <(
-            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
-          )
-          if (( ${#python_files[@]} > 0 )); then
-            python3 -m py_compile "${python_files[@]}"
-          fi
-
-      - name: Validate locked Cargo metadata
-        working-directory: codex-rs
-        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
-
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt --all -- --check
-
-      - name: Check Rust dependency policy
-        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
-        with:
-          rust-version: 1.95.0
-          manifest-path: ./codex-rs/Cargo.toml
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
   sync-upstream-alpha:
-    if: ${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: sync official Codex 0.149.0-alpha.7.1' }}
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
     name: Merge official 0.149.0-alpha.7.1 and refresh lockfile
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -127,12 +52,13 @@ jobs:
           upstream_tag=${UPSTREAM_TAG}
           upstream_commit=${UPSTREAM_COMMIT}
           detail=checkout-complete
+          merge_commit=
           run_id=${GITHUB_RUN_ID}
           run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
           gh api --method PUT \
             "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-            -f message="ci: alpha sync running" \
+            -f message="ci: alpha sync running checkout-complete" \
             -f content="$(base64 -w0 "$status_file")" \
             -f sha="$file_sha" \
             -f branch="$STATUS_BRANCH" >/dev/null
@@ -142,163 +68,10 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Merge exact upstream alpha and retain the Termux surface
+      - name: Merge, refresh lockfile, validate and push
         id: merge
         shell: bash
-        run: |
-          set -euo pipefail
-
-          publish_status() {
-            local state="$1"
-            local detail="$2"
-            local merge_sha="${3:-}"
-            local file_sha status_file
-            file_sha="$(
-              gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
-            )"
-            status_file="$(mktemp)"
-            cat >"$status_file" <<EOF
-          format_version=1
-          state=${state}
-          source_commit=${GITHUB_SHA}
-          upstream_tag=${UPSTREAM_TAG}
-          upstream_commit=${UPSTREAM_COMMIT}
-          detail=${detail}
-          merge_commit=${merge_sha}
-          run_id=${GITHUB_RUN_ID}
-          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          EOF
-            gh api --method PUT \
-              "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
-              -f message="ci: alpha sync ${state} ${detail}" \
-              -f content="$(base64 -w0 "$status_file")" \
-              -f sha="$file_sha" \
-              -f branch="$STATUS_BRANCH" >/dev/null
-          }
-
-          base_sha="$(git rev-parse HEAD)"
-          test "$base_sha" = "$GITHUB_SHA"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/openai/codex.git
-          git fetch --no-tags upstream \
-            "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
-          test "$(git rev-parse "${UPSTREAM_TAG}^{commit}")" = "$UPSTREAM_COMMIT"
-          publish_status running upstream-fetched || true
-
-          git merge --no-ff --no-commit -X ours "$UPSTREAM_TAG" || true
-
-          # Resolve any remaining content or modify/delete conflict in favour of
-          # the maintained Termux side. Non-conflicting upstream changes remain.
-          while IFS= read -r path; do
-            if git checkout --ours -- "$path" 2>/dev/null; then
-              git add -- "$path"
-            else
-              git rm -f --ignore-unmatch -- "$path"
-            fi
-          done < <(git diff --name-only --diff-filter=U)
-
-          restore_from_base() {
-            local path="$1"
-            if git cat-file -e "${base_sha}:${path}" 2>/dev/null; then
-              git checkout "$base_sha" -- "$path"
-            else
-              git rm -rf --ignore-unmatch -- "$path"
-            fi
-          }
-
-          # These paths are owned by the focused Termux fork rather than the
-          # upstream release branch.
-          for path in \
-            .github/CODEOWNERS \
-            .github/actions/setup-bazel-ci/action.yml \
-            .github/assets \
-            .github/repository-governance-status.json \
-            .github/scripts \
-            .github/termux-android-validation.json \
-            .github/workflows \
-            .prettierignore \
-            AGENTS.md \
-            EXECPLAN_voice.md \
-            EXECPLAN_voice_porcu.md \
-            EXEC_PLAN.md \
-            EXEC_PLAN_TERMUX_INSTALL.md \
-            EXEC_PLAN_mobile_build_acceleration.md \
-            PLANS.md \
-            README.md \
-            docs/contributing.md \
-            docs/termux-agent-safety.md \
-            docs/termux-alpha-log.md \
-            docs/termux-maintainer.md \
-            docs/termux-mobile-update.md \
-            scripts/termux; do
-            restore_from_base "$path"
-          done
-          publish_status running merge-resolved || true
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("codex-rs/Cargo.toml")
-          text = path.read_text(encoding="utf-8")
-          pattern = re.compile(
-              r"(?ms)(^\[workspace\.package\]\n.*?^version\s*=\s*\")([^\"]+)(\")"
-          )
-          updated, count = pattern.subn(
-              lambda match: match.group(1) + "0.149.0-alpha.7.1" + match.group(3),
-              text,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("failed to update workspace package version")
-          path.write_text(updated, encoding="utf-8")
-          PY
-
-          cat > scripts/termux/upstream-alpha.env <<EOF
-          format_version=1
-          tag=${UPSTREAM_TAG}
-          commit=${UPSTREAM_COMMIT}
-          EOF
-
-          cat > scripts/termux/release-request.env <<EOF
-          # Exact-source validation request for the protected alpha update.
-          format_version=3
-          source_mode=workflow-head
-          release_tag_prefix=termux-v2026.08.21-alpha.7.1
-          expected_package_version=${PACKAGE_VERSION}
-          EOF
-
-          cat >> scripts/termux/patch_audit.tsv <<'EOF'
-          subject	ci: stage upstream alpha sync	tooling	Temporary protected-main hook used to run the maintained upstream merge transaction.
-          subject	ci: restage observable upstream alpha sync	tooling	Temporary protected-main hook that exposes merge progress without adding a permanent workflow.
-          subject	ci: arm issue-triggered upstream alpha sync	tooling	Temporary issue-triggered hook used because connector-authored pushes did not schedule the merge job.
-          subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
-          EOF
-
-          publish_status running resolving-lockfile || true
-          cargo metadata --manifest-path codex-rs/Cargo.toml \
-            --format-version=1 >/dev/null
-          cargo metadata --manifest-path codex-rs/Cargo.toml \
-            --locked --format-version=1 >/dev/null
-
-          publish_status running running-regression-tests || true
-          cargo fmt --manifest-path codex-rs/Cargo.toml --all -- --check
-          bash scripts/termux/tests/run-tests
-          git diff --check
-
-          git add -A
-          git diff --cached --quiet && {
-            echo "::error::Upstream merge produced no staged update"
-            exit 1
-          }
-          git commit -m "termux: update to ${PACKAGE_VERSION}"
-          merge_sha="$(git rev-parse HEAD)"
-          test "$(git rev-parse HEAD^2)" = "$UPSTREAM_COMMIT"
-          echo "merge_sha=${merge_sha}" >> "$GITHUB_OUTPUT"
-          publish_status running pushing-main "$merge_sha" || true
-          git push origin HEAD:main
+        run: bash .github/scripts/sync-upstream-alpha-temp.sh
 
       - name: Publish observable final status
         if: always()
