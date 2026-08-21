@@ -18,6 +18,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  announce-exact-source-validation:
+    if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
+    name: Record exact-source validation run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STATUS_BRANCH: alpha-validation-status
+      STATUS_PATH: .github/alpha-validation-status.env
+    steps:
+      - name: Record fork CI run ID before validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          status_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}?ref=${STATUS_BRANCH}" --jq .sha
+          )"
+          status_file="$(mktemp)"
+          cat >"$status_file" <<EOF
+          format_version=1
+          state=validating-fork-ci
+          source_sha=${GITHUB_SHA}
+          fork_ci_run_id=${GITHUB_RUN_ID}
+          control_run_id=
+          artifact_run_id=
+          android_run_id=
+          EOF
+          gh api --method PUT \
+            "/repos/${GITHUB_REPOSITORY}/contents/${STATUS_PATH}" \
+            -f message="ci: record fork CI alpha validation run" \
+            -f content="$(base64 -w0 "$status_file")" \
+            -f sha="$status_sha" \
+            -f branch="$STATUS_BRANCH" >/dev/null
+
   validate:
     if: ${{ github.event_name != 'issues' || github.event.issue.number == 55 }}
     name: Termux fork checks
@@ -91,7 +126,9 @@ jobs:
 
   dispatch-exact-source-gates:
     if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
-    needs: validate
+    needs:
+      - announce-exact-source-validation
+      - validate
     name: Dispatch exact-source Termux gates
     runs-on: ubuntu-24.04
     timeout-minutes: 15
