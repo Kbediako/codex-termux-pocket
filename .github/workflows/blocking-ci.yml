@@ -17,7 +17,7 @@ jobs:
   sync-upstream-alpha:
     if: ${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 55 }}
     name: Merge official 0.149.0-alpha.7.1 and refresh lockfile
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
       contents: write
