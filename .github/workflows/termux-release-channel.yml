@@ -38,6 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest="scripts/termux/release-manifest.env"
+          api_version="2026-03-10"
 
           read_value() {
             local key="$1"
@@ -75,43 +76,85 @@ jobs:
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$codex_version" == "codex-cli ${head_sha:0:7}" ]]
           [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$archive_size_bytes" =~ ^[0-9]+$ ]]
-          [[ "$runtime_size_bytes" =~ ^[0-9]+$ ]]
+          [[ "$archive_size_bytes" =~ ^[0-9]+$ && "$archive_size_bytes" -gt 0 ]]
+          [[ "$runtime_size_bytes" =~ ^[0-9]+$ && "$runtime_size_bytes" -gt 0 ]]
 
           encoded_tag="$(jq -rn --arg value "$release_tag" '$value|@uri')"
           release_json="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}"
+            gh api \
+              -H "X-GitHub-Api-Version: ${api_version}" \
+              "/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}"
           )"
           anonymous_release="$(
             curl --fail --location --silent --show-error \
               -H 'Accept: application/vnd.github+json' \
-              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H "X-GitHub-Api-Version: ${api_version}" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}"
           )"
-          latest_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          latest_json="$(
+            gh api \
+              -H "X-GitHub-Api-Version: ${api_version}" \
+              "/repos/${GITHUB_REPOSITORY}/releases/latest"
+          )"
           anonymous_latest="$(
             curl --fail --location --silent --show-error \
               -H 'Accept: application/vnd.github+json' \
-              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H "X-GitHub-Api-Version: ${api_version}" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"
           )"
 
           expected_assets_json='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
-          for document in "$release_json" "$anonymous_release"; do
-            jq -e \
-              --arg tag "$release_tag" \
-              --arg source "$head_sha" \
-              --argjson assets "$expected_assets_json" \
-              '.tag_name == $tag
-               and .target_commitish == $source
-               and .draft == false
-               and .prerelease == false
-               and .immutable == true
-               and ([.assets[].name] | sort) == $assets' \
-              <<<"$document" >/dev/null
-          done
-          jq -e --arg tag "$release_tag" '.tag_name == $tag' <<<"$latest_json" >/dev/null
-          jq -e --arg tag "$release_tag" '.tag_name == $tag' <<<"$anonymous_latest" >/dev/null
+
+          verify_release_document() {
+            local label="$1"
+            local document="$2"
+            local actual
+
+            actual="$(jq -r '.tag_name // "missing"' <<<"$document")"
+            [[ "$actual" == "$release_tag" ]] || {
+              echo "::error::${label} release tag is ${actual}, expected ${release_tag}"
+              exit 1
+            }
+            actual="$(jq -r '.target_commitish // "missing"' <<<"$document")"
+            [[ "$actual" == "$head_sha" ]] || {
+              echo "::error::${label} release target is ${actual}, expected ${head_sha}"
+              exit 1
+            }
+            actual="$(jq -r '.draft // "missing"' <<<"$document")"
+            [[ "$actual" == "false" ]] || {
+              echo "::error::${label} release draft state is ${actual}, expected false"
+              exit 1
+            }
+            actual="$(jq -r '.prerelease // "missing"' <<<"$document")"
+            [[ "$actual" == "false" ]] || {
+              echo "::error::${label} release prerelease state is ${actual}, expected false"
+              exit 1
+            }
+            actual="$(jq -r '.immutable // "missing"' <<<"$document")"
+            [[ "$actual" == "true" ]] || {
+              echo "::error::${label} release immutable state is ${actual}, expected true (API ${api_version})"
+              exit 1
+            }
+            actual="$(jq -c '[.assets[].name] | sort' <<<"$document")"
+            [[ "$actual" == "$expected_assets_json" ]] || {
+              echo "::error::${label} release asset set is ${actual}, expected ${expected_assets_json}"
+              exit 1
+            }
+          }
+
+          verify_release_document authenticated "$release_json"
+          verify_release_document anonymous "$anonymous_release"
+
+          latest_tag="$(jq -r '.tag_name // "missing"' <<<"$latest_json")"
+          [[ "$latest_tag" == "$release_tag" ]] || {
+            echo "::error::Authenticated Latest is ${latest_tag}, expected ${release_tag}"
+            exit 1
+          }
+          anonymous_latest_tag="$(jq -r '.tag_name // "missing"' <<<"$anonymous_latest")"
+          [[ "$anonymous_latest_tag" == "$release_tag" ]] || {
+            echo "::error::Anonymous Latest is ${anonymous_latest_tag}, expected ${release_tag}"
+            exit 1
+          }
 
           public_dir="$(mktemp -d)"
           while IFS=$'\t' read -r asset_name asset_url; do
@@ -167,7 +210,7 @@ jobs:
             echo '### Release channel verification'
             echo
             echo "- Manifest tag: ${release_tag}"
-            echo "- Latest API tag: $(jq -r .tag_name <<<"$anonymous_latest")"
+            echo "- Latest API tag: ${anonymous_latest_tag}"
             echo "- Runtime source: ${head_sha}"
             echo "- Immutable: $(jq -r .immutable <<<"$anonymous_release")"
             echo "- Assets: $(jq -r '.assets | length' <<<"$anonymous_release") byte-verified files"
