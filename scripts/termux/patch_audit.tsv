@@ -114,3 +114,5 @@ subject	ci: fix alpha sync issue trigger	tooling	Temporary issue-reopen trigger 
 subject	ci: simulate Termux in alpha sync tests	tooling	Runs the existing helper fixtures under the same simulated Termux PREFIX used by the permanent control-plane workflow.
 subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
 subject	termux: update to 0.150.0-alpha.6	runtime-critical	Merges the exact official 0.150.0-alpha.6 alpha source and reapplies the maintained Android and Termux runtime patch stack.
+subject	termux: stage 0.150.0-alpha.6 publication	tooling	Records successful exact-source control-plane, ARM64, and Android validation evidence for publication.
+subject	termux: promote termux-v0.150.0-alpha.6-dd849adb3f	tooling	Promotes the byte-verified public release manifest after publication.
