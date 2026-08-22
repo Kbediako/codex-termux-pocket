@@ -6,17 +6,20 @@ on:
   pull_request: {}
   push:
     branches: [main]
+  issues:
+    types: [opened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -85,3 +88,55 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  update-latest-alpha:
+    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: update Codex Termux to 0.150.0-alpha.6' }}"
+    name: Merge, validate, publish, and verify 0.150.0-alpha.6
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: write
+      attestations: read
+      contents: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      STAGING_BRANCH: alpha-0.150.0-alpha.6-staging
+      UPSTREAM_TAG: rust-v0.150.0-alpha.6
+      UPSTREAM_COMMIT: bcb6f90f7f886f70a4812a0c05b865b9f6595e90
+      PACKAGE_VERSION: 0.150.0-alpha.6
+    steps:
+      - name: Checkout dedicated staging branch with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: alpha-0.150.0-alpha.6-staging
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Run exact-source alpha update and release transaction
+        id: update
+        shell: bash
+        run: bash .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
+
+      - name: Summarize completed update
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo '### Codex Termux alpha update'
+            echo
+            echo "- Package: \`0.150.0-alpha.6\`"
+            echo "- Runtime source: \`${{ steps.update.outputs.source_sha }}\`"
+            echo "- Release: \`${{ steps.update.outputs.release_tag }}\`"
+            echo "- Publication run: \`${{ steps.update.outputs.release_run_id }}\`"
+            echo "- Promoted main: \`${{ steps.update.outputs.promoted_main_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
