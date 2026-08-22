@@ -230,6 +230,26 @@ for path in \
 done
 
 CURRENT_STEP="updating-alpha-controls"
+python3 - "$PACKAGE_VERSION" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path("codex-rs/Cargo.toml")
+version = sys.argv[1]
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(
+    r'(?ms)(^\[workspace\.package\]\n.*?^version[ \t]*=[ \t]*")([^"]+)(")'
+)
+updated, count = pattern.subn(
+    lambda match: match.group(1) + version + match.group(3),
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("failed to set workspace package version")
+path.write_text(updated, encoding="utf-8")
+PY
 workspace_version="$(
   awk '
     /^\[workspace\.package\]$/ { in_package=1; next }
