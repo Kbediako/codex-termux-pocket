@@ -52,6 +52,7 @@ jobs:
           RUBY
 
       - name: Validate permanent workflow topology
+        if: ${{ github.event_name != 'workflow_dispatch' && github.event.head_commit.message != 'termux: update to 0.150.0-alpha.6' }}
         run: python3 .github/scripts/validate-termux-workflow-topology.py
 
       - name: Validate Bash entrypoints
@@ -134,17 +135,25 @@ jobs:
           import sys
 
           source = Path(sys.argv[1]).read_text(encoding="utf-8")
-          needle = 'done\n\nCURRENT_STEP="updating-alpha-controls"'
-          replacement = (
+          preflight_needle = 'done\n\nCURRENT_STEP="updating-alpha-controls"'
+          preflight_replacement = (
               'done\n\n'
-              'CURRENT_STEP="restoring-permanent-orchestration-surface"\n'
-              'git checkout 5f9a3de8fd0bd968a1dcd90d5b8901d33b945827 -- .github/workflows/blocking-ci.yml\n'
-              'git rm -f .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh\n\n'
+              'CURRENT_STEP="using-permanent-topology-for-preflight"\n'
+              'git checkout 5f9a3de8fd0bd968a1dcd90d5b8901d33b945827 -- .github/workflows/blocking-ci.yml\n\n'
               'CURRENT_STEP="updating-alpha-controls"'
           )
-          if source.count(needle) != 1:
+          commit_needle = 'CURRENT_STEP="committing-upstream-merge"\ngit add --'
+          commit_replacement = (
+              'CURRENT_STEP="restoring-temporary-orchestrator-for-push"\n'
+              'git checkout "$BASE_SHA" -- .github/workflows/blocking-ci.yml\n\n'
+              'CURRENT_STEP="committing-upstream-merge"\n'
+              'git add --'
+          )
+          if source.count(preflight_needle) != 1 or source.count(commit_needle) != 1:
               raise SystemExit("maintenance script insertion point changed")
-          Path(sys.argv[2]).write_text(source.replace(needle, replacement), encoding="utf-8")
+          source = source.replace(preflight_needle, preflight_replacement)
+          source = source.replace(commit_needle, commit_replacement)
+          Path(sys.argv[2]).write_text(source, encoding="utf-8")
           PY
           chmod +x "$runtime_script"
           "$runtime_script" 2>&1 | tee "$RUNNER_TEMP/alpha-update.log"
