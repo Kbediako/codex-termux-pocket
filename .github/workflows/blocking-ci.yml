@@ -126,9 +126,30 @@ jobs:
         id: update
         shell: bash
         run: |
-          set -o pipefail
-          bash .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh \
-            2>&1 | tee "$RUNNER_TEMP/alpha-update.log"
+          set -euo pipefail
+          source_script=.github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
+          runtime_script="$RUNNER_TEMP/maintainer-sync-alpha.sh"
+          python3 - "$source_script" "$runtime_script" <<'PY'
+          from pathlib import Path
+          import sys
+
+          source = Path(sys.argv[1]).read_text(encoding="utf-8")
+          needle = '''done
+
+CURRENT_STEP="updating-alpha-controls"'''
+          replacement = '''done
+
+CURRENT_STEP="restoring-permanent-orchestration-surface"
+git checkout 5f9a3de8fd0bd968a1dcd90d5b8901d33b945827 -- .github/workflows/blocking-ci.yml
+git rm -f .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
+
+CURRENT_STEP="updating-alpha-controls"'''
+          if source.count(needle) != 1:
+              raise SystemExit("maintenance script insertion point changed")
+          Path(sys.argv[2]).write_text(source.replace(needle, replacement), encoding="utf-8")
+          PY
+          chmod +x "$runtime_script"
+          "$runtime_script" 2>&1 | tee "$RUNNER_TEMP/alpha-update.log"
 
       - name: Publish exact failure diagnostics
         if: failure()
