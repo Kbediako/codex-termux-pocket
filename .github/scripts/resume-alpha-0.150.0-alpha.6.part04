@@ -1,0 +1,50 @@
+issue_update running "$CURRENT_STEP"
+wait_for_run "$RELEASE_RUN_ID" release-publication
+
+CURRENT_STEP="verifying-live-release-and-manifest"
+git fetch origin main
+PROMOTED_MAIN_SHA="$(git rev-parse origin/main)"
+release_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+latest_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest")"
+[[ "$(jq -r .tag_name <<<"$release_json")" == "$RELEASE_TAG" ]]
+[[ "$(jq -r .target_commitish <<<"$release_json")" == "$SOURCE_SHA" ]]
+[[ "$(jq -r .draft <<<"$release_json")" == "false" ]]
+[[ "$(jq -r .prerelease <<<"$release_json")" == "false" ]]
+[[ "$(jq -r .tag_name <<<"$latest_json")" == "$RELEASE_TAG" ]]
+expected_assets='["SHA256SUMS","codex-termux-aarch64-unknown-linux-musl.tar.gz","codex-termux-sbom.spdx.json","metadata.env","release-manifest.env"]'
+[[ "$(jq -c '[.assets[].name] | sort' <<<"$release_json")" == "$expected_assets" ]]
+manifest_text="$(
+  gh api "/repos/${GITHUB_REPOSITORY}/contents/scripts/termux/release-manifest.env?ref=main" \
+    --jq .content | tr -d '\n' | base64 --decode
+)"
+grep -Fx "release_tag=${RELEASE_TAG}" <<<"$manifest_text"
+grep -Fx "head_sha=${SOURCE_SHA}" <<<"$manifest_text"
+grep -Fx "codex_version=codex-cli ${SOURCE_SHA:0:7}" <<<"$manifest_text"
+
+CURRENT_STEP="dispatching-post-promotion-checks"
+POST_FORK_CI_RUN_ID="$(dispatch_and_find blocking-ci.yml "$PROMOTED_MAIN_SHA")"
+POST_CONTROL_RUN_ID="$(dispatch_and_find termux-control-plane.yml "$PROMOTED_MAIN_SHA")"
+CHANNEL_RUN_ID="$(dispatch_and_find termux-release-channel.yml "$PROMOTED_MAIN_SHA")"
+GOVERNANCE_RUN_ID="$(dispatch_and_find termux-governance-audit.yml "$PROMOTED_MAIN_SHA")"
+issue_update running "$CURRENT_STEP"
+
+CURRENT_STEP="waiting-for-post-promotion-checks"
+wait_for_run "$POST_FORK_CI_RUN_ID" post-fork-ci
+wait_for_run "$POST_CONTROL_RUN_ID" post-control-plane
+wait_for_run "$CHANNEL_RUN_ID" release-channel
+wait_for_run "$GOVERNANCE_RUN_ID" governance-audit
+
+CURRENT_STEP="cleaning-staging-branch"
+encoded_branch="$(jq -rn --arg value "$STAGING_BRANCH" '$value|@uri')"
+if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${encoded_branch}" >/dev/null 2>&1; then
+  gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${encoded_branch}" >/dev/null
+fi
+
+issue_update completed "published-and-post-verified"
+gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+  --comment "Codex ${PACKAGE_VERSION} was lockfile-corrected, validated from a clean permanent source, published as GitHub Latest, and post-verified." >/dev/null
+
+echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+echo "release_run_id=${RELEASE_RUN_ID}" >> "$GITHUB_OUTPUT"
+echo "promoted_main_sha=${PROMOTED_MAIN_SHA}" >> "$GITHUB_OUTPUT"

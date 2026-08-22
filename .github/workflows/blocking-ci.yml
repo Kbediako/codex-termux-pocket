@@ -1,7 +1,7 @@
 name: fork-ci
 
-# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
-# sandbox, and release gates live in dedicated path-filtered or manual workflows.
+# Routine CI for this Android/Termux-focused fork. The temporary resume job is
+# removed before the release candidate is validated or published.
 on:
   pull_request: {}
   push:
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   validate:
-    if: "${{ github.event_name != 'issues' && github.event.head_commit.message != 'ci: execute alpha 0.150.0-alpha.6' }}"
+    if: "${{ github.event_name != 'issues' }}"
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -52,7 +52,6 @@ jobs:
           RUBY
 
       - name: Validate permanent workflow topology
-        if: "${{ github.event_name != 'workflow_dispatch' && github.event.head_commit.message != 'termux: update to 0.150.0-alpha.6' }}"
         run: python3 .github/scripts/validate-termux-workflow-topology.py
 
       - name: Validate Bash entrypoints
@@ -90,9 +89,9 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
-  update-latest-alpha:
-    if: "${{ (github.event_name == 'push' && github.event.head_commit.message == 'ci: execute alpha 0.150.0-alpha.6') || (github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 73) }}"
-    name: Merge, validate, publish, and verify 0.150.0-alpha.6
+  resume-alpha-0-150-0-alpha-6:
+    if: "${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 73 }}"
+    name: Repair lockfile, validate, publish, and clean 0.150.0-alpha.6
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     permissions:
@@ -123,41 +122,15 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Run exact-source alpha update and release transaction
-        id: update
+      - name: Resume exact-source alpha transaction
+        id: resume
         shell: bash
         run: |
-          set -euo pipefail
-          git checkout -B "$STAGING_BRANCH"
-          source_script=.github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
-          runtime_script="$RUNNER_TEMP/maintainer-sync-alpha.sh"
-          python3 - "$source_script" "$runtime_script" <<'PY'
-          from pathlib import Path
-          import sys
-
-          source = Path(sys.argv[1]).read_text(encoding="utf-8")
-          preflight_needle = 'done\n\nCURRENT_STEP="updating-alpha-controls"'
-          preflight_replacement = (
-              'done\n\n'
-              'CURRENT_STEP="using-permanent-topology-for-preflight"\n'
-              'git checkout 5f9a3de8fd0bd968a1dcd90d5b8901d33b945827 -- .github/workflows/blocking-ci.yml\n\n'
-              'CURRENT_STEP="updating-alpha-controls"'
-          )
-          commit_needle = 'CURRENT_STEP="committing-upstream-merge"\ngit add --'
-          commit_replacement = (
-              'CURRENT_STEP="restoring-temporary-orchestrator-for-push"\n'
-              'git checkout "$BASE_SHA" -- .github/workflows/blocking-ci.yml\n\n'
-              'CURRENT_STEP="committing-upstream-merge"\n'
-              'git add --'
-          )
-          if source.count(preflight_needle) != 1 or source.count(commit_needle) != 1:
-              raise SystemExit("maintenance script insertion point changed")
-          source = source.replace(preflight_needle, preflight_replacement)
-          source = source.replace(commit_needle, commit_replacement)
-          Path(sys.argv[2]).write_text(source, encoding="utf-8")
-          PY
+          set -o pipefail
+          runtime_script="$RUNNER_TEMP/resume-alpha.sh"
+          cat .github/scripts/resume-alpha-0.150.0-alpha.6.part* > "$runtime_script"
           chmod +x "$runtime_script"
-          "$runtime_script" 2>&1 | tee "$RUNNER_TEMP/alpha-update.log"
+          "$runtime_script" 2>&1 | tee "$RUNNER_TEMP/alpha-resume.log"
 
       - name: Publish exact failure diagnostics
         if: failure()
@@ -166,7 +139,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/alpha-update.log"
+          log="$RUNNER_TEMP/alpha-resume.log"
+          diagnostics='No captured resume log was available.'
           if [[ -s "$log" ]]; then
             diagnostics="$(
               tail -n 220 "$log" \
@@ -174,22 +148,9 @@ jobs:
                 | tr -d '\r' \
                 | tail -c 18000
             )"
-          else
-            diagnostics='No captured update log was available.'
           fi
-          body="$(cat <<EOF
-          state=failed
-          detail=exact-regression-diagnostics
-          run_id=${GITHUB_RUN_ID}
-          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          upstream_tag=${UPSTREAM_TAG}
-          upstream_commit=${UPSTREAM_COMMIT}
-
-          \`\`\`text
-          ${diagnostics}
-          \`\`\`
-          EOF
-          )"
+          current="$(gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          body="${current}"$'\n\n```text\n'"${diagnostics}"$'\n```'
           gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
             -f body="$body" >/dev/null
 
@@ -198,11 +159,11 @@ jobs:
         shell: bash
         run: |
           {
-            echo '### Codex Termux alpha update'
+            echo '### Codex Termux alpha update completed'
             echo
             echo "- Package: \`0.150.0-alpha.6\`"
-            echo "- Runtime source: \`${{ steps.update.outputs.source_sha }}\`"
-            echo "- Release: \`${{ steps.update.outputs.release_tag }}\`"
-            echo "- Publication run: \`${{ steps.update.outputs.release_run_id }}\`"
-            echo "- Promoted main: \`${{ steps.update.outputs.promoted_main_sha }}\`"
+            echo "- Runtime source: \`${{ steps.resume.outputs.source_sha }}\`"
+            echo "- Release: \`${{ steps.resume.outputs.release_tag }}\`"
+            echo "- Publication run: \`${{ steps.resume.outputs.release_run_id }}\`"
+            echo "- Promoted main: \`${{ steps.resume.outputs.promoted_main_sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
