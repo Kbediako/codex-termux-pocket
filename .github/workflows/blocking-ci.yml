@@ -125,7 +125,44 @@ jobs:
       - name: Run exact-source alpha update and release transaction
         id: update
         shell: bash
-        run: bash .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
+        run: |
+          set -o pipefail
+          bash .github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh \
+            2>&1 | tee "$RUNNER_TEMP/alpha-update.log"
+
+      - name: Publish exact failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/alpha-update.log"
+          if [[ -s "$log" ]]; then
+            diagnostics="$(
+              {
+                grep -Ei '(^|[^a-z])(not ok|fail(ed|ure)?|error|expected|assert|mismatch|missing|refusing|unknown)([^a-z]|$)' "$log" || true
+                tail -n 120 "$log"
+              } | awk '!seen[$0]++' | tail -n 160 | tr -d '\r' | head -c 18000
+            )"
+          else
+            diagnostics='No captured update log was available.'
+          fi
+          body="$(cat <<EOF
+          state=failed
+          detail=exact-regression-diagnostics
+          run_id=${GITHUB_RUN_ID}
+          run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+
+          \`\`\`text
+          ${diagnostics}
+          \`\`\`
+          EOF
+          )"
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+            -f body="$body" >/dev/null
 
       - name: Summarize completed update
         if: success()
