@@ -1,25 +1,22 @@
 name: fork-ci
 
-# Routine CI for this Android/Termux-focused fork. The temporary resume job is
-# removed before the release candidate is validated or published.
+# Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
+# sandbox, and release gates live in dedicated path-filtered or manual workflows.
 on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: "${{ github.event_name != 'issues' }}"
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -88,82 +85,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  resume-alpha-0-150-0-alpha-6:
-    if: "${{ github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 73 }}"
-    name: Repair lockfile, validate, publish, and clean 0.150.0-alpha.6
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
-    permissions:
-      actions: write
-      attestations: read
-      contents: write
-      issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      ISSUE_NUMBER: "73"
-      STAGING_BRANCH: alpha-0.150.0-alpha.6-staging
-      UPSTREAM_TAG: rust-v0.150.0-alpha.6
-      UPSTREAM_COMMIT: bcb6f90f7f886f70a4812a0c05b865b9f6595e90
-      PACKAGE_VERSION: 0.150.0-alpha.6
-    steps:
-      - name: Checkout current main with full history
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up repository CI environment
-        uses: ./.github/actions/setup-ci
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-
-      - name: Resume exact-source alpha transaction
-        id: resume
-        shell: bash
-        run: |
-          set -o pipefail
-          runtime_script="$RUNNER_TEMP/resume-alpha.sh"
-          cat .github/scripts/resume-alpha-0.150.0-alpha.6.part* > "$runtime_script"
-          chmod +x "$runtime_script"
-          "$runtime_script" 2>&1 | tee "$RUNNER_TEMP/alpha-resume.log"
-
-      - name: Publish exact failure diagnostics
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          log="$RUNNER_TEMP/alpha-resume.log"
-          diagnostics='No captured resume log was available.'
-          if [[ -s "$log" ]]; then
-            diagnostics="$(
-              tail -n 220 "$log" \
-                | perl -pe 's/\e\[[0-9;]*[mK]//g' \
-                | tr -d '\r' \
-                | tail -c 18000
-            )"
-          fi
-          current="$(gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
-          body="${current}"$'\n\n```text\n'"${diagnostics}"$'\n```'
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
-            -f body="$body" >/dev/null
-
-      - name: Summarize completed update
-        if: success()
-        shell: bash
-        run: |
-          {
-            echo '### Codex Termux alpha update completed'
-            echo
-            echo "- Package: \`0.150.0-alpha.6\`"
-            echo "- Runtime source: \`${{ steps.resume.outputs.source_sha }}\`"
-            echo "- Release: \`${{ steps.resume.outputs.release_tag }}\`"
-            echo "- Publication run: \`${{ steps.resume.outputs.release_run_id }}\`"
-            echo "- Promoted main: \`${{ steps.resume.outputs.promoted_main_sha }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
