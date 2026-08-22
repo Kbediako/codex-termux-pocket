@@ -6,20 +6,18 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [opened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
+    if: ${{ github.event.head_commit.message != 'ci: execute alpha 0.150.0-alpha.6' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -91,7 +89,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   update-latest-alpha:
-    if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: update Codex Termux to 0.150.0-alpha.6' }}"
+    if: ${{ github.event_name == 'push' && github.event.head_commit.message == 'ci: execute alpha 0.150.0-alpha.6' }}
     name: Merge, validate, publish, and verify 0.150.0-alpha.6
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
@@ -102,16 +100,16 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_NUMBER: "73"
       STAGING_BRANCH: alpha-0.150.0-alpha.6-staging
       UPSTREAM_TAG: rust-v0.150.0-alpha.6
       UPSTREAM_COMMIT: bcb6f90f7f886f70a4812a0c05b865b9f6595e90
       PACKAGE_VERSION: 0.150.0-alpha.6
     steps:
-      - name: Checkout dedicated staging branch with full history
+      - name: Checkout current main with full history
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: alpha-0.150.0-alpha.6-staging
+          ref: main
           fetch-depth: 0
           persist-credentials: true
 
@@ -128,6 +126,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git checkout -B "$STAGING_BRANCH"
           source_script=.github/scripts/maintainer-sync-alpha-0.150.0-alpha.6.sh
           runtime_script="$RUNNER_TEMP/maintainer-sync-alpha.sh"
           python3 - "$source_script" "$runtime_script" <<'PY'
