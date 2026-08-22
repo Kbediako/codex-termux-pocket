@@ -33,24 +33,27 @@ workspace_version="$(
 )"
 [[ "$workspace_version" == "$PACKAGE_VERSION" ]]
 
-CURRENT_STEP="regenerating-and-committing-lockfile"
+CURRENT_STEP="verifying-and-committing-lockfile-if-needed"
 issue_update running "$CURRENT_STEP"
 cargo metadata --manifest-path codex-rs/Cargo.toml --format-version=1 >/dev/null
 cargo metadata --manifest-path codex-rs/Cargo.toml --locked --format-version=1 >/dev/null
+grep -F 'version = "0.150.0-alpha.6"' codex-rs/Cargo.lock >/dev/null
 mapfile -t changed < <(git status --porcelain | cut -c4-)
-if (( ${#changed[@]} != 1 )) || [[ "${changed[0]}" != "codex-rs/Cargo.lock" ]]; then
-  printf 'Unexpected files changed while refreshing Cargo.lock:\n' >&2
+if (( ${#changed[@]} == 0 )); then
+  LOCK_SHA="$(git rev-parse HEAD)"
+elif (( ${#changed[@]} == 1 )) && [[ "${changed[0]}" == "codex-rs/Cargo.lock" ]]; then
+  git diff --check
+  git add codex-rs/Cargo.lock
+  git commit -m "termux: update to ${PACKAGE_VERSION}"
+  LOCK_SHA="$(git rev-parse HEAD)"
+  git push origin HEAD:main
+else
+  printf 'Unexpected files changed while verifying Cargo.lock:\n' >&2
   printf '  %s\n' "${changed[@]}" >&2
   exit 1
 fi
-grep -F 'version = "0.150.0-alpha.6"' codex-rs/Cargo.lock >/dev/null
-git diff --check
-git add codex-rs/Cargo.lock
-git commit -m "termux: update to ${PACKAGE_VERSION}"
-LOCK_SHA="$(git rev-parse HEAD)"
-git push origin HEAD:main
 git push origin "HEAD:refs/heads/${STAGING_BRANCH}"
-issue_update awaiting-direct-cleanup "lockfile-committed:${LOCK_SHA}"
+issue_update awaiting-direct-cleanup "lockfile-verified:${LOCK_SHA}"
 
 CURRENT_STEP="waiting-for-permanent-source-cleanup"
 cleaned=false
