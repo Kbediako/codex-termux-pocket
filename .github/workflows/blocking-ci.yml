@@ -1,4 +1,5 @@
 name: fork-ci
+run-name: Fork CI · ${{ github.event_name }} · ${{ github.ref_name }}
 
 # Routine CI for this Android/Termux-focused fork. Expensive artifact, device,
 # sandbox, and release gates live in dedicated path-filtered or manual workflows.

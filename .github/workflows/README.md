@@ -9,6 +9,21 @@ such as `observe-alpha-149-status`, `observe-alpha-149-ci`, and
 `Codex CLI Release Detector` may therefore remain visible in old run history,
 but they are not retained workflows and cannot start new runs from `main`.
 
+## Actions naming
+
+Each permanent workflow has two deliberately separate identifiers:
+
+- `name` is the stable workflow identity shown in the Actions sidebar and used
+  for historical continuity.
+- `run-name` is the human-facing title for each individual run.
+
+Every retained workflow declares an explicit `run-name`. Without it, GitHub uses
+event-specific text; for a push this is normally the triggering commit message.
+That is why older, unrelated runs appeared as `ci: make fork workflows
+lightweight`. Those historical titles are retained by GitHub, but future runs
+use workflow-specific titles instead. New commits should also use a subject that
+describes the actual change rather than reusing that generic phrase.
+
 ## Routine checks
 
 - `blocking-ci.yml` (`fork-ci`) runs the broad, relatively inexpensive baseline
@@ -32,7 +47,7 @@ but they are not retained workflows and cannot start new runs from `main`.
 
 1. `termux-release-request.yml` is the only release publisher. It reads the exact
    source, release identity, and successful validation run IDs from
-   `scripts/termux/release-publication.env`.
+   `scripts/termux/release-publication.env .
 2. It re-verifies the control-plane, ARM64 artifact, Android/Termux evidence,
    checksums, SBOM, attestations, and final assets. It uploads the complete set to
    a draft, then publishes that draft as GitHub Latest in one transaction.
@@ -62,6 +77,7 @@ bytes. No post-publication workflow edits an existing release.
 - `termux-governance-audit.yml`
 
 `.github/scripts/validate-termux-workflow-topology.py` enforces this inventory,
-rejects observer/monitor/repair/one-time workflow names, ensures only the
-release-request workflow can write a GitHub release, and prevents the release
-channel from requiring repository-level release immutability.
+requires explicit non-generic run titles, rejects observer/monitor/repair/one-time
+workflow names, ensures only the release-request workflow can write a GitHub
+release, and prevents the release channel from requiring repository-level release
+immutability.

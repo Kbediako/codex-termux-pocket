@@ -32,6 +32,10 @@ FORBIDDEN_NAME_PARTS = (
     "publish-alpha",
 )
 
+FORBIDDEN_RUN_NAME_PARTS = (
+    "make fork workflows lightweight",
+)
+
 
 def fail(message: str) -> None:
     print(f"workflow-topology: {message}", file=sys.stderr)
@@ -62,8 +66,10 @@ def main() -> None:
         fail(f"temporary observer/repair workflow names are forbidden: {suspicious}")
 
     display_names: dict[str, str] = {}
+    run_names: dict[str, str] = {}
     for filename in sorted(actual):
         text = read(filename)
+
         match = re.search(r"(?m)^name:\s*(.+?)\s*$", text)
         if not match:
             fail(f"{filename} has no top-level workflow name")
@@ -75,6 +81,36 @@ def main() -> None:
                 f"{previous} and {filename}"
             )
         display_names[display_name] = filename
+
+        run_match = re.search(r"(?m)^run-name:\s*(.+?)\s*$", text)
+        if not run_match:
+            fail(
+                f"{filename} has no explicit run-name; push runs would inherit "
+                "an unrelated commit message"
+            )
+        run_name = run_match.group(1).strip("\"'")
+        if not run_name:
+            fail(f"{filename} has an empty run-name")
+        forbidden_run_name = next(
+            (
+                part
+                for part in FORBIDDEN_RUN_NAME_PARTS
+                if part in run_name.lower()
+            ),
+            None,
+        )
+        if forbidden_run_name:
+            fail(
+                f"{filename} contains generic run-name token "
+                f"{forbidden_run_name!r}"
+            )
+        previous_run = run_names.get(run_name)
+        if previous_run:
+            fail(
+                f"duplicate workflow run-name {run_name!r}: "
+                f"{previous_run} and {filename}"
+            )
+        run_names[run_name] = filename
 
     artifact = read("termux-mobile-artifact.yml")
     for forbidden in (
@@ -130,7 +166,8 @@ def main() -> None:
                 fail(f"{filename} contains release-writer token {forbidden!r}")
 
     print(
-        "workflow-topology: permanent workflow set and release ownership are valid"
+        "workflow-topology: permanent workflow set, run naming, and release "
+        "ownership are valid"
     )
 
 
