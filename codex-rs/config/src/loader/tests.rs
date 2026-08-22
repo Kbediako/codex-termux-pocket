@@ -10,12 +10,27 @@ use codex_file_system::GetMetadataOptions;
 use codex_file_system::ReadDirectoryEntry;
 use codex_file_system::ReadFileOptions;
 use codex_file_system::RemoveOptions;
+use codex_file_system::WalkOptions;
+use codex_file_system::WalkOutcome;
 use codex_file_system::WriteFileOptions;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
 pub(super) struct TestFileSystem;
+
+#[test]
+fn project_config_cannot_bind_permission_shortcuts() {
+    let safe = "[tui.keymap.chat]\nincrease_reasoning_effort = 'f9'\n";
+    for key in ["previous_permission_mode", "next_permission_mode"] {
+        let mut config = toml::from_str(&format!("{safe}{key} = 'page-down'")).unwrap();
+        assert_eq!(
+            sanitize_project_config(&mut config),
+            [format!("tui.keymap.chat.{key}")]
+        );
+        assert_eq!(config, toml::from_str::<TomlValue>(safe).unwrap());
+    }
+}
 
 #[tokio::test]
 async fn managed_browser_import_denial_survives_user_and_session_config() {
@@ -138,6 +153,15 @@ impl ExecutorFileSystem for TestFileSystem {
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
         Box::pin(async move { unimplemented!("test filesystem only supports reads") })
+    }
+
+    fn walk<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _options: WalkOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
+        unimplemented!()
     }
 
     fn remove<'a>(

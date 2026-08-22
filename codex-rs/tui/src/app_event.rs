@@ -287,6 +287,12 @@ pub(crate) enum AppEvent {
         destination: TranscriptExportDestination,
     },
 
+    /// Copy a picker selection while retaining its clipboard lease in the chat widget.
+    CopySelection {
+        text: Arc<str>,
+        label: String,
+    },
+
     /// Persist a submitted prompt in the cross-session message history.
     AppendMessageHistoryEntry {
         thread_id: ThreadId,
@@ -946,6 +952,12 @@ pub(crate) enum AppEvent {
         preset: ApprovalPreset,
         return_to_permissions: bool,
         profile_selection: Option<PermissionProfileSelection>,
+    },
+
+    /// Apply a permission shortcut only while its originating thread is displayed.
+    ApplyPermissionShortcut {
+        thread_id: ThreadId,
+        selection: PermissionProfileSelection,
     },
 
     /// Open the Windows world-writable directories warning.

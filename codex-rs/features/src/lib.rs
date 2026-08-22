@@ -145,6 +145,8 @@ pub enum Feature {
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
     ShellSnapshot,
+    /// Keep policy-filtered shell snapshots entirely in executor memory.
+    ShellSnapshotV2,
     /// Allow turns to start while selected executors are still starting.
     DeferredExecutor,
     /// Use the current working directory for turn diff display paths.
@@ -277,6 +279,8 @@ pub enum Feature {
     GuardianNodeReplTranscriptImages,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
+    /// Enable the extension-owned synchronous Guardian reviewer.
+    GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
     /// Add current context-window metadata to model-visible context.
@@ -862,14 +866,20 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::UnifiedExecZshFork,
         key: "unified_exec_zsh_fork",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Removed,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ShellSnapshot,
         key: "shell_snapshot",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ShellSnapshotV2,
+        key: "shell_snapshot_v2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::DeferredExecutor,
@@ -1400,6 +1410,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianV2,
         key: "guardianv2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianExt,
+        key: "guardian_ext",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

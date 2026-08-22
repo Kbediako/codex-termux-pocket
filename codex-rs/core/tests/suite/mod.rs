@@ -40,6 +40,7 @@ mod agent_execution;
 mod agent_websocket;
 mod agents_md;
 mod apply_patch_cli;
+mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
 mod audio_truncation;
@@ -67,10 +68,17 @@ mod extension_sandbox;
 mod external_auth;
 mod fork_thread;
 mod git_enrichment;
+mod guardian_mcp_elicitation;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
+mod guardian_review_cancellation;
+#[cfg(not(target_os = "windows"))]
+mod guardian_subagent_authorization;
+#[cfg(not(target_os = "windows"))]
 mod hooks;
+#[cfg(not(target_os = "windows"))]
+mod hooks_executor;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
 mod image_rollout;
@@ -134,8 +142,6 @@ mod safety_buffering;
 mod safety_check_downgrade;
 mod search_tool;
 mod send_user_message_async;
-mod shell_command;
-mod shell_serialization;
 mod shell_snapshot;
 mod skill_approval;
 mod skills;

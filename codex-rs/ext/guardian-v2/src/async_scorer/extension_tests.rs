@@ -7,6 +7,8 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use codex_core::config::Config;
+use codex_core::config::ConfigBuilder;
+use codex_core::config::LoaderOverrides;
 use codex_core::context::NodeReplReviewEvidence;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ExtensionData;
@@ -63,6 +65,7 @@ use crate::async_scorer::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
 use crate::async_scorer::config::DEFAULT_PARENT_COMPACTION_TOKENS;
 use crate::async_scorer::sampler::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use crate::async_scorer::sampler::MODEL;
+use crate::async_scorer::transcript::truncate_entry;
 
 const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";
@@ -222,6 +225,10 @@ impl ExtensionMetrics for RecordingMetrics {
 struct TestConversationHistory(Vec<ResponseItem>);
 
 impl ConversationHistorySnapshot for TestConversationHistory {
+    fn history_version(&self) -> u64 {
+        0
+    }
+
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(self.0.iter())
     }
@@ -271,25 +278,23 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
         arguments: r#"{"cmd":"pwd","sandbox_permissions":"require_escalated"}"#.to_owned(),
     };
 
-    for tool_name in ["exec_command", "shell_command"] {
-        let tool_name = ToolName::plain(tool_name);
-        assert!(!should_classify_tool(
-            &tool_name, &sandboxed, /*sandboxed_exec_commands*/ false
-        ));
-        assert!(!should_classify_tool(
-            &tool_name,
-            &additional_permissions,
-            /*sandboxed_exec_commands*/ false
-        ));
-        assert!(should_classify_tool(
-            &tool_name,
-            &unsandboxed,
-            /*sandboxed_exec_commands*/ false
-        ));
-        assert!(should_classify_tool(
-            &tool_name, &sandboxed, /*sandboxed_exec_commands*/ true
-        ));
-    }
+    let tool_name = ToolName::plain("exec_command");
+    assert!(!should_classify_tool(
+        &tool_name, &sandboxed, /*sandboxed_exec_commands*/ false
+    ));
+    assert!(!should_classify_tool(
+        &tool_name,
+        &additional_permissions,
+        /*sandboxed_exec_commands*/ false
+    ));
+    assert!(should_classify_tool(
+        &tool_name,
+        &unsandboxed,
+        /*sandboxed_exec_commands*/ false
+    ));
+    assert!(should_classify_tool(
+        &tool_name, &sandboxed, /*sandboxed_exec_commands*/ true
+    ));
     assert!(should_classify_tool(
         &ToolName::plain("read_file"),
         &sandboxed,
@@ -868,6 +873,45 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_truncates_legacy_prompt_after_appending_policy() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let template = "legacy instructions ".repeat(200);
+    let configuration = format!(
+        r#"
+[features.guardianv2]
+enabled = true
+classifier_instructions = "{template}"
+max_classifier_instruction_tokens = 256
+"#
+    );
+    let (request, _test, _registry) = sample_configured_conversation_history(
+        Vec::new(),
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        &configuration,
+        /*model_defaults*/ None,
+    )
+    .await?;
+
+    assert_eq!(
+        request["input"][1],
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": truncate_entry(
+                    &format!("{template}\n\n# Security Policy\n{TEST_GUARDIAN_POLICY}"),
+                    /*max_tokens*/ 256,
+                ),
+            }],
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contributor_uses_configured_prompt_effort_threshold_and_transcript() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -920,7 +964,9 @@ max_recent_non_user_entries = 8
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "previous-call".to_owned(),
+            call_id: Some("previous-call".to_owned()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("README.md".to_owned()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1176,7 +1222,9 @@ async fn contributor_includes_configured_transcript_images() -> Result<()> {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "previous-call".to_owned(),
+            call_id: Some("previous-call".to_owned()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: "Screenshot captured.".to_owned(),
@@ -1388,7 +1436,9 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "previous-call".to_owned(),
+            call_id: Some("previous-call".to_owned()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("README.md".to_owned()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1562,6 +1612,208 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let thread_server = responses::start_mock_server().await;
+    let initial = test_codex().build_with_auto_env(&thread_server).await?;
+    std::fs::write(
+        initial.home.path().join("requirements.toml"),
+        "[auto_review]\nrequired_on_models = [\"protected-model\"]\n",
+    )?;
+    let config_layer_stack = ConfigBuilder::default()
+        .codex_home(initial.home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides::with_managed_config_path_for_tests(
+            initial.home.path().join("managed_config.toml"),
+        ))
+        .build()
+        .await?
+        .config_layer_stack;
+    let test = test_codex()
+        .with_home(Arc::clone(&initial.home))
+        .with_config(move |config| {
+            config.config_layer_stack = config_layer_stack;
+            config
+                .features
+                .enable(Feature::GuardianV2)
+                .expect("Guardian v2 should remain globally enabled");
+        })
+        .build_with_auto_env(&thread_server)
+        .await?;
+
+    let server = responses::start_websocket_server(vec![Vec::new(), Vec::new()]).await;
+    let provider_info = ModelProviderInfo::create_openai_provider(Some(format!(
+        "http://{}/v1",
+        server.uri().trim_start_matches("ws://")
+    )));
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
+    let mut config = test.config.clone();
+    config.model_provider = provider_info;
+    let mut builder = ExtensionRegistryBuilder::new();
+    super::install(
+        &mut builder,
+        auth_manager,
+        Arc::downgrade(&test.thread_manager),
+    );
+    let registry = builder.build();
+    let session_store = ExtensionData::new("session-1");
+    let thread_store = test.codex.thread_extension_data();
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &SessionSource::Exec,
+            persistent_thread_state_available: false,
+            environments: &[],
+            mcp_resource_client: None,
+            extension_metrics: None,
+            session_store: &session_store,
+            thread_store,
+        })
+        .await;
+
+    let mut model_info = test
+        .thread_manager
+        .get_models_manager()
+        .get_model_info("gpt-5.5", &config.to_models_manager_config())
+        .await;
+    model_info.slug = "protected-model".to_owned();
+    thread_store.insert(model_info);
+    thread_store.insert(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        sampled_at: None,
+    });
+    assert_eq!(
+        registry
+            .approval_review(
+                &session_store,
+                thread_store,
+                "review action",
+                /*extension_metrics*/ None,
+            )
+            .await,
+        Some(ReviewDecision::Approved)
+    );
+
+    let turn_store = ExtensionData::new("turn-1");
+    let tool_name = ToolName::plain("read_file");
+    let payload = ToolPayload::Function {
+        arguments: json!({ "path": "protected.md" }).to_string(),
+    };
+    let oversized_compaction = ResponseItem::Compaction {
+        id: Some(ResponseItemId::from_server("cmp_oversized".to_owned())),
+        encrypted_content: "a"
+            .repeat(TruncationPolicy::Tokens(DEFAULT_PARENT_COMPACTION_TOKENS).byte_budget()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    registry.tool_lifecycle_contributors()[0]
+        .on_tool_start(ToolStartInput {
+            session_store: &session_store,
+            thread_store,
+            turn_store: &turn_store,
+            turn_id: "turn-1",
+            call_id: "protected.md",
+            tool_name: &tool_name,
+            payload: &payload,
+            conversation_history: Arc::new(TestConversationHistory(vec![oversized_compaction])),
+            source: ToolCallSource::Direct,
+        })
+        .await;
+
+    assert!(
+        thread_store.get::<SecurityRiskScore>().is_none(),
+        "protected models must not receive Guardian v2 fail-closed scores"
+    );
+    assert!(
+        server.connections().iter().all(Vec::is_empty),
+        "protected models must not spawn Guardian v2 classifiers"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (_, test, registry) = sample_configured_conversation_history(
+        Vec::new(),
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        "[features.guardianv2]\nenabled = true\nmax_tool_call_lag = 0\n",
+        /*model_defaults*/ None,
+    )
+    .await?;
+    let session_store = ExtensionData::new("session-1");
+    let thread_store = test.codex.thread_extension_data();
+    let score_progress = thread_store
+        .get::<GuardianV2ScoreProgress>()
+        .expect("Guardian v2 should track score progress per thread");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while score_progress
+            .latest_scored_tool_call
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    thread_store.insert(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        sampled_at: None,
+    });
+    assert_eq!(
+        registry
+            .approval_review(
+                &session_store,
+                thread_store,
+                "review action",
+                /*extension_metrics*/ None,
+            )
+            .await,
+        Some(ReviewDecision::Approved)
+    );
+
+    test.thread_manager
+        .remove_thread(&test.session_configured.thread_id)
+        .await
+        .expect("the test thread should exist before simulating a failed lookup");
+    let turn_store = ExtensionData::new("turn-1");
+    let tool_name = ToolName::plain("read_file");
+    let payload = ToolPayload::Function {
+        arguments: r#"{"path":"missing.md"}"#.to_owned(),
+    };
+    registry.tool_lifecycle_contributors()[0]
+        .on_tool_start(ToolStartInput {
+            session_store: &session_store,
+            thread_store,
+            turn_store: &turn_store,
+            turn_id: "turn-1",
+            call_id: "missing.md",
+            tool_name: &tool_name,
+            payload: &payload,
+            conversation_history: Arc::new(TestConversationHistory(Vec::new())),
+            source: ToolCallSource::Direct,
+        })
+        .await;
+
+    assert_eq!(score_progress.latest_tool_call.load(Ordering::Acquire), 2);
+    assert_eq!(
+        registry
+            .approval_review(
+                &session_store,
+                thread_store,
+                "review action",
+                /*extension_metrics*/ None,
+            )
+            .await,
+        None
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contributor_uses_catalog_policy_without_a_configured_override() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1600,7 +1852,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -> Result<()> {
+async fn contributor_preserves_uncapped_classifier_instructions() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let guardian_policy = format!(
@@ -1611,6 +1863,39 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
         Vec::new(),
         r#"{"path":"README.md"}"#,
         Some(&guardian_policy),
+    )
+    .await?;
+
+    assert_eq!(
+        request["input"][1],
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+                    .replace("{{ tenant_policy_config }}", &guardian_policy),
+            }],
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let guardian_policy = format!(
+        "Reject unsafe uploads.\n{}\nRequire explicit approval.",
+        "é".repeat(20_000)
+    );
+    let (request, _test, _registry) = sample_configured_conversation_history(
+        Vec::new(),
+        r#"{"path":"README.md"}"#,
+        Some(&guardian_policy),
+        "[features.guardianv2]\nenabled = true\nmax_classifier_instruction_tokens = 10000\n",
+        /*model_defaults*/ None,
     )
     .await?;
     let instructions = request["input"][1]["content"][0]["text"]
@@ -1664,7 +1949,9 @@ async fn contributor_sends_compacted_conversation_history_to_luna() -> Result<()
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id,
+                call_id: Some(call_id),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "result evidence {index}: {}",
                     "signal ".repeat(1_000)

@@ -1,5 +1,6 @@
 use super::mcp_refresh::McpRefreshInvalidationGuard;
 use super::*;
+use crate::environment_selection::combine_selected_capability_roots;
 use crate::tools::sandboxing::executor_windows_sandbox_level;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
@@ -119,7 +120,7 @@ impl Session {
                 windows_sandbox_level,
             )
             .await;
-        let mcp_config = self
+        let mcp_projection = self
             .services
             .mcp_manager
             .runtime_config_for_step(
@@ -134,6 +135,9 @@ impl Session {
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
             )
+            .await;
+        let mcp_config = self
+            .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
             .await
             .config;
         let local_process_cwd = environments
@@ -143,6 +147,17 @@ impl Session {
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
             local_process_cwd,
+        )
+        .with_selected_environments(
+            environments
+                .turn_environments()
+                .map(|environment| {
+                    (
+                        environment.selection.environment_id.clone(),
+                        Arc::clone(&environment.environment),
+                    )
+                })
+                .collect(),
         );
         (mcp_config, runtime_context)
     }
@@ -262,6 +277,13 @@ impl Session {
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
+            )
+            .await;
+        let mcp_projection = self
+            .project_selected_environment_mcp_servers(
+                &desired.config,
+                &desired.environments,
+                mcp_projection,
             )
             .await;
         let selected_plugins = mcp_projection.selected_plugins.clone();
@@ -438,18 +460,18 @@ impl Session {
         let mut root_locations_by_id = HashMap::new();
         let mut selected_capability_roots = Vec::new();
         let mut ready_environment_root_count = 0;
-        for (index, root) in self
-            .services
-            .selected_capability_roots
-            .iter()
-            .cloned()
-            .chain(
-                environments
-                    .turn_environments()
-                    .flat_map(|environment| environment.config().selected_capability_roots.clone()),
-            )
-            .enumerate()
-        {
+        let combined_roots = combine_selected_capability_roots(
+            &self.services.selected_capability_roots,
+            environments.turn_environments().map(|environment| {
+                (
+                    environment.config_origin,
+                    environment
+                        .config_origin
+                        .selected_capability_roots(&environment.environment, environment.config()),
+                )
+            }),
+        );
+        for (index, root) in combined_roots.into_iter().enumerate() {
             if let Some(kept_location) = root_locations_by_id.get(&root.id) {
                 if kept_location != &root.location {
                     tracing::warn!(
@@ -847,12 +869,17 @@ async fn review_guardian_mcp_elicitation(
     };
 
     let review_id = crate::guardian::new_guardian_review_id();
-    let decision = crate::guardian::review_approval_request(
+    let decision = crate::guardian::review_approval_request_with_cancel(
         &session,
         &turn_context,
-        review_id.clone(),
+        review_id,
         guardian_request,
-        Default::default(),
+        /*retry_reason*/ None,
+        crate::guardian::GuardianReviewOptions {
+            plugin_attribution_override: None,
+            approval_request_source: codex_analytics::GuardianApprovalRequestSource::MainTurn,
+            external_cancel: Some(cancellation_token),
+        },
     )
     .await;
     Ok(Some(mcp_elicitation_response_from_guardian_decision(

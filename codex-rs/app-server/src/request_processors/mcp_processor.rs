@@ -3,20 +3,24 @@ use codex_core::McpManager;
 use codex_mcp::McpServerSource;
 use codex_mcp::ReadResourceRequestParams;
 
+use crate::thread_state::ThreadStateManager;
+
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
 
 #[derive(Clone)]
 pub(crate) struct McpRequestProcessor {
-    auth_manager: Arc<AuthManager>,
+    pub(super) auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
-    outgoing: Arc<OutgoingMessageSender>,
+    pub(super) outgoing: Arc<OutgoingMessageSender>,
     config_manager: ConfigManager,
+    pub(super) thread_state_manager: ThreadStateManager,
 }
 
 impl McpRequestProcessor {
     pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
         thread_manager: Arc<ThreadManager>,
+        thread_state_manager: ThreadStateManager,
         outgoing: Arc<OutgoingMessageSender>,
         config_manager: ConfigManager,
     ) -> Self {
@@ -25,6 +29,7 @@ impl McpRequestProcessor {
             thread_manager,
             outgoing,
             config_manager,
+            thread_state_manager,
         }
     }
 
@@ -96,7 +101,7 @@ impl McpRequestProcessor {
             .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
 
-    async fn load_thread(
+    pub(super) async fn load_thread(
         &self,
         thread_id: &str,
     ) -> Result<(ThreadId, Arc<CodexThread>), JSONRPCErrorError> {
@@ -270,19 +275,19 @@ impl McpRequestProcessor {
         };
         let mcp_manager = self.thread_manager.mcp_manager();
         let auth = self.auth_manager.auth().await;
-        let (mcp_config, runtime_context) = match thread {
-            Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
-            None => {
-                let mcp_config = mcp_manager.runtime_config(&config).await;
-                let runtime_context = McpRuntimeContext::new(
-                    self.thread_manager.environment_manager(),
-                    config.cwd.to_path_buf(),
-                );
-                (mcp_config, runtime_context)
-            }
-        };
+        let environment_manager = self.thread_manager.environment_manager();
 
         tokio::spawn(async move {
+            let (mcp_config, runtime_context) = match thread {
+                Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
+                None => {
+                    let mcp_config = mcp_manager.runtime_config(&config).await;
+                    let runtime_context =
+                        McpRuntimeContext::new(environment_manager, config.cwd.to_path_buf());
+                    (mcp_config, runtime_context)
+                }
+            };
+
             Self::list_mcp_server_status_task(
                 outgoing,
                 request,

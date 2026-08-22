@@ -7,6 +7,7 @@ use crate::session::session::Session;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_exec_server::SelectedCapabilityRootsStatus;
+use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ThreadIdleCause;
 use codex_features::Feature;
 use codex_history::RolloutItem;
@@ -142,6 +143,57 @@ pub struct CodexThreadSettingsOverrides {
     pub personality: Option<Personality>,
 }
 
+/// One root conversation message exposed only to a worker's Guardian reviewers.
+#[derive(Debug, Eq, PartialEq)]
+pub enum GuardianRootMessage {
+    /// Genuine root-user input that can establish or revoke authorization.
+    User(String),
+    /// Root assistant final output that provides untrusted conversational context.
+    Assistant(String),
+}
+
+impl GuardianRootMessage {
+    /// Renders every line with its original role so message content cannot impersonate another role.
+    pub fn render(self) -> String {
+        let (role, text) = match self {
+            Self::User(text) => ("user", text),
+            Self::Assistant(text) => ("assistant", text),
+        };
+        text.lines()
+            .map(|line| format!("{role}: {line}\n"))
+            .collect()
+    }
+}
+
+/// Authorization state that changes on history rewrites or genuine user messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GuardianAuthorizationVersion {
+    /// Conversation-history rewrite generation.
+    pub history_version: u64,
+    /// Number of genuine user messages in the conversation snapshot.
+    pub user_message_count: usize,
+}
+
+impl GuardianAuthorizationVersion {
+    /// Captures history replacement and genuine user input from the same snapshot.
+    pub fn from_history(history: &dyn ConversationHistorySnapshot) -> Self {
+        Self {
+            history_version: history.history_version(),
+            user_message_count: history
+                .items()
+                .filter(|item| item.is_user_message())
+                .count(),
+        }
+    }
+}
+
+/// Bounded root conversation and authorization state from one history snapshot.
+#[derive(Debug, Eq, PartialEq)]
+pub struct GuardianRootSnapshot {
+    pub authorization_version: GuardianAuthorizationVersion,
+    pub messages: Vec<GuardianRootMessage>,
+}
+
 pub struct CodexThread {
     pub(crate) session: Arc<Session>,
     pub(crate) io: SessionIo,
@@ -208,6 +260,25 @@ impl CodexThread {
     /// Wait until the underlying session loop has terminated.
     pub async fn wait_until_terminated(&self) {
         self.io.session_loop_termination.clone().await;
+    }
+
+    pub(crate) async fn emit_thread_ready_lifecycle(&self) {
+        let config = self.config().await;
+        for contributor in self
+            .session
+            .services
+            .extensions
+            .thread_lifecycle_contributors()
+        {
+            contributor
+                .on_thread_ready(codex_extension_api::ThreadReadyInput {
+                    config: config.as_ref(),
+                    session_source: &self.session_source,
+                    session_store: &self.session.services.session_extension_data,
+                    thread_store: &self.session.services.thread_extension_data,
+                })
+                .await;
+        }
     }
 
     pub(crate) async fn emit_thread_resume_lifecycle(&self) {
@@ -679,6 +750,15 @@ impl CodexThread {
         self.session.multi_agent_version()
     }
 
+    /// Returns bounded root conversation evidence and its authorization version atomically.
+    pub async fn guardian_root_snapshot(&self) -> Option<GuardianRootSnapshot> {
+        self.session
+            .services
+            .agent_control
+            .root_user_authorization(self.session.thread_id)
+            .await
+    }
+
     /// Refresh the thread's layer-backed user config state from a caller-supplied
     /// config snapshot. Thread-scoped layers and session-static settings remain
     /// unchanged.
@@ -751,6 +831,26 @@ impl CodexThread {
         Ok(serde_json::to_value(result)?)
     }
 
+    pub async fn start_mcp_event_stream(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        meta: Option<serde_json::Value>,
+    ) -> anyhow::Result<codex_mcp::McpEventStream> {
+        let meta = match meta.as_ref() {
+            Some(serde_json::Value::Object(meta)) => Some(meta),
+            Some(other) => {
+                anyhow::bail!("MCP event request _meta must be a JSON object, got {other}")
+            }
+            None => None,
+        };
+        let _ = self.session.services.auth_manager.auth().await;
+        self.session.refresh_mcp_if_dirty().await;
+        codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
+            .open_event_stream(name, &arguments, meta)
+            .await
+    }
+
     pub async fn call_mcp_tool(
         &self,
         server: &str,
@@ -763,8 +863,8 @@ impl CodexThread {
             .services
             .mcp_runtime
             .latest_call_tool(
-                server, tool, arguments, meta, /*requested_timeout*/ None,
-                /*wait_for_server*/ true,
+                server, tool, /*environment_id*/ None, arguments, meta,
+                /*requested_timeout*/ None, /*wait_for_server*/ true,
             )
             .await
     }

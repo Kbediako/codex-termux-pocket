@@ -113,3 +113,4 @@ subject	ci: add observable alpha sync worker	tooling	Temporary merge worker used
 subject	ci: fix alpha sync issue trigger	tooling	Temporary issue-reopen trigger that avoids YAML ambiguity in the maintenance event selector.
 subject	ci: simulate Termux in alpha sync tests	tooling	Runs the existing helper fixtures under the same simulated Termux PREFIX used by the permanent control-plane workflow.
 subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official alpha.7.1 source and reapplies the maintained Android and Termux runtime patch stack.
+subject	termux: update to 0.150.0-alpha.6	runtime-critical	Merges the exact official 0.150.0-alpha.6 alpha source and reapplies the maintained Android and Termux runtime patch stack.
