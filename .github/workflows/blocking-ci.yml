@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' && github.event.head_commit.message != 'ci: execute alpha 0.150.0-alpha.6' }}
+    if: "${{ github.event_name != 'issues' && github.event.head_commit.message != 'ci: execute alpha 0.150.0-alpha.6' }}"
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -52,7 +52,7 @@ jobs:
           RUBY
 
       - name: Validate permanent workflow topology
-        if: ${{ github.event_name != 'workflow_dispatch' && github.event.head_commit.message != 'termux: update to 0.150.0-alpha.6' }}
+        if: "${{ github.event_name != 'workflow_dispatch' && github.event.head_commit.message != 'termux: update to 0.150.0-alpha.6' }}"
         run: python3 .github/scripts/validate-termux-workflow-topology.py
 
       - name: Validate Bash entrypoints
@@ -91,7 +91,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   update-latest-alpha:
-    if: ${{ (github.event_name == 'push' && github.event.head_commit.message == 'ci: execute alpha 0.150.0-alpha.6') || (github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 73) }}
+    if: "${{ (github.event_name == 'push' && github.event.head_commit.message == 'ci: execute alpha 0.150.0-alpha.6') || (github.event_name == 'issues' && github.event.action == 'reopened' && github.event.issue.number == 73) }}"
     name: Merge, validate, publish, and verify 0.150.0-alpha.6
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
