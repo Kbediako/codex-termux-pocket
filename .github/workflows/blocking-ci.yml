@@ -92,7 +92,7 @@ jobs:
   update-latest-alpha:
     if: "${{ github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.title == 'Maintenance: update Codex Termux to 0.150.0-alpha.6' }}"
     name: Merge, validate, publish, and verify 0.150.0-alpha.6
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     permissions:
       actions: write
