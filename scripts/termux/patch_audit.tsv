@@ -116,3 +116,7 @@ subject	termux: update to 0.149.0-alpha.7.1	runtime-critical	Merges the official
 subject	termux: update to 0.150.0-alpha.6	runtime-critical	Merges the exact official 0.150.0-alpha.6 alpha source and reapplies the maintained Android and Termux runtime patch stack.
 subject	termux: stage 0.150.0-alpha.6 publication	tooling	Records successful exact-source control-plane, ARM64, and Android validation evidence for publication.
 subject	termux: promote termux-v0.150.0-alpha.6-dd849adb3f	tooling	Promotes the byte-verified public release manifest after publication.
+subject	ci: add descriptive Actions run names	tooling	Connector staging commit used to prepare explicit human-facing run titles.
+subject	ci: stage descriptive Actions naming fix	tooling	Connector staging commit used to assemble the final naming change atomically.
+subject	ci: use descriptive Actions run titles	tooling	Adds explicit workflow-specific run titles and prevents fallback to unrelated commit messages.
+subject	ci: classify Actions naming maintenance	tooling	Classifies the retained naming-maintenance subjects in the fork patch audit.
