@@ -47,7 +47,7 @@ describes the actual change rather than reusing that generic phrase.
 
 1. `termux-release-request.yml` is the only release publisher. It reads the exact
    source, release identity, and successful validation run IDs from
-   `scripts/termux/release-publication.env .
+   `scripts/termux/release-publication.env`.
 2. It re-verifies the control-plane, ARM64 artifact, Android/Termux evidence,
    checksums, SBOM, attestations, and final assets. It uploads the complete set to
    a draft, then publishes that draft as GitHub Latest in one transaction.
