@@ -140,10 +140,10 @@ jobs:
           log="$RUNNER_TEMP/alpha-update.log"
           if [[ -s "$log" ]]; then
             diagnostics="$(
-              {
-                grep -Ei '(^|[^a-z])(not ok|fail(ed|ure)?|error|expected|assert|mismatch|missing|refusing|unknown)([^a-z]|$)' "$log" || true
-                tail -n 120 "$log"
-              } | awk '!seen[$0]++' | tail -n 160 | tr -d '\r' | head -c 18000
+              tail -n 220 "$log" \
+                | perl -pe 's/\e\[[0-9;]*[mK]//g' \
+                | tr -d '\r' \
+                | tail -c 18000
             )"
           else
             diagnostics='No captured update log was available.'
