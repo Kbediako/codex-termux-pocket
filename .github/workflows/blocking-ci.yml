@@ -127,7 +127,23 @@ jobs:
       - name: Run exact alpha update transaction
         id: update
         shell: bash
-        run: bash .github/scripts/update-alpha-0.150.0-alpha.8.sh
+        run: |
+          set -euo pipefail
+          source_script=.github/scripts/update-alpha-0.150.0-alpha.8.sh
+          runtime_script="$RUNNER_TEMP/update-alpha-0.150.0-alpha.8.sh"
+          python3 - "$source_script" "$runtime_script" <<'PY'
+          from pathlib import Path
+          import sys
+
+          source = Path(sys.argv[1]).read_text(encoding="utf-8")
+          old = "git ls-remote --tags --refs upstream 'refs/tags/rust-v*-alpha.*'"
+          new = "git ls-remote --tags --refs upstream"
+          if source.count(old) != 1:
+              raise SystemExit("latest-alpha probe changed unexpectedly")
+          Path(sys.argv[2]).write_text(source.replace(old, new), encoding="utf-8")
+          PY
+          chmod +x "$runtime_script"
+          "$runtime_script"
 
       - name: Summarize completed update
         if: success()
