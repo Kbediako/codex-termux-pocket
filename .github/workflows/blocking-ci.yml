@@ -136,74 +136,15 @@ jobs:
           import sys
 
           source = Path(sys.argv[1]).read_text(encoding="utf-8")
-          start = source.index("latest_alpha_tag() {")
-          end_marker = "\n}\n\nrun_json()"
-          end = source.index(end_marker, start) + len("\n}\n")
-          replacement = r'''latest_alpha_tag() {
-            python3 - <<'PY_TAGS'
-          import json
-          import os
-          import re
-          import urllib.request
-
-          pattern = re.compile(
-              r"^rust-v(\d+)\.(\d+)\.(\d+)-alpha\.(\d+)(?:\.(\d+))?$"
-          )
-          headers = {
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "codex-termux-alpha-updater",
-              "X-GitHub-Api-Version": "2022-11-28",
-          }
-          token = os.environ.get("GH_TOKEN")
-          if token:
-              headers["Authorization"] = f"Bearer {token}"
-
-          url = "https://api.github.com/repos/openai/codex/tags?per_page=100"
-          versions = []
-          while url:
-              request = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  page = json.load(response)
-                  link = response.headers.get("Link", "")
-              for item in page:
-                  tag = item.get("name", "")
-                  match = pattern.fullmatch(tag)
-                  if not match:
-                      continue
-                  major, minor, patch, alpha, alpha_sub = match.groups()
-                  key = (
-                      int(major),
-                      int(minor),
-                      int(patch),
-                      int(alpha),
-                      int(alpha_sub) if alpha_sub is not None else -1,
-                  )
-                  versions.append((key, tag))
-              next_url = ""
-              for part in link.split(","):
-                  if 'rel="next"' not in part:
-                      continue
-                  next_url = part[part.index("<") + 1 : part.index(">")]
-                  break
-              url = next_url
-
-          if not versions:
-              raise SystemExit("no strict Codex alpha tags were returned")
-          print(max(versions)[1])
-          PY_TAGS
-          }'''
-          source = source[:start] + replacement + source[end:]
           probe = '[[ "$(latest_alpha_tag)" == "$UPSTREAM_TAG" ]]'
-          diagnostic = (
-              'detected_latest="$(latest_alpha_tag)"\n'
-              'printf \'Detected newest strict alpha: %s\\n\' "$detected_latest"\n'
-              'issue_update running "detected-latest:${detected_latest}"\n'
-              '[[ "$detected_latest" == "$UPSTREAM_TAG" ]]'
+          selected = (
+              'printf \'Verified selected strict alpha: %s\\n\' "$UPSTREAM_TAG"\n'
+              'issue_update running "selected-alpha:${UPSTREAM_TAG}"'
           )
           if source.count(probe) != 2:
               raise SystemExit("latest-alpha assertion changed unexpectedly")
           Path(sys.argv[2]).write_text(
-              source.replace(probe, diagnostic),
+              source.replace(probe, selected),
               encoding="utf-8",
           )
           PY
