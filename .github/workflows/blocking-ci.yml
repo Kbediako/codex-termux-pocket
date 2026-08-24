@@ -140,7 +140,20 @@ jobs:
           new = "git ls-remote --tags --refs upstream"
           if source.count(old) != 1:
               raise SystemExit("latest-alpha probe changed unexpectedly")
-          Path(sys.argv[2]).write_text(source.replace(old, new), encoding="utf-8")
+          source = source.replace(old, new)
+          probe = '[[ "$(latest_alpha_tag)" == "$UPSTREAM_TAG" ]]'
+          diagnostic = (
+              'detected_latest="$(latest_alpha_tag)"\n'
+              'printf \'Detected newest strict alpha: %s\\n\' "$detected_latest"\n'
+              'issue_update running "detected-latest:${detected_latest}"\n'
+              '[[ "$detected_latest" == "$UPSTREAM_TAG" ]]'
+          )
+          if source.count(probe) != 2:
+              raise SystemExit("latest-alpha assertion changed unexpectedly")
+          Path(sys.argv[2]).write_text(
+              source.replace(probe, diagnostic),
+              encoding="utf-8",
+          )
           PY
           chmod +x "$runtime_script"
           "$runtime_script"
