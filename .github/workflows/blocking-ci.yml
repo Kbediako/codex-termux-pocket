@@ -137,7 +137,7 @@ jobs:
 
           source = Path(sys.argv[1]).read_text(encoding="utf-8")
           old = "git ls-remote --tags --refs upstream 'refs/tags/rust-v*-alpha.*'"
-          new = "git ls-remote --tags --refs upstream"
+          new = "gh api --paginate '/repos/openai/codex/tags?per_page=100' --jq '.[].name' | sed 's#^#0\\trefs/tags/#'"
           if source.count(old) != 1:
               raise SystemExit("latest-alpha probe changed unexpectedly")
           source = source.replace(old, new)
