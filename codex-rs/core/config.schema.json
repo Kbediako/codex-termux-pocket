@@ -640,6 +640,9 @@
             "collaboration_modes": {
               "type": "boolean"
             },
+            "compaction_image_budget": {
+              "type": "boolean"
+            },
             "computer_use": {
               "type": "boolean"
             },
@@ -647,6 +650,9 @@
               "type": "boolean"
             },
             "connectors": {
+              "type": "boolean"
+            },
+            "content_item_kinds": {
               "type": "boolean"
             },
             "current_time_reminder": {
@@ -746,6 +752,9 @@
               "type": "boolean"
             },
             "in_app_dictation": {
+              "type": "boolean"
+            },
+            "in_app_local_automation": {
               "type": "boolean"
             },
             "in_app_updates": {
@@ -2370,6 +2379,9 @@
           "type": "boolean"
         },
         "allow_upstream_proxy": {
+          "type": "boolean"
+        },
+        "credential_broker": {
           "type": "boolean"
         },
         "dangerously_allow_all_unix_sockets": {
@@ -5610,6 +5622,9 @@
         "collaboration_modes": {
           "type": "boolean"
         },
+        "compaction_image_budget": {
+          "type": "boolean"
+        },
         "computer_use": {
           "type": "boolean"
         },
@@ -5617,6 +5632,9 @@
           "type": "boolean"
         },
         "connectors": {
+          "type": "boolean"
+        },
+        "content_item_kinds": {
           "type": "boolean"
         },
         "current_time_reminder": {
@@ -5716,6 +5734,9 @@
           "type": "boolean"
         },
         "in_app_dictation": {
+          "type": "boolean"
+        },
+        "in_app_local_automation": {
           "type": "boolean"
         },
         "in_app_updates": {

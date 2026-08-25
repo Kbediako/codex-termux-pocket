@@ -99,6 +99,8 @@ pub enum Feature {
     SecretAuthStorage,
 
     // Experimental
+    /// Send per-content-entry classifications in internal Responses metadata.
+    ContentItemKinds,
     /// Record model-attempted tool calls in internal Responses metadata.
     ExecutedToolCallMetadata,
     /// Enable JavaScript code mode backed by the standalone host process.
@@ -219,6 +221,10 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppDictation,
+    /// Allow desktop apps to run local automations.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppLocalAutomation,
     /// Allow desktop apps to perform in-app updates.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -273,9 +279,9 @@ pub enum Feature {
     GuardianApproval,
     /// Reuse encrypted parent compaction when restarting Guardian review sessions.
     GuardianReuseParentCompaction,
-    /// Include completed node_repl Code Mode responses in Guardian reviews.
+    /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
     GuardianEnhancedNodeReplTranscripts,
-    /// Include completed node_repl Code Mode response images in Guardian reviews.
+    /// Include completed node_repl or cua_repl Code Mode response images in Guardian reviews.
     GuardianNodeReplTranscriptImages,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
@@ -305,6 +311,8 @@ pub enum Feature {
     PreventIdleSleep,
     /// Enable remote compaction v2 over the normal Responses API.
     RemoteCompactionV2,
+    /// Include retained images in the remote compaction context budget.
+    CompactionImageBudget,
     /// Retain client-authored developer messages across compacted context windows.
     RetainClientDeveloperMessages,
     /// Use Agent Identity for ChatGPT-authenticated sessions.
@@ -900,6 +908,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::ContentItemKinds,
+        key: "content_item_kinds",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ExecutedToolCallMetadata,
         key: "executed_tool_call_metadata",
         stage: Stage::UnderDevelopment,
@@ -1252,6 +1266,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::InAppLocalAutomation,
+        key: "in_app_local_automation",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::InAppUpdates,
         key: "in_app_updates",
         stage: Stage::Stable,
@@ -1544,6 +1564,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "remote_compaction_v2",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CompactionImageBudget,
+        key: "compaction_image_budget",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::RetainClientDeveloperMessages,

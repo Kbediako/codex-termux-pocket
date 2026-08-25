@@ -732,7 +732,7 @@ impl Session {
             ThreadHistoryMode::Paginated
         ) && matches!(
             session_configuration.thread_source.as_ref(),
-            Some(ThreadSource::Subagent)
+            Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
         );
         if let InitialHistory::Forked(items) = &mut initial_history {
             Self::assign_missing_rollout_response_item_ids(items);
@@ -1432,6 +1432,7 @@ impl Session {
                     session_configuration.session_source.clone(),
                     session_configuration.originator.clone(),
                     config.model_verbosity,
+                    config.features.enabled(Feature::ContentItemKinds),
                     config.features.enabled(Feature::EnableRequestCompression),
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),

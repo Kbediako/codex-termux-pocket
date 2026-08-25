@@ -370,6 +370,24 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.composer.set_task_mentions_enabled(enabled);
+        self.request_redraw();
+    }
+
+    pub(crate) fn task_mentions_enabled(&self) -> bool {
+        self.composer.task_mentions_enabled()
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        self.composer.on_task_search_result(query, matches);
+        self.request_redraw();
+    }
+
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.composer.set_plugins_command_enabled(enabled);
         self.request_redraw();
@@ -931,18 +949,6 @@ impl BottomPane {
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.composer.set_footer_hint_override(items);
         self.request_redraw();
-    }
-
-    /// Applies the externally decided Plan-mode nudge visibility to the footer presentation.
-    pub(crate) fn set_plan_mode_nudge_visible(&mut self, visible: bool) {
-        if self.composer.set_plan_mode_nudge_visible(visible) {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn plan_mode_nudge_visible(&self) -> bool {
-        self.composer.plan_mode_nudge_visible()
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {

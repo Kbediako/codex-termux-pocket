@@ -42,6 +42,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::user_input::UserInput;
 use core_test_support::fs_wait;
@@ -398,6 +399,14 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         Some("guardian")
     );
     assert_eq!(guardian_review["model"].as_str(), Some(expected_model));
+    for request in [guardian_prewarm, &guardian_review] {
+        let metadata: serde_json::Value = serde_json::from_str(
+            request["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("guardian turn metadata"),
+        )?;
+        assert_eq!(metadata["thread_source"], "guardian_review");
+    }
     assert_eq!(
         guardian_review["client_metadata"]["thread_id"].as_str(),
         Some(guardian_thread_id)
@@ -442,10 +451,18 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         .await
         .expect("guardian trunk rollout path");
     test.codex.shutdown_and_wait().await?;
-    let guardian_context_windows = fs::read_to_string(guardian_rollout_path)?
+    let guardian_rollout = fs::read_to_string(guardian_rollout_path)?
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
-        .collect::<serde_json::Result<Vec<_>>>()?
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        guardian_rollout.iter().find_map(|line| match &line.item {
+            RolloutItem::SessionMeta(meta) => meta.meta.thread_source.as_ref(),
+            _ => None,
+        }),
+        Some(&ThreadSource::GuardianReview)
+    );
+    let guardian_context_windows = guardian_rollout
         .into_iter()
         .filter_map(|line| match line.item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.model_context_window),
@@ -458,10 +475,16 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case("first_node"; "injects_policy_for_first_node_action")]
-#[test_case("shell_then_nodes"; "reuses_shell_reviewer_and_injects_policy_once")]
-#[test_case("ineligible_node"; "omits_policy_for_ineligible_parent_model")]
-async fn guardian_node_repl_policy_follows_production_approval_path(scenario: &str) -> Result<()> {
+#[test_case("first_node", "node_repl"; "injects_policy_for_first_node_action")]
+#[test_case("shell_then_nodes", "node_repl"; "reuses_shell_reviewer_and_injects_policy_once")]
+#[test_case("ineligible_node", "node_repl"; "omits_policy_for_ineligible_parent_model")]
+#[test_case("first_node", "cua_repl"; "injects_policy_for_first_cua_action")]
+#[test_case("shell_then_nodes", "cua_repl"; "reuses_shell_reviewer_and_injects_cua_policy_once")]
+#[test_case("ineligible_node", "cua_repl"; "omits_cua_policy_for_ineligible_parent_model")]
+async fn guardian_node_repl_policy_follows_production_approval_path(
+    scenario: &str,
+    repl_server: &'static str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     skip_if_wine_exec!(
@@ -479,24 +502,20 @@ async fn guardian_node_repl_policy_follows_production_approval_path(scenario: &s
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-            let node_repl: McpServerConfig = serde_json::from_value(json!({
+            let repl: McpServerConfig = serde_json::from_value(json!({
                 "command": mcp_server_bin,
                 "environment_id": remote_aware_environment_id(),
                 "default_tools_approval_mode": "prompt",
                 "env": { "MCP_TEST_ENABLE_NODE_REPL_JS": "1" }
             }))
-            .expect("valid Node REPL MCP test server");
+            .expect("valid REPL MCP test server");
             config
                 .mcp_servers
-                .set(
-                    [(String::from("node_repl"), node_repl)]
-                        .into_iter()
-                        .collect(),
-                )
-                .expect("configure Node REPL MCP test server");
+                .set([(String::from(repl_server), repl)].into_iter().collect())
+                .expect("configure REPL MCP test server");
         });
     let test = builder.build_with_auto_env(&server).await?;
-    wait_for_mcp_server(&test.codex, "node_repl").await?;
+    wait_for_mcp_server(&test.codex, repl_server).await?;
 
     let actions: &[&str] = if scenario == "shell_then_nodes" {
         &["shell", "node-first", "node-second"]
@@ -520,7 +539,7 @@ async fn guardian_node_repl_policy_follows_production_approval_path(scenario: &s
         } else {
             ev_function_call_with_namespace(
                 &call_id,
-                "mcp__node_repl",
+                &format!("mcp__{repl_server}"),
                 "js",
                 r#"{"code":"nodeRepl.empty()"}"#,
             )
@@ -542,7 +561,7 @@ async fn guardian_node_repl_policy_follows_production_approval_path(scenario: &s
     responses.push(sse(vec![ev_completed("parent-complete")]));
     let response_mock = mount_sse_sequence(&server, responses).await;
 
-    test.submit_text_turn("Inspect the browser with Node REPL.")
+    test.submit_text_turn(&format!("Inspect the browser with {repl_server}."))
         .await?;
 
     let requests = response_mock.requests();
@@ -1142,7 +1161,7 @@ async fn guardian_timeout_rejects_tool_call_with_acting_model_instructions(
     struct TimedOutReviewContributor;
 
     impl codex_extension_api::ApprovalReviewContributor for TimedOutReviewContributor {
-        fn contribute<'a>(
+        fn fast_decision<'a>(
             &'a self,
             _session_store: &'a codex_extension_api::ExtensionData,
             _thread_store: &'a codex_extension_api::ExtensionData,

@@ -137,7 +137,12 @@ impl Session {
             )
             .await;
         let mcp_config = self
-            .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
+            .project_selected_environment_mcp_servers(
+                &session_source,
+                config,
+                &environments,
+                mcp_projection,
+            )
             .await
             .config;
         let local_process_cwd = environments
@@ -281,6 +286,7 @@ impl Session {
             .await;
         let mcp_projection = self
             .project_selected_environment_mcp_servers(
+                &desired.session_source,
                 &desired.config,
                 &desired.environments,
                 mcp_projection,
@@ -807,7 +813,14 @@ async fn review_guardian_mcp_elicitation(
         )
         .await;
 
-        return Ok(matches!(decision, ReviewDecision::Approved).then(|| {
+        return Ok(matches!(
+            decision,
+            ReviewDecision::Approved
+                | ReviewDecision::Denied { .. }
+                | ReviewDecision::TimedOut
+                | ReviewDecision::Abort
+        )
+        .then(|| {
             mcp_elicitation_response_from_guardian_decision(decision, &turn_context.model_info)
         }));
     }

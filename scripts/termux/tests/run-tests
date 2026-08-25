@@ -227,7 +227,9 @@ test_storage_retention_and_rollback() {
   assert_eq "releases/$sha3" "$(readlink "$prefix/libexec/codex-termux/current")" 'newest release activation'
   termux_rollback_installed_release "$prefix" >/dev/null
   assert_eq "releases/$sha2" "$(readlink "$prefix/libexec/codex-termux/current")" 'rollback activation'
-  termux_list_installed_releases "$prefix" | grep -q "^\* $sha2" || fail 'release listing did not mark the active rollback target'
+  local installed_releases
+  installed_releases="$(termux_list_installed_releases "$prefix")"
+  grep -q "^\* $sha2" <<<"$installed_releases" || fail 'release listing did not mark the active rollback target'
   pass 'bounded release retention preserves one verified rollback and activates it atomically'
 }
 

@@ -143,6 +143,7 @@ use codex_app_server_protocol::RequestPermissionProfile;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerResponse;
+use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
@@ -476,6 +477,10 @@ impl TurnToolCounts {
             ThreadItem::FileChange { .. } => self.file_change += 1,
             ThreadItem::McpToolCall { .. } => self.mcp_tool_call += 1,
             ThreadItem::DynamicToolCall { .. } => self.dynamic_tool_call += 1,
+            ThreadItem::SubAgentActivity {
+                kind: SubAgentActivityKind::Completed,
+                ..
+            } => return,
             ThreadItem::CollabAgentToolCall { id, .. }
             | ThreadItem::SubAgentActivity { id, .. } => {
                 if !self.subagent_tool_call_ids.insert(id.clone()) {
@@ -1069,7 +1074,7 @@ impl AnalyticsReducer {
             .metadata
             .get_or_insert_with(|| ThreadMetadataState {
                 session_id: input.session_id.clone(),
-                thread_source: Some(ThreadSource::Subagent),
+                thread_source: input.thread_source.clone(),
                 initialization_mode: ThreadInitializationMode::New,
                 subagent_source: Some(subagent_source_name(&input.subagent_source)),
                 parent_thread_id,

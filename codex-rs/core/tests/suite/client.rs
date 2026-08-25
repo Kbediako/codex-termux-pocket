@@ -384,8 +384,9 @@ async fn sends_audio_urls_to_responses() {
         .unwrap();
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
-    let user_message = response_mock
-        .single_request()
+    let request = response_mock.single_request();
+    assert!(request.has_content_kinds(&["user.audio"]));
+    let user_message = request
         .input()
         .into_iter()
         .rev()
@@ -428,8 +429,9 @@ async fn sends_local_audio_to_responses() -> anyhow::Result<()> {
         .await?;
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
-    let user_message = response_mock
-        .single_request()
+    let request = response_mock.single_request();
+    assert!(request.has_content_kinds(&["user.text", "user.audio", "user.text"]));
+    let user_message = request
         .input()
         .into_iter()
         .rev()
@@ -1522,6 +1524,7 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -3007,6 +3010,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,

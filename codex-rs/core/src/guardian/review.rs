@@ -347,7 +347,7 @@ async fn run_guardian_review(
         && let Some(decision) = session
             .services
             .extensions
-            .approval_review(
+            .fast_approval_decision(
                 &session.services.session_extension_data,
                 &session.services.thread_extension_data,
                 &action.to_string(),
@@ -906,7 +906,7 @@ pub(super) async fn guardian_review_session_config(
             .enable(Feature::RetainClientDeveloperMessages)
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "guardian review session could not preserve Node REPL developer policy: {error}"
+                    "guardian review session could not preserve REPL developer policy: {error}"
                 )
             })?;
     }

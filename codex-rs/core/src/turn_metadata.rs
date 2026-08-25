@@ -87,6 +87,7 @@ pub async fn detached_memory_responses_metadata(
 ) -> CodexResponsesMetadata {
     CodexResponsesMetadata {
         request_kind: Some(CodexResponsesRequestKind::Memory),
+        thread_source: Some(ThreadSource::MemoryConsolidation),
         subagent_header: subagent_header_value(session_source),
         sandbox: sandbox.map(ToString::to_string),
         sandbox_mode: Some(
@@ -107,6 +108,7 @@ pub(crate) struct TurnMetadataState {
     forked_from_thread_id: Option<ThreadId>,
     parent_thread_id: Option<ThreadId>,
     parent_turn_id: OnceLock<String>,
+    initiating_agent_path: OnceLock<AgentPath>,
     root_turn_id: OnceLock<String>,
     subagent_header: Option<String>,
     subagent_kind: Option<String>,
@@ -169,6 +171,7 @@ impl TurnMetadataState {
             forked_from_thread_id,
             parent_thread_id,
             parent_turn_id: OnceLock::new(),
+            initiating_agent_path: OnceLock::new(),
             root_turn_id: OnceLock::new(),
             subagent_header: subagent_header_value(session_source),
             subagent_kind: subagent_metadata_kind(session_source),
@@ -267,6 +270,18 @@ impl TurnMetadataState {
         let _ = self.parent_turn_id.set(parent_turn_id);
     }
 
+    pub(crate) fn parent_turn_id(&self) -> Option<String> {
+        self.parent_turn_id.get().cloned()
+    }
+
+    pub(crate) fn set_initiating_agent_path(&self, initiating_agent_path: AgentPath) {
+        let _ = self.initiating_agent_path.set(initiating_agent_path);
+    }
+
+    pub(crate) fn initiating_agent_path(&self) -> Option<&AgentPath> {
+        self.initiating_agent_path.get()
+    }
+
     pub(crate) fn set_root_turn_id(&self, root_turn_id: String) {
         if root_turn_id.trim().is_empty() {
             return;
@@ -291,7 +306,11 @@ impl TurnMetadataState {
         }
         match &self.thread_source {
             // Desktop create/fork/send lacks trusted app-server provenance; fail closed.
-            Some(ThreadSource::Subagent | ThreadSource::MemoryConsolidation) => false,
+            Some(
+                ThreadSource::Subagent
+                | ThreadSource::GuardianReview
+                | ThreadSource::MemoryConsolidation,
+            ) => false,
             Some(ThreadSource::Feature(feature)) => {
                 !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
             }

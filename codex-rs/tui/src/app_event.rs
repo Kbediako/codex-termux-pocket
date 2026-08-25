@@ -16,6 +16,7 @@ use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
 use codex_app_server_protocol::MarketplaceAddResponse;
@@ -29,6 +30,7 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -336,6 +338,24 @@ pub(crate) enum AppEvent {
         result: Result<AppServerStartedThread, String>,
     },
 
+    /// Register a dynamically created background thread before its first turn starts.
+    DynamicToolThreadStarted {
+        thread_id: ThreadId,
+        task_tools_available: bool,
+        registered: tokio::sync::oneshot::Sender<()>,
+    },
+
+    /// Return a completed client-owned dynamic tool call to app server.
+    DynamicToolCallCompleted {
+        request_id: AppServerRequestId,
+        response: DynamicToolCallResponse,
+    },
+
+    /// Register task tools inherited by a dynamically created thread.
+    TaskToolsAvailable {
+        thread_id: ThreadId,
+    },
+
     /// Clear the terminal UI (screen + scrollback), start a fresh session, and keep the
     /// previous chat resumable.
     ClearUi {
@@ -424,6 +444,13 @@ pub(crate) enum AppEvent {
     FileSearchResult {
         query: String,
         matches: Vec<FileMatch>,
+    },
+
+    /// Same-host task results for the active unified mention query.
+    TaskSearchResult {
+        thread_id: ThreadId,
+        query: String,
+        matches: Vec<crate::task_mentions::TaskMention>,
     },
 
     /// Refresh account rate limits in the background.
