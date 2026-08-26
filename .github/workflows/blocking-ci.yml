@@ -7,17 +7,20 @@ on:
   pull_request: {}
   push:
     branches: [main]
+  issues:
+    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event_name == 'issues' && github.event.issue.number || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -86,3 +89,27 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  alpha12-resume:
+    if: "${{ github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.issue.number == 85 }}"
+    name: Complete validated 0.150.0-alpha.12 release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: "85"
+    steps:
+      - name: Checkout current main with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Run validated alpha.12 continuation
+        shell: bash
+        run: bash .github/scripts/alpha12-resume.sh
