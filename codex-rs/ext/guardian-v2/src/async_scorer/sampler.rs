@@ -489,6 +489,7 @@ impl LunaSampler {
             prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
             text: None,
             client_metadata: None,
+            access_programs: None,
         };
         let (supersede, mut superseded) = oneshot::channel();
         let scored = Arc::new(AtomicBool::new(false));

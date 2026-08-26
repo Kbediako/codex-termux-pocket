@@ -14,10 +14,13 @@ use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -2278,6 +2281,97 @@ async fn pre_sampling_compact_runs_when_comp_hash_changes() {
         previous_model,
         next_model,
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn previous_model_compaction_resolves_selected_settings() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", "before switch"),
+                ev_completed("r1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", "COMPACTION_SUMMARY"),
+                ev_completed("r2"),
+            ]),
+            responses::sse_completed("r3"),
+        ],
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.comp_hash = Some("hash-a".to_string());
+            model.default_reasoning_summary = ReasoningSummary::Detailed;
+            model.service_tiers = vec![ModelServiceTier {
+                id: ServiceTier::Fast.request_value().to_string(),
+                name: "Fast".to_string(),
+                description: "Priority processing".to_string(),
+            }];
+        })
+        .with_model_info_override("gpt-5.2", |model| {
+            model.comp_hash = Some("hash-b".to_string());
+            model.default_reasoning_summary = ReasoningSummary::Auto;
+            model.service_tiers.clear();
+        })
+        .with_model("gpt-5.4")
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_reasoning_summary = None;
+            config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+            config
+                .features
+                .enable(Feature::FastMode)
+                .expect("enable FastMode");
+            set_test_compact_prompt(config);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_text_turn("before switch").await?;
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "after switch".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                model: Some("gpt-5.2".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    // The retained priority selection is filtered out for B, restored for
+    // compaction on A, and still omitted from the following B request.
+    let actual = request_log
+        .requests()
+        .iter()
+        .map(|request| {
+            let body = request.body_json();
+            json!([
+                body["model"],
+                body["reasoning"]["summary"],
+                body["service_tier"]
+            ])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            json!(["gpt-5.4", "detailed", "priority"]),
+            json!(["gpt-5.4", "detailed", "priority"]),
+            json!(["gpt-5.2", "auto", null]),
+        ]
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

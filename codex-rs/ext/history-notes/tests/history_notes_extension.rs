@@ -4,11 +4,14 @@ use codex_config::LoaderOverrides;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::TokenBudgetConfig;
+use codex_extension_api::ContentItemKind;
 use codex_extension_api::ConversationHistory;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::NoopTurnItemEmitter;
+use codex_extension_api::PromptFragment;
+use codex_extension_api::PromptSlot;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolCallSource;
@@ -40,6 +43,7 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+const THREAD_HINT: &str = "Recent notes (up to 5, most-recent first):\n- /root/worker/notes/latest.md (2 lines, 14 UTF-8 bytes)";
 
 #[tokio::test]
 async fn installed_extension_exposes_and_invokes_history_notes_tools() -> TestResult {
@@ -50,6 +54,12 @@ async fn installed_extension_exposes_and_invokes_history_notes_tools() -> TestRe
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "encrypted_output": "enc_payload"
         })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/alpha/notes/v2/thread_hint"))
+        .and(header("x-openai-actor-authorization", "actor-biscuit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": THREAD_HINT})))
         .mount(&server)
         .await;
     let codex_home = TempDir::new()?;
@@ -142,8 +152,20 @@ async fn installed_extension_exposes_and_invokes_history_notes_tools() -> TestRe
         )
     );
 
+    let hints = registry.context_contributors()[0]
+        .contribute_thread_context(&session_store, &thread_store)
+        .await;
+    assert_eq!(
+        hints,
+        vec![PromptFragment::new(
+            PromptSlot::ContextWindow,
+            THREAD_HINT,
+            ContentItemKind("notes.thread_hint".to_string()),
+        )]
+    );
+
     let requests = server.received_requests().await.expect("recorded requests");
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&requests[0].body)?,
         json!({
@@ -155,12 +177,120 @@ async fn installed_extension_exposes_and_invokes_history_notes_tools() -> TestRe
         })
     );
 
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&requests[1].body)?,
+        json!({
+            "context": {
+                "session_id": "session-123",
+                "current_agent_name": "/root/worker",
+            }
+        })
+    );
+
+    for (namespace, name, mut arguments) in [
+        ("history", "list_windows", json!({"limit": 101})),
+        ("history", "list_items", json!({})),
+        (
+            "history",
+            "list_items",
+            json!({"limit": 21, "max_chars_per_item": 4_000}),
+        ),
+        (
+            "history",
+            "read_item",
+            json!({"window_id": "window", "item_id": "item", "limit_chars": 20_001}),
+        ),
+        (
+            "history",
+            "search_contents",
+            json!({"query": "x".repeat(1_001), "limit": 21}),
+        ),
+        ("history", "search_contents", json!({"query": ""})),
+        ("notes", "list_files_by_prefix", json!({"max_results": 101})),
+        (
+            "notes",
+            "search_contents",
+            json!({"query": "x".repeat(1_001), "max_files": 21, "max_matches_per_file": 11}),
+        ),
+        ("notes", "search_contents", json!({"query": ""})),
+        (
+            "notes",
+            "read_file",
+            json!({"path": "notes.md", "start_line": -2}),
+        ),
+        (
+            "notes",
+            "append_to_file",
+            json!({"path": "notes.md", "text": "append"}),
+        ),
+        (
+            "notes",
+            "write_file",
+            json!({"path": "notes.md", "text": "replace"}),
+        ),
+    ] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/backend-api/codex/alpha/{namespace}/v2/{name}"
+            )))
+            .and(header("x-openai-actor-authorization", "actor-biscuit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "encrypted_output": "enc_history"
+            })))
+            .mount(&server)
+            .await;
+        let tool_name = ToolName::namespaced(namespace, name);
+        let tool = tools
+            .iter()
+            .find(|tool| tool.tool_name() == tool_name)
+            .expect("exposed tool");
+        tool.handle(tool_call(tool_name, arguments.clone())).await?;
+        arguments["context"] = json!({
+            "session_id": "session-123",
+            "current_agent_name": "/root/worker",
+        });
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body))
+                .collect::<Result<Vec<_>, _>>()?,
+            vec![arguments]
+        );
+    }
+
+    for result in [
+        json!({"text": ""}),
+        json!({"text": "x".repeat(4_001)}),
+        json!({"encrypted_output": "old-backend-hint"}),
+    ] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/alpha/notes/v2/thread_hint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(result))
+            .mount(&server)
+            .await;
+        assert!(
+            registry.context_contributors()[0]
+                .contribute_thread_context(&session_store, &thread_store)
+                .await
+                .is_empty()
+        );
+    }
+
     let mut disabled_config = config.clone();
     disabled_config.token_budget = None;
     for contributor in registry.config_contributors() {
         contributor.on_config_changed(&session_store, &thread_store, &config, &disabled_config);
     }
     assert!(exposed_tools(&registry, &session_store, &thread_store).is_empty());
+    assert!(
+        registry.context_contributors()[0]
+            .contribute_thread_context(&session_store, &thread_store)
+            .await
+            .is_empty()
+    );
 
     Ok(())
 }

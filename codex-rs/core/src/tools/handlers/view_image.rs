@@ -93,7 +93,7 @@ impl ViewImageHandler {
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         if !invocation
             .turn
-            .model_info
+            .model_info()
             .input_modalities
             .contains(&InputModality::Image)
         {
@@ -151,8 +151,7 @@ impl ViewImageHandler {
             ))
         })?;
         let model_visible_path = path_uri.inferred_native_path_string();
-        let sandbox = turn
-            .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
+        let sandbox = turn_environment.sandbox_context(/*additional_permissions*/ None);
         let fs = turn_environment.environment.get_filesystem();
 
         let metadata = fs
@@ -183,7 +182,7 @@ impl ViewImageHandler {
             FunctionCallError::RespondToModel(VIEW_IMAGE_INVALID_MESSAGE.to_string())
         })?;
 
-        let can_request_original_detail = can_request_original_image_detail(&turn.model_info);
+        let can_request_original_detail = can_request_original_image_detail(turn.model_info());
         let use_original_detail = self.options.unified_image_budget
             || can_request_original_detail && matches!(detail, Some(ViewImageDetail::Original));
         let image_detail = if use_original_detail {

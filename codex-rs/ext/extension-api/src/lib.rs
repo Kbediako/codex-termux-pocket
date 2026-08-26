@@ -90,7 +90,7 @@ pub use registry::ExtensionRegistryBuilder;
 pub use registry::empty_extension_registry;
 pub use state::ExtensionData;
 pub use state::ExtensionDataInit;
+pub use user_instructions::Instructions;
 pub use user_instructions::LoadUserInstructionsFuture;
 pub use user_instructions::LoadedUserInstructions;
-pub use user_instructions::UserInstructions;
 pub use user_instructions::UserInstructionsProvider;

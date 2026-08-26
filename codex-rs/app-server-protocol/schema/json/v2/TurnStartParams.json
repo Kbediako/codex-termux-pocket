@@ -120,6 +120,15 @@
       ],
       "type": "object"
     },
+    "CyberAccessProgram": {
+      "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+      "enum": [
+        "standard",
+        "daybreakBlue",
+        "daybreakRed"
+      ],
+      "type": "string"
+    },
     "ImageDetail": {
       "enum": [
         "auto",
@@ -655,6 +664,13 @@
         "null"
       ]
     },
+    "serviceTierForTurn": {
+      "description": "Override the service tier only when this request starts a new turn. Use \"default\" for standard speed. Omitted or null inherits the thread's tier. Does not change the thread's tier or a turn being steered.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "summary": {
       "anyOf": [
         {
@@ -668,6 +684,13 @@
     },
     "threadId": {
       "type": "string"
+    },
+    "turnTrigger": {
+      "description": "Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

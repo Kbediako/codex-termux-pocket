@@ -299,13 +299,18 @@ fn test_session_telemetry() -> SessionTelemetry {
 }
 
 #[test]
-fn ultra_reasoning_uses_max_for_requests() {
+fn reasoning_effort_for_requests_maps_ultra_and_persistent() {
     assert_eq!(
         (
             super::reasoning_effort_for_request(ReasoningEffort::Ultra),
             super::reasoning_effort_for_request(ReasoningEffort::High),
+            super::reasoning_effort_for_request(ReasoningEffort::Persistent),
         ),
-        (ReasoningEffort::Max, ReasoningEffort::High,)
+        (
+            ReasoningEffort::Max,
+            ReasoningEffort::High,
+            ReasoningEffort::Custom("disabled".to_string()),
+        )
     );
 }
 

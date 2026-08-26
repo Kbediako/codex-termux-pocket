@@ -369,6 +369,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
             permissions: exec_server_permissions.clone().into(),
             cwd: Some(cwd_uri.clone()),
             workspace_roots: vec![cwd_uri.clone()],
+            temporary_directories: None,
             windows_sandbox_level: if cfg!(windows) {
                 codex_protocol::config_types::WindowsSandboxLevel::RestrictedToken
             } else {

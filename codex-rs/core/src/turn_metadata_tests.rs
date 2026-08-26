@@ -12,6 +12,7 @@ use crate::responses_metadata::PARENT_TURN_ID_KEY;
 use crate::responses_metadata::ROOT_TURN_ID_KEY;
 use crate::responses_metadata::SANDBOX_MODE_KEY;
 use crate::responses_metadata::TOOL_NAMESPACES_INFO_KEY;
+use crate::responses_metadata::TURN_TRIGGER_KEY;
 use crate::responses_metadata::TurnToolFunctionInfo;
 use crate::responses_metadata::TurnToolNamespaceInfo;
 use crate::responses_metadata::TurnToolSource;
@@ -44,6 +45,7 @@ fn test_mcp_turn_metadata_context() -> McpTurnMetadataContext<'static> {
     McpTurnMetadataContext {
         model: "gpt-5.4",
         reasoning_effort: Some(ReasoningEffortConfig::High),
+        node_repl_disabled: false,
     }
 }
 
@@ -500,6 +502,7 @@ fn turn_metadata_state_includes_model_and_reasoning_effort_only_in_request_meta(
         .current_meta_value_for_mcp_request(McpTurnMetadataContext {
             model: "gpt-5.4",
             reasoning_effort: None,
+            node_repl_disabled: false,
         })
         .expect("turn metadata should be present");
     assert_eq!(
@@ -682,6 +685,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     )]));
     state.set_parent_turn_id("parent-turn-a".to_string());
     state.set_root_turn_id("root-turn-a".to_string());
+    state.set_turn_trigger("goal".to_string());
     state.set_responsesapi_client_metadata(HashMap::from([
         (
             "codex_security_surface".to_string(),
@@ -737,6 +741,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
             "client-supplied".to_string(),
         ),
         ("thread_source".to_string(), "client-supplied".to_string()),
+        (TURN_TRIGGER_KEY.to_string(), "client-supplied".to_string()),
         ("request_kind".to_string(), "client-supplied".to_string()),
         (
             "turn_started_at_unix_ms".to_string(),
@@ -814,6 +819,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert_eq!(json[ROOT_TURN_ID_KEY].as_str(), Some("root-turn-a"));
     assert_eq!(json["subagent_kind"].as_str(), Some("thread_spawn"));
     assert_eq!(json["thread_source"].as_str(), Some("automation"));
+    assert_eq!(json[TURN_TRIGGER_KEY].as_str(), Some("goal"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
     assert!(json.get("request_kind").is_none());
     assert!(json.get(WINDOW_ID_KEY).is_none());
@@ -953,7 +959,12 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
 
 #[test]
 fn responses_api_metadata_rejects_reserved_keys() {
-    for reserved_key in ["thread_source", WINDOW_ID_KEY, CONTEXT_WINDOW_ID_KEY] {
+    for reserved_key in [
+        "thread_source",
+        TURN_TRIGGER_KEY,
+        WINDOW_ID_KEY,
+        CONTEXT_WINDOW_ID_KEY,
+    ] {
         assert_eq!(
             validate_extra_metadata(
                 BTreeMap::from([(reserved_key.to_string(), "sdk".to_string())]).iter()

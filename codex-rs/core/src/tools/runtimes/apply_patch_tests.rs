@@ -27,6 +27,9 @@ fn test_turn_environment(environment_id: &str) -> crate::session::turn_context::
             workspace_roots: Vec::new(),
             config: EnvironmentConfigState::Ready(EnvironmentConfig {
                 allow_login_shell: true,
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                windows_sandbox_private_desktop: true,
+                use_legacy_landlock: false,
                 permission_profile: PermissionProfileSnapshot::legacy(
                     PermissionProfile::read_only(),
                 ),
@@ -341,6 +344,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
             permissions: permissions.into(),
             cwd: Some(cwd.clone()),
             workspace_roots: vec![cwd],
+            temporary_directories: None,
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
             windows_sandbox_private_desktop: false,
             windows_sandbox_proxy_settings_mode: None,

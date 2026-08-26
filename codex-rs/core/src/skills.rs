@@ -13,6 +13,7 @@ use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillMetadata;
 use codex_skills_extension::HostSkillsLoadInput;
 use codex_skills_extension::detect_implicit_skill_invocation;
+use codex_skills_extension::record_plugin_turn_usage;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
@@ -44,9 +45,17 @@ pub(crate) fn emit_explicit_skill_invocations(
         .iter()
         .map(|skill| &skill.path_to_skills_md)
         .collect::<HashSet<_>>();
+    let model_slug_tag = sanitize_metric_tag_value(turn_context.model_info().slug.as_str());
+    let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
     for skill in mentioned_skills {
         let skill_name_tag = sanitize_metric_tag_value(skill.name.as_str());
+        let plugin_id_tag =
+            sanitize_metric_tag_value(skill.plugin_id.as_deref().unwrap_or("unattributed"));
         let status = if injected_skill_paths.contains(&skill.path_to_skills_md) {
+            record_plugin_turn_usage(
+                turn_context.extension_data.as_ref(),
+                skill.plugin_id.as_deref(),
+            );
             "ok"
         } else {
             "error"
@@ -58,6 +67,9 @@ pub(crate) fn emit_explicit_skill_invocations(
                 ("status", status),
                 ("skill", skill_name_tag.as_str()),
                 ("invoke_type", "explicit"),
+                ("plugin_id", plugin_id_tag.as_str()),
+                ("model_slug", model_slug_tag.as_str()),
+                ("reasoning_effort", reasoning_effort.as_str()),
             ],
         );
     }
@@ -123,6 +135,14 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         return;
     }
     let skill_name_tag = sanitize_metric_tag_value(skill_name.as_str());
+    let plugin_id_tag =
+        sanitize_metric_tag_value(invocation.plugin_id.as_deref().unwrap_or("unattributed"));
+    let model_slug_tag = sanitize_metric_tag_value(turn_context.model_info().slug.as_str());
+    let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
+    record_plugin_turn_usage(
+        turn_context.extension_data.as_ref(),
+        invocation.plugin_id.as_deref(),
+    );
 
     for contributor in sess.services.extensions.skill_invocation_contributors() {
         contributor
@@ -144,13 +164,16 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
             ("status", "ok"),
             ("skill", skill_name_tag.as_str()),
             ("invoke_type", "implicit"),
+            ("plugin_id", plugin_id_tag.as_str()),
+            ("model_slug", model_slug_tag.as_str()),
+            ("reasoning_effort", reasoning_effort.as_str()),
         ],
     );
     sess.services
         .analytics_events_client
         .track_skill_invocations(
             build_track_events_context(
-                turn_context.model_info.slug.clone(),
+                turn_context.model_info().slug.clone(),
                 sess.thread_id.to_string(),
                 turn_context.sub_id.clone(),
                 turn_context.originator.clone(),

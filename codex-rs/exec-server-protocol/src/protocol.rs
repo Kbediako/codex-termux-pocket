@@ -153,9 +153,16 @@ pub enum EnvironmentStatusKind {
 }
 
 impl EnvironmentInfo {
-    /// Returns information about the current local exec-server process.
-    pub fn local() -> Self {
+    /// Returns executor-local default directories used to resolve `:tmpdir`.
+    ///
+    /// This is separate from `local` so orchestrator startup can cache the
+    /// directories without repeating local shell detection.
+    pub fn local_temporary_directories() -> Vec<PathUri> {
         let cwd = std::env::current_dir().ok();
+        Self::local_temporary_directories_with_cwd(cwd.as_deref())
+    }
+
+    fn local_temporary_directories_with_cwd(cwd: Option<&std::path::Path>) -> Vec<PathUri> {
         let temporary_directory_env_vars: &[&str] = if cfg!(windows) {
             &["TEMP", "TMP"]
         } else {
@@ -181,6 +188,22 @@ impl EnvironmentInfo {
                 temporary_directories.push(path);
             }
         }
+        temporary_directories
+    }
+
+    /// Returns information about the current local exec-server process.
+    pub fn local() -> Self {
+        let cwd = std::env::current_dir().ok();
+        let temporary_directories = Self::local_temporary_directories_with_cwd(cwd.as_deref());
+        let normalize_temp_path = |path: std::ffi::OsString| {
+            PathUri::from_host_native_path(&path).ok().or_else(|| {
+                if cfg!(unix) {
+                    PathUri::from_host_native_path(cwd.as_ref()?.join(path)).ok()
+                } else {
+                    None
+                }
+            })
+        };
         let temp_dir = normalize_temp_path(std::env::temp_dir().into_os_string());
 
         Self {

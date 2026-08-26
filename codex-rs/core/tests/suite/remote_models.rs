@@ -48,6 +48,7 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -365,8 +366,13 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
     Ok(())
 }
 
+#[test_case(ReasoningEffort::Custom("future".to_string()), "future"; "custom")]
+#[test_case(ReasoningEffort::Persistent, "disabled"; "persistent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result<()> {
+async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
+    effort: ReasoningEffort,
+    expected_wire_effort: &str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
@@ -379,16 +385,15 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    let custom_reasoning_effort = ReasoningEffort::Custom("future".to_string());
-    remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
+    remote_model.default_reasoning_level = Some(effort.clone());
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         },
         ReasoningEffortPreset {
-            effort: custom_reasoning_effort.clone(),
-            description: custom_reasoning_effort.to_string(),
+            effort: effort.clone(),
+            description: effort.to_string(),
         },
     ];
     remote_model.default_reasoning_summary = ReasoningSummary::Detailed;
@@ -411,7 +416,7 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         .with_config(|config| {
             config.model = Some(requested_model.to_string());
         })
-        .build(&server)
+        .build_with_auto_env(&server)
         .await?;
 
     codex
@@ -434,7 +439,7 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         .and_then(|reasoning| reasoning.get("summary"))
         .and_then(|value| value.as_str());
     assert_eq!(body["model"].as_str(), Some(requested_model));
-    assert_eq!(reasoning_effort, Some("future"));
+    assert_eq!(reasoning_effort, Some(expected_wire_effort));
     assert_eq!(reasoning_summary, Some("detailed"));
 
     Ok(())

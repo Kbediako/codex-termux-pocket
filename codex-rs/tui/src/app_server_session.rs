@@ -652,6 +652,10 @@ impl AppServerSession {
         self.managed_new_thread_defaults.as_ref()
     }
 
+    pub(crate) fn supports_paginated_history(&self) -> bool {
+        self.history_support == ThreadHistorySupport::Paginated
+    }
+
     /// Fetches the current account info without refreshing the auth token.
     ///
     /// Used by both `bootstrap` (to populate the initial UI) and `get_login_status`
@@ -1201,6 +1205,7 @@ impl AppServerSession {
                 request_id,
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
+                    turn_trigger: None,
                     client_user_message_id: None,
                     input: items,
                     responsesapi_client_metadata: None,
@@ -1214,12 +1219,14 @@ impl AppServerSession {
                     permissions,
                     model: Some(model),
                     service_tier,
+                    service_tier_for_turn: None,
                     effort,
                     summary,
                     personality,
                     output_schema,
                     collaboration_mode,
                     multi_agent_mode: None,
+                    cyber_access_program: None,
                 },
             })
             .await
@@ -1602,7 +1609,9 @@ pub(crate) fn status_account_display_from_auth_mode(
             email: None,
             plan: plan_type.map(plan_type_display_name),
         }),
-        Some(AuthMode::Headers) | Some(AuthMode::BedrockApiKey) => None,
+        Some(AuthMode::Headers)
+        | Some(AuthMode::BedrockApiKey)
+        | Some(AuthMode::BedrockAccessKeys) => None,
         None => None,
     }
 }

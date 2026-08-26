@@ -226,7 +226,6 @@ pub struct Thread {
     )]
     pub project_id: Option<String>,
     /// Persisted thread history contract selected when this thread was created.
-    #[experimental("thread.historyMode")]
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').

@@ -121,7 +121,7 @@ async fn start_review_conversation(
     let model = config
         .review_model
         .clone()
-        .unwrap_or_else(|| ctx.model_info.slug.clone());
+        .unwrap_or_else(|| ctx.model_info().slug.clone());
     sub_agent_config.model = Some(model);
     (run_codex_thread_one_shot(
         sub_agent_config,

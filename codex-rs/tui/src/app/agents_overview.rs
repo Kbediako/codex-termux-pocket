@@ -12,6 +12,7 @@ use crate::chatwidget::ThreadInputStateRestoreMode;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
@@ -666,15 +667,34 @@ impl App {
     ) {
         let active_turn_id = match self.active_turn_id_for_thread(thread_id).await {
             Some(turn_id) => Some(turn_id),
-            None => match app_server
-                .thread_read(thread_id, /*include_turns*/ true)
-                .await
+            None => match async {
+                let thread = app_server
+                    .thread_read(thread_id, /*include_turns*/ false)
+                    .await?;
+                let turns = match thread.history_mode {
+                    ThreadHistoryMode::Paginated if app_server.supports_paginated_history() => {
+                        app_server
+                            .thread_turns_page(thread_id, /*cursor*/ None)
+                            .await?
+                            .data
+                    }
+                    ThreadHistoryMode::Legacy | ThreadHistoryMode::Paginated => {
+                        app_server
+                            .thread_read(thread_id, /*include_turns*/ true)
+                            .await?
+                            .turns
+                    }
+                };
+                Ok::<_, color_eyre::Report>(
+                    turns
+                        .into_iter()
+                        .find(|turn| turn.status == TurnStatus::InProgress)
+                        .map(|turn| turn.id),
+                )
+            }
+            .await
             {
-                Ok(thread) => thread
-                    .turns
-                    .into_iter()
-                    .find(|turn| turn.status == TurnStatus::InProgress)
-                    .map(|turn| turn.id),
+                Ok(turn_id) => turn_id,
                 Err(error) => {
                     self.chat_widget
                         .add_error_message(format!("Failed to stop background task: {error}"));

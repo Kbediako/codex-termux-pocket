@@ -6,6 +6,7 @@ use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
+use codex_git_utils::SanitizedGitUrl;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -43,6 +44,7 @@ pub(crate) const PARENT_TURN_ID_KEY: &str = "parent_turn_id";
 pub(crate) const ROOT_TURN_ID_KEY: &str = "root_turn_id";
 pub(crate) const SUBAGENT_KIND_KEY: &str = "subagent_kind";
 pub(crate) const THREAD_SOURCE_KEY: &str = "thread_source";
+pub(crate) const TURN_TRIGGER_KEY: &str = "turn_trigger";
 pub(crate) const SANDBOX_KEY: &str = "sandbox";
 pub(crate) const SANDBOX_MODE_KEY: &str = "sandbox_mode";
 pub(crate) const AUTO_REVIEW_ENABLED_KEY: &str = "auto_review_enabled";
@@ -76,6 +78,7 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
     ROOT_TURN_ID_KEY,
     SUBAGENT_KIND_KEY,
     THREAD_SOURCE_KEY,
+    TURN_TRIGGER_KEY,
     SANDBOX_KEY,
     SANDBOX_MODE_KEY,
     AUTO_REVIEW_ENABLED_KEY,
@@ -161,7 +164,7 @@ impl CodexResponsesRequestKind {
 #[derive(Clone, Debug, Serialize, Default)]
 pub(crate) struct TurnMetadataWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) associated_remote_urls: Option<BTreeMap<String, String>>,
+    pub(crate) associated_remote_urls: Option<BTreeMap<String, SanitizedGitUrl>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) latest_git_commit_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +223,7 @@ pub struct CodexResponsesMetadata {
     pub(crate) subagent_header: Option<String>,
     pub(crate) subagent_kind: Option<String>,
     pub(crate) thread_source: Option<ThreadSource>,
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) sandbox: Option<String>,
     pub(crate) sandbox_mode: Option<String>,
     pub(crate) auto_review_enabled: Option<bool>,
@@ -255,6 +259,7 @@ impl CodexResponsesMetadata {
             subagent_header: None,
             subagent_kind: None,
             thread_source: None,
+            turn_trigger: None,
             sandbox: None,
             sandbox_mode: None,
             auto_review_enabled: None,
@@ -379,6 +384,7 @@ impl CodexResponsesMetadata {
             root_turn_id: self.root_turn_id.as_deref(),
             subagent_kind: self.subagent_kind.as_deref(),
             thread_source: self.thread_source.as_ref(),
+            turn_trigger: self.turn_trigger.as_deref(),
             sandbox: self.sandbox.as_deref(),
             sandbox_mode: self.sandbox_mode.as_deref(),
             auto_review_enabled: self.auto_review_enabled,
@@ -507,6 +513,8 @@ struct CodexTurnMetadataPayload<'a> {
     subagent_kind: Option<&'a str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thread_source: Option<&'a ThreadSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_trigger: Option<&'a str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sandbox: Option<&'a str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

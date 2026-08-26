@@ -43,6 +43,12 @@ impl GrpcCodeModeHost {
         }
     }
 
+    #[tracing::instrument(
+        name = "code_mode_host.grpc.open_session",
+        level = "info",
+        skip_all,
+        fields(otel.name = "code_mode_host.grpc.open_session")
+    )]
     async fn open_session_request(
         &self,
         request: proto::OpenSessionRequest,
@@ -52,6 +58,15 @@ impl GrpcCodeModeHost {
         Ok(Response::new(self.state.open_session(limits)?))
     }
 
+    #[tracing::instrument(
+        name = "code_mode_host.grpc.close_session",
+        level = "info",
+        skip_all,
+        fields(
+            otel.name = "code_mode_host.grpc.close_session",
+            session.id = %request.session_id,
+        )
+    )]
     async fn close_session_request(
         &self,
         request: proto::CloseSessionRequest,
@@ -104,6 +119,17 @@ impl GrpcCodeModeHost {
         Ok(Response::new(proto::AcknowledgeNotificationResponse {}))
     }
 
+    #[tracing::instrument(
+        name = "code_mode_host.grpc.execute",
+        level = "info",
+        skip_all,
+        fields(
+            otel.name = "code_mode_host.grpc.execute",
+            session.id = %request.session_id,
+            execution.id = %request.execution_id,
+            call_id = %request.tool_call_id,
+        )
+    )]
     async fn execute_request(
         &self,
         request: proto::ExecuteRequest,
@@ -171,6 +197,17 @@ impl GrpcCodeModeHost {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    #[tracing::instrument(
+        name = "code_mode_host.grpc.wait",
+        level = "info",
+        skip_all,
+        fields(
+            otel.name = "code_mode_host.grpc.wait",
+            session.id = %request.session_id,
+            cell.id = %request.cell_id,
+            wait.id = %request.wait_id,
+        )
+    )]
     async fn wait_request(
         &self,
         request: proto::WaitRequest,

@@ -65,7 +65,7 @@ pub(crate) fn tool_user_shell_type(
 }
 
 pub(crate) fn requested_tool_mode(turn_context: &TurnContext) -> ToolMode {
-    turn_context.model_info.tool_mode.unwrap_or_else(|| {
+    turn_context.model_info().tool_mode.unwrap_or_else(|| {
         if turn_context.config.features.enabled(Feature::CodeModeOnly) {
             ToolMode::CodeModeOnly
         } else if turn_context.config.features.enabled(Feature::CodeMode) {

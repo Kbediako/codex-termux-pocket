@@ -208,8 +208,8 @@ impl McpHandler {
             result: result.result,
             tool_input: result.tool_input,
             wall_time: started.elapsed(),
-            original_image_detail_supported: can_request_original_image_detail(&turn.model_info),
-            truncation_policy: turn.model_info.truncation_policy.into(),
+            original_image_detail_supported: can_request_original_image_detail(turn.model_info()),
+            truncation_policy: turn.model_info().truncation_policy.into(),
         }))
     }
 }

@@ -111,9 +111,11 @@ fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bo
         (
             Op::InterAgentCommunication {
                 communication: actual,
+                ..
             },
             Op::InterAgentCommunication {
                 communication: expected,
+                ..
             },
         ) => actual == expected,
         _ => false,
@@ -272,6 +274,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             | RolloutItem::EventMsg(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TurnContext(_) => None,
         })
@@ -449,8 +452,7 @@ async fn send_input_errors_when_manager_dropped() {
                 text: "hello".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect_err("send_input should fail without a manager");
@@ -481,17 +483,27 @@ async fn on_event_updates_status_from_task_started() {
 
 #[tokio::test]
 async fn on_event_updates_status_from_task_complete() {
-    let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
-        turn_id: "turn-1".to_string(),
-        started_at: None,
-        last_agent_message: Some("done".to_string()),
-        error: None,
-        completed_at: None,
-        duration_ms: None,
-        time_to_first_token_ms: None,
-    }));
-    let expected = AgentStatus::Completed(Some("done".to_string()));
-    assert_eq!(status, Some(expected));
+    for (error, expected) in [
+        (None, AgentStatus::Completed(Some("done".to_string()))),
+        (
+            Some(ErrorEvent {
+                message: "denied".to_string(),
+                codex_error_info: None,
+            }),
+            AgentStatus::Errored("denied".to_string()),
+        ),
+    ] {
+        let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            started_at: None,
+            last_agent_message: Some("done".to_string()),
+            error,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        }));
+        assert_eq!(status, Some(expected));
+    }
 }
 
 #[tokio::test]
@@ -565,8 +577,7 @@ async fn send_input_errors_when_thread_missing() {
                 text: "hello".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect_err("send_input should fail for missing thread");
@@ -639,8 +650,7 @@ async fn send_input_submits_user_message() {
                 text: "hello from tests".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_input should succeed");
@@ -666,8 +676,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
             thread_id,
             communication.clone(),
             AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_inter_agent_communication should succeed");
@@ -677,6 +686,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         thread_id,
         Op::InterAgentCommunication {
             communication: communication.clone(),
+            start_options: Default::default(),
         },
     );
     let captured = harness
@@ -948,14 +958,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             spawned_agent.thread_id,
             communication.clone(),
             AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_inter_agent_communication should succeed after reload");
     let expected = (
         spawned_agent.thread_id,
-        Op::InterAgentCommunication { communication },
+        Op::InterAgentCommunication {
+            communication,
+            start_options: Default::default(),
+        },
     );
     let captured = harness
         .manager
@@ -3118,7 +3130,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
                 thread_id == worker_thread_id
                     && matches!(
                         op,
-                        Op::InterAgentCommunication { communication }
+                        Op::InterAgentCommunication { communication, .. }
                             if communication.author == tester_path
                                 && communication.recipient == worker_path
                                 && communication.content == "done"
@@ -3205,6 +3217,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
                 expected_message.clone(),
                 /*trigger_turn*/ false,
             ),
+            start_options: Default::default(),
         },
     );
 

@@ -1,15 +1,22 @@
+mod reviewer_config;
+
 use std::sync::Arc;
 use std::sync::Weak;
 
+use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_extension_api::ApprovalReviewError;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::InternalSessionSpawnFuture;
 use codex_extension_api::InternalSessionSpawner;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadReadyInput;
+use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::ThreadId;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 
 /// Guardian extension dependencies supplied by the host at construction time.
 #[derive(Clone, Debug)]
@@ -25,6 +32,29 @@ impl<S> GuardianExtension<S> {
             thread_manager,
             internal_session_spawner,
         }
+    }
+
+    /// Prepares reviewer options for the later synchronous reviewer implementation.
+    pub async fn prepare_reviewer_options(
+        &self,
+        parent_config: &Config,
+        parent_environments: &[TurnEnvironmentSelection],
+        parent_model: &str,
+        parent_reasoning_effort: Option<ReasoningEffort>,
+        live_network_config: Option<NetworkProxyConfig>,
+    ) -> Result<StartThreadOptions, ApprovalReviewError> {
+        let thread_manager = self.thread_manager.upgrade().ok_or_else(|| {
+            ApprovalReviewError::Failed("thread manager is no longer available".to_string())
+        })?;
+        reviewer_config::prepare(
+            &thread_manager,
+            parent_config,
+            parent_environments,
+            parent_model,
+            parent_reasoning_effort,
+            live_network_config,
+        )
+        .await
     }
 
     /// Delegates a fresh internal-session request to the host helper.

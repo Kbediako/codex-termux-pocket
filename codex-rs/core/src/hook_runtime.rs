@@ -6,6 +6,7 @@ use codex_analytics::CompactionTrigger;
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
 use codex_core_plugins::executor_plugin_hook_sources;
+use codex_hooks::InterruptRequest;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
 use codex_hooks::PermissionRequestRequest;
@@ -39,6 +40,7 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookStartedEvent;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::WarningEvent;
@@ -143,7 +145,7 @@ pub(crate) async fn run_pending_session_start_hooks(
             #[allow(deprecated)]
             cwd: turn_context.cwd.clone(),
             transcript_path: sess.hook_transcript_path().await,
-            model: turn_context.model_info.slug.clone(),
+            model: turn_context.model_info().slug.clone(),
             permission_mode: hook_permission_mode(turn_context),
             target,
         };
@@ -185,7 +187,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         tool_name: tool_name.name().to_string(),
         matcher_aliases: tool_name.matcher_aliases().to_vec(),
@@ -246,7 +248,7 @@ pub(crate) async fn run_permission_request_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         tool_name: payload.tool_name.name().to_string(),
         matcher_aliases: payload.tool_name.matcher_aliases().to_vec(),
@@ -288,7 +290,7 @@ pub(crate) async fn run_post_tool_use_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         tool_name,
         matcher_aliases,
@@ -355,13 +357,18 @@ pub(crate) async fn run_turn_stop_hooks(
         // Internal/synthetic subagents do not expose user-configured lifecycle
         // hooks, so there is no Stop or SubagentStop request to dispatch.
         SessionSource::SubAgent(_) => return StopOutcome::default(),
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation) => (
+            StopHookTarget::MemoryConsolidation,
+            sess.hook_transcript_path().await,
+        ),
         _ => (StopHookTarget::Stop, sess.hook_transcript_path().await),
     };
     let request_metadata = turn_context
         .turn_metadata_state
         .current_meta_value_for_mcp_request(McpTurnMetadataContext {
-            model: step_context.model_info.slug.as_str(),
-            reasoning_effort: step_context.reasoning_effort.clone(),
+            model: step_context.settings.model_info.slug.as_str(),
+            reasoning_effort: step_context.settings.effective_reasoning_effort(),
+            node_repl_disabled: step_context.settings.model_info.node_repl_disabled,
         })
         .map(|turn_metadata| {
             serde_json::Map::from_iter([(
@@ -375,7 +382,7 @@ pub(crate) async fn run_turn_stop_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         request_metadata,
         stop_hook_active,
@@ -427,6 +434,35 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
     emit_hook_completed_events(sess, &turn_context, outcome.hook_events).await;
 }
 
+pub(crate) async fn run_turn_interrupt_hooks(sess: &Arc<Session>, turn_context: &Arc<TurnContext>) {
+    if matches!(&turn_context.session_source, SessionSource::SubAgent(_)) {
+        return;
+    }
+
+    let hooks = sess.hooks();
+    let preview_runs = hooks.preview_interrupt();
+    if preview_runs.is_empty() {
+        return;
+    }
+
+    let request = InterruptRequest {
+        session_id: sess.session_id().into(),
+        turn_id: turn_context.sub_id.clone(),
+        #[allow(deprecated)]
+        cwd: turn_context.cwd.clone(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info().slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+    };
+    if let Err(err) = sess.flush_rollout().await {
+        tracing::warn!("failed to flush transcript before Interrupt hook: {err}");
+    }
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = hooks.run_interrupt(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
 pub(crate) async fn run_pre_compact_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -439,7 +475,7 @@ pub(crate) async fn run_pre_compact_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         trigger: compaction_trigger_label(trigger).to_string(),
     };
     let preview_runs = sess.hooks().preview_pre_compact(&request);
@@ -476,7 +512,7 @@ pub(crate) async fn run_post_compact_hooks(
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
+        model: turn_context.model_info().slug.clone(),
         trigger: compaction_trigger_label(trigger).to_string(),
     };
     let preview_runs = sess.hooks().preview_post_compact(&request);
@@ -573,7 +609,7 @@ pub(crate) async fn inspect_pending_input(
                 #[allow(deprecated)]
                 cwd: turn_context.cwd.clone(),
                 transcript_path: sess.hook_transcript_path().await,
-                model: turn_context.model_info.slug.clone(),
+                model: turn_context.model_info().slug.clone(),
                 permission_mode: hook_permission_mode(turn_context),
                 prompt: UserMessageItem::new(content).message(),
             };
@@ -810,7 +846,7 @@ fn hook_run_analytics_payload(
 ) -> (codex_analytics::TrackEventsContext, HookRunFact) {
     (
         build_track_events_context(
-            turn_context.model_info.slug.clone(),
+            turn_context.model_info().slug.clone(),
             thread_id,
             completed
                 .turn_id
@@ -841,6 +877,7 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::SubagentStart => "SubagentStart",
         HookEventName::SubagentStop => "SubagentStop",
         HookEventName::Stop => "Stop",
+        HookEventName::Interrupt => "Interrupt",
     };
     let hook_source = match run.source {
         HookSource::System => "system",
@@ -1035,7 +1072,7 @@ mod tests {
 
         assert_eq!(tracking.thread_id, "thread-123");
         assert_eq!(tracking.turn_id, "turn-from-hook");
-        assert_eq!(tracking.model_slug, turn_context.model_info.slug);
+        assert_eq!(tracking.model_slug, turn_context.model_info().slug);
         assert_eq!(hook.event_name, HookEventName::Stop);
         assert_eq!(hook.handler_type, HookHandlerType::Command);
         assert_eq!(hook.execution_mode, HookExecutionMode::Sync);

@@ -10,6 +10,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_config::AppToolApproval;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::models::PermissionProfile;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
@@ -196,9 +197,10 @@ impl PreparedMcpCall {
         server_metadata: McpServerMetadata,
         plugin_id: Option<String>,
         selected_plugin_server: bool,
-    ) -> Self {
+    ) -> Option<Self> {
         let server_name = tool_info.server_name.clone();
-        Self {
+        config.permission_profile_for_server(&server_name)?;
+        Some(Self {
             _connections: connections,
             client,
             config,
@@ -209,7 +211,7 @@ impl PreparedMcpCall {
             server_metadata,
             plugin_id,
             selected_plugin_server,
-        }
+        })
     }
 
     pub fn tool_info(&self) -> &ToolInfo {
@@ -219,6 +221,15 @@ impl PreparedMcpCall {
     /// Returns the configuration and approval authority captured with this client.
     pub fn config(&self) -> &McpConfig {
         &self.config
+    }
+
+    /// Returns the owner permissions validated when this immutable call was prepared.
+    pub fn permission_profile(&self) -> &PermissionProfile {
+        let Some(permission_profile) = self.config.permission_profile_for_server(&self.server_name)
+        else {
+            unreachable!("prepared MCP calls retain their immutable permission authority");
+        };
+        permission_profile
     }
 
     pub fn server_name(&self) -> &str {

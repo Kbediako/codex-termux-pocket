@@ -72,7 +72,7 @@ pub(crate) struct CodeModeService {
     availability: Result<(), String>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
     default_exec_yield_time_ms: u64,
-    shutting_down: AtomicBool,
+    shutdown_token: CancellationToken,
     unavailable_warning_emitted: AtomicBool,
 }
 
@@ -89,7 +89,7 @@ impl CodeModeService {
             availability,
             dispatch_broker,
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
-            shutting_down: AtomicBool::new(false),
+            shutdown_token: CancellationToken::new(),
             unavailable_warning_emitted: AtomicBool::new(false),
         }
     }
@@ -160,7 +160,7 @@ impl CodeModeService {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
-        self.shutting_down.store(true, Ordering::Release);
+        self.shutdown_token.cancel();
         // Join any initialization already in progress without initializing an unused service.
         match self
             .session
@@ -206,20 +206,25 @@ impl CodeModeService {
         )
     }
 
-    async fn session(&self) -> Result<Arc<dyn CodeModeSession>, String> {
-        if self.shutting_down.load(Ordering::Acquire) {
+    pub(crate) async fn session(&self) -> Result<Arc<dyn CodeModeSession>, String> {
+        if self.shutdown_token.is_cancelled() {
             return Err("code mode session is shutting down".to_string());
         }
         self.session
             .get_or_try_init(|| async {
-                if self.shutting_down.load(Ordering::Acquire) {
+                if self.shutdown_token.is_cancelled() {
                     return Err("code mode session is shutting down".to_string());
                 }
-                let session = self
-                    .session_provider
-                    .create_session(self.dispatch_broker.clone())
-                    .await?;
-                if self.shutting_down.load(Ordering::Acquire) {
+                let session = tokio::select! {
+                    biased;
+                    _ = self.shutdown_token.cancelled() => {
+                        return Err("code mode session is shutting down".to_string());
+                    }
+                    session = self
+                        .session_provider
+                        .create_session(self.dispatch_broker.clone()) => session?,
+                };
+                if self.shutdown_token.is_cancelled() {
                     let _ = session.shutdown().await;
                     return Err("code mode session is shutting down".to_string());
                 }
@@ -277,7 +282,7 @@ pub(super) async fn handle_runtime_response(
 }
 
 fn sanitize_runtime_image_detail(turn: &TurnContext, items: &mut [FunctionCallOutputContentItem]) {
-    sanitize_image_detail_items(can_request_original_image_detail(&turn.model_info), items);
+    sanitize_image_detail_items(can_request_original_image_detail(turn.model_info()), items);
 }
 
 fn format_script_status(response: &RuntimeResponse) -> String {

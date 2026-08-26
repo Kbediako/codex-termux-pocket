@@ -87,7 +87,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => false,
         },
-        RolloutItem::InterAgentCommunication(_)
+        RolloutItem::RealtimeItem(_)
+        | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
@@ -741,15 +742,16 @@ impl AgentControl {
         )
         .await;
 
+        let start_options = TurnStartOptions {
+            parent_turn_id: options.parent_turn_id,
+            root_turn_id: options.root_turn_id,
+            cyber_access_program: options.cyber_access_program,
+            ..Default::default()
+        };
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
-                self.send_input(
-                    new_thread.thread_id,
-                    input,
-                    options.parent_turn_id,
-                    options.root_turn_id,
-                )
-                .await?;
+                self.send_input(new_thread.thread_id, input, start_options)
+                    .await?;
             }
             SpawnInitialInput::InterAgentCommunication(communication, context) => {
                 self.send_inter_agent_communication_after_capacity_check(
@@ -757,8 +759,7 @@ impl AgentControl {
                     &state,
                     communication,
                     context,
-                    options.parent_turn_id,
-                    options.root_turn_id,
+                    start_options,
                 )
                 .await?;
             }
@@ -1001,6 +1002,7 @@ impl AgentControl {
                     }
                     true
                 }
+                RolloutItem::RealtimeItem(_) => false,
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)

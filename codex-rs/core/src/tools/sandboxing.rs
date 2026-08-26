@@ -395,6 +395,8 @@ pub(crate) struct SandboxAttempt<'a> {
     pub(crate) sandbox_cwd: &'a PathUri,
     pub(crate) workspace_roots: &'a [PathUri],
     pub codex_linux_sandbox_exe: Option<&'a std::path::PathBuf>,
+    // TODO(anp): Reconcile these attempt settings with TurnEnvironment::sandbox_context
+    // so process execution and patch writes honor the selected environment's backend.
     pub use_legacy_landlock: bool,
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
@@ -500,6 +502,7 @@ impl<'a> SandboxAttempt<'a> {
                 permissions: exec_server_permissions.into(),
                 cwd: Some(exec_request.windows_sandbox_policy_cwd.clone()),
                 workspace_roots: self.workspace_roots.to_vec(),
+                temporary_directories: None,
                 windows_sandbox_level: executor_windows_sandbox_level(
                     self.windows_sandbox_level,
                     self.sandbox_cwd,

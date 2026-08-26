@@ -8,6 +8,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_skills::system_cache_root_dir;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
@@ -195,6 +197,45 @@ impl TurnRequestProcessor {
         self.thread_settings_update_inner(request_id, params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn turn_settings_update(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: TurnSettingsUpdateParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        self.ensure_direct_input_allowed(request_id, thread.as_ref())
+            .await?;
+        let (reply, outcome) = oneshot::channel();
+        self.submit_core_op(
+            request_id,
+            &thread,
+            Op::TurnSettings {
+                turn_id: params.turn_id,
+                update: TurnSettingsUpdate {
+                    model: params.model,
+                    // Match thread/settings/update: public null does not clear effort.
+                    effort: params.effort.map(Some),
+                    summary: params.summary,
+                    service_tier: params.service_tier,
+                },
+                reply,
+            },
+        )
+        .await
+        .map_err(|err| internal_error(format!("failed to submit turn settings: {err}")))?;
+        let outcome = outcome
+            .await
+            .map_err(|_| internal_error("turn settings operation ended before replying"))?;
+        let status = match outcome {
+            TurnSettingsUpdateOutcome::Applied => TurnSettingsUpdateStatus::Applied,
+            TurnSettingsUpdateOutcome::TargetUnavailable => {
+                TurnSettingsUpdateStatus::TargetUnavailable
+            }
+            TurnSettingsUpdateOutcome::Rejected { reason } => return Err(invalid_request(reason)),
+        };
+        Ok(Some(TurnSettingsUpdateResponse { status }.into()))
     }
 
     pub(crate) async fn turn_steer(
@@ -528,6 +569,9 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
+        self.seal_realtime_transcript_before_user_input(thread_id, &mapped_items)
+            .await?;
+
         let submission = thread
             .start_or_steer_turn(
                 TurnInputRequest::new(TurnInput::UserInput {
@@ -536,7 +580,10 @@ impl TurnRequestProcessor {
                 })
                 .with_thread_settings(thread_settings)
                 .on_start(TurnStartOptions {
+                    turn_trigger: params.turn_trigger,
                     final_output_json_schema: params.output_schema,
+                    service_tier: params.service_tier_for_turn,
+                    cyber_access_program: params.cyber_access_program.map(Into::into),
                     ..Default::default()
                 })
                 .with_additional_context(additional_context)
@@ -901,12 +948,12 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: TurnSteerParams,
     ) -> Result<TurnSteerResponse, JSONRPCErrorError> {
-        let (_, thread) = self
-            .load_thread(&params.thread_id)
-            .await
-            .inspect_err(|error| {
-                self.track_error_response(request_id, error, /*error_type*/ None);
-            })?;
+        let (thread_id, thread) =
+            self.load_thread(&params.thread_id)
+                .await
+                .inspect_err(|error| {
+                    self.track_error_response(request_id, error, /*error_type*/ None);
+                })?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
 
@@ -931,6 +978,9 @@ impl TurnRequestProcessor {
             .map(V2UserInput::into_core)
             .collect();
         let additional_context = map_additional_context(params.additional_context);
+
+        self.seal_realtime_transcript_before_user_input(thread_id, &mapped_items)
+            .await?;
 
         let submission = thread
             .steer_turn(
@@ -1025,6 +1075,37 @@ impl TurnRequestProcessor {
             }
         };
         Ok(TurnSteerResponse { turn_id })
+    }
+
+    async fn seal_realtime_transcript_before_user_input(
+        &self,
+        thread_id: ThreadId,
+        input: &[CoreInputItem],
+    ) -> Result<(), JSONRPCErrorError> {
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        if !thread_state
+            .lock()
+            .await
+            .realtime_history
+            .should_seal_user_input(input)
+        {
+            return Ok(());
+        }
+        let listener = self
+            .thread_state_manager
+            .current_listener_command_tx(thread_id)
+            .ok_or_else(|| internal_error("thread listener is not running"))?;
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        listener
+            .send(ThreadListenerCommand::SealRealtimeUserInput {
+                input: input.to_vec(),
+                completion_tx,
+            })
+            .map_err(|_| internal_error("thread listener is not running"))?;
+        completion_rx
+            .await
+            .map_err(|_| internal_error("thread listener stopped before sealing realtime input"))?
+            .map_err(internal_error)
     }
 
     async fn prepare_realtime_conversation_thread(

@@ -334,7 +334,7 @@ impl McpConnectionSet {
     ) -> Option<PreparedMcpCall> {
         let server_name = &tool_info.server_name;
         let view = self.servers.get(server_name)?;
-        Some(PreparedMcpCall::new(
+        PreparedMcpCall::new(
             Arc::clone(self),
             client,
             config,
@@ -345,7 +345,7 @@ impl McpConnectionSet {
             self.plugin_id_for_mcp_server_name(server_name)
                 .map(str::to_string),
             self.is_selected_plugin_mcp_server(server_name),
-        ))
+        )
     }
 
     /// Force-refresh Codex Apps tools and publish one new exact catalog revision.

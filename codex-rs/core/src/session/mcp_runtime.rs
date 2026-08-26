@@ -28,7 +28,6 @@ pub(super) struct McpDesiredState {
     pub(super) session_source: SessionSource,
     pub(super) environments: TurnEnvironmentSnapshot,
     pub(super) local_process_cwd: PathBuf,
-    pub(super) windows_sandbox_level: WindowsSandboxLevel,
 }
 
 impl Session {
@@ -39,9 +38,11 @@ impl Session {
         updates: &SessionSettingsUpdate,
     ) -> bool {
         current.cwd() != next.cwd()
-            || current.approval_policy.value() != next.approval_policy.value()
-            || current.approvals_reviewer != next.approvals_reviewer
+            || current.step_settings.approval_policy.value()
+                != next.step_settings.approval_policy.value()
+            || current.step_settings.approvals_reviewer != next.step_settings.approvals_reviewer
             || current.permission_profile() != next.permission_profile()
+            || current.windows_sandbox_level != next.windows_sandbox_level
             || updates.environments.as_ref().is_some_and(|environments| {
                 environments.environments != self.services.turn_environments.selections()
             })
@@ -97,7 +98,6 @@ impl Session {
             session_source: session_configuration.session_source.clone(),
             environments,
             local_process_cwd,
-            windows_sandbox_level: session_configuration.windows_sandbox_level,
         }
     }
 
@@ -124,7 +124,6 @@ impl Session {
             session_source: session_configuration.session_source.clone(),
             environments: resolved_environments.clone(),
             local_process_cwd,
-            windows_sandbox_level: session_configuration.windows_sandbox_level,
         };
         self.publish_mcp_runtime(
             &desired,
@@ -150,7 +149,7 @@ impl Session {
         mut projection: McpRuntimeProjection,
     ) -> BoxFuture<'a, McpRuntimeProjection> {
         Box::pin(async move {
-            if crate::guardian::is_guardian_reviewer_source(session_source) {
+            if crate::guardian::is_basic_session_source(session_source) {
                 return projection;
             }
 
@@ -332,8 +331,17 @@ impl Session {
             .environment_cwds
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
+        let mcp_servers = effective_mcp_servers(&config, auth.as_ref());
+        config.set_server_permission_profiles(
+            &mcp_servers,
+            desired.environments.turn_environments().map(|environment| {
+                (
+                    environment.selection.environment_id.clone(),
+                    environment.permission_profile_with_workspace_roots(),
+                )
+            }),
+        );
         let mcp_config = Arc::new(config);
-        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
             desired.local_process_cwd.clone(),

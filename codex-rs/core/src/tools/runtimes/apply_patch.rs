@@ -100,6 +100,7 @@ impl ApplyPatchRuntime {
             permissions: permissions.into(),
             cwd: Some(attempt.sandbox_cwd.clone()),
             workspace_roots: attempt.workspace_roots.to_vec(),
+            temporary_directories: None,
             windows_sandbox_level: executor_windows_sandbox_level(
                 attempt.windows_sandbox_level,
                 attempt.sandbox_cwd,

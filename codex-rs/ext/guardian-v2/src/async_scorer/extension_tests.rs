@@ -35,6 +35,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
@@ -64,6 +65,7 @@ use super::should_classify_tool;
 use crate::async_scorer::config::CLASSIFICATION_OUTPUT_INSTRUCTIONS;
 use crate::async_scorer::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
 use crate::async_scorer::config::DEFAULT_PARENT_COMPACTION_TOKENS;
+use crate::async_scorer::config::GuardianV2ReviewScope;
 use crate::async_scorer::sampler::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use crate::async_scorer::sampler::INITIAL_WEBSOCKET_CONNECTIONS;
 use crate::async_scorer::sampler::MODEL;
@@ -140,7 +142,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should initialize");
     let turn_store = ExtensionData::new("turn-1");
-    let tool_name = ToolName::plain("read_file");
+    let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
         arguments: r#"{"path":"README.md"}"#.to_owned(),
     };
@@ -173,7 +175,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 .fast_approval_decision(
                     &session_store,
                     thread_store,
-                    "review action",
+                    r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
                     /*extension_metrics*/ None,
                 )
                 .await,
@@ -294,31 +296,40 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
     };
 
     let tool_name = ToolName::plain("exec_command");
+    let standard_scope = GuardianV2ReviewScope::Standard {
+        sandboxed_exec_commands: false,
+    };
     assert!(!should_classify_tool(
-        &tool_name, &sandboxed, /*sandboxed_exec_commands*/ false
+        &tool_name,
+        &sandboxed,
+        standard_scope,
     ));
     assert!(!should_classify_tool(
         &tool_name,
         &additional_permissions,
-        /*sandboxed_exec_commands*/ false
+        standard_scope,
     ));
     assert!(should_classify_tool(
         &tool_name,
         &unsandboxed,
-        /*sandboxed_exec_commands*/ false
+        standard_scope,
     ));
     assert!(should_classify_tool(
-        &tool_name, &sandboxed, /*sandboxed_exec_commands*/ true
+        &tool_name,
+        &sandboxed,
+        GuardianV2ReviewScope::Standard {
+            sandboxed_exec_commands: true,
+        },
     ));
     assert!(should_classify_tool(
         &ToolName::plain("read_file"),
         &sandboxed,
-        /*sandboxed_exec_commands*/ false
+        standard_scope,
     ));
     assert!(should_classify_tool(
         &ToolName::namespaced("mcp", "exec_command"),
         &sandboxed,
-        /*sandboxed_exec_commands*/ false
+        standard_scope,
     ));
     skip_if_no_network!(Ok(()));
 
@@ -360,6 +371,123 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
             .load(Ordering::Acquire),
         latest_scored_tool_call
     );
+    Ok(())
+}
+
+#[test]
+fn computer_use_only_classification_recognizes_direct_and_code_mode_tools() {
+    let payload = ToolPayload::Function {
+        arguments: r#"{"code":"await browser.goto('https://example.com')"}"#.to_owned(),
+    };
+    for (tool_name, expected) in [
+        (ToolName::namespaced("mcp__node_repl__", "js"), true),
+        (ToolName::namespaced("mcp__cua_repl__", "js"), true),
+        (ToolName::plain("mcp__node_repl__js"), true),
+        (ToolName::plain("mcp__cua_repl__js"), true),
+        (ToolName::namespaced("mcp__ordinary__", "js"), false),
+        (ToolName::plain("read_file"), false),
+        (ToolName::plain("exec_command"), false),
+    ] {
+        assert_eq!(
+            should_classify_tool(&tool_name, &payload, GuardianV2ReviewScope::ComputerUseOnly),
+            expected,
+            "unexpected classification scope for {tool_name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let fixture = GuardianFailureFixture::new().await?;
+    let thread_store = fixture.test.codex.thread_extension_data();
+    let mut config = thread_store
+        .get::<crate::async_scorer::config::GuardianV2Config>()
+        .expect("Guardian v2 should have initialized")
+        .as_ref()
+        .clone();
+    config.review_scope = GuardianV2ReviewScope::ComputerUseOnly;
+    thread_store.insert(config);
+    thread_store.insert(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        sampled_at: None,
+    });
+    let progress = thread_store
+        .get::<GuardianV2ScoreProgress>()
+        .expect("Guardian v2 should track score progress per thread");
+    let latest_tool_call = progress.latest_tool_call.load(Ordering::Acquire);
+    let turn_store = ExtensionData::new("turn-1");
+    let ordinary_tool = ToolName::namespaced("mcp__ordinary__", "write_record");
+    let payload = ToolPayload::Function {
+        arguments: r#"{"record":"sensitive"}"#.to_owned(),
+    };
+    fixture.registry.tool_lifecycle_contributors()[0]
+        .on_tool_start(ToolStartInput {
+            session_store: &fixture.session_store,
+            thread_store,
+            turn_store: &turn_store,
+            turn_id: "turn-1",
+            call_id: "ordinary-call",
+            tool_name: &ordinary_tool,
+            payload: &payload,
+            conversation_history: Arc::new(TestConversationHistory(Vec::new())),
+            source: ToolCallSource::CodeMode {
+                cell_id: "cell-1".to_owned(),
+                runtime_tool_call_id: "nested-1".to_owned(),
+            },
+        })
+        .await;
+    assert_eq!(
+        progress.latest_tool_call.load(Ordering::Acquire),
+        latest_tool_call,
+        "unrelated code-mode calls must not age browser/CUA scores"
+    );
+
+    for (action, expected) in [
+        (
+            json!({"tool": "mcp_tool_call", "server": "node_repl", "tool_name": "js"}),
+            Some(ReviewDecision::Approved),
+        ),
+        (
+            json!({"tool": "mcp_tool_call", "server": "cua_repl", "tool_name": "js"}),
+            Some(ReviewDecision::Approved),
+        ),
+        (
+            json!({"tool": "mcp_tool_call", "server": "ordinary", "tool_name": "js"}),
+            None,
+        ),
+        (json!({"tool": "exec_command", "server": "node_repl"}), None),
+    ] {
+        let prompt = action.to_string();
+        assert_eq!(
+            fixture
+                .registry
+                .fast_approval_decision(
+                    &fixture.session_store,
+                    thread_store,
+                    &prompt,
+                    /*extension_metrics*/ None,
+                )
+                .await,
+            expected,
+            "unexpected fast approval for {action}"
+        );
+    }
+    assert_eq!(
+        fixture
+            .registry
+            .fast_approval_decision(
+                &fixture.session_store,
+                thread_store,
+                "not valid JSON",
+                /*extension_metrics*/ None,
+            )
+            .await,
+        None,
+        "malformed approval actions must not reuse a browser score"
+    );
+
     Ok(())
 }
 
@@ -547,7 +675,9 @@ async fn sample_configured_conversation_history(
 ) -> Result<(serde_json::Value, TestCodex, ExtensionRegistry<Config>)> {
     let thread_server = responses::start_mock_server().await;
     let guardian_policy = guardian_policy.map(str::to_owned);
-    let guardian_config = guardian_config.to_owned();
+    let guardian_config = format!(
+        "{guardian_config}\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n"
+    );
     let has_model_defaults = model_defaults.is_some();
     let builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
@@ -564,10 +694,8 @@ async fn sample_configured_conversation_history(
         .with_model("gpt-5.5")
         .with_config(move |config| config.guardian_policy_config = guardian_policy)
         .with_pre_build_hook(move |home| {
-            if !guardian_config.is_empty() {
-                std::fs::write(home.join("config.toml"), guardian_config)
-                    .expect("Guardian v2 configuration should be written");
-            }
+            std::fs::write(home.join("config.toml"), guardian_config)
+                .expect("Guardian v2 configuration should be written");
         });
     let mut builder = if let Some(model_defaults) = model_defaults {
         builder.with_model_info_override("gpt-5.5", move |model| {
@@ -1259,7 +1387,7 @@ max_recent_non_user_entries = 8
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contributor_includes_configured_transcript_images() -> Result<()> {
+async fn contributor_includes_transcript_images_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let history = vec![
@@ -1298,9 +1426,6 @@ async fn contributor_includes_configured_transcript_images() -> Result<()> {
     let configuration = r#"
 [features.guardianv2]
 enabled = true
-
-[features.guardianv2.transcript]
-include_images = true
 "#;
     let (request, _test, _registry) = sample_configured_conversation_history(
         history,
@@ -1741,7 +1866,7 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
             .fast_approval_decision(
                 &session_store,
                 thread_store,
-                "review action",
+                r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
                 /*extension_metrics*/ None,
             )
             .await,
@@ -1749,7 +1874,7 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
     );
 
     let turn_store = ExtensionData::new("turn-1");
-    let tool_name = ToolName::plain("read_file");
+    let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
         arguments: json!({ "path": "protected.md" }).to_string(),
     };
@@ -1975,6 +2100,74 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_preserves_final_assistant_messages_after_tool_eviction() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let mut history = vec![
+        responses::user_message_item("Find a flight to New York."),
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_owned(),
+            content: vec![ContentItem::OutputText {
+                text: "I found a $450 flight. Should I book it?".to_owned(),
+            }],
+            phase: Some(MessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        responses::user_message_item("Yes."),
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_owned(),
+            content: vec![ContentItem::OutputText {
+                text: "Searching airline websites.".to_owned(),
+            }],
+            phase: Some(MessagePhase::Commentary),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    history.extend((0..6).map(|index| ResponseItem::FunctionCall {
+        id: None,
+        name: "exec_command".to_owned(),
+        namespace: None,
+        arguments: format!("booking step {index}"),
+        encrypted_function_args: None,
+        call_id: format!("call-{index}"),
+        internal_chat_message_metadata_passthrough: None,
+    }));
+    let configuration = "[features.guardianv2]\nenabled = true\n\n[features.guardianv2.transcript]\nmax_recent_non_user_entries = 4\n";
+
+    let (request, _test, _registry) = sample_configured_conversation_history(
+        history,
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        configuration,
+        /*model_defaults*/ None,
+    )
+    .await?;
+    let entries = request["input"][2]["content"]
+        .as_array()
+        .expect("Luna request should contain separate transcript text items")
+        .iter()
+        .filter_map(|entry| entry["text"].as_str())
+        .filter(|entry| entry.starts_with('['))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        entries,
+        vec![
+            "[1] user: Find a flight to New York.\n",
+            "[2] assistant: I found a $450 flight. Should I book it?\n",
+            "[3] user: Yes.\n",
+            "[8] tool exec_command call: booking step 3\n",
+            "[9] tool exec_command call: booking step 4\n",
+            "[10] tool exec_command call: booking step 5\n",
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contributor_sends_compacted_conversation_history_to_luna() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2066,7 +2259,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),
-                "[features.guardianv2]\nenabled = true\nmax_parent_compaction_tokens = 256\n",
+                "[features.guardianv2]\nenabled = true\nmax_parent_compaction_tokens = 256\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n",
             )
             .expect("Guardian v2 parent compaction configuration should be written");
         })

@@ -6,6 +6,8 @@
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app_event::RecapTrigger;
+use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
@@ -615,29 +617,20 @@ impl App {
                 self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
             AppEvent::StartCommitAnimation => {
-                if self
-                    .commit_anim_running
-                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let tx = self.app_event_tx.clone();
-                    let running = self.commit_anim_running.clone();
-                    thread::spawn(move || {
-                        while running.load(Ordering::Relaxed) {
-                            thread::sleep(COMMIT_ANIMATION_TICK);
-                            tx.send(AppEvent::CommitTick);
-                        }
-                    });
-                }
+                self.commit_animation.get_or_insert_with(|| {
+                    let mut interval = tokio::time::interval_at(
+                        tokio::time::Instant::now() + COMMIT_ANIMATION_TICK,
+                        COMMIT_ANIMATION_TICK,
+                    );
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    interval
+                });
             }
             AppEvent::StopCommitAnimation => {
-                self.commit_anim_running.store(false, Ordering::Release);
-            }
-            AppEvent::CommitTick => {
-                self.chat_widget.on_commit_tick();
+                self.commit_animation = None;
             }
             AppEvent::Exit(mode) => {
-                if mode == ExitMode::ShutdownFirst {
+                if matches!(mode, ExitMode::ShutdownFirst | ExitMode::ShutdownAfterInterrupt) {
                     self.show_shutdown_feedback(tui)?;
                 }
                 return Ok(self.handle_exit_mode(app_server, mode).await);
@@ -688,7 +681,7 @@ impl App {
                     match app_server.turn_interrupt(thread_id, turn_id).await {
                         Ok(()) => {
                             self.app_event_tx
-                                .send(AppEvent::Exit(ExitMode::ShutdownFirst));
+                                .send(AppEvent::Exit(ExitMode::ShutdownAfterInterrupt));
                         }
                         Err(error) => {
                             self.chat_widget
@@ -1610,6 +1603,9 @@ impl App {
                     failed_scan,
                 );
             }
+            AppEvent::StartupWorldWritableScanCompleted => {
+                self.windows_sandbox.startup_world_writable_scan_pending = false;
+            }
             AppEvent::OpenFeedbackNote {
                 category,
                 include_logs,
@@ -2297,6 +2293,7 @@ impl App {
                             logs_base_dir,
                             permission_profile,
                             tx,
+                            /*startup_scan*/ false,
                         );
                     }
                 }
@@ -2459,13 +2456,77 @@ impl App {
                     .await;
             }
             AppEvent::RenameAgentsOverviewThread { thread_id, name } => {
-                if let Err(error) = app_server.thread_set_name(thread_id, name.clone()).await {
-                    if let Ok(mut state) = self.agents_overview.view_state.lock() {
-                        state.input = name;
-                        state.renaming = true;
+                match app_server.thread_set_name(thread_id, name.clone()).await {
+                    Ok(()) => self.chat_widget.expect_manual_thread_name(thread_id, name),
+                    Err(error) => {
+                        if let Ok(mut state) = self.agents_overview.view_state.lock() {
+                            state.input = name;
+                            state.renaming = true;
+                        }
+                        self.chat_widget
+                            .add_error_message(format!("Failed to rename task: {error}"));
                     }
-                    self.chat_widget
-                        .add_error_message(format!("Failed to rename task: {error}"));
+                }
+            }
+            AppEvent::SuggestThreadName {
+                thread_id,
+                request_id,
+            } => {
+                self.suggest_thread_name(app_server, thread_id, request_id)
+                    .await;
+            }
+            AppEvent::ThreadTitleStarted {
+                thread_id,
+                destination,
+                prompt,
+                effort,
+                result,
+            } => {
+                self.on_thread_title_started(
+                    app_server,
+                    thread_id,
+                    destination,
+                    prompt,
+                    effort,
+                    result,
+                );
+            }
+            AppEvent::GeneratedThreadTitle {
+                thread_id,
+                temporary_thread_id,
+                destination,
+                result,
+            } => {
+                self.temporary_structured_requests
+                    .remove(&temporary_thread_id);
+
+                match destination {
+                    ThreadTitleDestination::Automatic { expected_title } => {
+                        if let Ok(response) = result
+                            && let Some(title) = super::thread_title::parse_thread_title(&response)
+                            && self.chat_widget.thread_id() == Some(thread_id)
+                            && self.chat_widget.thread_name().as_deref()
+                                == Some(expected_title.as_str())
+                        {
+                            match app_server.thread_set_name(thread_id, title.clone()).await {
+                                Ok(()) => self.chat_widget.expect_automatic_thread_name(title),
+                                Err(error) => {
+                                    tracing::debug!(%error, "failed to apply generated thread title");
+                                }
+                            }
+                        }
+                    }
+                    ThreadTitleDestination::RenameSuggestion { request_id } => {
+                        let suggestion = result
+                            .ok()
+                            .and_then(|response| super::thread_title::parse_thread_title(&response));
+
+                        self.chat_widget.apply_thread_name_suggestion(
+                            thread_id,
+                            request_id,
+                            suggestion.as_deref(),
+                        );
+                    }
                 }
             }
             AppEvent::StopAgentsOverviewThread { thread_id } => {
@@ -2837,6 +2898,71 @@ impl App {
             AppEvent::KeymapCleared { context, action } => {
                 self.apply_keymap_clear(context, action).await;
             }
+            AppEvent::GenerateRecap { thread_id } => {
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    if self.chat_widget.is_user_turn_pending_or_running() {
+                        self.chat_widget.add_error_message(
+                            "Wait for the current task to finish before running /recap.".to_string(),
+                        );
+                    } else {
+                        self.request_recap(app_server, thread_id, RecapTrigger::Manual);
+                    }
+                }
+            }
+            AppEvent::CheckRecap { thread_id } => {
+                if self.current_displayed_thread_id() == Some(thread_id)
+                    && !self.chat_widget.is_user_turn_pending_or_running()
+                    && self.recap.should_generate(std::time::Instant::now())
+                {
+                    self.request_recap(app_server, thread_id, RecapTrigger::Automatic);
+                }
+            }
+            AppEvent::RecapStarted {
+                thread_id,
+                request_id,
+                trigger,
+                completed_turn_count,
+                turn_revision,
+                history,
+                result,
+            } => {
+                self.handle_recap_started(
+                    app_server,
+                    recap::RecapRequest {
+                        thread_id,
+                        request_id,
+                        trigger,
+                        completed_turn_count,
+                        turn_revision,
+                    },
+                    history,
+                    result,
+                );
+            }
+            AppEvent::RecapGenerated {
+                thread_id,
+                request_id,
+                trigger,
+                temporary_thread_id,
+                completed_turn_count,
+                turn_revision,
+                result,
+            } => {
+                self.temporary_structured_requests.remove(&temporary_thread_id);
+                if let Some(cell) = self.handle_generated_recap(
+                    recap::RecapRequest {
+                        thread_id,
+                        request_id,
+                        trigger,
+                        completed_turn_count,
+                        turn_revision,
+                    },
+                    temporary_thread_id,
+                    result,
+                ) {
+                    self.insert_history_cell(tui, Box::new(cell));
+                }
+            }
         }
         Ok(AppRunControl::Continue)
     }
@@ -2993,7 +3119,7 @@ impl App {
             }
         }
         match mode {
-            ExitMode::ShutdownFirst => {
+            ExitMode::ShutdownFirst | ExitMode::ShutdownAfterInterrupt => {
                 // Mark the thread we are explicitly shutting down for exit so
                 // its shutdown completion does not trigger agent failover.
                 self.pending_shutdown_exit_thread_id =
@@ -3015,7 +3141,11 @@ impl App {
                     }
                 }
                 self.pending_shutdown_exit_thread_id = None;
-                AppRunControl::Exit(ExitReason::UserRequested)
+                AppRunControl::Exit(if mode == ExitMode::ShutdownAfterInterrupt {
+                    ExitReason::TurnInterrupted
+                } else {
+                    ExitReason::UserRequested
+                })
             }
             ExitMode::Immediate => {
                 self.pending_shutdown_exit_thread_id = None;
@@ -3042,7 +3172,7 @@ impl App {
         }
 
         match app_server.thread_archive(thread_id).await {
-            Ok(()) => AppRunControl::Exit(ExitReason::UserRequested),
+            Ok(()) => AppRunControl::Exit(ExitReason::Archived(thread_id)),
             Err(err) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to archive current thread: {err}"));
@@ -3069,7 +3199,7 @@ impl App {
         }
 
         match app_server.thread_delete(thread_id).await {
-            Ok(()) => AppRunControl::Exit(ExitReason::UserRequested),
+            Ok(()) => AppRunControl::Exit(ExitReason::ThreadRemoved),
             Err(err) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to delete current thread: {err}"));

@@ -7,7 +7,6 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use codex_core::GuardianAuthorizationVersion;
 use codex_core::GuardianRootMessage;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
@@ -34,6 +33,8 @@ use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::ThreadId;
+use codex_protocol::mcp::is_node_repl_backed_server;
+use codex_protocol::mcp::is_node_repl_backed_tool;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TruncationPolicy;
@@ -41,6 +42,7 @@ use codex_protocol::security_risk::SecurityRiskScore;
 use serde_json::json;
 
 use super::config::GuardianV2Config;
+use super::config::GuardianV2ReviewScope;
 use super::review_evidence::render_review_evidence;
 use super::sampler::LunaSampler;
 use super::sampler::LunaSamplerConfig;
@@ -62,8 +64,14 @@ struct RenderedAction {
 fn should_classify_tool(
     tool_name: &ToolName,
     payload: &ToolPayload,
-    sandboxed_exec_commands: bool,
+    review_scope: GuardianV2ReviewScope,
 ) -> bool {
+    let GuardianV2ReviewScope::Standard {
+        sandboxed_exec_commands,
+    } = review_scope
+    else {
+        return is_node_repl_backed_tool(&tool_name.name, tool_name.namespace.as_deref());
+    };
     if sandboxed_exec_commands
         || !tool_name.is_default_namespace()
         || tool_name.name != "exec_command"
@@ -367,12 +375,23 @@ impl ApprovalReviewContributor for GuardianV2Extension {
         &'a self,
         _session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
-        _prompt: &'a str,
+        prompt: &'a str,
         extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
     ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
         Box::pin(async move {
             thread_store.get::<GuardianV2Enabled>()?;
             let guardian_config = thread_store.get::<GuardianV2Config>()?;
+            if guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly {
+                let action = serde_json::from_str::<serde_json::Value>(prompt).ok()?;
+                if action.get("tool").and_then(serde_json::Value::as_str) != Some("mcp_tool_call")
+                    || !action
+                        .get("server")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_node_repl_backed_server)
+                {
+                    return None;
+                }
+            }
             let score_progress = thread_store.get::<GuardianV2ScoreProgress>()?;
             let latest_scored_tool_call = score_progress
                 .latest_scored_tool_call
@@ -450,14 +469,12 @@ impl GuardianV2Extension {
         let Some(score_progress) = input.thread_store.get::<GuardianV2ScoreProgress>() else {
             return;
         };
-        if !should_classify_tool(
-            input.tool_name,
-            input.payload,
-            guardian_config.sandboxed_exec_commands,
-        ) {
-            score_progress
-                .latest_tool_call
-                .fetch_add(/*val*/ 1, Ordering::Relaxed);
+        if !should_classify_tool(input.tool_name, input.payload, guardian_config.review_scope) {
+            if guardian_config.review_scope != GuardianV2ReviewScope::ComputerUseOnly {
+                score_progress
+                    .latest_tool_call
+                    .fetch_add(/*val*/ 1, Ordering::Relaxed);
+            }
             return;
         }
         let metrics = score_progress.metrics.clone();
@@ -597,10 +614,10 @@ impl GuardianV2Extension {
             .and_then(|model| model.auto_review_model_override.clone());
         let conversation_history = Arc::clone(&input.conversation_history);
         // Snapshot before spawning so a delayed sample cannot see later reviews.
-        let sync_reviews = input
+        let guardian_evidence = input
             .thread_store
-            .get_or_init(GuardianReviewEvidence::default)
-            .snapshot();
+            .get_or_init(GuardianReviewEvidence::default);
+        let sync_reviews = guardian_evidence.snapshot();
         let node_repl_images = if guardian_config.transcript.include_images {
             input
                 .thread_store
@@ -619,7 +636,9 @@ impl GuardianV2Extension {
                 .map(|snapshot| snapshot.authorization_version);
             let root_conversation = root_snapshot.map(|snapshot| snapshot.messages);
             let authorization_version =
-                GuardianAuthorizationVersion::from_history(conversation_history.as_ref());
+                guardian_evidence.authorization_version(conversation_history.as_ref());
+            let trusted_user_inputs =
+                guardian_evidence.user_input_fragments(conversation_history.as_ref());
             let transcript = guardian_config
                 .transcript
                 .build(conversation_history.items());
@@ -672,6 +691,11 @@ impl GuardianV2Extension {
                         .map(GuardianRootMessage::render),
                 );
                 classification_input.push(">>> ROOT CONVERSATION END\n".to_owned());
+            }
+            if !trusted_user_inputs.is_empty() {
+                classification_input.push(">>> TRUSTED USER ANSWERS START\n".to_owned());
+                classification_input.extend(trusted_user_inputs);
+                classification_input.push(">>> TRUSTED USER ANSWERS END\n".to_owned());
             }
             classification_input.push(">>> TRANSCRIPT START\n".to_owned());
             classification_input.extend(transcript.entries);

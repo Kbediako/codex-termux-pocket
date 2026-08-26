@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
 use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use globset::GlobBuilder;
 use globset::GlobMatcher;
@@ -264,6 +265,17 @@ pub struct RawFileSystemSandboxPolicy {
     pub glob_scan_max_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<RawFileSystemSandboxEntry>,
+}
+
+/// Executor-owned paths needed to interpret filesystem sandbox policy entries.
+///
+/// Orchestrator callers keep these as `PathUri` values until execution crosses
+/// into the executor that owns them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileSystemSandboxPolicyContext<'a> {
+    pub cwd: &'a PathUri,
+    pub workspace_roots: &'a [PathUri],
+    pub temporary_directories: Option<&'a [PathUri]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1019,6 +1031,65 @@ impl FileSystemSandboxPolicy {
         self
     }
 
+    /// Materializes workspace-root entries without projecting executor paths onto the host.
+    pub fn materialize_project_roots_with_path_uris(mut self, workspace_roots: &[PathUri]) -> Self {
+        if let Ok(native_workspace_roots) = workspace_roots
+            .iter()
+            .map(PathUri::to_abs_path)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            return self.materialize_project_roots_with_workspace_roots(&native_workspace_roots);
+        }
+
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in self.entries {
+            let (subpath, is_glob) = match &entry.path {
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::ProjectRoots { subpath },
+                } => (subpath.as_deref(), false),
+                FileSystemPath::GlobPattern { pattern }
+                    if pattern.starts_with(PROJECT_ROOTS_GLOB_PATTERN_PREFIX) =>
+                {
+                    (
+                        Some(&pattern[PROJECT_ROOTS_GLOB_PATTERN_PREFIX.len()..]),
+                        true,
+                    )
+                }
+                _ => {
+                    entries.push(entry);
+                    continue;
+                }
+            };
+            entries.extend(workspace_roots.iter().filter_map(|root| {
+                let path = subpath.map_or_else(
+                    || Some(root.clone()),
+                    |subpath| resolve_scoped_workspace_path(root, subpath),
+                );
+                let (path, access) = match path {
+                    Some(path) if is_glob => (
+                        FileSystemPath::GlobPattern {
+                            pattern: path.inferred_native_path_string(),
+                        },
+                        entry.access,
+                    ),
+                    Some(path) => (FileSystemPath::Path { path }, entry.access),
+                    None if !entry.access.can_write() => (
+                        FileSystemPath::Path { path: root.clone() },
+                        FileSystemAccessMode::Deny,
+                    ),
+                    None => return None,
+                };
+                Some(FileSystemSandboxEntry {
+                    path,
+                    access,
+                    missing_path_behavior: entry.missing_path_behavior,
+                })
+            }));
+        }
+        self.entries = entries;
+        self
+    }
+
     /// Preserves symbolic `:workspace_roots` entries while also adding concrete
     /// entries for each provided workspace root.
     pub fn with_materialized_project_roots_for_workspace_roots(
@@ -1587,6 +1658,28 @@ fn resolve_candidate_path(path: &Path, cwd: &Path) -> Option<AbsolutePathBuf> {
     } else {
         Some(AbsolutePathBuf::from_absolute_path(cwd).ok()?.join(path))
     }
+}
+
+/// Resolves a workspace-relative path using the root's own path convention.
+///
+/// Rejects absolute paths, traversal, Windows drive changes, and any result
+/// outside the root so foreign-platform permission rules cannot escape scope.
+fn resolve_scoped_workspace_path(root: &PathUri, subpath: &str) -> Option<PathUri> {
+    let convention = root.infer_path_convention()?;
+    if subpath.starts_with('/')
+        || convention == PathConvention::Windows && subpath.starts_with('\\')
+        || convention
+            .path_segments(subpath)
+            .any(|segment| segment == "." || segment == "..")
+        || convention == PathConvention::Windows
+            && convention
+                .path_segments(subpath)
+                .any(|segment| segment.contains(':'))
+    {
+        return None;
+    }
+    let path = root.join(subpath).ok()?;
+    path.starts_with(root).then_some(path)
 }
 
 /// Returns true when two config paths refer to the same exact target before

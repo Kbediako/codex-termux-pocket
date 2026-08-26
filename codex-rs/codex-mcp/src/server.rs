@@ -93,6 +93,7 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 /// those belong to a publication and can change without reconnecting.
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
+    auth: McpServerAuth,
     transport: McpServerTransportConfig,
     environment_id: String,
     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
@@ -206,6 +207,7 @@ impl McpServerConnectionIdentity {
             .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
 
         Self {
+            auth: config.auth.clone(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
             oauth_store: stored_oauth_url
@@ -239,7 +241,8 @@ impl McpServerConnectionIdentity {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
-        self.transport == other.transport
+        self.auth == other.auth
+            && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.oauth_store == other.oauth_store
             && same_resolved_environment(&self.resolved_environment, &other.resolved_environment)

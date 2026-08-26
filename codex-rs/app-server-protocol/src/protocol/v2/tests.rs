@@ -1,6 +1,7 @@
 use super::*;
 use crate::ServerNotification;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
+use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmentAction;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -70,6 +71,30 @@ fn absolute_path(path: &str) -> AbsolutePathBuf {
 
 fn test_absolute_path() -> AbsolutePathBuf {
     absolute_path("readable")
+}
+
+#[test]
+fn managed_hooks_requirements_default_interrupt_to_empty() {
+    let value = json!({
+        "managedDir": null,
+        "windowsManagedDir": null,
+        "PreToolUse": [],
+        "PermissionRequest": [],
+        "PostToolUse": [],
+        "PreCompact": [],
+        "PostCompact": [],
+        "SessionStart": [],
+        "SessionEnd": [],
+        "UserPromptSubmit": [],
+        "SubagentStart": [],
+        "SubagentStop": [],
+        "Stop": []
+    });
+
+    let parsed: ManagedHooksRequirements =
+        serde_json::from_value(value).expect("deserialize managed hooks requirements");
+
+    assert_eq!(parsed.interrupt, Vec::new());
 }
 
 #[test]
@@ -2811,6 +2836,46 @@ fn guardian_approval_review_action_round_trips_command_shape() {
 }
 
 #[test]
+fn guardian_stdin_review_action_round_trips_native_and_foreign_paths() {
+    for (cwd_uri, cwd_native) in [
+        ("file:///home/alice/repo", "/home/alice/repo"),
+        (
+            "file:///C:/Users/Alice%20Smith/repo",
+            r"C:\Users\Alice Smith\repo",
+        ),
+        ("file://server/share/repo", r"\\server\share\repo"),
+    ] {
+        let core_action = CoreGuardianAssessmentAction::WriteStdin {
+            approval_id: "stdin-approval".into(),
+            process_id: "42".into(),
+            stdin: "yes\n".into(),
+            cwd: PathUri::parse(cwd_uri).expect("valid cwd URI"),
+        };
+        let action = GuardianApprovalReviewAction::from(core_action.clone());
+        let value = json!({
+            "type": "writeStdin",
+            "approvalId": "stdin-approval",
+            "processId": "42",
+            "stdin": "yes\n",
+            "cwd": cwd_native,
+        });
+
+        assert_eq!(
+            serde_json::to_value(&action).expect("serialize stdin review action"),
+            value,
+        );
+        let deserialized: GuardianApprovalReviewAction =
+            serde_json::from_value(value).expect("deserialize stdin review action");
+        assert_eq!(deserialized, action);
+        assert_eq!(
+            CoreGuardianAssessmentAction::try_from(deserialized)
+                .expect("convert stdin review action"),
+            core_action,
+        );
+    }
+}
+
+#[test]
 fn network_requirements_deserializes_legacy_fields() {
     let requirements: NetworkRequirements = serde_json::from_value(json!({
         "allowedDomains": ["api.openai.com"],
@@ -4649,6 +4714,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         thread_id: "thread_123".to_string(),
         client_user_message_id: None,
         input: vec![],
+        turn_trigger: None,
         responsesapi_client_metadata: None,
         additional_context: None,
         environments: None,
@@ -4660,16 +4726,47 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         permissions: None,
         model: None,
         service_tier: None,
+        service_tier_for_turn: None,
         effort: None,
         summary: None,
         output_schema: None,
         collaboration_mode: None,
         multi_agent_mode: None,
         personality: None,
+        cyber_access_program: None,
     };
     let serialized_without_override =
         serde_json::to_value(&without_override).expect("params should serialize");
     assert_eq!(serialized_without_override.get("serviceTier"), None);
+}
+
+#[test]
+fn turn_start_cyber_access_program_uses_separate_wire_formats() {
+    for (app_server_value, core_value) in [
+        ("standard", "standard"),
+        ("daybreakBlue", "daybreak_blue"),
+        ("daybreakRed", "daybreak_red"),
+    ] {
+        let params: TurnStartParams = serde_json::from_value(json!({
+            "threadId": "thread_123",
+            "input": [],
+            "cyberAccessProgram": app_server_value,
+        }))
+        .expect("params should deserialize");
+        let core_program: codex_protocol::turn_input::CyberAccessProgram = params
+            .cyber_access_program
+            .expect("explicit program")
+            .into();
+
+        assert_eq!(
+            serde_json::to_value(params).expect("params should serialize")["cyberAccessProgram"],
+            app_server_value,
+        );
+        assert_eq!(
+            serde_json::to_value(core_program).expect("core program should serialize"),
+            json!(core_value),
+        );
+    }
 }
 
 #[test]

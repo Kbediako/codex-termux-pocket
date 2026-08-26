@@ -50,6 +50,13 @@ pub struct JsonSchema {
     pub encrypted: Option<bool>,
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<JsonValue>>,
+    // Preserve bounds in reserved tool declarations, including exact integer values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<serde_json::Number>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<serde_json::Number>,
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,7 +528,10 @@ fn sanitize_json_schema(value: &mut JsonValue) {
                     schema_types.push(JsonSchemaPrimitiveType::Object);
                 } else if map.contains_key("items") || map.contains_key("prefixItems") {
                     schema_types.push(JsonSchemaPrimitiveType::Array);
-                } else if map.contains_key("enum") || map.contains_key("format") {
+                } else if map.contains_key("enum")
+                    || map.contains_key("format")
+                    || map.contains_key("maxLength")
+                {
                     schema_types.push(JsonSchemaPrimitiveType::String);
                 } else if map.contains_key("minimum")
                     || map.contains_key("maximum")

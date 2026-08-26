@@ -6,6 +6,7 @@ use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewRequest;
 use crate::elicitation::ElicitationReviewer;
 use crate::elicitation::elicitation_is_rejected_by_policy;
+use crate::mcp::tests::test_elicitation_config;
 use crate::rmcp_client::AsyncManagedClient;
 use crate::rmcp_client::CODEX_APPS_RECONNECT_INITIAL_BACKOFF;
 use crate::rmcp_client::CodexAppsStartupReconnect;
@@ -22,6 +23,7 @@ use crate::tools::ToolFilter;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
 use crate::tools::normalize_tools_for_model_with_prefix;
+use assert_matches::assert_matches;
 use codex_config::AppToolApproval;
 use codex_config::Constrained;
 use codex_config::McpServerAuth;
@@ -42,6 +44,7 @@ use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::McpStartupFailureReason;
 use codex_rmcp_client::ElicitationResponse;
@@ -103,8 +106,11 @@ impl McpConnectionSet {
             prefix_mcp_tool_names,
             non_prefixed_mcp_tool_servers: Vec::new(),
             elicitation_requests: ElicitationRequestManager::new(
-                approval_policy.value(),
-                permission_profile.get().clone(),
+                test_elicitation_config(
+                    "server",
+                    approval_policy.value(),
+                    permission_profile.get().clone(),
+                ),
                 /*reviewer*/ None,
                 /*lifecycle*/ None,
                 ElicitationRequestRouter::default(),
@@ -121,6 +127,7 @@ impl McpConnectionSet {
                 connection: Arc::new(McpServerConnection {
                     identity: None,
                     client,
+                    startup_timeout: DEFAULT_STARTUP_TIMEOUT,
                     startup_trigger: None,
                     _diagnostics_guard: LIVE_CONNECTIONS.track(),
                 }),
@@ -203,9 +210,15 @@ fn store_current_tools(cache_context: &ConnectorRuntimeContext<ToolInfo>, tools:
 }
 
 async fn capture_binding(manager: &Arc<McpConnectionSet>) -> McpBinding {
+    let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+    config.server_permission_profiles = manager
+        .servers
+        .keys()
+        .map(|name| (name.clone(), PermissionProfile::default()))
+        .collect();
     manager
         .capture_binding_with_metadata(
-            Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
+            Arc::new(config),
             /*plugins_available*/ false,
             /*required_servers*/ &[],
         )
@@ -785,8 +798,7 @@ fn elicitation_granular_policy_respects_never_and_config() {
 #[tokio::test]
 async fn disabled_permissions_auto_accept_elicitation_with_empty_form_schema() {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
+        test_elicitation_config("server", AskForApproval::Never, PermissionProfile::Disabled),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
@@ -820,8 +832,7 @@ async fn disabled_permissions_auto_accept_elicitation_with_empty_form_schema() {
 #[tokio::test]
 async fn disabled_permissions_do_not_auto_accept_elicitation_with_requested_fields() {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
+        test_elicitation_config("server", AskForApproval::Never, PermissionProfile::Disabled),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
@@ -912,8 +923,7 @@ async fn assert_elicitation_declined_with_reviewer_calls(
 ) {
     let reviewer = Arc::new(DecliningElicitationReviewer::default());
     let manager = ElicitationRequestManager::new(
-        approval_policy,
-        PermissionProfile::Disabled,
+        test_elicitation_config(server_name, approval_policy, PermissionProfile::Disabled),
         Some(reviewer.clone()),
         /*lifecycle*/ None,
         full_access_form_input_enabled_router(),
@@ -953,8 +963,7 @@ async fn assert_requested_user_input_is_declined(
     router: ElicitationRequestRouter,
 ) {
     let manager = ElicitationRequestManager::new(
-        approval_policy,
-        permission_profile,
+        test_elicitation_config("server", approval_policy, permission_profile),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         router,
@@ -1041,8 +1050,7 @@ async fn assert_disabled_permissions_surface_requested_user_input(
     let router = full_access_form_input_enabled_router();
     let reviewer = Arc::new(DecliningElicitationReviewer::default());
     let manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
+        test_elicitation_config("server", AskForApproval::Never, PermissionProfile::Disabled),
         Some(reviewer.clone()),
         /*lifecycle*/ None,
         router.clone(),
@@ -1188,8 +1196,7 @@ async fn on_request_approval_forms_remain_with_the_reviewer() {
 #[tokio::test]
 async fn disabled_permissions_decline_user_input_without_an_event_channel() {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
+        test_elicitation_config("server", AskForApproval::Never, PermissionProfile::Disabled),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         full_access_form_input_enabled_router(),
@@ -1220,8 +1227,11 @@ async fn disabled_permissions_decline_user_input_without_an_event_channel() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_authority_updates_never_auto_approve_mixed_policy() {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::default(),
+        test_elicitation_config(
+            "server",
+            AskForApproval::Never,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
@@ -1230,14 +1240,20 @@ async fn concurrent_authority_updates_never_auto_approve_mixed_policy() {
     let updater = tokio::spawn(async move {
         for _ in 0..1_000 {
             assert!(updating_manager.update(
-                AskForApproval::OnRequest,
-                PermissionProfile::Disabled,
+                test_elicitation_config(
+                    "server",
+                    AskForApproval::OnRequest,
+                    PermissionProfile::Disabled
+                ),
                 /*reviewer*/ None,
                 /*lifecycle*/ None,
             ));
             assert!(updating_manager.update(
-                AskForApproval::Never,
-                PermissionProfile::default(),
+                test_elicitation_config(
+                    "server",
+                    AskForApproval::Never,
+                    PermissionProfile::default()
+                ),
                 /*reviewer*/ None,
                 /*lifecycle*/ None,
             ));
@@ -1290,15 +1306,21 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
         }
     });
     let manager_a = ElicitationRequestManager::new(
-        AskForApproval::OnRequest,
-        PermissionProfile::default(),
+        test_elicitation_config(
+            "server",
+            AskForApproval::OnRequest,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         Some(lifecycle.clone()),
         router.clone(),
     );
     let manager_b = ElicitationRequestManager::new(
-        AskForApproval::OnRequest,
-        PermissionProfile::default(),
+        test_elicitation_config(
+            "server",
+            AskForApproval::OnRequest,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         Some(lifecycle),
         router.clone(),
@@ -1390,8 +1412,11 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
 async fn cancelled_elicitation_is_removed_without_affecting_other_pending_requests() {
     let router = ElicitationRequestRouter::default();
     let manager = ElicitationRequestManager::new(
-        AskForApproval::OnRequest,
-        PermissionProfile::default(),
+        test_elicitation_config(
+            "server",
+            AskForApproval::OnRequest,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         router.clone(),
@@ -4261,6 +4286,9 @@ async fn manager_with_reusable_ready_server(
             connection: Arc::new(McpServerConnection {
                 identity: Some(reusable_server_identity(config, runtime_context)),
                 client: create_ready_async_managed_client(tools).await,
+                startup_timeout: config
+                    .startup_timeout_sec
+                    .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
                 startup_trigger: None,
                 _diagnostics_guard: LIVE_CONNECTIONS.track(),
             }),
@@ -4395,6 +4423,9 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
                     startup_reconnect: None,
                     cancel_token: CancellationToken::new(),
                 },
+                startup_timeout: config
+                    .startup_timeout_sec
+                    .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
                 startup_trigger: None,
                 _diagnostics_guard: LIVE_CONNECTIONS.track(),
             }),
@@ -4491,6 +4522,7 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() -> 
     .expect("test server should have one connection owner");
     connection.client = pending_client;
     config.enabled_tools = Some(vec!["search".to_string()]);
+    config.startup_timeout_sec = Some(DEFAULT_STARTUP_TIMEOUT);
 
     let reconciled = tokio::time::timeout(
         Duration::from_millis(100),
@@ -4657,6 +4689,68 @@ async fn reconciliation_reuses_legacy_stdio_server_with_existing_protocol_marker
 }
 
 #[tokio::test]
+async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::Result<()> {
+    let environment_manager = Arc::new(environment_manager_without_environments());
+    environment_manager.upsert_environment(
+        "customer-executor".to_string(),
+        "ws://127.0.0.1:1".to_string(),
+        /*connect_timeout*/ None,
+    )?;
+    let runtime_context = McpRuntimeContext::new(environment_manager, PathBuf::from("/tmp"));
+    let codex_home = tempdir()?;
+    let mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let [config, refreshed_config] = [McpServerAuth::OAuth, McpServerAuth::ChatGpt].map(|auth| {
+        let mut config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
+        config.environment_id = "customer-executor".to_string();
+        config.auth = auth;
+        crate::effective_mcp_servers_from_configured(
+            HashMap::from([("docs".to_string(), config)]),
+            &mcp_config,
+            /*auth*/ None,
+        )
+        .remove("docs")
+        .expect("configured server should survive auth projection")
+        .config()
+        .clone()
+    });
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    let reconciled = reconcile_reusable_server(&previous, refreshed_config, runtime_context).await;
+    let outcome = reconciled
+        .servers
+        .get("docs")
+        .expect("refreshed server should exist")
+        .connection
+        .client()
+        .await;
+    assert_matches!(
+        outcome.err().expect("changed auth mode must be validated"),
+        StartupOutcomeError::Failed {
+            error,
+            is_authentication_required,
+        } => {
+            assert_eq!(
+                (error.as_str(), is_authentication_required),
+                (
+                    "executor-owned MCP server `docs` cannot use hosted ChatGPT authentication; configure executor-owned credentials instead",
+                    false,
+                )
+            );
+        }
+    );
+    assert_eq!(
+        model_tool_names(&reconciled.list_all_tools().await),
+        HashSet::new()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
     let runtime_context = reusable_server_runtime_context();
     let config = reusable_server_config("http://127.0.0.1:1");
@@ -4778,8 +4872,14 @@ async fn reconciliation_updates_elicitation_policy_without_restarting_ready_serv
             .authority
             .lock()
             .expect("elicitation authority lock");
-        authority.approval_policy = AskForApproval::Never;
-        authority.permission_profile = PermissionProfile::Disabled;
+        let config = Arc::make_mut(
+            &mut authority
+                .as_mut()
+                .expect("test manager should have permission authority")
+                .config,
+        );
+        config.approval_policy = Constrained::allow_any(AskForApproval::Never);
+        config.permission_profile = PermissionProfile::Disabled;
     }
 
     let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
@@ -4790,8 +4890,12 @@ async fn reconciliation_updates_elicitation_policy_without_restarting_ready_serv
         .authority
         .lock()
         .expect("elicitation authority lock");
-    assert_eq!(authority.approval_policy, AskForApproval::OnRequest);
-    assert_eq!(authority.permission_profile, PermissionProfile::default());
+    let config = &authority
+        .as_ref()
+        .expect("reconciled manager should have permission authority")
+        .config;
+    assert_eq!(config.approval_policy.value(), AskForApproval::OnRequest);
+    assert_eq!(config.permission_profile, PermissionProfile::default());
 }
 
 #[tokio::test]
@@ -4804,11 +4908,14 @@ async fn reconciliation_reuses_ready_server_when_startup_timeout_changes() {
         vec![create_test_tool("docs", "search")],
     )
     .await;
-    config.startup_timeout_sec = Some(Duration::from_secs(30));
+    config.startup_timeout_sec = Some(Duration::from_secs(60));
 
     let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
 
-    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+    assert_eq!(
+        model_tool_names(&reconciled.list_all_tools().await),
+        HashSet::from([ToolName::namespaced("mcp__docs", "search")])
+    );
 }
 
 #[tokio::test]
@@ -4867,6 +4974,9 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
         },
+        startup_timeout: config
+            .startup_timeout_sec
+            .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
         startup_trigger: None,
         _diagnostics_guard: LIVE_CONNECTIONS.track(),
     });

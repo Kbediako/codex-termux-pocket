@@ -955,6 +955,9 @@ mod tests {
             service_tier: Some("priority".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
             text: None,
+            access_programs: Some(
+                codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue.into(),
+            ),
             client_metadata: Some(HashMap::from([(
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),

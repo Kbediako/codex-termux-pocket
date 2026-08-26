@@ -285,7 +285,11 @@
         "sendInput",
         "resumeAgent",
         "wait",
-        "closeAgent"
+        "closeAgent",
+        "sendMessage",
+        "followupTask",
+        "interruptAgent",
+        "listAgents"
       ],
       "type": "string"
     },
@@ -293,7 +297,8 @@
       "enum": [
         "inProgress",
         "completed",
-        "failed"
+        "failed",
+        "interrupted"
       ],
       "type": "string"
     },
@@ -1144,6 +1149,15 @@
             }
           ],
           "description": "Optional Git metadata captured when the thread was created."
+        },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created."
         },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
@@ -2687,6 +2701,14 @@
       },
       "type": "array"
     },
+    "itemsBackwardsCursor": {
+      "default": null,
+      "description": "Opaque cursor for hydrating paginated items backwards.\n\nPass this as `cursor` to `thread/items/list` with `sortDirection: \"desc\"`. The first page includes the item identified by the cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "model": {
       "type": "string"
     },
@@ -2719,6 +2741,14 @@
     },
     "thread": {
       "$ref": "#/definitions/Thread"
+    },
+    "turnsBackwardsCursor": {
+      "default": null,
+      "description": "Opaque cursor for hydrating paginated turns backwards.\n\nPass this as `cursor` to `thread/turns/list` with `sortDirection: \"desc\"`. The first page includes the turn identified by the cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

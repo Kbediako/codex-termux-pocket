@@ -401,6 +401,7 @@ impl ThreadHistoryBuilder {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::SessionMeta(_) => {}
         }
@@ -858,6 +859,7 @@ impl ThreadHistoryBuilder {
             transparent_background: None,
             failure: None,
             saved_path: None,
+            imagegen_request_id: None,
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -871,6 +873,7 @@ impl ThreadHistoryBuilder {
             transparent_background: payload.transparent_background,
             failure: payload.failure.clone(),
             saved_path: payload.saved_path.clone(),
+            imagegen_request_id: None,
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -2082,6 +2085,7 @@ mod tests {
                         transparent_background: Some(true),
                         failure: None,
                         saved_path: Some(saved_path.clone()),
+                        imagegen_request_id: None,
                     },
                 )),
                 started_at_ms: Some(0),
@@ -2114,6 +2118,7 @@ mod tests {
                 transparent_background: Some(true),
                 failure: None,
                 saved_path: Some(saved_path),
+                imagegen_request_id: None,
             })]
         );
     }
@@ -2431,6 +2436,7 @@ mod tests {
                             },
                         ),
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
+                        imagegen_request_id: None,
                     }),
                 ],
             }

@@ -52,6 +52,9 @@ pub(crate) fn attribute_executor_plugins(
     catalog: &mut SkillCatalog,
     snapshot: &SelectedPluginSnapshot,
 ) {
+    catalog
+        .entries
+        .retain(|skill| !snapshot.disabled_plugin_roots.contains(&skill.authority.id));
     for skill in &mut catalog.entries {
         if let Some(plugin) = snapshot
             .plugins

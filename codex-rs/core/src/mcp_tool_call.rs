@@ -59,6 +59,7 @@ use codex_protocol::mcp_approval_meta::TOOL_DESCRIPTION_KEY as MCP_TOOL_APPROVAL
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_DISPLAY_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_DISPLAY_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_TITLE_KEY as MCP_TOOL_APPROVAL_TOOL_TITLE_KEY;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::McpInvocation;
@@ -243,6 +244,7 @@ pub(crate) async fn handle_mcp_tool_call(
         &hook_tool_name,
         &metadata,
         prepared_call.config(),
+        prepared_call.permission_profile(),
         approval_policy,
     )
     .await
@@ -287,7 +289,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     &call_id,
                     invocation,
                     item_metadata.clone(),
-                    crate::guardian::guardian_timeout_message(&turn_context.model_info),
+                    crate::guardian::guardian_timeout_message(turn_context.model_info()),
                     /*already_started*/ true,
                 )
                 .await
@@ -449,7 +451,7 @@ async fn handle_approved_mcp_tool_call(
                         .map(|(connector_id, action_name)| HostedFileUploadContext {
                             connector_id: connector_id.clone(),
                             action_name: action_name.clone(),
-                            model: turn_context.model_info.slug.clone(),
+                            model: turn_context.model_info().slug.clone(),
                         });
                     let rewritten_arguments = rewrite_mcp_tool_arguments_for_openai_files(
                         sess,
@@ -464,7 +466,7 @@ async fn handle_approved_mcp_tool_call(
                         tool_input = rewritten_arguments.clone();
                     }
                     let request_meta = build_mcp_tool_call_request_meta(
-                        turn_context,
+                        step_context,
                         &server,
                         call_id,
                         Some(&metadata),
@@ -491,7 +493,7 @@ async fn handle_approved_mcp_tool_call(
                 .await
                 .map_err(|error| format!("tool call error: {error:?}"))?;
             let result = sanitize_mcp_tool_result_for_model(
-                &turn_context.model_info.input_modalities,
+                &turn_context.model_info().input_modalities,
                 Ok(result),
             )?;
             Ok(maybe_request_codex_apps_auth_elicitation(
@@ -773,9 +775,10 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
     else {
         return Ok(meta);
     };
-    let permission_profile = prepared_call.config().permission_profile.clone();
+    // TODO(anp): Build this metadata from the server's captured
+    // TurnEnvironment::sandbox_context instead of the runtime-wide Landlock value.
     let sandbox_state = serde_json::to_value(SandboxState {
-        permission_profile,
+        permission_profile: prepared_call.permission_profile().clone(),
         codex_linux_sandbox_exe: prepared_call.config().codex_linux_sandbox_exe.clone(),
         sandbox_cwd,
         use_legacy_landlock: prepared_call.config().use_legacy_landlock,
@@ -1021,7 +1024,7 @@ async fn maybe_track_codex_app_used(
     };
 
     let tracking = build_track_events_context(
-        turn_context.model_info.slug.clone(),
+        turn_context.model_info().slug.clone(),
         sess.thread_id.to_string(),
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
@@ -1177,7 +1180,7 @@ async fn custom_mcp_tool_approval_mode(
 }
 
 fn build_mcp_tool_call_request_meta(
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     server: &str,
     call_id: &str,
     metadata: Option<&McpToolApprovalMetadata>,
@@ -1188,11 +1191,13 @@ fn build_mcp_tool_call_request_meta(
         serde_json::Value::String(call_id.to_string()),
     );
 
-    if let Some(turn_metadata) = turn_context
+    if let Some(turn_metadata) = step_context
+        .turn
         .turn_metadata_state
         .current_meta_value_for_mcp_request(McpTurnMetadataContext {
-            model: turn_context.model_info.slug.as_str(),
-            reasoning_effort: turn_context.effective_reasoning_effort(),
+            model: step_context.settings.model_info.slug.as_str(),
+            reasoning_effort: step_context.settings.effective_reasoning_effort(),
+            node_repl_disabled: step_context.settings.model_info.node_repl_disabled,
         })
     {
         request_meta.insert(
@@ -1299,6 +1304,7 @@ async fn maybe_request_mcp_tool_approval(
     hook_tool_name: &HookToolName,
     metadata: &McpToolApprovalMetadata,
     config: &codex_mcp::McpConfig,
+    permission_profile: &PermissionProfile,
     policy: McpToolApprovalPolicy,
 ) -> Option<ReviewDecision> {
     let turn_context = &step_context.turn;
@@ -1315,14 +1321,14 @@ async fn maybe_request_mcp_tool_approval(
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
         &config.config_layer_stack,
         config.approvals_reviewer,
-        Some(turn_context.model_info.slug.as_str()),
+        Some(turn_context.model_info().slug.as_str()),
         &invocation.server,
         metadata.connector_id.as_deref(),
     );
     if !strict_auto_review
         && mcp_permission_prompt_is_auto_approved(
             config.approval_policy.value(),
-            &config.permission_profile,
+            permission_profile,
             McpPermissionPromptAutoApproveContext {
                 tool_approval_mode: Some(policy.mode),
             },

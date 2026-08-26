@@ -11,6 +11,10 @@ import type { SandboxPolicy } from "./SandboxPolicy";
 import type { UserInput } from "./UserInput";
 
 export type TurnStartParams = {threadId: string, clientUserMessageId?: string | null, input: Array<UserInput>, /**
+ * Optional source classification for the caller that starts this turn.
+ * Ignored when this request steers an already-active turn.
+ */
+turnTrigger?: string | null, /**
  * Override the working directory for this turn and subsequent turns.
  */
 cwd?: string | null, /**
@@ -30,6 +34,11 @@ model?: string | null, /**
  * Override the service tier for this turn and subsequent turns.
  */
 serviceTier?: string | null | null, /**
+ * Override the service tier only when this request starts a new turn.
+ * Use "default" for standard speed. Omitted or null inherits the thread's tier.
+ * Does not change the thread's tier or a turn being steered.
+ */
+serviceTierForTurn?: string | null, /**
  * Override the reasoning effort for this turn and subsequent turns.
  */
 effort?: ReasoningEffort | null, /**

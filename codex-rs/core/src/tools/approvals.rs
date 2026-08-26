@@ -14,7 +14,6 @@ use crate::hook_runtime::run_permission_request_hooks;
 use crate::mcp_tool_call::request_mcp_tool_user_approval;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
-use crate::session::turn_context::TurnContext;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::runtimes::apply_patch::ApplyPatchApprovalKey;
 use crate::tools::runtimes::unified_exec::UnifiedExecApprovalKey;
@@ -377,10 +376,6 @@ enum ApprovalReviewer {
 }
 
 impl ApprovalReviewer {
-    fn for_turn(turn: &TurnContext) -> Self {
-        Self::for_policy(turn.approval_policy(), turn.config.approvals_reviewer)
-    }
-
     fn for_policy(approval_policy: AskForApproval, reviewer: ApprovalsReviewer) -> Self {
         if routes_approval_policy_to_guardian(approval_policy, reviewer) {
             Self::Guardian
@@ -497,7 +492,7 @@ impl Session {
                 _ => {}
             }
         }
-        resolution.into_tool_result(&ctx.review_context.turn().model_info)
+        resolution.into_tool_result(ctx.review_context.turn().model_info())
     }
 
     async fn request_reviewer_approval(
@@ -515,7 +510,10 @@ impl Session {
         {
             ApprovalReviewer::for_policy(*approval_policy, *reviewer)
         } else {
-            ApprovalReviewer::for_turn(ctx.review_context.turn())
+            ApprovalReviewer::for_policy(
+                ctx.review_context.approval_policy,
+                ctx.review_context.approvals_reviewer,
+            )
         };
 
         let decision = match reviewer {

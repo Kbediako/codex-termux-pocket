@@ -123,3 +123,4 @@ subject	ci: classify Actions naming maintenance	tooling	Classifies the retained 
 subject	termux: update to 0.150.0-alpha.8	runtime-critical	Merges the exact official 0.150.0-alpha.8 source and reapplies the maintained Android and Termux runtime patch stack.
 subject	termux: stage 0.150.0-alpha.8 publication	tooling	Records successful exact-source control-plane, ARM64, and Android validation evidence for publication.
 subject	termux: promote termux-v0.150.0-alpha.8	tooling	Promotes the byte-verified public release manifest after publication.
+subject	termux: update to 0.150.0-alpha.12	runtime-critical	Merges the exact official 0.150.0-alpha.12 source and reapplies the maintained Android and Termux runtime patch stack.

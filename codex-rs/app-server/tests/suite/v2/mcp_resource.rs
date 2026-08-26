@@ -36,7 +36,6 @@ use codex_protocol::protocol::SessionSource;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
-use rmcp::model::BooleanSchema;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResult;
 use rmcp::model::ElicitRequestParams;
@@ -47,7 +46,6 @@ use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
 use rmcp::model::MetaObject;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::PrimitiveSchemaDefinition;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
@@ -569,7 +567,8 @@ async fn mcp_resource_read_returns_contents_and_declines_elicitation_without_thr
             r#"
 chatgpt_base_url = "{apps_server_url}"
 mcp_oauth_credentials_store = "file"
-approval_policy = "on-request"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
 
 [features]
 apps = true
@@ -979,10 +978,6 @@ impl ServerHandler for ResourceAppsMcpServer {
         }
         if uri == TEST_ELICITATION_RESOURCE_URI {
             let requested_schema = ElicitationSchema::builder()
-                .required_property(
-                    "confirmed",
-                    PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
-                )
                 .build()
                 .map_err(|err| rmcp::ErrorData::internal_error(err.to_string(), None))?;
             let result = context

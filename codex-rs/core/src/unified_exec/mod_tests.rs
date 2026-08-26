@@ -193,7 +193,7 @@ async fn exec_command_with_tty(
         chunk_id: generate_chunk_id(),
         wall_time,
         raw_output: collected,
-        truncation_policy: turn.model_info.truncation_policy.into(),
+        truncation_policy: turn.model_info().truncation_policy.into(),
         max_output_tokens: None,
         process_id: response_process_id,
         exit_code,

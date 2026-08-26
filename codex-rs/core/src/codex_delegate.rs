@@ -80,7 +80,7 @@ pub(crate) async fn run_codex_thread_interactive(
         warnings: Vec::new(),
     };
     let session_source = SessionSource::SubAgent(subagent_source.clone());
-    let is_guardian_reviewer = crate::guardian::is_guardian_reviewer_source(&session_source);
+    let is_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source);
     let extensions = if is_guardian_reviewer {
         codex_extension_api::empty_extension_registry()
     } else {
@@ -214,8 +214,10 @@ pub(crate) async fn run_codex_thread_one_shot(
         .submit_turn_input(
             TurnInputRequest::user_input(input).on_start(TurnStartOptions {
                 final_output_json_schema,
+                service_tier: None,
                 parent_turn_id: Some(parent_turn_id),
                 root_turn_id,
+                ..Default::default()
             }),
             TurnInputMode::StartIfIdle,
         )

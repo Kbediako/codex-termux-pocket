@@ -57,6 +57,7 @@ pub enum ReasoningEffort {
     XHigh,
     Max,
     Ultra,
+    Persistent,
     /// A model-defined effort value that this client does not know yet.
     Custom(String),
 }
@@ -73,6 +74,7 @@ impl ReasoningEffort {
             Self::XHigh => "xhigh",
             Self::Max => "max",
             Self::Ultra => "ultra",
+            Self::Persistent => "persistent",
             Self::Custom(effort) => effort,
         }
     }
@@ -139,6 +141,7 @@ impl FromStr for ReasoningEffort {
             "xhigh" => Ok(Self::XHigh),
             "max" => Ok(Self::Max),
             "ultra" => Ok(Self::Ultra),
+            "persistent" => Ok(Self::Persistent),
             "" => Err("reasoning_effort must not be empty".to_string()),
             effort => Ok(Self::Custom(effort.to_string())),
         }
@@ -1132,28 +1135,34 @@ mod tests {
         let serialized = to_string(&custom).expect("custom reasoning effort should serialize");
         let serialized_max = to_string(&ReasoningEffort::Max).expect("Max should serialize");
         let serialized_ultra = to_string(&ReasoningEffort::Ultra).expect("Ultra should serialize");
+        let serialized_persistent =
+            to_string(&ReasoningEffort::Persistent).expect("Persistent should serialize");
 
         assert_eq!(
             (
                 "high".parse(),
                 "max".parse(),
                 "ultra".parse(),
+                "persistent".parse(),
                 "future".parse(),
                 deserialized,
                 serialized,
                 serialized_max,
                 serialized_ultra,
+                serialized_persistent,
                 custom.to_string(),
             ),
             (
                 Ok(ReasoningEffort::High),
                 Ok(ReasoningEffort::Max),
                 Ok(ReasoningEffort::Ultra),
+                Ok(ReasoningEffort::Persistent),
                 Ok(custom.clone()),
                 custom,
                 r#""future""#.to_string(),
                 r#""max""#.to_string(),
                 r#""ultra""#.to_string(),
+                r#""persistent""#.to_string(),
                 "future".to_string(),
             )
         );

@@ -336,6 +336,7 @@ fn reference_context_item() -> TurnContextItem {
         multi_agent_version: None,
         multi_agent_mode: None,
         realtime_active: Some(false),
+        cyber_access_program: None,
         effort: None,
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     }
@@ -2724,7 +2725,7 @@ fn text_only_items_unchanged() {
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
-            text: "Hello world, this is a response.".to_string(),
+            text: "Hello, \"world\"!\nこんにちは".to_string(),
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,

@@ -88,6 +88,8 @@ impl Stage {
 /// Unique features toggled via configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
+    /// Enable the interactive transcript composer and turn-selection UI.
+    TranscriptV2,
     // Stable.
     /// Enable the default shell tool.
     ShellTool,
@@ -109,6 +111,8 @@ pub enum Feature {
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
     CodeModeHost,
+    /// Establish the code-mode host connection during session startup.
+    CodeModePrewarm,
     /// Terminate active code mode cells when their turn is interrupted.
     CodeModeInterrupt,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
@@ -207,6 +211,8 @@ pub enum Feature {
     Plugins,
     /// Discover selected-root plugin and skill manifests through one high-level exec-server RPC.
     ExecutorCapabilityDiscovery,
+    /// Skip host skill snapshots when no registered contributor requires them.
+    SkipHostSkillDiscovery,
     /// Removed compatibility flag for plugin-bundled lifecycle hooks.
     PluginHooks,
     /// Allow the in-app browser pane in desktop apps.
@@ -299,12 +305,16 @@ pub enum Feature {
     ToolCallMcpElicitation,
     /// Prompt Codex Apps connector auth failures through MCP URL elicitations.
     AuthElicitation,
+    /// Offer Amazon Bedrock setup during TUI sign-in onboarding.
+    BedrockSetupWizard,
     /// Enable personality selection in the TUI.
     Personality,
     /// Enable native artifact tools.
     Artifact,
     /// Enable Fast mode selection in the TUI and request layer.
     FastMode,
+    /// Enable explicitly requested model changes for later step captures.
+    StepModelSwitching,
     /// Enable experimental realtime voice conversation mode in the TUI.
     RealtimeConversation,
     /// Prevent idle system sleep while a turn is actively running.
@@ -834,6 +844,12 @@ pub struct FeatureSpec {
 }
 
 pub const FEATURES: &[FeatureSpec] = &[
+    FeatureSpec {
+        id: Feature::TranscriptV2,
+        key: "transcript_v2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
     // Stable features.
     FeatureSpec {
         id: Feature::GhostCommit,
@@ -910,8 +926,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ContentItemKinds,
         key: "content_item_kinds",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ExecutedToolCallMetadata,
@@ -936,6 +952,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "code_mode_host",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CodeModePrewarm,
+        key: "code_mode_prewarm",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::CodeModeInterrupt,
@@ -1242,6 +1264,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::SkipHostSkillDiscovery,
+        key: "skip_host_skill_discovery",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::PluginHooks,
         key: "plugin_hooks",
         stage: Stage::Removed,
@@ -1482,6 +1510,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::BedrockSetupWizard,
+        key: "bedrock_setup_wizard",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::Personality,
         key: "personality",
         stage: Stage::Stable,
@@ -1498,6 +1532,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "fast_mode",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::StepModelSwitching,
+        key: "step_model_switching",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::RealtimeConversation,

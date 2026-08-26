@@ -217,7 +217,7 @@ impl RequestPluginInstallHandler {
                 .analytics_events_client
                 .track_plugin_install_requested(
                     build_track_events_context(
-                        turn.model_info.slug.clone(),
+                        turn.model_info().slug.clone(),
                         session.thread_id.to_string(),
                         turn.sub_id.clone(),
                         turn.originator.clone(),

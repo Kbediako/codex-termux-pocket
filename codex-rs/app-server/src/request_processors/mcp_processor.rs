@@ -3,6 +3,7 @@ use super::*;
 use codex_core::McpManager;
 use codex_mcp::McpServerSource;
 use codex_mcp::ReadResourceRequestParams;
+use codex_mcp::resolve_oauth_callback;
 
 use crate::thread_state::ThreadStateManager;
 
@@ -204,6 +205,11 @@ impl McpRequestProcessor {
         let resolved_scopes =
             resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
         let oauth_credential_name = server.oauth_credential_name(&name);
+        let callback_url =
+            resolve_oauth_callback(server, &url, mcp_config.mcp_oauth_callback_url.as_deref())
+                .map_err(|err| {
+                    internal_error(format!("failed to resolve MCP OAuth callback: {err}"))
+                })?;
 
         let handle = perform_oauth_login_return_url(
             oauth_credential_name.as_ref(),
@@ -218,6 +224,7 @@ impl McpRequestProcessor {
             server.oauth_resource.as_deref(),
             timeout_secs,
             server.oauth_callback_port(mcp_config.mcp_oauth_callback_port),
+            callback_url.as_deref(),
             mcp_config.mcp_oauth_callback_url.as_deref(),
             http_client,
             redirect_mode,
