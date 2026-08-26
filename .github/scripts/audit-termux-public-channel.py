@@ -21,8 +21,15 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-def parse_env(path: Path, allowed: set[str], required: set[str]) -> dict[str, str]:
+def parse_env(
+    path: Path,
+    allowed: set[str],
+    required: set[str],
+    *,
+    allow_empty: set[str] | None = None,
+) -> dict[str, str]:
     values: dict[str, str] = {}
+    empty_ok = allow_empty or set()
     for line_number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -30,7 +37,7 @@ def parse_env(path: Path, allowed: set[str], required: set[str]) -> dict[str, st
         if "=" not in line:
             fail(f"{path}:{line_number}: malformed key/value line")
         key, value = line.split("=", 1)
-        if key not in allowed or key in values or not value:
+        if key not in allowed or key in values or (not value and key not in empty_ok):
             fail(f"{path}:{line_number}: invalid {key or 'entry'}")
         values[key] = value
     missing = required - values.keys()
@@ -166,6 +173,7 @@ def main() -> None:
             "runtime_size_bytes",
         },
         {"format_version", "head_sha", "codex_version", "target"},
+        allow_empty={"source_repository", "git_describe", "source_ref"},
     )
     if metadata["head_sha"] != manifest["head_sha"]:
         fail("release metadata commit mismatch")
@@ -179,7 +187,8 @@ def main() -> None:
         match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
         if not match or match.group(2) in sums:
             fail("malformed or duplicate SHA256SUMS entry")
-        sums[match.group(2)] = match.group(1)
+        digest, name = match.groups()
+        sums[name] = digest
     if sums.get("codex-termux-aarch64-unknown-linux-musl.tar.gz") != manifest["archive_sha256"]:
         fail("SHA256SUMS archive digest mismatch")
 
