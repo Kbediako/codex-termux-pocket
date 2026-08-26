@@ -152,7 +152,7 @@ known_conflict() {
     .github/*|scripts/termux/*|README.md|AGENTS.md|PLANS.md|EXEC_PLAN*.md|EXECPLAN_*.md|docs/contributing.md|docs/termux-*.md|.prettierignore)
       return 0
       ;;
-    codex-rs/Cargo.lock|MODULE.bazel.lock)
+    codex-rs/Cargo.toml|codex-rs/Cargo.lock|MODULE.bazel.lock)
       return 0
       ;;
     codex-rs/arg0/src/lib.rs|codex-rs/cli/build.rs|codex-rs/cli/src/main.rs)
@@ -203,7 +203,7 @@ for path in "${unresolved[@]}"; do
     continue
   fi
   case "$path" in
-    codex-rs/Cargo.lock|MODULE.bazel.lock)
+    codex-rs/Cargo.toml|codex-rs/Cargo.lock|MODULE.bazel.lock)
       git checkout --theirs -- "$path" 2>/dev/null \
         || git rm -f --ignore-unmatch -- "$path"
       ;;
