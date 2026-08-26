@@ -9,7 +9,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
-TEMP_ALPHA13_SCRIPT = REPO_ROOT / ".github" / "scripts" / "alpha13-maintenance.sh"
 
 EXPECTED_WORKFLOWS = {
     "blocking-ci.yml",
@@ -155,10 +154,6 @@ def main() -> None:
         if required not in publisher:
             fail(f"termux-release-request.yml is missing {required!r}")
 
-    temporary_alpha13 = (
-        TEMP_ALPHA13_SCRIPT.is_file()
-        and "alpha13-maintenance:" in read("blocking-ci.yml")
-    )
     for filename in sorted(actual - {"termux-release-request.yml"}):
         text = read(filename)
         for forbidden in (
@@ -167,12 +162,6 @@ def main() -> None:
             '"/repos/${GITHUB_REPOSITORY}/releases"',
             "contents: write",
         ):
-            if (
-                filename == "blocking-ci.yml"
-                and forbidden == "contents: write"
-                and temporary_alpha13
-            ):
-                continue
             if forbidden in text:
                 fail(f"{filename} contains release-writer token {forbidden!r}")
 
