@@ -122,7 +122,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          bash .github/scripts/alpha1515-maintenance.sh \
+          bash .github/scripts/alpha1515-maintenance-v2.sh \
             2>&1 | tee "$RUNNER_TEMP/alpha1515-maintenance.log"
 
       - name: Publish exact failure diagnostics
