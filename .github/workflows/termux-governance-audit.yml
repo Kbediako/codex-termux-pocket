@@ -44,9 +44,31 @@ jobs:
                 [[ "$workflow_path" == ".github/workflows/termux-governance-audit.yml" ]] || continue
                 created_epoch="$(date -u -d "$created_at" +%s)"
                 (( created_epoch < cutoff_epoch )) || continue
-                gh api --method POST \
+
+                if ! gh api --method POST \
                   "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" \
-                  >/dev/null
+                  >/dev/null 2>&1; then
+                  gh api --method POST \
+                    "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/force-cancel" \
+                    >/dev/null
+                fi
+
+                cancelled=false
+                for _ in {1..20}; do
+                  run_state="$(
+                    gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                      --jq '[.status, (.conclusion // "")] | @tsv'
+                  )"
+                  if [[ "$run_state" == $'completed\tcancelled' ]]; then
+                    cancelled=true
+                    break
+                  fi
+                  sleep 3
+                done
+                [[ "$cancelled" == "true" ]] || {
+                  echo "::error::Stale governance run ${run_id} did not become cancelled"
+                  exit 1
+                }
                 echo "- Cancelled stale queued governance run \`${run_id}\`." \
                   >>"$GITHUB_STEP_SUMMARY"
               done
