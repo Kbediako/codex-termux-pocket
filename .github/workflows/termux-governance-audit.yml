@@ -37,7 +37,6 @@ jobs:
           set -euo pipefail
           now_epoch="$(date -u +%s)"
           cancel_cutoff_epoch="$(( now_epoch - 6 * 60 * 60 ))"
-          delete_cutoff_epoch="$(( now_epoch - 7 * 24 * 60 * 60 ))"
           gh api --paginate \
             "/repos/${GITHUB_REPOSITORY}/actions/runs?status=queued&per_page=100" \
             --jq '.workflow_runs[] | [.id, .path, .created_at] | @tsv' \
@@ -47,31 +46,19 @@ jobs:
                 created_epoch="$(date -u -d "$created_at" +%s)"
                 (( created_epoch < cancel_cutoff_epoch )) || continue
 
-                cancellation_accepted=false
-                if gh api --method POST \
+                if ! gh api --method POST \
                   "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" \
-                  >/dev/null 2>&1; then
-                  cancellation_accepted=true
-                elif gh api --method POST \
-                  "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/force-cancel" \
-                  >/dev/null 2>&1; then
-                  cancellation_accepted=true
-                else
-                  (( created_epoch < delete_cutoff_epoch )) || {
-                    echo "::error::Queued governance run ${run_id} rejected cancel and force-cancel"
-                    exit 1
-                  }
-                  gh api --method DELETE \
-                    "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
-                    >/dev/null
-                  echo "- Deleted irrecoverable stale queued governance run \`${run_id}\` after both cancellation endpoints failed." \
-                    >>"$GITHUB_STEP_SUMMARY"
-                  continue
+                  >/dev/null 2>&1 \
+                  && ! gh api --method POST \
+                    "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/force-cancel" \
+                    >/dev/null 2>&1; then
+                  gh workflow disable termux-governance-audit.yml
+                  sleep 5
+                  gh workflow enable termux-governance-audit.yml
                 fi
 
-                [[ "$cancellation_accepted" == "true" ]]
                 cancelled=false
-                for _ in {1..20}; do
+                for _ in {1..30}; do
                   run_state="$(
                     gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
                       --jq '[.status, (.conclusion // "")] | @tsv'
@@ -83,7 +70,7 @@ jobs:
                   sleep 3
                 done
                 [[ "$cancelled" == "true" ]] || {
-                  echo "::error::Stale governance run ${run_id} did not become cancelled"
+                  echo "::error::Stale governance run ${run_id} remained ${run_state} after cancel, force-cancel, and workflow reset"
                   exit 1
                 }
                 echo "- Cancelled stale queued governance run \`${run_id}\`." \
