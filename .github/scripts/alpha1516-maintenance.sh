@@ -27,6 +27,14 @@ for old, new in replacements.items():
         raise SystemExit(f"proven alpha.5 wrapper is missing expected token: {old}")
     source = source.replace(old, new)
 
+exec_marker = 'exec "$work/adapted.sh"'
+if source.count(exec_marker) != 1:
+    raise SystemExit("proven wrapper execution checkpoint changed")
+source = source.replace(
+    exec_marker,
+    'nl -ba "$work/adapted.sh" | sed -n \'75,100p\'\n' + exec_marker,
+)
+
 for required in (
     "rust-v0.151.0-alpha.6",
     "42cd2e3425834ee77c0b76c121cd43541d69810b",
