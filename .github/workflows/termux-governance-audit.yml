@@ -14,6 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: read
 
 concurrency:
@@ -30,6 +31,26 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Cancel stale queued governance runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff_epoch="$(( $(date -u +%s) - 6 * 60 * 60 ))"
+          gh api --paginate \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs?status=queued&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .path, .created_at] | @tsv' \
+            | while IFS=$'\t' read -r run_id workflow_path created_at; do
+                [[ "$run_id" != "$GITHUB_RUN_ID" ]] || continue
+                [[ "$workflow_path" == ".github/workflows/termux-governance-audit.yml" ]] || continue
+                created_epoch="$(date -u -d "$created_at" +%s)"
+                (( created_epoch < cutoff_epoch )) || continue
+                gh api --method POST \
+                  "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" \
+                  >/dev/null
+                echo "- Cancelled stale queued governance run \`${run_id}\`." \
+                  >>"$GITHUB_STEP_SUMMARY"
+              done
+
       - name: Checkout audited main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
