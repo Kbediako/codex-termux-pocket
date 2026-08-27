@@ -2,6 +2,8 @@ name: termux-release-channel
 run-name: Verify promoted Termux release channel
 
 # Verify that the promoted manifest points to the complete GitHub Latest release.
+# Direct edits to this permanent verifier also provide an explicit post-promotion
+# recheck after a workflow-token manifest promotion suppresses recursive events.
 # Repository-level release editing remains enabled by owner policy, so this
 # workflow continuously verifies the current public identity, bytes, checksums,
 # SBOM, and provenance attestations. It never mutates a published release.
