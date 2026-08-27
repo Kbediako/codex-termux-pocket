@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Adapt the last proven alpha.5 transaction from its immutable commit to the
-# exact official 0.151.0-alpha.6 tag. The nested transaction retains the full
-# merge, validation, publication, public-byte verification, and cleanup path.
+# Bootstrap the last proven alpha.5 transaction from its immutable commit, then
+# adapt only the exact alpha.6 release identity. Keep this bootstrap directory
+# distinct from the adapted transaction's own alpha1516-maintenance directory;
+# otherwise the nested generator would overwrite the script currently running.
 base="https://raw.githubusercontent.com/Kbediako/codex-termux-pocket/09c509971074d56dab9f92043b4bcb851a2864f2/.github/scripts/alpha1515-maintenance.sh"
-work="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1516-maintenance"
-mkdir -p "$work"
+bootstrap="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1516-bootstrap"
+mkdir -p "$bootstrap"
 curl --fail --location --silent --show-error --retry 5 \
-  "$base" -o "$work/original.sh"
+  "$base" -o "$bootstrap/original.sh"
 
-python3 - "$work/original.sh" "$work/adapted.sh" <<'PY'
+python3 - "$bootstrap/original.sh" "$bootstrap/adapted.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -27,14 +28,6 @@ for old, new in replacements.items():
         raise SystemExit(f"proven alpha.5 wrapper is missing expected token: {old}")
     source = source.replace(old, new)
 
-exec_marker = 'exec "$work/adapted.sh"'
-if source.count(exec_marker) != 1:
-    raise SystemExit("proven wrapper execution checkpoint changed")
-source = source.replace(
-    exec_marker,
-    'nl -ba "$work/adapted.sh" | sed -n \'75,100p\'\n' + exec_marker,
-)
-
 for required in (
     "rust-v0.151.0-alpha.6",
     "42cd2e3425834ee77c0b76c121cd43541d69810b",
@@ -46,6 +39,6 @@ for required in (
 Path(sys.argv[2]).write_text(source, encoding="utf-8")
 PY
 
-chmod +x "$work/adapted.sh"
-bash -n "$work/adapted.sh"
-exec "$work/adapted.sh"
+chmod +x "$bootstrap/adapted.sh"
+bash -n "$bootstrap/adapted.sh"
+exec "$bootstrap/adapted.sh"
