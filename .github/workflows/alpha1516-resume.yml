@@ -1,0 +1,414 @@
+name: alpha1516-resume
+run-name: Resume exact-source 0.151.0-alpha.6 publication
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/alpha1516-resume.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+concurrency:
+  group: alpha1516-resume
+  cancel-in-progress: false
+
+jobs:
+  resume:
+    name: Rebuild stale gates, publish, verify, and clean up
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: "89"
+      SOURCE_SHA: 2b9e7bdf3c6cf06ab0ff1669455e71b2f078c02f
+      PACKAGE_VERSION: 0.151.0-alpha.6
+      UPSTREAM_TAG: rust-v0.151.0-alpha.6
+      UPSTREAM_COMMIT: 42cd2e3425834ee77c0b76c121cd43541d69810b
+      MERGE_COMMIT: 6bdb902a00306a953c0dcea357f6c48326fa874f
+      RELEASE_TAG: termux-v0.151.0-alpha.6-2b9e7bdf3c
+      CONTROL_RUN_ID: "33080562306"
+      FORK_CI_RUN_ID: "33080549841"
+      SANDBOX_RUN_ID: "33080570681"
+      STALE_ORCHESTRATOR_RUN_ID: "33080108793"
+      STALE_ARTIFACT_RUN_ID: "33080578721"
+      STALE_ANDROID_RUN_ID: "33080585497"
+    steps:
+      - name: Checkout permanent release controls
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resume exact-source release transaction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          repo="$GITHUB_REPOSITORY"
+          gate_branch="alpha1516-gate-retry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_run_id=""
+          android_run_id=""
+          release_run_id=""
+          post_fork_ci_run_id=""
+          post_control_run_id=""
+          release_channel_run_id=""
+          governance_run_id=""
+          tracker_state="running"
+          tracker_detail="initializing-exact-source-gate-recovery"
+
+          update_tracker() {
+            local state="$1"
+            local detail="$2"
+            local body payload
+            body="$(cat <<EOF
+          state=${state}
+          detail=${detail}
+          orchestrator_run_id=${STALE_ORCHESTRATOR_RUN_ID}
+          resume_run_id=${GITHUB_RUN_ID}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+          package_version=${PACKAGE_VERSION}
+          merge_commit=${MERGE_COMMIT}
+          source_sha=${SOURCE_SHA}
+          release_tag=${RELEASE_TAG}
+          fork_ci_run_id=${FORK_CI_RUN_ID}
+          control_run_id=${CONTROL_RUN_ID}
+          sandbox_run_id=${SANDBOX_RUN_ID}
+          artifact_run_id=${artifact_run_id}
+          android_run_id=${android_run_id}
+          release_run_id=${release_run_id}
+          post_fork_ci_run_id=${post_fork_ci_run_id}
+          post_control_run_id=${post_control_run_id}
+          release_channel_run_id=${release_channel_run_id}
+          governance_run_id=${governance_run_id}
+          stale_artifact_run_id=${STALE_ARTIFACT_RUN_ID}
+          stale_android_run_id=${STALE_ANDROID_RUN_ID}
+          EOF
+          )"
+            payload="$RUNNER_TEMP/issue-update.json"
+            jq -n --arg body "$body" '{body:$body}' > "$payload"
+            gh api --method PATCH "/repos/${repo}/issues/${ISSUE_NUMBER}" \
+              --input "$payload" >/dev/null
+          }
+
+          on_error() {
+            local rc=$?
+            local line="${BASH_LINENO[0]:-unknown}"
+            set +e
+            update_tracker failed "resume-workflow-line-${line}-exit-${rc}"
+            exit "$rc"
+          }
+          trap on_error ERR
+
+          verify_successful_run() {
+            local run_id="$1"
+            local expected_path="$2"
+            local label="$3"
+            local run_json
+            run_json="$(gh api "/repos/${repo}/actions/runs/${run_id}")"
+            [[ "$(jq -r .head_sha <<<"$run_json")" == "$SOURCE_SHA" ]]
+            [[ "$(jq -r .path <<<"$run_json")" == "$expected_path" ]]
+            [[ "$(jq -r .status <<<"$run_json")" == "completed" ]]
+            [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]] || {
+              echo "::error::${label} run ${run_id} is not a successful exact-source run"
+              return 1
+            }
+          }
+
+          cancel_stale_run() {
+            local run_id="$1"
+            gh api --method POST "/repos/${repo}/actions/runs/${run_id}/cancel" \
+              >/dev/null 2>&1 || true
+            gh api --method POST "/repos/${repo}/actions/runs/${run_id}/force-cancel" \
+              >/dev/null 2>&1 || true
+          }
+
+          dispatch_workflow() {
+            local workflow="$1"
+            local ref="$2"
+            local payload="$3"
+            gh api --method POST \
+              "/repos/${repo}/actions/workflows/${workflow}/dispatches" \
+              --input "$payload" >/dev/null
+          }
+
+          find_dispatched_run() {
+            local workflow="$1"
+            local branch="$2"
+            local head_sha="$3"
+            local attempt json run_id
+            for attempt in $(seq 1 90); do
+              json="$(gh api "/repos/${repo}/actions/workflows/${workflow}/runs?event=workflow_dispatch&branch=${branch}&per_page=100")"
+              run_id="$(
+                jq -r --arg branch "$branch" --arg sha "$head_sha" '
+                  [.workflow_runs[]
+                    | select(.event == "workflow_dispatch")
+                    | select(.head_branch == $branch)
+                    | select(.head_sha == $sha)]
+                  | sort_by(.created_at)
+                  | last
+                  | .id // empty
+                ' <<<"$json"
+              )"
+              if [[ "$run_id" =~ ^[0-9]+$ ]]; then
+                printf '%s' "$run_id"
+                return 0
+              fi
+              sleep 4
+            done
+            echo "::error::Could not discover workflow_dispatch run for ${workflow} on ${branch}@${head_sha}"
+            return 1
+          }
+
+          wait_for_run() {
+            local run_id="$1"
+            local label="$2"
+            local timeout_seconds="$3"
+            local deadline status conclusion run_json
+            deadline=$(( $(date +%s) + timeout_seconds ))
+            while (( $(date +%s) < deadline )); do
+              run_json="$(gh api "/repos/${repo}/actions/runs/${run_id}")"
+              status="$(jq -r .status <<<"$run_json")"
+              conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+              if [[ "$status" == "completed" ]]; then
+                if [[ "$conclusion" == "success" ]]; then
+                  echo "${label} run ${run_id} completed successfully."
+                  return 0
+                fi
+                echo "::error::${label} run ${run_id} completed with ${conclusion:-unknown}"
+                gh api "/repos/${repo}/actions/runs/${run_id}/jobs?per_page=100" \
+                  --jq '.jobs[] | {id,name,status,conclusion,steps:[.steps[] | select(.conclusion != "success" and .conclusion != "skipped")]}' \
+                  || true
+                return 1
+              fi
+              sleep 15
+            done
+            echo "::error::${label} run ${run_id} did not complete inside the recovery deadline"
+            return 1
+          }
+
+          close_tracker() {
+            local body payload
+            body="$(cat <<EOF
+          state=completed
+          detail=published-and-independently-verified
+          orchestrator_run_id=${STALE_ORCHESTRATOR_RUN_ID}
+          resume_run_id=${GITHUB_RUN_ID}
+          upstream_tag=${UPSTREAM_TAG}
+          upstream_commit=${UPSTREAM_COMMIT}
+          package_version=${PACKAGE_VERSION}
+          merge_commit=${MERGE_COMMIT}
+          source_sha=${SOURCE_SHA}
+          release_tag=${RELEASE_TAG}
+          fork_ci_run_id=${FORK_CI_RUN_ID}
+          control_run_id=${CONTROL_RUN_ID}
+          sandbox_run_id=${SANDBOX_RUN_ID}
+          artifact_run_id=${artifact_run_id}
+          android_run_id=${android_run_id}
+          release_run_id=${release_run_id}
+          post_fork_ci_run_id=${post_fork_ci_run_id}
+          post_control_run_id=${post_control_run_id}
+          release_channel_run_id=${release_channel_run_id}
+          governance_run_id=${governance_run_id}
+          stale_artifact_run_id=${STALE_ARTIFACT_RUN_ID}
+          stale_android_run_id=${STALE_ANDROID_RUN_ID}
+          EOF
+          )"
+            payload="$RUNNER_TEMP/issue-close.json"
+            jq -n --arg body "$body" \
+              '{body:$body,state:"closed",state_reason:"completed"}' > "$payload"
+            gh api --method PATCH "/repos/${repo}/issues/${ISSUE_NUMBER}" \
+              --input "$payload" >/dev/null
+          }
+
+          update_tracker running retrying-stale-exact-source-gates
+
+          verify_successful_run "$FORK_CI_RUN_ID" ".github/workflows/blocking-ci.yml" "Fork CI"
+          verify_successful_run "$CONTROL_RUN_ID" ".github/workflows/termux-control-plane.yml" "Control plane"
+          verify_successful_run "$SANDBOX_RUN_ID" ".github/workflows/termux-linux-sandbox.yml" "Linux sandbox"
+
+          cancel_stale_run "$STALE_ARTIFACT_RUN_ID"
+          cancel_stale_run "$STALE_ANDROID_RUN_ID"
+          cancel_stale_run "$STALE_ORCHESTRATOR_RUN_ID"
+
+          create_ref_payload="$RUNNER_TEMP/create-gate-ref.json"
+          jq -n --arg ref "refs/heads/${gate_branch}" --arg sha "$SOURCE_SHA" \
+            '{ref:$ref,sha:$sha}' > "$create_ref_payload"
+          gh api --method POST "/repos/${repo}/git/refs" \
+            --input "$create_ref_payload" >/dev/null
+
+          artifact_payload="$RUNNER_TEMP/dispatch-artifact.json"
+          jq -n --arg ref "$gate_branch" \
+            '{ref:$ref,inputs:{source_ref:$ref}}' > "$artifact_payload"
+          dispatch_workflow termux-mobile-artifact.yml "$gate_branch" "$artifact_payload"
+
+          android_payload="$RUNNER_TEMP/dispatch-android.json"
+          jq -n --arg ref "$gate_branch" '{ref:$ref}' > "$android_payload"
+          dispatch_workflow termux-android-emulator.yml "$gate_branch" "$android_payload"
+
+          artifact_run_id="$(find_dispatched_run termux-mobile-artifact.yml "$gate_branch" "$SOURCE_SHA")"
+          android_run_id="$(find_dispatched_run termux-android-emulator.yml "$gate_branch" "$SOURCE_SHA")"
+          update_tracker running validating-retried-arm64-and-android-gates
+
+          wait_for_run "$artifact_run_id" "ARM64 artifact" 9000
+          wait_for_run "$android_run_id" "Android/Termux" 9000
+
+          verify_successful_run "$artifact_run_id" ".github/workflows/termux-mobile-artifact.yml" "ARM64 artifact"
+          verify_successful_run "$android_run_id" ".github/workflows/termux-android-emulator.yml" "Android/Termux"
+
+          artifact_json="$(gh api "/repos/${repo}/actions/runs/${artifact_run_id}/artifacts?per_page=100")"
+          artifact_count="$(
+            jq '[.artifacts[]
+              | select(.name == "codex-termux-aarch64-unknown-linux-musl")
+              | select(.expired == false)] | length' <<<"$artifact_json"
+          )"
+          [[ "$artifact_count" == "1" ]] || {
+            echo "::error::Expected one retained production artifact, found ${artifact_count}"
+            exit 1
+          }
+
+          update_tracker running preparing-alpha6-publication-request
+
+          patch_response="$(gh api "/repos/${repo}/contents/scripts/termux/patch_audit.tsv?ref=main")"
+          patch_sha="$(jq -r .sha <<<"$patch_response")"
+          patch_file="$RUNNER_TEMP/patch_audit.tsv"
+          jq -r .content <<<"$patch_response" | tr -d '\n' | base64 --decode > "$patch_file"
+          request_subject=$'subject\ttermux: request validated 0.151.0-alpha.6 release\ttooling\tRecords successful exact-source control-plane, ARM64, and Android validation evidence for publication.'
+          promote_subject=$'subject\ttermux: promote termux-v0.151.0-alpha.6-2b9e7bdf3c\ttooling\tPromotes the byte-verified public release manifest after publication.'
+          for line in "$request_subject" "$promote_subject"; do
+            grep -Fqx "$line" "$patch_file" || printf '%s\n' "$line" >> "$patch_file"
+          done
+          patch_content="$(base64 -w0 "$patch_file")"
+          patch_payload="$RUNNER_TEMP/update-patch-audit.json"
+          jq -n \
+            --arg message "ci: stage protected alpha1516 update" \
+            --arg content "$patch_content" \
+            --arg sha "$patch_sha" \
+            '{message:$message,content:$content,sha:$sha,branch:"main"}' \
+            > "$patch_payload"
+          gh api --method PUT "/repos/${repo}/contents/scripts/termux/patch_audit.tsv" \
+            --input "$patch_payload" >/dev/null
+
+          request_file="$RUNNER_TEMP/release-publication.env"
+          cat > "$request_file" <<EOF
+          # Exact validated source and publication evidence.
+          format_version=1
+          source_sha=${SOURCE_SHA}
+          release_tag=${RELEASE_TAG}
+          expected_package_version=${PACKAGE_VERSION}
+          expected_codex_version=codex-cli ${SOURCE_SHA:0:7}
+          control_run_id=${CONTROL_RUN_ID}
+          artifact_run_id=${artifact_run_id}
+          android_run_id=${android_run_id}
+          EOF
+
+          request_response="$(gh api "/repos/${repo}/contents/scripts/termux/release-publication.env?ref=main")"
+          request_sha="$(jq -r .sha <<<"$request_response")"
+          request_content="$(base64 -w0 "$request_file")"
+          request_payload="$RUNNER_TEMP/update-release-request.json"
+          jq -n \
+            --arg message "termux: request validated 0.151.0-alpha.6 release" \
+            --arg content "$request_content" \
+            --arg sha "$request_sha" \
+            '{message:$message,content:$content,sha:$sha,branch:"main"}' \
+            > "$request_payload"
+          request_commit_sha="$(
+            gh api --method PUT "/repos/${repo}/contents/scripts/termux/release-publication.env" \
+              --input "$request_payload" --jq .commit.sha
+          )"
+          [[ "$request_commit_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          publisher_payload="$RUNNER_TEMP/dispatch-publisher.json"
+          jq -n '{ref:"main"}' > "$publisher_payload"
+          dispatch_workflow termux-release-request.yml main "$publisher_payload"
+          release_run_id="$(find_dispatched_run termux-release-request.yml main "$request_commit_sha")"
+          update_tracker running publishing-complete-alpha6-release
+          wait_for_run "$release_run_id" "Release publisher" 5400
+
+          latest_json="$(gh api "/repos/${repo}/releases/latest")"
+          [[ "$(jq -r .tag_name <<<"$latest_json")" == "$RELEASE_TAG" ]]
+          [[ "$(jq -r .target_commitish <<<"$latest_json")" == "$SOURCE_SHA" ]]
+          [[ "$(jq -r .draft <<<"$latest_json")" == "false" ]]
+          [[ "$(jq -r .prerelease <<<"$latest_json")" == "false" ]]
+          expected_assets="$(printf '%s\n' \
+            SHA256SUMS \
+            codex-termux-aarch64-unknown-linux-musl.tar.gz \
+            codex-termux-sbom.spdx.json \
+            metadata.env \
+            release-manifest.env | LC_ALL=C sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"$latest_json" | LC_ALL=C sort)"
+          [[ "$actual_assets" == "$expected_assets" ]] || {
+            diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          }
+
+          gh api --method DELETE "/repos/${repo}/git/refs/heads/${gate_branch}" \
+            >/dev/null 2>&1 || true
+
+          resume_response="$(gh api "/repos/${repo}/contents/.github/workflows/alpha1516-resume.yml?ref=main")"
+          resume_sha="$(jq -r .sha <<<"$resume_response")"
+          cleanup_payload="$RUNNER_TEMP/delete-resume-workflow.json"
+          jq -n \
+            --arg message "chore: remove temporary alpha1516 orchestration" \
+            --arg sha "$resume_sha" \
+            '{message:$message,sha:$sha,branch:"main"}' > "$cleanup_payload"
+          cleanup_commit_sha="$(
+            gh api --method DELETE "/repos/${repo}/contents/.github/workflows/alpha1516-resume.yml" \
+              --input "$cleanup_payload" --jq .commit.sha
+          )"
+          [[ "$cleanup_commit_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          final_main_sha="$(gh api "/repos/${repo}/branches/main" --jq .commit.sha)"
+          [[ "$final_main_sha" == "$cleanup_commit_sha" ]]
+
+          for workflow in \
+            termux-release-channel.yml \
+            termux-governance.yml \
+            termux-control-plane.yml \
+            blocking-ci.yml; do
+            payload="$RUNNER_TEMP/dispatch-${workflow}.json"
+            jq -n '{ref:"main"}' > "$payload"
+            dispatch_workflow "$workflow" main "$payload"
+          done
+
+          release_channel_run_id="$(find_dispatched_run termux-release-channel.yml main "$final_main_sha")"
+          governance_run_id="$(find_dispatched_run termux-governance.yml main "$final_main_sha")"
+          post_control_run_id="$(find_dispatched_run termux-control-plane.yml main "$final_main_sha")"
+          post_fork_ci_run_id="$(find_dispatched_run blocking-ci.yml main "$final_main_sha")"
+          update_tracker running independently-verifying-promoted-alpha6-release
+
+          wait_for_run "$release_channel_run_id" "Release channel" 3600
+          wait_for_run "$governance_run_id" "Governance" 3600
+          wait_for_run "$post_control_run_id" "Post-promotion control plane" 3600
+          wait_for_run "$post_fork_ci_run_id" "Post-promotion fork CI" 3600
+
+          latest_tag="$(gh api "/repos/${repo}/releases/latest" --jq .tag_name)"
+          [[ "$latest_tag" == "$RELEASE_TAG" ]]
+          if gh api "/repos/${repo}/contents/.github/workflows/alpha1516-resume.yml?ref=main" \
+            >/dev/null 2>&1; then
+            echo "::error::Temporary resume workflow still exists on main"
+            exit 1
+          fi
+          if gh api "/repos/${repo}/git/ref/heads/${gate_branch}" >/dev/null 2>&1; then
+            echo "::error::Temporary gate branch still exists"
+            exit 1
+          fi
+
+          trap - ERR
+          close_tracker
+
+          {
+            echo "### Alpha.6 release recovery completed"
+            echo
+            echo "- Source: \`${SOURCE_SHA}\`"
+            echo "- Release: \`${RELEASE_TAG}\`"
+            echo "- Artifact run: \`${artifact_run_id}\`"
+            echo "- Android run: \`${android_run_id}\`"
+            echo "- Publisher run: \`${release_run_id}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
