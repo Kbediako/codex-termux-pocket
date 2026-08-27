@@ -97,7 +97,7 @@ source, exact asset set, metadata, checksums, attestations, and Latest endpoint
 on every relevant run instead of relying on GitHub's immutability setting.
 
 `termux-release-channel.yml` is read-only post-promotion verification.
-`termux-governance-audit.yml` independently checks the public channel when the
+`termux-governance.yml` independently checks the public channel when the
 manifest or release controls change, on its daily schedule, or manually.
 
 ## Failed or delayed builds

@@ -56,8 +56,8 @@ describes the actual change rather than reusing that generic phrase.
 4. `termux-release-channel.yml` is read-only current-state verification. It
    proves that the promoted manifest still identifies a complete GitHub Latest
    release with the expected source, assets, metadata, checksums, and attestations.
-5. `termux-governance-audit.yml` independently audits the promoted public channel
-   when Termux release/governance inputs change, on a daily schedule, or manually.
+5. `termux-governance.yml` independently audits the promoted public channel when
+   Termux release/governance inputs change, on a daily schedule, or manually.
 
 Repository-level release editing intentionally remains enabled. Safety comes
 from exact-source validation, staging every final asset before publication,
@@ -74,7 +74,7 @@ bytes. No post-publication workflow edits an existing release.
 - `termux-android-emulator.yml`
 - `termux-release-request.yml`
 - `termux-release-channel.yml`
-- `termux-governance-audit.yml`
+- `termux-governance.yml`
 
 `.github/scripts/validate-termux-workflow-topology.py` enforces this inventory,
 requires explicit non-generic run titles, rejects observer/monitor/repair/one-time

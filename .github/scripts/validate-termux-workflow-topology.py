@@ -14,7 +14,7 @@ EXPECTED_WORKFLOWS = {
     "blocking-ci.yml",
     "termux-android-emulator.yml",
     "termux-control-plane.yml",
-    "termux-governance-audit.yml",
+    "termux-governance.yml",
     "termux-linux-sandbox.yml",
     "termux-mobile-artifact.yml",
     "termux-release-channel.yml",
@@ -130,6 +130,7 @@ def main() -> None:
     channel = read("termux-release-channel.yml")
     for forbidden in (
         "actions: write",
+        "gh workflow run termux-governance.yml",
         "gh workflow run termux-governance-audit.yml",
         "--method PATCH",
         "make_latest",
