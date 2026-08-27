@@ -834,14 +834,22 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
 }
 
 #[tokio::test]
-async fn plugin_list_accepts_omitted_cwds() -> Result<()> {
+async fn plugin_list_omitted_cwds_excludes_server_project_config() -> Result<()> {
     let codex_home = TempDir::new()?;
+    let project_marketplace = TempDir::new()?;
     std::fs::create_dir_all(codex_home.path().join(".agents/plugins"))?;
-    write_plugins_enabled_config(codex_home.path())?;
+    std::fs::create_dir_all(codex_home.path().join(".git"))?;
+    std::fs::create_dir_all(codex_home.path().join(".codex"))?;
+    std::fs::create_dir_all(project_marketplace.path().join(".agents/plugins"))?;
+    write_installed_plugin(&codex_home, "home-marketplace", "home-plugin")?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "[features]\nplugins = true\n[plugins.\"home-plugin@home-marketplace\"]\nenabled = true\n",
+    )?;
     std::fs::write(
         codex_home.path().join(".agents/plugins/marketplace.json"),
         r#"{
-  "name": "codex-curated",
+  "name": "home-marketplace",
   "plugins": [
     {
       "name": "home-plugin",
@@ -853,6 +861,20 @@ async fn plugin_list_accepts_omitted_cwds() -> Result<()> {
   ]
 }"#,
     )?;
+    std::fs::write(
+        project_marketplace
+            .path()
+            .join(".agents/plugins/marketplace.json"),
+        r#"{"name":"project-marketplace","plugins":[{"name":"project-plugin","source":{"source":"local","path":"./project-plugin"}}]}"#,
+    )?;
+    let source = serde_json::to_string(&project_marketplace.path().to_string_lossy())?;
+    std::fs::write(
+        codex_home.path().join(".codex/config.toml"),
+        format!(
+            "[marketplaces.project-marketplace]\nsource_type = \"local\"\nsource = {source}\n\n[plugins.\"home-plugin@home-marketplace\"]\nenabled = false\n"
+        ),
+    )?;
+    set_project_trust_level(codex_home.path(), codex_home.path(), TrustLevel::Trusted)?;
     let home = codex_home.path().to_string_lossy().into_owned();
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -863,15 +885,39 @@ async fn plugin_list_accepts_omitted_cwds() -> Result<()> {
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
-    let request_id = mcp
-        .send_plugin_list_request(PluginListParams {
-            cwds: None,
-            marketplace_kinds: None,
-            force_refetch: false,
-        })
-        .await?;
-
-    let _: PluginListResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    for (cwds, expected) in [
+        (None, vec![("home-plugin@home-marketplace", true, true)]),
+        (
+            Some(Vec::new()),
+            vec![("home-plugin@home-marketplace", true, true)],
+        ),
+        (
+            Some(vec![AbsolutePathBuf::try_from(codex_home.path())?]),
+            vec![
+                ("home-plugin@home-marketplace", true, false),
+                ("project-plugin@project-marketplace", false, false),
+            ],
+        ),
+    ] {
+        let request_id = mcp
+            .send_plugin_list_request(PluginListParams {
+                cwds,
+                marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
+                force_refetch: false,
+            })
+            .await?;
+        let response: PluginListResponse =
+            timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+        let mut plugins = response
+            .marketplaces
+            .iter()
+            .flat_map(|marketplace| &marketplace.plugins)
+            .map(|plugin| (plugin.id.as_str(), plugin.installed, plugin.enabled))
+            .collect::<Vec<_>>();
+        plugins.sort_unstable();
+        assert_eq!(plugins, expected);
+        assert_eq!(response.marketplace_load_errors, Vec::new());
+    }
     Ok(())
 }
 

@@ -75,6 +75,7 @@ fn model_with_collaboration_messages(
 ) -> codex_protocol::openai_models::ModelInfo {
     let mut model = model_info_from_slug(slug);
     let model_messages = model.model_messages.get_or_insert(ModelMessages {
+        persistent_instructions: None,
         instructions_template: None,
         instructions_variables: None,
         approvals: None,

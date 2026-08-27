@@ -153,6 +153,7 @@ async fn read_only_permissions_preserve_parent_environments_and_denied_reads() -
         .expect("parent should have an execution environment");
     environment.config = EnvironmentConfigState::Ready(EnvironmentConfig {
         allow_login_shell: true,
+        workspace_roots: environment.workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(parent_profile.clone()),
         shell_environment_policy: Default::default(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&parent_config),

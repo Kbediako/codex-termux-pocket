@@ -43,7 +43,7 @@ use codex_protocol::turn_input::TurnStartOptions;
 use crate::session::completed_session_loop_termination;
 
 pub(crate) struct GuardianReadOnlyHistoryTools(
-    pub(crate) Vec<Arc<dyn codex_tools::ToolExecutor<codex_tools::ToolCall>>>,
+    pub(crate) Vec<Arc<dyn for<'call> codex_tools::ToolExecutor<codex_tools::ToolCall<'call>>>>,
 );
 
 /// Start an interactive sub-Codex thread and return its runtime and IO channels.

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use codex_core_plugins::PluginCommandAttribution;
 use codex_plugin::PluginId;
+use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -50,11 +51,12 @@ async fn command_approval_holds_an_elicitation_until_response() {
             session
                 .request_command_approval(
                     turn_context.as_ref(),
+                    ExecApprovalKind::Command,
                     "call-1".to_string(),
                     /*approval_id*/ None,
                     /*environment_id*/ None,
                     vec!["echo".to_string()],
-                    cwd,
+                    cwd.into(),
                     /*reason*/ None,
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,

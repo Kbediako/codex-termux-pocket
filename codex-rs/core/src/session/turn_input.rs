@@ -21,6 +21,7 @@ use crate::tasks::RegularTask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
@@ -234,21 +235,25 @@ async fn start_or_steer(
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
-        input,
+        mut input,
         thread_settings,
         start,
         additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
-        return Err(CodexErr::InvalidRequest(
-            "only user input can steer a turn".to_string(),
-        ));
+    let has_explicit_input = match &input {
+        SubmittedTurnInput::UserInput { content, .. } => !content.is_empty(),
+        SubmittedTurnInput::ResponseItem(ResponseItem::FunctionCallOutput {
+            call_id: None,
+            ..
+        }) => true,
+        _ => {
+            return Err(CodexErr::InvalidRequest(
+                "only user input or standalone function-call outputs can start or steer a turn"
+                    .to_string(),
+            ));
+        }
     };
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     let incoming_root_turn_id = start
@@ -258,11 +263,10 @@ async fn start_or_steer(
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
     match session
         .steer_input(
-            &mut items,
+            &mut input,
             additional_context.clone(),
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
-            client_id.clone(),
             responsesapi_client_metadata.clone(),
             incoming_root_turn_id,
         )
@@ -280,7 +284,7 @@ async fn start_or_steer(
                 unreachable!("explicit user input can enter Plan mode");
             };
             if can_start_root_turn
-                && !items.is_empty()
+                && has_explicit_input
                 && turn_context
                     .turn_metadata_state
                     .can_start_root_turn(&turn_context.session_source)
@@ -297,13 +301,12 @@ async fn start_or_steer(
             session
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
-            turn_context.session_telemetry.user_prompt(&items);
+            if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                turn_context.session_telemetry.user_prompt(content);
+            }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
-            if !items.is_empty() {
-                task_input.push(TurnInput::UserInput {
-                    content: items,
-                    client_id,
-                });
+            if has_explicit_input {
+                task_input.push(pending_turn_input(input));
             }
             session
                 .spawn_task(turn_context, task_input, RegularTask::new())
@@ -447,22 +450,18 @@ async fn steer(
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
-        input,
+        mut input,
         thread_settings,
         start,
         additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
+    if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
         return Err(CodexErr::InvalidRequest(
             "only user input can steer a turn".to_string(),
         ));
-    };
+    }
     let incoming_root_turn_id = start
         .parent_turn_id
         .as_ref()
@@ -470,11 +469,10 @@ async fn steer(
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
     match session
         .steer_input(
-            &mut items,
+            &mut input,
             additional_context,
             Some(expected_turn_id.as_str()),
             settings.required_active_final_output_json_schema(),
-            client_id,
             responsesapi_client_metadata,
             incoming_root_turn_id,
         )
@@ -511,6 +509,7 @@ impl Session {
                 self.send_event_raw(Event {
                     id: submission_id,
                     msg: EventMsg::Error(ErrorEvent {
+                        misalignment: None,
                         message: format!("failed to submit turn input: {reason:?}"),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
                     }),
@@ -537,24 +536,19 @@ impl Session {
         }
     }
 
-    /// Inject additional user input into the currently active turn.
+    /// Inject additional user input or a standalone tool output into the active turn.
     ///
     /// Returns the active turn id when accepted.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "steering carries the accepted input plus its turn-scoped metadata"
-    )]
     async fn steer_input(
         &self,
-        input: &mut Vec<UserInput>,
+        input: &mut SubmittedTurnInput,
         additional_context: BTreeMap<String, AdditionalContextEntry>,
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
-        client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
         incoming_root_turn_id: Option<Option<String>>,
     ) -> Result<String, NotSubmittedReason> {
@@ -591,7 +585,7 @@ impl Session {
             }
         }
 
-        if input.is_empty() {
+        if matches!(input, SubmittedTurnInput::UserInput { content, .. } if content.is_empty()) {
             return Err(NotSubmittedReason::EmptyInput);
         }
         // Compare JSON values directly instead of serialized schema text.
@@ -602,11 +596,6 @@ impl Session {
         {
             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
         }
-        active_task
-            .turn_context
-            .session_telemetry
-            .user_prompt(input);
-
         let mut pending_input = merge_additional_context_input(self, additional_context).await;
 
         if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
@@ -616,10 +605,20 @@ impl Session {
                 .set_responsesapi_client_metadata(responsesapi_client_metadata);
         }
 
-        pending_input.push(TurnInput::UserInput {
-            content: std::mem::take(input),
-            client_id: client_user_message_id,
-        });
+        let input = match input {
+            SubmittedTurnInput::UserInput { content, client_id } => {
+                active_task
+                    .turn_context
+                    .session_telemetry
+                    .user_prompt(content);
+                TurnInput::UserInput {
+                    content: std::mem::take(content),
+                    client_id: client_id.clone(),
+                }
+            }
+            input => pending_turn_input(input.clone()),
+        };
+        pending_input.push(input);
         if let Some(incoming_root_turn_id) = incoming_root_turn_id
             && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
         {
@@ -657,6 +656,15 @@ fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
     match input {
         SubmittedTurnInput::UserInput { content, client_id } => {
             TurnInput::UserInput { content, client_id }
+        }
+        SubmittedTurnInput::ResponseItem(mut item)
+            if matches!(
+                &item,
+                ResponseItem::FunctionCallOutput { call_id: None, .. }
+            ) =>
+        {
+            Session::assign_missing_response_item_id(&mut item);
+            TurnInput::FunctionCallOutput(item)
         }
         SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
         SubmittedTurnInput::InterAgentCommunication(communication) => {

@@ -2,6 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_config::McpServerConfig;
+use codex_mcp::McpServerSource;
+use codex_mcp::PreparedMcpCall;
 use codex_tools::ToolCallSource;
 use codex_tools::ToolName;
 use codex_tools::ToolPayload;
@@ -33,6 +36,75 @@ pub enum ToolCallOutcome {
     Aborted,
 }
 
+/// Provenance captured from the immutable MCP call selected for one tool invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum McpToolSource {
+    /// A connector routed through the host-owned Codex Apps MCP server.
+    Connector,
+    /// An MCP server whose frozen registration matches the active Codex configuration.
+    Config,
+    /// An MCP server registered by a locally loaded plugin.
+    Plugin {
+        /// Identifier of the plugin that owns this MCP server.
+        id: String,
+    },
+    /// An executor-selected plugin whose root has not been attested by the host.
+    SelectedPlugin,
+    /// A compatibility or extension registration without user-owned provenance.
+    Other,
+}
+
+/// Read-only metadata and provenance captured from the MCP call that will execute.
+#[derive(Clone, Debug)]
+pub struct McpToolContext {
+    tool: crate::McpToolInfo,
+    source: McpToolSource,
+}
+
+impl McpToolContext {
+    /// Snapshots a prepared call without exposing its executable client to extensions.
+    ///
+    /// Configured servers retain their provenance only when their captured connection
+    /// still matches the host configuration for the current tool invocation.
+    pub fn from_prepared_call(
+        call: &PreparedMcpCall,
+        configured_server: Option<&McpServerConfig>,
+    ) -> Self {
+        let tool = call.tool_info().clone();
+        let source = if tool.connector_id.is_some() && call.is_host_owned_apps() {
+            McpToolSource::Connector
+        } else if call.is_selected_plugin_server() {
+            McpToolSource::SelectedPlugin
+        } else if let Some(id) = call.plugin_id() {
+            McpToolSource::Plugin { id: id.to_owned() }
+        } else if call
+            .config()
+            .mcp_server_catalog
+            .server(call.server_name())
+            .is_some_and(|server| {
+                matches!(server.source(), McpServerSource::Config)
+                    && configured_server.is_some_and(|configured| server.config() == configured)
+            })
+        {
+            McpToolSource::Config
+        } else {
+            McpToolSource::Other
+        };
+
+        Self { tool, source }
+    }
+
+    /// Returns frozen metadata for the exact model-visible MCP tool being executed.
+    pub fn tool_info(&self) -> &crate::McpToolInfo {
+        &self.tool
+    }
+
+    /// Returns the registration source captured with the executable call.
+    pub fn source(&self) -> &McpToolSource {
+        &self.source
+    }
+}
+
 /// Input supplied when the host starts executing one tool call.
 pub struct ToolStartInput<'a> {
     /// Store scoped to the host session runtime.
@@ -47,6 +119,8 @@ pub struct ToolStartInput<'a> {
     pub call_id: &'a str,
     /// Tool name as routed by the host.
     pub tool_name: &'a ToolName,
+    /// Read-only metadata and provenance from the exact MCP call that will execute.
+    pub mcp_tool: Option<&'a McpToolContext>,
     /// Finalized tool arguments, including any pre-tool-use hook rewrites.
     ///
     /// Payloads can contain sensitive plaintext and must not be logged.

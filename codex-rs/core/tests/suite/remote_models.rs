@@ -115,6 +115,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
     let specific = ModelInfo {
         display_name: "GPT 5.3 Codex".to_string(),
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some("use specific prefix".to_string()),
             instructions_variables: None,
             approvals: None,
@@ -130,6 +131,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
     let generic = ModelInfo {
         display_name: "GPT 5.3".to_string(),
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some("use generic prefix".to_string()),
             instructions_variables: None,
             approvals: None,
@@ -366,12 +368,15 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
     Ok(())
 }
 
-#[test_case(ReasoningEffort::Custom("future".to_string()), "future"; "custom")]
-#[test_case(ReasoningEffort::Persistent, "disabled"; "persistent")]
+#[test_case(ReasoningEffort::Custom("future".to_string()), "future", Some("Catalog follow-up instructions."); "custom")]
+#[test_case(ReasoningEffort::Persistent, "disabled", None; "persistent")]
+#[test_case(ReasoningEffort::Persistent, "disabled", Some("Catalog follow-up instructions."); "persistent override")]
+#[test_case(ReasoningEffort::Persistent, "disabled", Some(""); "empty persistent override")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
     effort: ReasoningEffort,
     expected_wire_effort: &str,
+    catalog_instructions: Option<&str>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -379,6 +384,8 @@ async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
     let server = MockServer::start().await;
     let requested_model = "gpt-5.3-codex-test";
     let prefix_model = "gpt-5.3-codex";
+    let base_instructions = "Keep the catalog base instructions.";
+    let developer_instructions = "Keep the configured developer instructions.";
     let mut remote_model = test_remote_model_with_policy(
         prefix_model,
         ModelVisibility::List,
@@ -397,6 +404,18 @@ async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
         },
     ];
     remote_model.default_reasoning_summary = ReasoningSummary::Detailed;
+    remote_model.model_messages = Some(ModelMessages {
+        persistent_instructions: catalog_instructions.map(str::to_string),
+        instructions_template: Some(base_instructions.to_string()),
+        instructions_variables: None,
+        approvals: None,
+        collaboration_modes: None,
+        auto_review: None,
+        permissions: None,
+        multi_agent: None,
+        token_budget: None,
+        guardian_v2: None,
+    });
     mount_models_once(
         &server,
         ModelsResponse {
@@ -415,6 +434,7 @@ async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
             config.model = Some(requested_model.to_string());
+            config.developer_instructions = Some(developer_instructions.to_string());
         })
         .build_with_auto_env(&server)
         .await?;
@@ -441,6 +461,34 @@ async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
     assert_eq!(body["model"].as_str(), Some(requested_model));
     assert_eq!(reasoning_effort, Some(expected_wire_effort));
     assert_eq!(reasoning_summary, Some("detailed"));
+    assert_eq!(request.instructions_text(), base_instructions);
+    assert!(
+        request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains(developer_instructions))
+    );
+
+    let persistent_instructions = request
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|text| text.starts_with("<persistent_mode>"))
+        .collect::<Vec<_>>();
+    if effort != ReasoningEffort::Persistent || catalog_instructions == Some("") {
+        assert!(persistent_instructions.is_empty());
+    } else if let Some(instructions) = catalog_instructions {
+        assert_eq!(
+            persistent_instructions,
+            vec![format!(
+                "<persistent_mode>\n{instructions}\n</persistent_mode>"
+            )]
+        );
+    } else {
+        assert_eq!(persistent_instructions.len(), 1);
+        assert!(persistent_instructions[0].starts_with(
+            "<persistent_mode>\n## Proactivity\n\nAfter you've completed the user task and delivered the final answer,"
+        ));
+    }
 
     Ok(())
 }
@@ -797,6 +845,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
         default_service_tier: None,
         upgrade: None,
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some(remote_instructions.to_string()),
             instructions_variables: None,
             approvals: None,

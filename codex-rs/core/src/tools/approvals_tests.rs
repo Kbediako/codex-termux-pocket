@@ -95,7 +95,6 @@ fn guardian_cwd_rejects_foreign_remote_path() {
 
     assert!(guardian_cwd(codex_exec_server::REMOTE_ENVIRONMENT_ID, cwd).is_err());
 }
-
 #[tokio::test]
 async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
     let (session, turn, events) = make_session_and_context_with_rx().await;

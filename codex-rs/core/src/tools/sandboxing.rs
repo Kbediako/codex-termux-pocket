@@ -418,6 +418,17 @@ pub(crate) fn executor_windows_sandbox_level(
 }
 
 impl<'a> SandboxAttempt<'a> {
+    /// Whether this attempt bypasses sandboxing required by its ambient policy.
+    /// Use the requested policy, not the controller's wrapper, for remote executors.
+    pub(crate) fn is_escalated(&self) -> bool {
+        !self.sandbox_requested
+            && self.manager.should_sandbox(
+                self.permissions,
+                SandboxablePreference::Auto,
+                self.enforce_managed_network,
+            )
+    }
+
     pub(crate) fn network_proxy<'b>(
         &'b self,
         fallback: Option<&'b NetworkProxy>,

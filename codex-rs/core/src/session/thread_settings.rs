@@ -27,6 +27,7 @@ pub(super) async fn update(
             .send_event_raw(Event {
                 id: submission_id,
                 msg: EventMsg::Error(ErrorEvent {
+                    misalignment: None,
                     message: format!("invalid thread settings override: {error}"),
                     codex_error_info: Some(CodexErrorInfo::BadRequest),
                 }),

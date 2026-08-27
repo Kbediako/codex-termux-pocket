@@ -489,6 +489,7 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
             &selection,
             EnvironmentConfig {
                 allow_login_shell: false,
+                workspace_roots: selection.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(
                     test.config.permissions.permission_profile().clone(),
                 ),

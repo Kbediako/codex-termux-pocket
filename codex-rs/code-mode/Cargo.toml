@@ -16,6 +16,7 @@ workspace = true
 codex-code-mode-protocol = { workspace = true }
 codex-http-client = { workspace = true }
 codex-install-context = { workspace = true }
+codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 futures = { workspace = true }
 http-body-util = "0.1.3"

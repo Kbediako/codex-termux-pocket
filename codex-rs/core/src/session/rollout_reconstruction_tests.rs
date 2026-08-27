@@ -157,6 +157,8 @@ async fn record_initial_history_ignores_security_risk_scores() {
     let user_item = user_message("visible user input");
     let security_risk = SecurityRiskScore {
         scores: BTreeMap::from([("credential_access".to_string(), 0.92)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     };
 

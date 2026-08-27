@@ -31,6 +31,7 @@ async fn catalog_permission_message_loaded_from_remote_models_is_sent() -> Resul
     let model_slug = "remote-catalog-permissions-model";
     let mut model = model_info_from_slug(model_slug);
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: None,
         instructions_template: None,
         instructions_variables: None,
         approvals: None,

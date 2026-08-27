@@ -1907,6 +1907,7 @@ mod tests {
         let catalog_template = "Catalog Guardian template:\n{{ tenant_policy_config }}";
         parent_config.guardian_policy_config = Some(managed_policy.to_string());
         let model_messages = ModelMessages {
+            persistent_instructions: None,
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
@@ -1945,6 +1946,7 @@ mod tests {
     async fn guardian_review_session_config_preserves_explicit_empty_catalog_policy() {
         let parent_config = crate::config::test_config().await;
         let model_messages = ModelMessages {
+            persistent_instructions: None,
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
@@ -1991,6 +1993,7 @@ mod tests {
         let parent_config = crate::config::test_config().await;
         let catalog_policy = "Use the catalog Guardian policy.";
         let model_messages = ModelMessages {
+            persistent_instructions: None,
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
@@ -2310,6 +2313,7 @@ mod tests {
             .send(Event {
                 id: "prior-turn".to_string(),
                 msg: EventMsg::Error(ErrorEvent {
+                    misalignment: None,
                     message: "stale guardian error".to_string(),
                     codex_error_info: None,
                 }),
@@ -2351,6 +2355,7 @@ mod tests {
             .send(Event {
                 id: "current-turn".to_string(),
                 msg: EventMsg::Error(ErrorEvent {
+                    misalignment: None,
                     message: "temporary failure".to_string(),
                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
                 }),

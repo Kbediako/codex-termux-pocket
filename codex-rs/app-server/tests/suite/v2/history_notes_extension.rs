@@ -22,6 +22,7 @@ use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
@@ -171,31 +172,6 @@ async fn app_server_uses_configured_notes_backend_for_context_window_hints(
                 request.tool_by_name(namespace, tool_name).is_some(),
                 "app-server should expose {namespace}.{tool_name} to the model"
             );
-        }
-        // Reserved tools must retain Bridge-compatible constraints in the model request.
-        for (namespace, tool_name, property, expected) in [
-            (
-                "history",
-                "list_items",
-                "limit",
-                json!({"type": "integer", "minimum": 1}),
-            ),
-            (
-                "notes",
-                "search_contents",
-                "query",
-                json!({"type": "string"}),
-            ),
-        ] {
-            let tool = request
-                .tool_by_name(namespace, tool_name)
-                .expect("history/notes tool should be exposed");
-            let mut schema = tool["parameters"]["properties"][property].clone();
-            schema
-                .as_object_mut()
-                .expect("parameter schema")
-                .remove("description");
-            assert_eq!(schema, expected, "{namespace}.{tool_name}.{property}");
         }
     }
     assert!(request.tool_by_name("notes", "thread_hint").is_none());
@@ -424,6 +400,7 @@ async fn guardian_can_read_parent_history_without_inheriting_notes_tools() -> Re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result<()> {
+    let encrypted_query = format!("enc_query_{}", "x".repeat(1_001));
     let calls = [
         ("history", "list_windows", json!({})),
         ("history", "list_items", json!({})),
@@ -435,7 +412,7 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
         (
             "history",
             "search_contents",
-            json!({"query": "PRIVATE_QUERY"}),
+            json!({"query": encrypted_query, "limit": 2, "recent_first": false}),
         ),
         (
             "notes",
@@ -446,17 +423,17 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
         (
             "notes",
             "search_contents",
-            json!({"query": "PRIVATE_QUERY"}),
+            json!({"query": encrypted_query, "max_files": 2}),
         ),
         (
             "notes",
             "append_to_file",
-            json!({"path": "PRIVATE_PATH", "text": "PRIVATE_TEXT"}),
+            json!({"path": "PRIVATE_PATH", "text": "enc_append_text"}),
         ),
         (
             "notes",
             "write_file",
-            json!({"path": "PRIVATE_PATH", "text": "PRIVATE_TEXT"}),
+            json!({"path": "PRIVATE_PATH", "text": "enc_write_text"}),
         ),
         (
             "functions",
@@ -475,11 +452,12 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
         ),
     ];
     let server = responses::start_mock_server().await;
-    for (namespace, tool, _) in &calls[..9] {
+    for (namespace, tool, arguments) in &calls[..9] {
         Mock::given(method("POST"))
             .and(path(format!(
                 "/backend-api/codex/alpha/{namespace}/v2/{tool}"
             )))
+            .and(body_partial_json(arguments.clone()))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"text": "PRIVATE_RESULT"})),
             )
@@ -554,6 +532,19 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
             ..Default::default()
         })
         .await?;
+
+    let request = &response_mock.requests()[0];
+    for (namespace, name, field) in [
+        ("history", "search_contents", "query"),
+        ("notes", "search_contents", "query"),
+        ("notes", "append_to_file", "text"),
+        ("notes", "write_file", "text"),
+    ] {
+        let tool = request
+            .tool_by_name(namespace, name)
+            .expect("declared history or notes tool");
+        assert_eq!(tool["parameters"]["properties"][field]["encrypted"], true);
+    }
 
     for (index, (namespace, tool, _)) in calls.iter().enumerate() {
         let event = wait_for_matching_analytics_event(&server, DEFAULT_READ_TIMEOUT, |event| {

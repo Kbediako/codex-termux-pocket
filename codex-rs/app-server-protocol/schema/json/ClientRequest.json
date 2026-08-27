@@ -5395,6 +5395,16 @@
         "threadId": {
           "type": "string"
         },
+        "toolOutput": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnToolOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turnTrigger": {
           "description": "Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.",
           "type": [
@@ -5435,6 +5445,27 @@
         "expectedTurnId",
         "input",
         "threadId"
+      ],
+      "type": "object"
+    },
+    "TurnToolOutput": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "$ref": "#/definitions/FunctionCallOutputBody"
+        }
+      },
+      "required": [
+        "name",
+        "output"
       ],
       "type": "object"
     },

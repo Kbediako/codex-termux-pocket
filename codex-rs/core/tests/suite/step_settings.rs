@@ -12,6 +12,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -727,6 +728,91 @@ async fn model_activation_uses_destination_metadata_defaults(
         vec![request.turn_id; 3],
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_instructions_follow_mid_turn_model_changes() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            paused_response("resp-1", "pause-before-persistent-model-change"),
+            sse_completed("resp-2"),
+        ],
+    )
+    .await;
+    let test = step_settings_test()
+        .with_config(|config| {
+            config.model_reasoning_effort = Some(ReasoningEffort::Persistent);
+            for model in &mut config
+                .model_catalog
+                .as_mut()
+                .expect("controlled model catalog")
+                .models
+            {
+                model
+                    .supported_reasoning_levels
+                    .push(ReasoningEffortPreset {
+                        effort: ReasoningEffort::Persistent,
+                        description: ReasoningEffort::Persistent.to_string(),
+                    });
+                model
+                    .model_messages
+                    .as_mut()
+                    .expect("model instruction metadata")
+                    .persistent_instructions =
+                    Some(format!("Persistent instructions for {}.", model.slug));
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let paused = start_paused_turn(&test.codex).await?;
+    assert_eq!(
+        submit_turn_settings(
+            &test.codex,
+            &paused.turn_id,
+            TurnSettingsUpdate {
+                model: Some(MODEL_B.to_string()),
+                ..Default::default()
+            }
+        )
+        .await?,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    answer_paused_turn(&test.codex, &paused.turn_id).await?;
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::Error(error) => panic!("model activation failed: {}", error.message),
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    let initial =
+        format!("<persistent_mode>\nPersistent instructions for {MODEL_A}.\n</persistent_mode>");
+    let update = format!(
+        "<persistent_mode>\nThese persistent-mode instructions replace all previously provided persistent-mode instructions.\n\nPersistent instructions for {MODEL_B}.\n</persistent_mode>"
+    );
+    let requests = response_mock.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| {
+                let instructions = request
+                    .message_input_texts("developer")
+                    .into_iter()
+                    .filter(|text| text.starts_with("<persistent_mode>"))
+                    .collect::<Vec<_>>();
+                json!({"model": request.body_json()["model"], "instructions": instructions})
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"model": MODEL_A, "instructions": [initial]}),
+            json!({"model": MODEL_B, "instructions": [initial, update]}),
+        ]
+    );
     Ok(())
 }
 

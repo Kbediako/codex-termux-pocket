@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use codex_extension_api::McpToolContext;
 use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolCallSource as ExtensionToolCallSource;
 use codex_extension_api::ToolFinishInput;
@@ -11,7 +12,10 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 
-pub(crate) async fn notify_tool_start(invocation: &ToolInvocation) {
+pub(crate) async fn notify_tool_start(
+    invocation: &ToolInvocation,
+    mcp_tool: Option<&McpToolContext>,
+) {
     let contributors = invocation
         .session
         .services
@@ -32,6 +36,7 @@ pub(crate) async fn notify_tool_start(invocation: &ToolInvocation) {
                 turn_id: invocation.turn.sub_id.as_str(),
                 call_id: invocation.call_id.as_str(),
                 tool_name: &invocation.tool_name,
+                mcp_tool,
                 payload: &invocation.payload,
                 conversation_history: Arc::clone(&conversation_history),
                 source: extension_tool_call_source(invocation.source.clone()),

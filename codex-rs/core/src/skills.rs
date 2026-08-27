@@ -12,6 +12,7 @@ use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillMetadata;
 use codex_skills_extension::HostSkillsLoadInput;
+use codex_skills_extension::InjectedHostSkillPrompts;
 use codex_skills_extension::detect_implicit_skill_invocation;
 use codex_skills_extension::record_plugin_turn_usage;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -34,7 +35,7 @@ pub(crate) fn skills_load_input_from_config(
     )
 }
 
-pub(crate) fn emit_explicit_skill_invocations(
+pub(crate) async fn emit_explicit_skill_invocations(
     sess: &Session,
     turn_context: &TurnContext,
     mentioned_skills: &[SkillMetadata],
@@ -72,6 +73,31 @@ pub(crate) fn emit_explicit_skill_invocations(
                 ("reasoning_effort", reasoning_effort.as_str()),
             ],
         );
+    }
+
+    let injected_host_skill_prompts = turn_context
+        .extension_data
+        .get::<InjectedHostSkillPrompts>();
+    for skill in injected_skills {
+        let skill_resource = skill.path_to_skills_md.to_string_lossy();
+        if injected_host_skill_prompts
+            .as_ref()
+            .is_some_and(|prompts| prompts.is_superseded_path(&skill_resource))
+        {
+            continue;
+        }
+        for contributor in sess.services.extensions.skill_invocation_contributors() {
+            contributor
+                .on_skill_invocation(SkillInvocationInput {
+                    session_store: &sess.services.session_extension_data,
+                    thread_store: &sess.services.thread_extension_data,
+                    turn_store: turn_context.extension_data.as_ref(),
+                    turn_id: turn_context.sub_id.as_str(),
+                    skill_resource: skill_resource.as_ref(),
+                    kind: SkillInvocationKind::Explicit,
+                })
+                .await;
+        }
     }
 
     let invocations = injected_skills

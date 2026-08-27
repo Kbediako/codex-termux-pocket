@@ -487,6 +487,7 @@ async fn on_event_updates_status_from_task_complete() {
         (None, AgentStatus::Completed(Some("done".to_string()))),
         (
             Some(ErrorEvent {
+                misalignment: None,
                 message: "denied".to_string(),
                 codex_error_info: None,
             }),
@@ -509,6 +510,7 @@ async fn on_event_updates_status_from_task_complete() {
 #[tokio::test]
 async fn on_event_updates_status_from_error() {
     let status = agent_status_from_event(&EventMsg::Error(ErrorEvent {
+        misalignment: None,
         message: "boom".to_string(),
         codex_error_info: None,
     }));
@@ -1459,6 +1461,8 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
 #[tokio::test]
 async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let managed_fragment = "<managed_developer_instructions>\nParent developer instructions.\n</managed_developer_instructions>";
+    let persistent_fragment =
+        "<persistent_mode>\nParent developer instructions.\n</persistent_mode>";
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -1556,6 +1560,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                         ContentItem::InputText {
                             text: managed_fragment.to_string(),
                         },
+                        ContentItem::InputText {
+                            text: persistent_fragment.to_string(),
+                        },
                     ],
                     phase: None,
                     internal_chat_message_metadata_passthrough: Some(
@@ -1565,6 +1572,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                                 ContentItemKind("multi_agent.mode_instructions".to_string()),
                                 ContentItemKind("generic.developer_policy".to_string()),
                                 ContentItemKind("managed_config.developer_instructions".to_string()),
+                                ContentItemKind("persistent_mode.instructions".to_string()),
                             ]),
                             ..Default::default()
                         },
@@ -1675,6 +1683,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             ContentItem::InputText {
                 text: managed_fragment.to_string(),
             },
+            ContentItem::InputText {
+                text: persistent_fragment.to_string(),
+            },
         ],
         phase: None,
         internal_chat_message_metadata_passthrough: Some(
@@ -1683,6 +1694,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     ContentItemKind("generic.developer_instructions".to_string()),
                     ContentItemKind("generic.developer_policy".to_string()),
                     ContentItemKind("managed_config.developer_instructions".to_string()),
+                    ContentItemKind("persistent_mode.instructions".to_string()),
                 ]),
                 ..Default::default()
             },
@@ -1767,8 +1779,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "empty child developer instructions should remove parent developer instructions"
     );
     assert!(
-        history_contains_text(no_hint_history.raw_items(), managed_fragment),
-        "clearing child instructions must preserve an overlapping managed policy"
+        history_contains_text(no_hint_history.raw_items(), managed_fragment)
+            && history_contains_text(no_hint_history.raw_items(), persistent_fragment),
+        "clearing child instructions must preserve overlapping managed and persistent instructions"
     );
     assert!(
         history_contains_text(
@@ -2658,6 +2671,8 @@ async fn spawn_agent_fork_last_n_turns_drops_parent_startup_prefix_when_under_li
 
 #[tokio::test]
 async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
+    let persistent_fragment =
+        "<persistent_mode>\nParent persistent instructions.\n</persistent_mode>";
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -2707,6 +2722,9 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
                         },
                         ContentItem::InputText {
                             text: "Preserved bounded developer context.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: persistent_fragment.to_string(),
                         },
                     ],
                     phase: None,
@@ -2769,6 +2787,10 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
     assert!(
         !history_contains_text(history.raw_items(), "Child developer instructions."),
         "bounded fork should not inject child instructions before its canonical context rebuild"
+    );
+    assert!(
+        !history_contains_text(history.raw_items(), persistent_fragment),
+        "bounded fork should remove persistent instructions before rebuilding context for the child's effort"
     );
     assert!(
         history_contains_text(history.raw_items(), "Preserved bounded developer context."),

@@ -599,6 +599,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
         guardian_request.body_json()["model"].as_str(),
         Some(review_model)
     );
+    assert_eq!(guardian_request.path(), "/v1/responses");
 
     timeout(Duration::from_secs(10), codex.shutdown_and_wait()).await??;
 

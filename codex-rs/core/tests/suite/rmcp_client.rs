@@ -801,6 +801,7 @@ async fn environment_mcp_policy_filters_runtime_config_and_model_tools(
             &selection,
             EnvironmentConfig {
                 allow_login_shell: true,
+                workspace_roots: selection.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(
                     fixture.config.permissions.permission_profile().clone(),
                 ),
@@ -1743,14 +1744,11 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
             .into_iter()
             .find(|selection| selection.environment_id == remote_aware_environment_id())
             .context("thread should select the MCP server's executor environment")?;
-        let selection = TurnEnvironmentSelection {
-            workspace_roots: vec![PathUri::parse(if cfg!(windows) {
-                "file:///foreign/workspace"
-            } else {
-                "file:///C:/workspace"
-            })?],
-            ..selection
-        };
+        let workspace_roots = vec![PathUri::parse(if cfg!(windows) {
+            "file:///foreign/workspace"
+        } else {
+            "file:///C:/workspace"
+        })?];
         submit_thread_settings(
             &fixture.codex,
             ThreadSettingsOverrides {
@@ -1765,13 +1763,13 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
             },
         )
         .await?;
-        let workspace_roots = selection.workspace_roots.clone();
         fixture
             .codex
             .environment_ready(
                 &selection,
                 EnvironmentConfig {
                     allow_login_shell: fixture.config.permissions.allow_login_shell,
+                    workspace_roots: workspace_roots.clone(),
                     permission_profile: PermissionProfileSnapshot::legacy(
                         owner_permission_profile.clone(),
                     ),

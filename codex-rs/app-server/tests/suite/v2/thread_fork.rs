@@ -1442,6 +1442,19 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
         .find(|request| request.url.path().ends_with("/responses"))
         .expect("forked turn response request");
     let request_body = response_request.body_json::<Value>()?;
+    let turn_metadata: Value = serde_json::from_str(
+        request_body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("forked turn metadata"),
+    )?;
+    assert_eq!(
+        turn_metadata["forked_from_thread_id"].as_str(),
+        Some(conversation_id.as_str())
+    );
+    assert_eq!(
+        turn_metadata["forked_from_ordinal_exclusive"].as_u64(),
+        Some(history_base.end_ordinal_exclusive)
+    );
     let model_input = request_body["input"]
         .as_array()
         .expect("response input array");
@@ -1702,6 +1715,11 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .await?;
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
+    let history_base = read_session_meta_line(forked_path.as_path())
+        .await?
+        .meta
+        .history_base
+        .expect("fork history base");
     let child_rollout = std::fs::read_to_string(forked_path.as_path())?
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
@@ -1933,6 +1951,19 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .find(|request| request.url.path().ends_with("/responses"))
         .expect("cold-resumed model request")
         .body_json::<Value>()?;
+    let turn_metadata: Value = serde_json::from_str(
+        request_body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("cold-resumed turn metadata"),
+    )?;
+    assert_eq!(
+        turn_metadata["forked_from_thread_id"].as_str(),
+        Some(source_thread_id.as_str())
+    );
+    assert_eq!(
+        turn_metadata["forked_from_ordinal_exclusive"].as_u64(),
+        Some(history_base.end_ordinal_exclusive)
+    );
     let model_input = request_body["input"].as_array().expect("model input");
     assert!(model_input.iter().any(|item| {
         item["role"] == expected_marker_role

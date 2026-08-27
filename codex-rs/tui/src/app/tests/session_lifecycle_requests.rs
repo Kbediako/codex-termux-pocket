@@ -1284,14 +1284,18 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     let turn = recorded_params(&requests, "turn/start")
         .pop()
         .expect("background task turn request");
+    assert_eq!(turn["input"], serde_json::json!([]));
     assert_eq!(
-        turn["input"][0]["text"],
-        format!(
-            "<codex_delegation>\n  <source_thread_id>{creation_source}</source_thread_id>\n  <input>Check &lt;main&gt; &amp; report</input>\n</codex_delegation>"
-        )
+        turn["toolOutput"],
+        serde_json::json!({
+            "name": "create_thread",
+            "namespace": "codex_tui",
+            "output": format!(
+                "<codex_delegation>\n  <source_thread_id>{creation_source}</source_thread_id>\n  <input>Check &lt;main&gt; &amp; report</input>\n</codex_delegation>"
+            )
+        })
     );
     assert_eq!(turn["sandboxPolicy"], source_sandbox);
-
     app.handle_app_server_event(
         &app_server,
         codex_app_server_client::AppServerEvent::ServerRequest(Box::new(exec_approval_request(
@@ -1353,11 +1357,17 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
         panic!("expected a follow-up task completion event")
     };
     assert!(response.success, "{response:?}");
+    let turn = &recorded_params(&requests, "turn/start")[1];
+    assert_eq!(turn["input"], serde_json::json!([]));
     assert_eq!(
-        recorded_params(&requests, "turn/start")[1]["input"][0]["text"],
-        format!(
-            "<codex_delegation>\n  <source_thread_id>{thread_id}</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>"
-        )
+        turn["toolOutput"],
+        serde_json::json!({
+            "name": "send_message_to_thread",
+            "namespace": "codex_tui",
+            "output": format!(
+                "<codex_delegation>\n  <source_thread_id>{thread_id}</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>"
+            )
+        })
     );
 
     app.dynamic_tool_tasks.insert(

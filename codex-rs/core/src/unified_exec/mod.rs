@@ -184,6 +184,10 @@ struct ProcessEntry {
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
     hook_command: String,
     tty: bool,
+    environment_id: String,
+    // The successful launch bypassed sandboxing required by its ambient policy.
+    // Preserve this across turns so subsequent stdin writes can require approval.
+    escalated: bool,
     network_approval: Option<DeferredNetworkApproval>,
     session: Weak<Session>,
     last_used: tokio::time::Instant,

@@ -27,6 +27,7 @@ fn test_turn_environment(environment_id: &str) -> crate::session::turn_context::
             workspace_roots: Vec::new(),
             config: EnvironmentConfigState::Ready(EnvironmentConfig {
                 allow_login_shell: true,
+                workspace_roots: Vec::new(),
                 windows_sandbox_level: WindowsSandboxLevel::Disabled,
                 windows_sandbox_private_desktop: true,
                 use_legacy_landlock: false,

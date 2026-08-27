@@ -5,11 +5,13 @@ use codex_client::HttpTransport;
 use codex_client::RequestBody;
 use codex_login::default_client::create_client;
 use codex_model_provider::SharedModelProvider;
+use http::HeaderValue;
 use http::Method;
 use serde_json::Value;
 use serde_json::json;
 
 const HISTORY_NOTES_BACKEND_TIMEOUT: Duration = Duration::from_secs(35);
+const ENCRYPTED_TOOL_ARGUMENTS_HEADER: &str = "x-openai-encrypted-tool-arguments";
 
 #[derive(Clone)]
 pub(crate) struct HistoryNotesBackend {
@@ -50,6 +52,18 @@ impl HistoryNotesBackend {
             .map_err(|error| format!("History backend auth could not be resolved: {error}"))?;
 
         let mut request = provider.build_request(Method::POST, path);
+        if matches!(
+            path,
+            "alpha/history/v2/search_contents"
+                | "alpha/notes/v2/search_contents"
+                | "alpha/notes/v2/append_to_file"
+                | "alpha/notes/v2/write_file"
+        ) {
+            request.headers.insert(
+                ENCRYPTED_TOOL_ARGUMENTS_HEADER,
+                HeaderValue::from_static("true"),
+            );
+        }
         request.body = Some(RequestBody::Json(arguments));
         request.timeout = Some(HISTORY_NOTES_BACKEND_TIMEOUT);
         let request = auth

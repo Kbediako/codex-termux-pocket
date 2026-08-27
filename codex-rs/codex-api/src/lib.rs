@@ -66,6 +66,7 @@ pub use crate::endpoint::RealtimeWebsocketConnection;
 pub use crate::endpoint::RealtimeWebsocketEvents;
 pub use crate::endpoint::RealtimeWebsocketWriter;
 pub use crate::endpoint::ResponsesClient;
+pub use crate::endpoint::ResponsesEndpoint;
 pub use crate::endpoint::ResponsesOptions;
 pub use crate::endpoint::ResponsesWebsocketClient;
 pub use crate::endpoint::ResponsesWebsocketClose;

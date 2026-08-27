@@ -39,6 +39,7 @@ use codex_mcp::ToolInfo;
 use codex_mcp::auth_elicitation_completed_result;
 use codex_mcp::build_auth_elicitation_plan;
 use codex_mcp::mcp_permission_prompt_is_auto_approved;
+use codex_protocol::ResponseItemId;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::items::McpToolCallError;
 use codex_protocol::items::McpToolCallItem;
@@ -116,7 +117,9 @@ pub(crate) async fn handle_mcp_tool_call(
     step_context: &Arc<StepContext>,
     cancellation_token: &CancellationToken,
     call_id: String,
+    originating_item_id: Option<ResponseItemId>,
     tool_info: &ToolInfo,
+    prepared_call: Option<PreparedMcpCall>,
     hook_tool_name: HookToolName,
     invocation_tool_name: ToolName,
     arguments: String,
@@ -147,7 +150,7 @@ pub(crate) async fn handle_mcp_tool_call(
         arguments: arguments_value.clone(),
     };
 
-    let Some(prepared_call) = sess.prepare_mcp_call(&server, &tool_name).await else {
+    let Some(prepared_call) = prepared_call else {
         let item_metadata =
             McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
         let result = notify_mcp_tool_call_skip(
@@ -259,6 +262,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     &sess,
                     step_context.as_ref(),
                     &call_id,
+                    originating_item_id.as_ref(),
                     invocation,
                     prepared_call,
                     metadata,
@@ -332,6 +336,7 @@ pub(crate) async fn handle_mcp_tool_call(
         &sess,
         step_context.as_ref(),
         &call_id,
+        originating_item_id.as_ref(),
         invocation,
         prepared_call,
         metadata,
@@ -394,6 +399,7 @@ async fn handle_approved_mcp_tool_call(
     sess: &Arc<Session>,
     step_context: &StepContext,
     call_id: &str,
+    originating_item_id: Option<&ResponseItemId>,
     invocation: McpInvocation,
     prepared_call: PreparedMcpCall,
     metadata: McpToolApprovalMetadata,
@@ -471,9 +477,10 @@ async fn handle_approved_mcp_tool_call(
                         call_id,
                         Some(&metadata),
                     );
-                    let request_meta = with_mcp_tool_call_thread_id_meta(
+                    let request_meta = with_mcp_tool_call_ids_meta(
                         request_meta,
                         &sess.thread_id.to_string(),
+                        originating_item_id,
                     );
                     let request_meta = augment_mcp_tool_request_meta_with_sandbox_state(
                         step_context,
@@ -1125,6 +1132,7 @@ const MCP_TOOL_OPENAI_OUTPUT_TEMPLATE_META_KEY: &str = "openai/outputTemplate";
 const MCP_TOOL_UI_RESOURCE_URI_META_KEY: &str = "ui/resourceUri";
 const MCP_TOOL_LINK_ID_META_KEY: &str = "link_id";
 const MCP_TOOL_PLUGIN_ID_META_KEY: &str = "plugin_id";
+const MCP_TOOL_ITEM_ID_META_KEY: &str = "itemId";
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
 const MCP_TOOL_CONNECTED_ACCOUNT_EMAIL_META_KEY: &str = "connected_account_email";
 const MCP_TOOL_RESOURCE_URI_META_KEY: &str = "resource_uri";
@@ -1229,28 +1237,27 @@ fn build_mcp_tool_call_request_meta(
     (!request_meta.is_empty()).then_some(serde_json::Value::Object(request_meta))
 }
 
-fn with_mcp_tool_call_thread_id_meta(
+fn with_mcp_tool_call_ids_meta(
     meta: Option<serde_json::Value>,
     thread_id: &str,
+    originating_item_id: Option<&ResponseItemId>,
 ) -> Option<serde_json::Value> {
-    match meta {
-        Some(serde_json::Value::Object(mut map)) => {
-            map.insert(
-                MCP_TOOL_THREAD_ID_META_KEY.to_string(),
-                serde_json::Value::String(thread_id.to_string()),
-            );
-            Some(serde_json::Value::Object(map))
-        }
-        None => {
-            let mut map = serde_json::Map::new();
-            map.insert(
-                MCP_TOOL_THREAD_ID_META_KEY.to_string(),
-                serde_json::Value::String(thread_id.to_string()),
-            );
-            Some(serde_json::Value::Object(map))
-        }
-        other => other,
+    let mut map = match meta {
+        Some(serde_json::Value::Object(map)) => map,
+        None => serde_json::Map::new(),
+        other => return other,
+    };
+    map.insert(
+        MCP_TOOL_THREAD_ID_META_KEY.to_string(),
+        serde_json::Value::String(thread_id.to_string()),
+    );
+    if let Some(item_id) = originating_item_id {
+        map.insert(
+            MCP_TOOL_ITEM_ID_META_KEY.to_string(),
+            serde_json::Value::String(item_id.to_string()),
+        );
     }
+    Some(serde_json::Value::Object(map))
 }
 
 #[derive(Clone, Copy)]

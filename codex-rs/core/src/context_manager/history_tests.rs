@@ -1266,6 +1266,10 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
             },
             ContentItem::InputText { text: model_switch },
             ContentItem::InputText {
+                text: "<persistent_mode>\nFollow up on the completed task.\n</persistent_mode>"
+                    .to_string(),
+            },
+            ContentItem::InputText {
                 text: "persistent environment instructions".to_string(),
             },
         ],
@@ -1275,6 +1279,7 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
             content_item_kinds: Some(vec![
                 ContentItemKind("generic.developer_instructions".to_string()),
                 ContentItemKind("model_switch.instructions".to_string()),
+                ContentItemKind("persistent_mode.instructions".to_string()),
                 ContentItemKind("environments.instructions".to_string()),
             ]),
             ..Default::default()

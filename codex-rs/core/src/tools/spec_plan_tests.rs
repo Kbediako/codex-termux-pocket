@@ -69,7 +69,7 @@ const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 struct ToolPlanInputs {
     tool_runtimes: Vec<RegisteredTool>,
     tool_suggest_candidates: Option<ToolSuggestCandidates>,
-    extension_tool_executors: Vec<Arc<dyn ToolExecutor<ExtensionToolCall>>>,
+    extension_tool_executors: Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>>,
     wait_for_environment_tool_config: Option<Arc<WaitForEnvironmentToolConfig>>,
     dynamic_tools: Vec<DynamicToolSpec>,
 }
@@ -310,7 +310,7 @@ struct TestNamespaceExtensionTool {
     tool_name: &'static str,
 }
 
-impl ToolExecutor<ExtensionToolCall> for TestNamespaceExtensionTool {
+impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(self.namespace, self.tool_name)
     }
@@ -330,7 +330,10 @@ impl ToolExecutor<ExtensionToolCall> for TestNamespaceExtensionTool {
         })
     }
 
-    fn handle(&self, _call: ExtensionToolCall) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, _call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(async {
             Ok(Box::new(codex_tools::JsonToolOutput::new(json!({}))) as Box<dyn ToolOutput>)
         })
@@ -339,7 +342,7 @@ impl ToolExecutor<ExtensionToolCall> for TestNamespaceExtensionTool {
 
 struct DeferredExtensionTool;
 
-impl ToolExecutor<ExtensionToolCall> for DeferredExtensionTool {
+impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("extension_echo")
     }
@@ -366,7 +369,10 @@ impl ToolExecutor<ExtensionToolCall> for DeferredExtensionTool {
         ToolExposure::Deferred
     }
 
-    fn handle(&self, _call: ExtensionToolCall) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, _call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(async { panic!("spec planning should not execute extension tools") })
     }
 }
@@ -637,7 +643,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         else {
             panic!("secondary environment should be ready");
         };
-        secondary.selection.workspace_roots = vec![secondary_workspace_root];
+        secondary.config_mut().workspace_roots = vec![secondary_workspace_root];
         secondary.config_mut().permission_profile =
             codex_protocol::models::PermissionProfileSnapshot::legacy(secondary_profile);
         let turn = Arc::new(turn);
@@ -1086,6 +1092,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
                         config: EnvironmentConfigState::Ready(
                             codex_protocol::protocol::EnvironmentConfig {
                                 allow_login_shell: true,
+                                workspace_roots: Vec::new(),
                                 windows_sandbox_level: turn.windows_sandbox_level,
                                 windows_sandbox_private_desktop: turn
                                     .config

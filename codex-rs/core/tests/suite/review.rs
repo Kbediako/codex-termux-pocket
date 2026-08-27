@@ -1012,7 +1012,7 @@ async fn review_uses_custom_review_model_from_config() {
 }
 
 /// Ensure that when `review_model` is not set in the config, the review request
-/// uses the session model.
+/// uses the session model without exposing disabled clock tools or reminders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_uses_session_model_when_review_model_unset() {
     skip_if_no_network!();
@@ -1025,7 +1025,7 @@ async fn review_uses_session_model_when_review_model_unset() {
         .with_config(|config| {
             config.model = Some("gpt-5.4".to_string());
             config.review_model = None;
-            config.model_reasoning_effort = Some(ReasoningEffort::Max);
+            config.model_reasoning_effort = Some(ReasoningEffort::Persistent);
         })
         .build_with_auto_env(&server)
         .await
@@ -1061,7 +1061,12 @@ async fn review_uses_session_model_when_review_model_unset() {
     assert_eq!(request.path(), "/v1/responses");
     let body = request.body_json();
     assert_eq!(body["model"].as_str().unwrap(), "gpt-5.4");
-    assert_eq!(body["reasoning"]["effort"].as_str(), Some("max"));
+    assert_eq!(body["reasoning"]["effort"].as_str(), Some("disabled"));
+    assert_eq!(
+        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
+        [false, false]
+    );
+    assert!(!request.has_content_kinds(&["current_time.reminder"]));
 
     let _codex_home_guard = codex_home;
     server.verify().await;

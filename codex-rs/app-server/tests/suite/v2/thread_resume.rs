@@ -3766,6 +3766,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
         session_id: conversation_id.into(),
         id: conversation_id,
         forked_from_id: None,
+        forked_from_ordinal_exclusive: None,
         parent_thread_id: None,
         timestamp: "2025-01-05T12:00:00Z".to_string(),
         cwd: repo_path.clone(),

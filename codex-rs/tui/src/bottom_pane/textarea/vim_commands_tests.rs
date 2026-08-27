@@ -1,9 +1,14 @@
 use super::super::TextArea;
 use super::VimAction;
+use crate::keymap::KeyChordMatch;
+use crate::keymap::KeyChordMatcher;
+use crate::keymap::KeymapContextSet;
+use crate::keymap::RuntimeKeymap;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
+use tokio::time::Instant;
 
 fn vim_textarea(text: &str, cursor: usize) -> TextArea {
     let mut textarea = TextArea::new();
@@ -14,13 +19,25 @@ fn vim_textarea(text: &str, cursor: usize) -> TextArea {
 }
 
 fn keys(textarea: &mut TextArea, keys: &str) {
+    let keymap = RuntimeKeymap::defaults();
+    let mut matcher = KeyChordMatcher::default();
     for key in keys.chars() {
         let code = if key == '\n' {
             KeyCode::Enter
         } else {
             KeyCode::Char(key)
         };
-        textarea.input(KeyEvent::new(code, KeyModifiers::NONE));
+        let event = KeyEvent::new(code, KeyModifiers::NONE);
+        match matcher.advance(
+            event,
+            &keymap.chords,
+            KeymapContextSet::new(textarea.keymap_context()),
+            Instant::now(),
+        ) {
+            KeyChordMatch::PassThrough => textarea.input(event),
+            KeyChordMatch::Completed(event) => textarea.input(event),
+            KeyChordMatch::Pending(_) | KeyChordMatch::Cancelled | KeyChordMatch::Ignored => {}
+        }
     }
 }
 
@@ -383,7 +400,7 @@ fn find_and_till_handle_missing_cancelled_and_adjacent_targets() {
 }
 
 #[test]
-fn dot_repeat_replays_character_find_operators() {
+fn dot_repeat_replays_character_find_and_buffer_jump_operators() {
     let mut textarea = vim_textarea("one:two:three", /*cursor*/ 0);
     keys(&mut textarea, "df:.");
     assert_eq!(textarea.text(), "three");
@@ -403,6 +420,10 @@ fn dot_repeat_replays_character_find_operators() {
             (expected, Some("Normal"))
         );
     }
+
+    let mut textarea = vim_textarea("one\ntwo\nthree\nfour\nfive", "one\n".len());
+    keys(&mut textarea, "dggj.");
+    assert_eq!(textarea.text(), "five");
 }
 
 #[test]
@@ -470,6 +491,9 @@ fn character_find_and_operator_motion_use_configured_bindings() {
 #[test]
 fn uppercase_commands_accept_shift_only_terminal_events() {
     let mut textarea = vim_textarea("alpha\nbeta", /*cursor*/ 0);
+    textarea.input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT));
+    assert_eq!(textarea.cursor(), "alpha\n".len());
+
     textarea.set_cursor("alpha\nbe".len());
     textarea.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SHIFT));
     keys(&mut textarea, "b");
@@ -478,6 +502,35 @@ fn uppercase_commands_accept_shift_only_terminal_events() {
     textarea.input(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SHIFT));
     keys(&mut textarea, "b");
     assert_eq!(textarea.cursor(), "alpha\nb".len());
+}
+
+#[test]
+fn buffer_jumps_target_first_non_blank_and_support_operators() {
+    let mut textarea = vim_textarea("  first\n  second\n  third", /*cursor*/ 2);
+    keys(&mut textarea, "G");
+    assert_eq!(textarea.cursor(), "  first\n  second\n  ".len());
+    keys(&mut textarea, "gg");
+    assert_eq!(textarea.cursor(), 2);
+
+    let mut textarea = vim_textarea("first\nsecond\nthird", "first\n".len());
+    keys(&mut textarea, "dG");
+    assert_eq!(textarea.text(), "first\n");
+
+    let mut textarea = vim_textarea("first\nsecond\nthird", "first\n".len());
+    keys(&mut textarea, "dgg");
+    assert_eq!(textarea.text(), "third");
+
+    let mut textarea = vim_textarea("one\ntwo\nthree\nfour", "one\n".len());
+    keys(&mut textarea, "dggp");
+    assert_eq!(textarea.text(), "three\none\ntwo\nfour");
+
+    let mut textarea = vim_textarea("one\ntwo\nthree", "one\n".len());
+    keys(&mut textarea, "yGp");
+    assert_eq!(textarea.text(), "one\ntwo\ntwo\nthree\nthree");
+
+    let mut textarea = vim_textarea("one\ntwo\nthree", "one\n".len());
+    keys(&mut textarea, "cG");
+    assert_eq!(textarea.vim_mode_label(), Some("Insert"));
 }
 
 #[test]
@@ -539,7 +592,7 @@ fn dot_repeat_has_visual_snapshot_coverage() {
 fn find_and_navigation_have_visual_snapshot_coverage() {
     let mut textarea = vim_textarea("alpha beta\ngamma delta", /*cursor*/ 0);
     let mut states = Vec::new();
-    for command in ["tb", "fb", "Ta", "Fa"] {
+    for command in ["tb", "fb", "Ta", "Fa", "G", "gg"] {
         keys(&mut textarea, command);
         states.push(format!(
             "{command}: {}\n{}^",
@@ -560,5 +613,10 @@ fn find_and_navigation_have_visual_snapshot_coverage() {
     Fa: alpha beta\ngamma delta
         ^
 
+    G: alpha beta\ngamma delta
+               ^
+
+    gg: alpha beta\ngamma delta
+    ^
     "###);
 }

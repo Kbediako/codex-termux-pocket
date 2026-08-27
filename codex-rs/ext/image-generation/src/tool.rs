@@ -113,7 +113,7 @@ fn extension_turn_item(item: ImageGenerationItem, legacy_event: EventMsg) -> Ext
     }
 }
 
-impl ToolExecutor<ToolCall> for ImageGenerationTool {
+impl<'call> ToolExecutor<ToolCall<'call>> for ImageGenerationTool {
     /// Keeps the tool in the existing image-generation Responses namespace.
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME)
@@ -130,13 +130,19 @@ impl ToolExecutor<ToolCall> for ImageGenerationTool {
     }
 
     /// Executes the selected image operation and returns the completed image result.
-    fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> codex_extension_api::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(self.handle_call(call))
     }
 }
 
 impl ImageGenerationTool {
-    async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    async fn handle_call(
+        &self,
+        call: ToolCall<'_>,
+    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args = parse_args(&call)?;
         let request =
             request_for_call_args(&args, call.conversation_history.items(), &call.environments)
@@ -263,7 +269,7 @@ fn usage_limit_failure(error: &CodexErr) -> Option<ImageGenerationFailure> {
 
 async fn save_image_generation_result(
     save_root: Option<&AbsolutePathBuf>,
-    environment: Option<&ToolEnvironment>,
+    environment: Option<&ToolEnvironment<'_>>,
     session_id: &str,
     call_id: &str,
     result: &str,
@@ -403,7 +409,7 @@ enum ImageRequest {
 async fn request_for_call_args(
     args: &ImagegenArgs,
     history: &[ResponseItem],
-    environments: &[ToolEnvironment],
+    environments: &[ToolEnvironment<'_>],
 ) -> Result<ImageRequest, FunctionCallError> {
     let paths = args.referenced_image_paths.as_deref().unwrap_or_default();
     if paths.len() > MAX_EDIT_IMAGES {
@@ -534,7 +540,7 @@ fn output_image_urls(output: &FunctionCallOutputPayload) -> impl Iterator<Item =
 
 async fn image_url(
     path: &AbsolutePathBuf,
-    environment: &ToolEnvironment,
+    environment: &ToolEnvironment<'_>,
 ) -> Result<ImageUrl, FunctionCallError> {
     let path_uri = PathUri::from_abs_path(path);
     let sandbox = environment.file_system_sandbox_context.clone();
@@ -562,7 +568,7 @@ async fn image_url(
 }
 
 /// Parses the strict model-facing arguments for an image-generation call.
-fn parse_args(call: &ToolCall) -> Result<ImagegenArgs, FunctionCallError> {
+fn parse_args(call: &ToolCall<'_>) -> Result<ImagegenArgs, FunctionCallError> {
     serde_json::from_str(call.function_arguments()?)
         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
 }

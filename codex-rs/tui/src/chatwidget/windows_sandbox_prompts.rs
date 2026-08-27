@@ -48,13 +48,15 @@ impl ChatWidget {
         else {
             return None;
         };
-        match codex_windows_sandbox::apply_world_writable_scan_and_denies_for_permissions(
+        let result = codex_windows_sandbox::apply_world_writable_scan_and_denies_for_permissions(
             self.config.codex_home.as_path(),
             cwd.as_path(),
             &env_map,
             &permissions,
             Some(self.config.codex_home.as_path()),
-        ) {
+        );
+        crate::windows_sandbox::record_world_writable_scan_result(&self.session_telemetry, &result);
+        match result {
             Ok(_) => None,
             Err(_) => Some((Vec::new(), 0, true)),
         }

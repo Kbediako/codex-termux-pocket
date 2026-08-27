@@ -2903,7 +2903,7 @@ async fn load_plugins_returns_empty_when_feature_disabled() {
 }
 
 #[tokio::test]
-async fn plugin_cache_ignores_unrelated_session_overrides() {
+async fn plugin_cache_reuses_effective_configurations() {
     let codex_home = TempDir::new().unwrap();
     let plugin_root = codex_home
         .path()
@@ -2962,16 +2962,44 @@ async fn plugin_cache_ignores_unrelated_session_overrides() {
     };
     let manager = test_plugins_manager(codex_home.path().to_path_buf());
 
-    let first = manager
-        .plugins_for_config(&config(r#"model = "first""#))
-        .await;
+    let first_config = config(r#"model = "first""#);
+    let second_config = config(
+        r#"[plugins."sample@test".mcp_servers.sample]
+enabled = false"#,
+    );
+    let first = manager.plugins_for_config(&first_config).await;
+    let first_snapshots = manager
+        .plugin_skill_snapshots_for_config(&first_config)
+        .expect("first configuration snapshots");
+    let second = manager.plugins_for_config(&second_config).await;
+    let second_snapshots = manager
+        .plugin_skill_snapshots_for_config(&second_config)
+        .expect("second configuration snapshots");
     std::fs::remove_file(plugin_root.join(".mcp.json")).unwrap();
-    let second = manager
-        .plugins_for_config(&config(r#"model = "second""#))
-        .await;
 
-    assert_eq!(second, first);
-    assert_eq!(second.plugins()[0].mcp_servers.len(), 1);
+    assert_eq!(
+        manager.plugin_skill_snapshots_for_config(&first_config),
+        Some(first_snapshots),
+    );
+    assert_eq!(
+        manager
+            .plugins_for_config(&config(r#"model = "second""#))
+            .await,
+        first,
+    );
+    assert_eq!(
+        manager.plugin_skill_snapshots_for_config(&second_config),
+        Some(second_snapshots),
+    );
+    assert_eq!(manager.plugins_for_config(&second_config).await, second);
+    manager.clear_cache();
+    assert_eq!(
+        [first_config, second_config]
+            .iter()
+            .map(|config| manager.plugin_skill_snapshots_for_config(config))
+            .collect::<Vec<_>>(),
+        vec![None, None],
+    );
 }
 
 #[tokio::test]
@@ -3054,6 +3082,57 @@ enabled = true
             )],
         );
     }
+}
+
+#[test]
+fn loaded_plugins_cache_evicts_least_recently_used_configuration() {
+    let codex_home = TempDir::new().unwrap();
+    let manager = test_plugins_manager(codex_home.path().to_path_buf());
+    let keys = (0..=LOADED_PLUGINS_CACHE_CAPACITY)
+        .map(|index| PluginLoadCacheKey {
+            configured_plugins: HashMap::from([(
+                format!("plugin-{index}@test"),
+                PluginConfig {
+                    enabled: true,
+                    mcp_servers: HashMap::new(),
+                },
+            )]),
+            skill_config_rules: SkillConfigRules::default(),
+            remote_global_catalog_active: false,
+            auth_identity: None,
+        })
+        .collect::<Vec<_>>();
+    let generation = manager.loaded_plugins_cache_generation();
+    for key in keys.iter().take(LOADED_PLUGINS_CACHE_CAPACITY) {
+        manager.cache_loaded_plugins_if_current(
+            generation,
+            key.clone(),
+            Vec::new(),
+            crate::skill_snapshots::new_plugin_skill_snapshots(),
+        );
+    }
+    manager.cache_loaded_plugins_if_current(
+        generation,
+        keys[LOADED_PLUGINS_CACHE_CAPACITY - 1].clone(),
+        Vec::new(),
+        crate::skill_snapshots::new_plugin_skill_snapshots(),
+    );
+    assert_eq!(manager.cached_loaded_plugins(&keys[0]), Some(Vec::new()));
+    manager.cache_loaded_plugins_if_current(
+        generation,
+        keys[LOADED_PLUGINS_CACHE_CAPACITY].clone(),
+        Vec::new(),
+        crate::skill_snapshots::new_plugin_skill_snapshots(),
+    );
+
+    assert_eq!(
+        keys.iter()
+            .map(|key| manager.cached_loaded_plugins(key).is_some())
+            .collect::<Vec<_>>(),
+        (0..=LOADED_PLUGINS_CACHE_CAPACITY)
+            .map(|index| index != 1)
+            .collect::<Vec<_>>(),
+    );
 }
 
 #[test]
@@ -6671,7 +6750,7 @@ fn refresh_non_curated_plugin_cache_continues_after_plugin_error() {
 }
 
 #[tokio::test]
-async fn load_plugins_ignores_project_config_files() {
+async fn load_plugins_uses_project_config_files() {
     let codex_home = TempDir::new().unwrap();
     let project_root = codex_home.path().join("project");
     let plugin_root = codex_home
@@ -6714,7 +6793,13 @@ async fn load_plugins_ignores_project_config_files() {
     )
     .await;
 
-    assert_eq!(plugins, Vec::new());
+    assert_eq!(
+        plugins
+            .iter()
+            .map(|plugin| (plugin.config_name.as_str(), plugin.enabled))
+            .collect::<Vec<_>>(),
+        vec![("sample@test", true)]
+    );
 }
 
 #[tokio::test]

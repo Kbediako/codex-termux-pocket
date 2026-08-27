@@ -135,7 +135,7 @@ impl ToolContributor for HistoryNotesExtension {
         &self,
         session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         let Some(config) = thread_store.get::<HistoryNotesExtensionConfig>() else {
             return Vec::new();
         };
@@ -151,7 +151,7 @@ impl ToolContributor for HistoryNotesExtension {
                     config.backend.clone(),
                     session_store.level_id().to_string(),
                     identity.agent_name.clone(),
-                )) as Arc<dyn ToolExecutor<ToolCall>>
+                )) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
             })
             .collect()
     }

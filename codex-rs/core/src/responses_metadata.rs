@@ -30,6 +30,7 @@ pub(crate) const THREAD_ID_KEY: &str = "thread_id";
 pub(crate) const AGENT_NAME_KEY: &str = "agent_name";
 pub(crate) const TURN_ID_KEY: &str = "turn_id";
 pub(crate) const WINDOW_ID_KEY: &str = "window_id";
+pub(crate) const WINDOW_NUMBER_KEY: &str = "window_number";
 pub(crate) const CONTEXT_WINDOW_ID_KEY: &str = "context_window_id";
 pub(crate) const REQUEST_KIND_KEY: &str = "request_kind";
 pub(crate) const COMPACTION_KEY: &str = "compaction";
@@ -39,6 +40,7 @@ pub(crate) const TOOL_NAMESPACES_INFO_KEY: &str = "tool_namespaces_info";
 pub(crate) const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
 
 pub(crate) const FORKED_FROM_THREAD_ID_KEY: &str = "forked_from_thread_id";
+pub(crate) const FORKED_FROM_ORDINAL_EXCLUSIVE_KEY: &str = "forked_from_ordinal_exclusive";
 pub(crate) const PARENT_THREAD_ID_KEY: &str = "parent_thread_id";
 pub(crate) const PARENT_TURN_ID_KEY: &str = "parent_turn_id";
 pub(crate) const ROOT_TURN_ID_KEY: &str = "root_turn_id";
@@ -62,6 +64,7 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
     AGENT_NAME_KEY,
     TURN_ID_KEY,
     WINDOW_ID_KEY,
+    WINDOW_NUMBER_KEY,
     CONTEXT_WINDOW_ID_KEY,
     X_CODEX_WINDOW_ID_HEADER,
     X_CODEX_TURN_METADATA_HEADER,
@@ -73,6 +76,7 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
     TOOL_NAMESPACES_INFO_KEY,
     TURN_STARTED_AT_UNIX_MS_KEY,
     FORKED_FROM_THREAD_ID_KEY,
+    FORKED_FROM_ORDINAL_EXCLUSIVE_KEY,
     PARENT_THREAD_ID_KEY,
     PARENT_TURN_ID_KEY,
     ROOT_TURN_ID_KEY,
@@ -86,6 +90,10 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
     NODE_REPL_DISABLED_KEY,
     WORKSPACES_KEY,
 ];
+// These keys were previously valid user configuration. Accept existing configs while filtering
+// their values before constructing Core-owned request metadata.
+const BACKWARD_COMPATIBLE_RESERVED_METADATA_KEYS: &[&str] =
+    &[WINDOW_NUMBER_KEY, FORKED_FROM_ORDINAL_EXCLUSIVE_KEY];
 const MAX_EXTRA_METADATA_ENTRIES: usize = 16;
 const MAX_EXTRA_METADATA_KEY_BYTES: usize = 64;
 const MAX_EXTRA_METADATA_VALUE_BYTES: usize = 128;
@@ -214,9 +222,11 @@ pub struct CodexResponsesMetadata {
     pub(crate) turn_id: Option<String>,
     pub(crate) routing_hint: Option<HeaderValue>,
     pub(crate) window_id: String,
+    pub(crate) window_number: Option<u64>,
     pub(crate) context_window_id: Option<Uuid>,
     pub(crate) request_kind: Option<CodexResponsesRequestKind>,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
+    pub(crate) forked_from_ordinal_exclusive: Option<u64>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) parent_turn_id: Option<String>,
     pub(crate) root_turn_id: Option<String>,
@@ -250,9 +260,11 @@ impl CodexResponsesMetadata {
             turn_id: None,
             routing_hint: None,
             window_id,
+            window_number: None,
             context_window_id: None,
             request_kind: None,
             forked_from_thread_id: None,
+            forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
             parent_turn_id: None,
             root_turn_id: None,
@@ -374,11 +386,13 @@ impl CodexResponsesMetadata {
                 .then_some(self.turn_id.as_deref())
                 .flatten(),
             window_id: has_request_identity.then_some(self.window_id.as_str()),
+            window_number: has_request_identity.then_some(self.window_number).flatten(),
             context_window_id: has_request_identity
                 .then_some(self.context_window_id)
                 .flatten(),
             request_kind: request_kind_value,
             forked_from_thread_id: self.forked_from_thread_id,
+            forked_from_ordinal_exclusive: self.forked_from_ordinal_exclusive,
             parent_thread_id: self.parent_thread_id,
             parent_turn_id: self.parent_turn_id.as_deref(),
             root_turn_id: self.root_turn_id.as_deref(),
@@ -452,7 +466,9 @@ pub(crate) fn validate_extra_metadata<'a>(
         if key.len() > MAX_EXTRA_METADATA_KEY_BYTES || !valid_extra_metadata_key(key) {
             return Err("responses_api_metadata keys must be short ASCII identifiers");
         }
-        if RESERVED_METADATA_KEYS.contains(&key.as_str()) {
+        if RESERVED_METADATA_KEYS.contains(&key.as_str())
+            && !BACKWARD_COMPATIBLE_RESERVED_METADATA_KEYS.contains(&key.as_str())
+        {
             return Err("responses_api_metadata contains a reserved key");
         }
         if value.len() > MAX_EXTRA_METADATA_VALUE_BYTES {
@@ -498,11 +514,15 @@ struct CodexTurnMetadataPayload<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_id: Option<&'a str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     context_window_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_kind: Option<&'static str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from_ordinal_exclusive: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

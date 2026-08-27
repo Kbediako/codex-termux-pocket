@@ -2292,6 +2292,7 @@ impl App {
                             env_map,
                             logs_base_dir,
                             permission_profile,
+                            self.session_telemetry.clone(),
                             tx,
                             /*startup_scan*/ false,
                         );

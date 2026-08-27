@@ -368,6 +368,7 @@ fn resolved_local_environments<const N: usize>(
                         workspace_roots: Vec::new(),
                         config: EnvironmentConfigState::Ready(EnvironmentConfig {
                             allow_login_shell: true,
+                            workspace_roots: Vec::new(),
                             windows_sandbox_level: WindowsSandboxLevel::Disabled,
                             windows_sandbox_private_desktop: true,
                             use_legacy_landlock: false,

@@ -118,6 +118,44 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_tool_output_starts_instruction_turn() -> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let response = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![ev_response_created("turn"), ev_completed("turn")]),
+    )
+    .await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+
+    let expected_output = json!({
+        "type": "function_call_output",
+        "name": "send_message_to_thread",
+        "namespace": "codex_app",
+        "output": "delegated work",
+    });
+    let output = serde_json::from_value(expected_output.clone())?;
+
+    let submission = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::new(TurnInput::ResponseItem(output)))
+        .await?;
+    let TurnInputSubmission::Started { turn_id } = submission else {
+        panic!("standalone output should start a turn");
+    };
+    wait_for_turn_complete(test.codex.as_ref()).await;
+
+    let request = response.single_request();
+    responses::assert_root_turn(&request.body_json(), Some(&turn_id))?;
+    let output = &request.inputs_of_type("function_call_output")[0];
+    assert_eq!(output["name"], expected_output["name"]);
+    assert_eq!(output["namespace"], expected_output["namespace"]);
+    assert_eq!(output["output"], expected_output["output"]);
+    assert!(output.get("call_id").is_none());
+
+    Ok(())
+}
+
 async fn assert_idle_user_input_reaches_the_first_model_request(
     mode: ModeKind,
 ) -> anyhow::Result<()> {

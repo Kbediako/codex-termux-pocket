@@ -266,7 +266,12 @@ async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -
 
     let developer_messages = first_request.message_input_texts("developer");
     let catalog_line =
-        format!("- {SKILL_NAME}: {SKILL_DESCRIPTION} (orchestrator package: {SKILL_RESOURCE_URI})");
+        format!("- {SKILL_NAME}: {SKILL_DESCRIPTION} (orchestrator package: o0/deploy)");
+    assert!(
+        developer_messages
+            .iter()
+            .any(|text| text.contains("- `o0` = `skill://plugin_demo`"))
+    );
     assert_eq!(
         1,
         developer_messages

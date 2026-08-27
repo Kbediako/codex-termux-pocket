@@ -190,6 +190,8 @@ pub(crate) struct VimNormalKeymap {
     pub(crate) find_backward: Vec<KeyBinding>,
     pub(crate) till_forward: Vec<KeyBinding>,
     pub(crate) till_backward: Vec<KeyBinding>,
+    pub(crate) jump_top: Vec<KeyBinding>,
+    pub(crate) jump_bottom: Vec<KeyBinding>,
     pub(crate) delete_char: Vec<KeyBinding>,
     pub(crate) replace_char: Vec<KeyBinding>,
     pub(crate) repeat_last_change: Vec<KeyBinding>,
@@ -227,6 +229,8 @@ pub(crate) struct VimOperatorKeymap {
     pub(crate) motion_find_backward: Vec<KeyBinding>,
     pub(crate) motion_till_forward: Vec<KeyBinding>,
     pub(crate) motion_till_backward: Vec<KeyBinding>,
+    pub(crate) motion_jump_top: Vec<KeyBinding>,
+    pub(crate) motion_jump_bottom: Vec<KeyBinding>,
     pub(crate) select_inner_text_object: Vec<KeyBinding>,
     pub(crate) select_around_text_object: Vec<KeyBinding>,
     pub(crate) cancel: Vec<KeyBinding>,
@@ -558,7 +562,15 @@ impl RuntimeKeymap {
     /// parsing `TuiKeymap`, because doing so would ignore explicit user
     /// unbindings and conflict diagnostics.
     pub(crate) fn defaults() -> Self {
-        Self::built_in_defaults()
+        static DEFAULTS: std::sync::OnceLock<RuntimeKeymap> = std::sync::OnceLock::new();
+
+        DEFAULTS
+            .get_or_init(|| {
+                Self::from_config(&TuiKeymap::default()).unwrap_or_else(|error| {
+                    panic!("built-in keymap defaults must be valid: {error}")
+                })
+            })
+            .clone()
     }
 
     /// Resolve a runtime keymap from config, applying precedence and validation.
@@ -728,6 +740,8 @@ impl RuntimeKeymap {
             find_backward: resolve_local!(keymap, defaults, vim_normal, find_backward),
             till_forward: resolve_local!(keymap, defaults, vim_normal, till_forward),
             till_backward: resolve_local!(keymap, defaults, vim_normal, till_backward),
+            jump_top: resolve_local!(keymap, defaults, vim_normal, jump_top),
+            jump_bottom: resolve_local!(keymap, defaults, vim_normal, jump_bottom),
             delete_char: resolve_local!(keymap, defaults, vim_normal, delete_char),
             replace_char: resolve_local!(keymap, defaults, vim_normal, replace_char),
             repeat_last_change: resolve_local!(keymap, defaults, vim_normal, repeat_last_change),
@@ -830,6 +844,14 @@ impl RuntimeKeymap {
                 vim_normal.till_backward.as_slice(),
             ),
             (
+                keymap.vim_normal.jump_top.as_ref(),
+                vim_normal.jump_top.as_slice(),
+            ),
+            (
+                keymap.vim_normal.jump_bottom.as_ref(),
+                vim_normal.jump_bottom.as_slice(),
+            ),
+            (
                 keymap.vim_normal.delete_char.as_ref(),
                 vim_normal.delete_char.as_slice(),
             ),
@@ -924,6 +946,14 @@ impl RuntimeKeymap {
                 keymap.vim_normal.till_backward.as_ref(),
                 &mut vim_normal.till_backward,
             ),
+            (
+                keymap.vim_normal.jump_top.as_ref(),
+                &mut vim_normal.jump_top,
+            ),
+            (
+                keymap.vim_normal.jump_bottom.as_ref(),
+                &mut vim_normal.jump_bottom,
+            ),
         ] {
             if configured.is_none() {
                 bindings.retain(|binding| {
@@ -982,6 +1012,8 @@ impl RuntimeKeymap {
                 vim_operator,
                 motion_till_backward
             ),
+            motion_jump_top: resolve_local!(keymap, defaults, vim_operator, motion_jump_top),
+            motion_jump_bottom: resolve_local!(keymap, defaults, vim_operator, motion_jump_bottom),
             select_inner_text_object: resolve_local!(
                 keymap,
                 defaults,
@@ -1059,6 +1091,14 @@ impl RuntimeKeymap {
                 vim_operator.motion_till_backward.as_slice(),
             ),
             (
+                keymap.vim_operator.motion_jump_top.as_ref(),
+                vim_operator.motion_jump_top.as_slice(),
+            ),
+            (
+                keymap.vim_operator.motion_jump_bottom.as_ref(),
+                vim_operator.motion_jump_bottom.as_slice(),
+            ),
+            (
                 keymap.vim_operator.cancel.as_ref(),
                 vim_operator.cancel.as_slice(),
             ),
@@ -1090,6 +1130,14 @@ impl RuntimeKeymap {
             (
                 keymap.vim_operator.motion_till_backward.as_ref(),
                 &mut vim_operator.motion_till_backward,
+            ),
+            (
+                keymap.vim_operator.motion_jump_top.as_ref(),
+                &mut vim_operator.motion_jump_top,
+            ),
+            (
+                keymap.vim_operator.motion_jump_bottom.as_ref(),
+                &mut vim_operator.motion_jump_bottom,
             ),
         ] {
             if configured.is_none() {
@@ -1468,6 +1516,11 @@ impl RuntimeKeymap {
                 find_backward: default_bindings![shift(KeyCode::Char('f'))],
                 till_forward: default_bindings![plain(KeyCode::Char('t'))],
                 till_backward: default_bindings![shift(KeyCode::Char('t'))],
+                jump_top: default_bindings![],
+                jump_bottom: default_bindings![
+                    shift(KeyCode::Char('g')),
+                    plain(KeyCode::Char('G'))
+                ],
                 delete_char: default_bindings![plain(KeyCode::Char('x'))],
                 replace_char: default_bindings![plain(KeyCode::Char('r'))],
                 repeat_last_change: default_bindings![plain(KeyCode::Char('.'))],
@@ -1506,6 +1559,11 @@ impl RuntimeKeymap {
                 motion_find_backward: default_bindings![shift(KeyCode::Char('f'))],
                 motion_till_forward: default_bindings![plain(KeyCode::Char('t'))],
                 motion_till_backward: default_bindings![shift(KeyCode::Char('t'))],
+                motion_jump_top: default_bindings![],
+                motion_jump_bottom: default_bindings![
+                    shift(KeyCode::Char('g')),
+                    plain(KeyCode::Char('G'))
+                ],
                 select_inner_text_object: default_bindings![plain(KeyCode::Char('i'))],
                 select_around_text_object: default_bindings![plain(KeyCode::Char('a'))],
                 cancel: default_bindings![plain(KeyCode::Esc)],
@@ -2011,6 +2069,8 @@ impl RuntimeKeymap {
                 ("find_backward", self.vim_normal.find_backward.as_slice()),
                 ("till_forward", self.vim_normal.till_forward.as_slice()),
                 ("till_backward", self.vim_normal.till_backward.as_slice()),
+                ("jump_top", self.vim_normal.jump_top.as_slice()),
+                ("jump_bottom", self.vim_normal.jump_bottom.as_slice()),
                 ("delete_char", self.vim_normal.delete_char.as_slice()),
                 ("replace_char", self.vim_normal.replace_char.as_slice()),
                 (
@@ -2094,6 +2154,14 @@ impl RuntimeKeymap {
                 (
                     "motion_till_backward",
                     self.vim_operator.motion_till_backward.as_slice(),
+                ),
+                (
+                    "motion_jump_top",
+                    self.vim_operator.motion_jump_top.as_slice(),
+                ),
+                (
+                    "motion_jump_bottom",
+                    self.vim_operator.motion_jump_bottom.as_slice(),
                 ),
                 (
                     "select_inner_text_object",
@@ -3144,6 +3212,7 @@ mod tests {
     fn configured_legacy_vim_bindings_prune_new_navigation_defaults() {
         let mut keymap = TuiKeymap::default();
         keymap.vim_normal.move_left = Some(one("f"));
+        keymap.vim_operator.motion_left = Some(one("g"));
         keymap.vim_normal.move_right = Some(one("t"));
         keymap.vim_normal.move_up = Some(one("shift-f"));
         keymap.vim_operator.motion_right = Some(one("shift-t"));
@@ -3152,6 +3221,7 @@ mod tests {
 
         assert_eq!(runtime.vim_normal.find_forward, Vec::new());
         assert_eq!(runtime.vim_normal.find_backward, Vec::new());
+        assert_eq!(runtime.vim_operator.motion_jump_top, Vec::new());
         assert_eq!(runtime.vim_normal.till_forward, Vec::new());
         assert_eq!(runtime.vim_operator.motion_till_backward, Vec::new());
     }

@@ -350,7 +350,7 @@ fn exposed_tools(
     registry: &ExtensionRegistry<Config>,
     session_store: &ExtensionData,
     thread_store: &ExtensionData,
-) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
     registry
         .tool_contributors()
         .iter()
@@ -358,7 +358,7 @@ fn exposed_tools(
         .collect()
 }
 
-fn tool_call(tool_name: ToolName, arguments: serde_json::Value) -> ToolCall {
+fn tool_call(tool_name: ToolName, arguments: serde_json::Value) -> ToolCall<'static> {
     ToolCall {
         turn_id: "turn-1".to_string(),
         call_id: "call-read-file".to_string(),

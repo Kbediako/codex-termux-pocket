@@ -611,6 +611,7 @@ See the Codex keymap documentation for supported actions and examples."
                     env_map,
                     logs_base_dir,
                     startup_permission_profile,
+                    app.session_telemetry.clone(),
                     tx,
                     /*startup_scan*/ true,
                 );

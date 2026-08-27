@@ -1051,6 +1051,12 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
 #[tokio::test]
 async fn process_compacted_history_preserves_separate_guardian_developer_message() {
     let (session, mut turn_context) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn_context, |settings| {
+        update_selected_settings_for_test(settings, |selected| {
+            selected.collaboration_mode.settings.reasoning_effort =
+                Some(ReasoningEffortConfig::Persistent);
+        });
+    });
     let guardian_policy = "guardian policy".to_string();
     let guardian_source =
         SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
@@ -1120,6 +1126,12 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
         !developer_messages
             .iter()
             .any(|(message, _)| message.contains("stale developer message"))
+    );
+    assert!(
+        !developer_messages
+            .iter()
+            .any(|(message, _)| message.contains("<persistent_mode>")),
+        "guardian context must not inherit persistent-mode proactivity"
     );
     assert!(developer_messages.len() >= 2);
     assert_eq!(

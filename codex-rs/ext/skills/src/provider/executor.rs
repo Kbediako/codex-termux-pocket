@@ -121,7 +121,10 @@ impl SkillProvider for ExecutorSkillProvider {
         })
     }
 
-    fn read(&self, request: SkillReadRequest) -> SkillProviderFuture<'_, SkillReadResult> {
+    fn read<'a>(
+        &'a self,
+        request: SkillReadRequest<'a>,
+    ) -> SkillProviderFuture<'a, SkillReadResult> {
         Box::pin(async move {
             if request.authority.kind != SkillSourceKind::Executor {
                 return Err(SkillProviderError::new(format!(

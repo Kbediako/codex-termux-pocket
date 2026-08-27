@@ -22,8 +22,9 @@ const MAX_RENDERED_BYTES: usize = 32_000;
 const MAX_RENDERED_OMISSION_BYTES: usize = 160;
 const MAX_PROVENANCE_BYTES: usize = 128;
 
+/// Controls which retained REPL evidence a Guardian reviewer may receive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NodeReplReviewEvidenceMode {
+pub enum NodeReplReviewEvidenceMode {
     Disabled,
     TextOnly,
     Multimodal,
@@ -129,6 +130,16 @@ impl NodeReplReviewEvidence {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Returns bounded REPL evidence using the existing Guardian text and image layout.
+    pub fn review_inputs(&self, mode: NodeReplReviewEvidenceMode) -> Vec<UserInput> {
+        if mode == NodeReplReviewEvidenceMode::Disabled {
+            return Vec::new();
+        }
+        self.snapshot_since(/*reviewed_sequence*/ 0)
+            .map(|fragment| fragment.into_inputs(mode))
+            .unwrap_or_default()
     }
 
     pub(crate) fn record(

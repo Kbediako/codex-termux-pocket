@@ -52,6 +52,9 @@ pub(super) enum VimEditTarget {
         motion: VimFindMotion,
         target: char,
     },
+    BufferJump {
+        last: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -262,6 +265,9 @@ impl TextArea {
                             return false;
                         }
                     }
+                    VimEditTarget::BufferJump { last } => {
+                        self.jump_to_vim_buffer_line(last, Some(operator));
+                    }
                 }
                 if operator == VimOperator::Change {
                     return self.vim_mode == VimMode::Insert;
@@ -330,6 +336,10 @@ impl TextArea {
             self.start_vim_find(VimFindMotion::TillForward, /*operator*/ None);
         } else if self.vim_normal_keymap.till_backward.is_pressed(event) {
             self.start_vim_find(VimFindMotion::TillBackward, /*operator*/ None);
+        } else if self.vim_normal_keymap.jump_top.is_pressed(event) {
+            self.jump_to_vim_buffer_line(/*last*/ false, /*operator*/ None);
+        } else if self.vim_normal_keymap.jump_bottom.is_pressed(event) {
+            self.jump_to_vim_buffer_line(/*last*/ true, /*operator*/ None);
         } else {
             return false;
         }
@@ -365,6 +375,25 @@ impl TextArea {
             .is_pressed(event)
         {
             self.start_vim_find(VimFindMotion::TillBackward, Some(operator));
+        } else if self.vim_operator_keymap.motion_jump_top.is_pressed(event)
+            || self
+                .vim_operator_keymap
+                .motion_jump_bottom
+                .is_pressed(event)
+        {
+            let last = self
+                .vim_operator_keymap
+                .motion_jump_bottom
+                .is_pressed(event);
+            match operator {
+                VimOperator::Delete => {
+                    self.start_vim_edit(VimAction::Delete(VimEditTarget::BufferJump { last }));
+                }
+                VimOperator::Change => {
+                    self.start_vim_edit(VimAction::Change(VimEditTarget::BufferJump { last }));
+                }
+                VimOperator::Yank => self.jump_to_vim_buffer_line(last, Some(operator)),
+            }
         } else {
             return false;
         }
@@ -473,6 +502,33 @@ impl TextArea {
             self.set_cursor(destination);
         }
         true
+    }
+
+    fn jump_to_vim_buffer_line(&mut self, last: bool, operator: Option<VimOperator>) {
+        if let Some(operator) = operator {
+            let current = self.current_line_range_with_newline();
+            let range = if last {
+                current.start..self.text.len()
+            } else {
+                0..current.end
+            };
+            match operator {
+                VimOperator::Delete => self.kill_line_range(range),
+                VimOperator::Yank => self.yank_line_range(range),
+                VimOperator::Change => {
+                    self.kill_line_range(range);
+                    self.vim_mode = VimMode::Insert;
+                }
+            }
+            return;
+        }
+        let start = if last {
+            self.beginning_of_line(self.text.len())
+        } else {
+            0
+        };
+        self.set_cursor(start);
+        self.set_cursor(self.first_non_blank_of_current_line());
     }
 
     fn is_vim_command_target(&self, position: usize) -> bool {

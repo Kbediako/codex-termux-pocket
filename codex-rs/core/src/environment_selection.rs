@@ -168,7 +168,10 @@ fn resolve_selection_config(
 ) -> (TurnEnvironmentSelection, EnvironmentConfigOrigin) {
     let (config, origin) = match selection.config {
         EnvironmentConfigState::FromThread => (
-            EnvironmentConfigState::Ready(thread_config.clone()),
+            EnvironmentConfigState::Ready(thread_config_for_selection(
+                &selection.workspace_roots,
+                thread_config,
+            )),
             EnvironmentConfigOrigin::Thread,
         ),
         config @ (EnvironmentConfigState::Ready(_)
@@ -179,10 +182,23 @@ fn resolve_selection_config(
     (selection, origin)
 }
 
+fn thread_config_for_selection(
+    workspace_roots: &[PathUri],
+    thread_config: &EnvironmentConfig,
+) -> EnvironmentConfig {
+    EnvironmentConfig {
+        workspace_roots: workspace_roots.to_vec(),
+        ..thread_config.clone()
+    }
+}
+
 impl SelectedTurnEnvironment {
     fn refresh_thread_config(&mut self, config: &EnvironmentConfig) {
         if self.config_origin == EnvironmentConfigOrigin::Thread {
-            self.selection.config = EnvironmentConfigState::Ready(config.clone());
+            self.selection.config = EnvironmentConfigState::Ready(thread_config_for_selection(
+                &self.selection.workspace_roots,
+                config,
+            ));
         }
     }
 }
@@ -916,6 +932,7 @@ mod tests {
     fn test_environment_config() -> EnvironmentConfig {
         EnvironmentConfig {
             allow_login_shell: true,
+            workspace_roots: Vec::new(),
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: true,
             use_legacy_landlock: false,
@@ -1093,6 +1110,7 @@ url = "ws://127.0.0.1:8765"
         };
         let expected_config = EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: Vec::new(),
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: true,
             use_legacy_landlock: false,
@@ -1344,6 +1362,7 @@ url = "ws://127.0.0.1:8765"
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let expected_config = EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: Vec::new(),
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: true,
             use_legacy_landlock: false,
@@ -1701,6 +1720,7 @@ url = "ws://127.0.0.1:8765"
             .expect("replacement environment");
         let child_config = EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: Vec::new(),
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: true,
             use_legacy_landlock: false,
@@ -1764,6 +1784,7 @@ url = "ws://127.0.0.1:8765"
             resolve_turn_environments(Arc::clone(&manager), std::slice::from_ref(&selection)).await;
         let parent_owner_config = EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: selection.workspace_roots.clone(),
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: true,
             use_legacy_landlock: false,

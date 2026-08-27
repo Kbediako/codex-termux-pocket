@@ -23,6 +23,7 @@ fn config_with_personality(personality: Option<Personality>) -> ModelsManagerCon
 #[test]
 fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let override_instructions = "override {{ personality }}";
+    let persistent_instructions = "Follow up on the active task.";
     let mut model = model_info_from_slug("unknown-model");
     let approvals = ApprovalMessages {
         on_request: Some("user approvals".to_string()),
@@ -67,6 +68,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         ..Default::default()
     };
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: Some(persistent_instructions.to_string()),
         instructions_template: Some("template".to_string()),
         instructions_variables: Some(ModelInstructionsVariables {
             personality_default: Some("default".to_string()),
@@ -91,6 +93,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     assert_eq!(
         updated.model_messages,
         Some(ModelMessages {
+            persistent_instructions: Some(persistent_instructions.to_string()),
             instructions_template: Some(override_instructions.to_string()),
             instructions_variables: None,
             approvals: Some(approvals),
@@ -118,6 +121,7 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
         unless_trusted: None,
     };
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: Some(String::new()),
         instructions_template: Some("before {{ personality }} after".to_string()),
         instructions_variables: Some(ModelInstructionsVariables {
             personality_default: Some("default".to_string()),
@@ -142,6 +146,7 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
     assert_eq!(
         updated.model_messages,
         Some(ModelMessages {
+            persistent_instructions: Some(String::new()),
             instructions_template: Some("before default after".to_string()),
             instructions_variables: None,
             approvals: Some(approvals),
@@ -169,6 +174,7 @@ fn disabled_personality_uses_plain_base_instructions_for_local_personality_model
         assert_eq!(
             updated.model_messages,
             Some(ModelMessages {
+                persistent_instructions: None,
                 instructions_template: Some(BASE_INSTRUCTIONS.to_string()),
                 instructions_variables: None,
                 approvals: None,
@@ -210,6 +216,7 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
     for (instructions, expected) in cases {
         let mut model = model_info_from_slug("unknown-model");
         model.model_messages = Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some(instructions.to_string()),
             instructions_variables: None,
             approvals: None,

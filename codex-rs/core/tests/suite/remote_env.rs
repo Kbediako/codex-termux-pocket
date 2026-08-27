@@ -557,6 +557,7 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
                 vec![TurnEnvironmentSelection {
                     config: EnvironmentConfigState::Ready(EnvironmentConfig {
                         allow_login_shell: test.config.permissions.allow_login_shell,
+                        workspace_roots: selection.workspace_roots.clone(),
                         permission_profile: owner_permission_profile,
                         shell_environment_policy: Default::default(),
                         windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1322,6 +1323,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
         EnvironmentConfigState::Pending,
         EnvironmentConfigState::Ready(EnvironmentConfig {
             allow_login_shell: false,
+            workspace_roots: selection.workspace_roots.clone(),
             permission_profile: permission_profile.clone(),
             shell_environment_policy: Default::default(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1366,6 +1368,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
             environments: Some(vec![TurnEnvironmentSelection {
                 config: EnvironmentConfigState::Ready(EnvironmentConfig {
                     allow_login_shell: true,
+                    workspace_roots: selection.workspace_roots.clone(),
                     permission_profile: permission_profile.clone(),
                     shell_environment_policy: Default::default(),
                     windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1394,6 +1397,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                 vec![TurnEnvironmentSelection {
                     config: EnvironmentConfigState::Ready(EnvironmentConfig {
                         allow_login_shell: false,
+                        workspace_roots: selection.workspace_roots.clone(),
                         permission_profile: permission_profile.clone(),
                         shell_environment_policy: Default::default(),
                         windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1461,6 +1465,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                     vec![TurnEnvironmentSelection {
                         config: EnvironmentConfigState::Ready(EnvironmentConfig {
                             allow_login_shell: false,
+                            workspace_roots: selection.workspace_roots.clone(),
                             permission_profile: permission_profile.clone(),
                             shell_environment_policy: Default::default(),
                             windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1536,6 +1541,7 @@ async fn owner_network_policy_rejects_unsupported_environment_authority() -> Res
         .context("thread should select its executor environment")?;
     let owner_config = EnvironmentConfig {
         allow_login_shell: test.config.permissions.allow_login_shell,
+        workspace_roots: selection.workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
         shell_environment_policy: test.config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1614,6 +1620,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         config: EnvironmentConfigState::Pending,
         ..selection.clone()
     };
+    let owner_workspace_root = selection.cwd.join("owner-workspace")?;
     let root = |id: &str| SelectedCapabilityRoot {
         id: id.to_string(),
         location: CapabilityRootLocation::Environment {
@@ -1623,6 +1630,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     };
     let owner_config = |id: &str, allow_login_shell: bool| EnvironmentConfig {
         allow_login_shell,
+        workspace_roots: vec![selection.cwd.clone(), owner_workspace_root.clone()],
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
         shell_environment_policy: Default::default(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
@@ -1642,6 +1650,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     let waiting = timeout(Duration::from_secs(5), start_pending_thread())
         .await
         .context("pending thread startup should not block")??;
+    let requested_workspace_roots = waiting.thread.config_snapshot().await.workspace_roots;
     let independent = start_pending_thread().await?;
     let failed = start_pending_thread().await?;
 
@@ -1757,21 +1766,18 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         config: EnvironmentConfigState::Ready(waiting_config.clone()),
         ..pending_selection.clone()
     };
-    submit_thread_settings(
-        &waiting.thread,
-        ThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentSelections::new(
-                test.config.cwd.clone(),
-                vec![ready_selection.clone()],
-            )),
-            ..Default::default()
-        },
-    )
-    .await?;
+    waiting
+        .thread
+        .environment_ready(&pending_selection, waiting_config)
+        .await?;
     wait_for_response_request_count(&response_mock, /*expected_count*/ 2).await;
     assert_eq!(
         waiting.thread.environment_selections().await,
         vec![ready_selection]
+    );
+    assert_eq!(
+        waiting.thread.config_snapshot().await.workspace_roots,
+        requested_workspace_roots
     );
 
     let ready_request = response_mock
@@ -1799,6 +1805,13 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
             .into_iter()
             .rfind(|text| text.contains("<ready_capability_roots>")),
         Some("<ready_capability_roots>waiting-root</ready_capability_roots>".to_string())
+    );
+    assert!(
+        ready_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains(&owner_workspace_root.inferred_native_path_string())),
+        "waiting turn should observe owner-resolved workspace roots"
     );
 
     let recovered_selection = TurnEnvironmentSelection {
@@ -2276,6 +2289,7 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
         workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
         config: EnvironmentConfigState::Ready(EnvironmentConfig {
             allow_login_shell: test.config.permissions.allow_login_shell,
+            workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
             permission_profile: PermissionProfileSnapshot::active_with_profile_workspace_roots(
                 PermissionProfile::read_only(),
                 owner_active_profile.clone(),

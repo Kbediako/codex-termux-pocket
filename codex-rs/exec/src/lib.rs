@@ -976,6 +976,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         turn_trigger: None,
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
+                        tool_output: None,
                         responsesapi_client_metadata: None,
                         additional_context: None,
                         environments: None,

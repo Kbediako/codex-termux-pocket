@@ -81,7 +81,10 @@ impl ToolExecutor<ToolInvocation> for ViewImageHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -284,12 +287,13 @@ mod tests {
     use tokio::sync::Mutex;
 
     fn replace_primary_environment_cwd(turn: &mut crate::TurnContext, cwd: AbsolutePathBuf) {
-        let current = turn
+        let mut current = turn
             .environments
             .turn_environments()
             .next()
             .cloned()
             .expect("default local turn environment");
+        current.config_mut().workspace_roots.clear();
         let mut selection = current.selection;
         selection.cwd = PathUri::from_abs_path(&cwd);
         selection.workspace_roots.clear();

@@ -81,6 +81,7 @@ async fn terminal_title_shows_action_required_while_exec_approval_is_pending() {
     );
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-action-required".into(),
         approval_id: Some("call-action-required".into()),
         turn_id: "turn-action-required".into(),
@@ -146,6 +147,7 @@ async fn terminal_title_action_required_respects_spinner_setting() {
     chat.refresh_terminal_title();
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-no-spinner".into(),
         approval_id: Some("call-no-spinner".into()),
         turn_id: "turn-no-spinner".into(),
@@ -174,6 +176,7 @@ async fn terminal_title_action_required_blinks_when_animations_are_enabled() {
     chat.refresh_terminal_title();
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-blink".into(),
         approval_id: Some("call-blink".into()),
         turn_id: "turn-blink".into(),
@@ -212,6 +215,7 @@ async fn terminal_title_activity_indicators_do_not_animate_when_animations_are_d
     assert!(!chat.should_animate_terminal_title_spinner());
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-no-animations".into(),
         approval_id: Some("call-no-animations".into()),
         turn_id: "turn-no-animations".into(),

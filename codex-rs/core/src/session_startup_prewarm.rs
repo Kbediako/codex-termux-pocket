@@ -313,14 +313,9 @@ async fn schedule_startup_prewarm_inner(
         build_prompt_started_at.elapsed(),
         /*status*/ None,
     );
-    let window_id = session.current_window_id().await;
-    let responses_metadata = startup_turn_context
-        .turn_metadata_state
-        .to_responses_metadata(
-            session.installation_id.clone(),
-            window_id,
-            CodexResponsesRequestKind::Prewarm,
-        );
+    let responses_metadata = session
+        .responses_metadata(&startup_turn_context, CodexResponsesRequestKind::Prewarm)
+        .await;
     let mut client_session = session.services.model_client.new_session();
     let websocket_warmup_started_at = Instant::now();
     client_session

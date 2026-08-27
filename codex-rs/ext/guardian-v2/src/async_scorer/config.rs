@@ -33,6 +33,7 @@ pub(crate) enum GuardianV2ReviewScope {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GuardianV2Config {
     local_overrides: GuardianV2ConfigToml,
+    pub(crate) persist_scores: bool,
     pub(crate) classifier_instructions: String,
     pub(crate) review_threshold: f64,
     pub(crate) max_tool_call_lag: usize,
@@ -229,6 +230,7 @@ impl GuardianV2Config {
 
         Ok(Self {
             local_overrides: configured.clone(),
+            persist_scores: configured.persist_scores.unwrap_or(false),
             classifier_instructions: configured
                 .classifier_instructions
                 .unwrap_or_else(|| DEFAULT_CLASSIFIER_INSTRUCTIONS.to_owned()),

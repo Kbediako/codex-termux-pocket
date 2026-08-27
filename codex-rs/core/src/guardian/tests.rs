@@ -649,7 +649,7 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
     };
     environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(environment_permission_profile);
-    environment.selection.workspace_roots = vec![
+    environment.config_mut().workspace_roots = vec![
         PathUri::from_abs_path(&workspace_root),
         PathUri::from_abs_path(&second_workspace_root),
     ];
@@ -1371,6 +1371,7 @@ fn guardian_write_stdin_preserves_input_and_foreign_cwd() -> serde_json::Result<
     let action = GuardianApprovalRequest::WriteStdin {
         id: "terminal-open".to_string(),
         approval_id: "terminal-write".to_string(),
+        environment_id: "windows-executor".to_string(),
         process_id: 1000,
         input: input.to_string(),
         cwd: cwd.clone(),
@@ -1381,6 +1382,7 @@ fn guardian_write_stdin_preserves_input_and_foreign_cwd() -> serde_json::Result<
         guardian_approval_request_to_json(&action)?,
         serde_json::json!({
             "tool": "write_stdin",
+            "environment_id": "windows-executor",
             "session_id": 1000,
             "chars": input,
             "cwd": r"C:\workspace",

@@ -16,12 +16,14 @@ pub(super) struct WindowsSandboxState {
 
 impl App {
     #[cfg(target_os = "windows")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_world_writable_scan(
         cwd: AbsolutePathBuf,
         workspace_roots: Vec<AbsolutePathBuf>,
         env_map: std::collections::HashMap<String, String>,
         logs_base_dir: AbsolutePathBuf,
         permission_profile: PermissionProfile,
+        session_telemetry: SessionTelemetry,
         tx: AppEventSender,
         startup_scan: bool,
     ) {
@@ -47,6 +49,7 @@ impl App {
                     &permissions,
                     Some(logs_base_dir_path),
                 );
+            crate::windows_sandbox::record_world_writable_scan_result(&session_telemetry, &result);
             if result.is_err() {
                 // Scan failed: warn without examples.
                 send_world_writable_scan_failed(&tx);

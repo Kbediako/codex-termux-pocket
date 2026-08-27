@@ -17,6 +17,7 @@ use crate::context::world_state::ModelInstructionsState;
 use crate::context::world_state::MultiAgentModeState;
 use crate::context::world_state::MultiAgentUsageHintState;
 use crate::context::world_state::PermissionsState;
+use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PersonalityState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
@@ -187,6 +188,26 @@ impl Session {
                     .model_messages
                     .as_ref()
                     .and_then(|messages| messages.collaboration_modes.as_ref()),
+            ));
+        }
+        if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
+            let send_user_message_async_available =
+                !turn_context.session_source.is_non_root_agent()
+                    && step_context
+                        .settings
+                        .model_info
+                        .experimental_supported_tools
+                        .iter()
+                        .any(|tool| tool == "send_user_message_async");
+            world_state.add_section(PersistentModeState::new(
+                step_context.settings.effective_reasoning_effort().as_ref(),
+                step_context
+                    .settings
+                    .model_info
+                    .model_messages
+                    .as_ref()
+                    .and_then(|messages| messages.persistent_instructions.as_deref()),
+                send_user_message_async_available,
             ));
         }
         if turn_context.config.include_environment_context {
