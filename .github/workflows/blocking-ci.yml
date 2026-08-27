@@ -7,20 +7,17 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event_name == 'issues' && github.event.issue.number || github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -89,63 +86,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  alpha1515-maintenance:
-    if: "${{ github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.issue.title == 'Maintenance: update Codex Termux to 0.151.0-alpha.5' }}"
-    name: Merge, validate, publish, and verify 0.151.0-alpha.5
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 360
-    permissions:
-      actions: write
-      contents: write
-      issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
-    steps:
-      - name: Checkout current main with full history
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up repository CI environment
-        uses: ./.github/actions/setup-ci
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-
-      - name: Run exact 0.151.0-alpha.5 transaction
-        shell: bash
-        run: |
-          set -o pipefail
-          bash .github/scripts/alpha1515-maintenance-v2.sh \
-            2>&1 | tee "$RUNNER_TEMP/alpha1515-maintenance.log"
-
-      - name: Publish exact failure diagnostics
-        if: failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          log="$RUNNER_TEMP/alpha1515-maintenance.log"
-          if [[ -s "$log" ]]; then
-            diagnostics="$(
-              tail -n 260 "$log" \
-                | perl -pe 's/\e\[[0-9;]*[mK]//g' \
-                | tr -d '\r' \
-                | tail -c 18000
-            )"
-          else
-            diagnostics='No captured alpha1515 maintenance log was available.'
-          fi
-          current="$(
-            gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
-              --json body --jq .body
-          )"
-          body="${current}"$'\n\n```text\n'"${diagnostics}"$'\n```'
-          gh api --method PATCH \
-            "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
-            -f body="$body" >/dev/null
