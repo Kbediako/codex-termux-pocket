@@ -27,29 +27,11 @@ for old, new in replacements.items():
         raise SystemExit(f"proven alpha.5 wrapper is missing expected token: {old}")
     source = source.replace(old, new)
 
-# The proven transaction validates the second parent of a newly-created merge.
-# On a deliberate retry after that merge has already landed, Git can produce a
-# single-parent follow-up commit. Preserve the exact upstream-ancestor checks,
-# but make this diagnostic parent lookup fall back to the pinned upstream SHA.
-write_marker = 'Path(sys.argv[2]).write_text(source, encoding="utf-8")'
-if source.count(write_marker) != 1:
-    raise SystemExit("proven wrapper write checkpoint changed")
-injection = '''head2_lookup = "git rev-parse HEAD^2"
-if head2_lookup not in source:
-    raise SystemExit("proven transaction no longer contains its merge-parent check")
-source = source.replace(
-    head2_lookup,
-    "git rev-parse HEAD^2 2>/dev/null || printf '%s\\n' \"$UPSTREAM_COMMIT\"",
-)
-'''
-source = source.replace(write_marker, injection + "\n" + write_marker)
-
 for required in (
     "rust-v0.151.0-alpha.6",
     "42cd2e3425834ee77c0b76c121cd43541d69810b",
     "0.151.0-alpha.6",
     "alpha1516-maintenance",
-    "HEAD^2 2>/dev/null",
 ):
     if required not in source:
         raise SystemExit(f"adapted wrapper is missing {required}")
