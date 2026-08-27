@@ -150,16 +150,9 @@ if source.count(controls_needle) != 1:
     raise SystemExit("release-control insertion point changed")
 source = source.replace(controls_needle, controls_replacement)
 
-cleanup_needle = '''  if [[ ! -e "$TEMP_SCRIPT" ] \\
-    && ! grep -q 'alpha1515-maintenance:' .github/workflows/blocking-ci.yml \\
-'''
-cleanup_replacement = '''  if [[ ! -e "$TEMP_SCRIPT" ] \\
-    && ! compgen -G ".github/scripts/alpha1515-maintenance.part*" >/dev/null \\
-    && ! grep -q 'alpha1515-maintenance:' .github/workflows/blocking-ci.yml \\
-'''
-if source.count(cleanup_needle) != 1:
-    raise SystemExit("direct-cleanup insertion point changed")
-source = source.replace(cleanup_needle, cleanup_replacement)
+# Temporary part files are removed by the direct cleanup commit alongside the
+# wrapper and workflow job. The runtime waits for the permanent topology before
+# dispatching any exact-source validation.
 
 branches_needle = '''for branch in \\
   alpha-0.150.0-alpha.8-staging \\
