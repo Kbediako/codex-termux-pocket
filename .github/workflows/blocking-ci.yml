@@ -120,4 +120,32 @@ jobs:
 
       - name: Run exact 0.151.0-alpha.5 transaction
         shell: bash
-        run: bash .github/scripts/alpha1515-maintenance.sh
+        run: |
+          set -o pipefail
+          bash .github/scripts/alpha1515-maintenance.sh \
+            2>&1 | tee "$RUNNER_TEMP/alpha1515-maintenance.log"
+
+      - name: Publish exact failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/alpha1515-maintenance.log"
+          if [[ -s "$log" ]]; then
+            diagnostics="$(
+              tail -n 260 "$log" \
+                | perl -pe 's/\e\[[0-9;]*[mK]//g' \
+                | tr -d '\r' \
+                | tail -c 18000
+            )"
+          else
+            diagnostics='No captured alpha1515 maintenance log was available.'
+          fi
+          current="$(
+            gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+              --json body --jq .body
+          )"
+          body="${current}"$'\n\n```text\n'"${diagnostics}"$'\n```'
+          gh api --method PATCH \
+            "/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+            -f body="$body" >/dev/null
