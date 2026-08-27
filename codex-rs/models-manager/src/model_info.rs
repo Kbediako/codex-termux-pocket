@@ -60,6 +60,7 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         });
         model_messages.instructions_template = Some(base_instructions.clone());
@@ -204,6 +205,7 @@ fn local_model_messages_for_slug(slug: &str) -> ModelMessages {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         },
         _ => ModelMessages {
@@ -216,6 +218,7 @@ fn local_model_messages_for_slug(slug: &str) -> ModelMessages {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         },
     }

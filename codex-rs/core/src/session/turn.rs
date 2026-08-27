@@ -2565,6 +2565,7 @@ async fn try_run_sampling_request(
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             } => {
                 sess.services
@@ -2589,6 +2590,7 @@ async fn try_run_sampling_request(
                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
                         response_id,
                         token_usage: token_usage.clone(),
+                        usage_metadata,
                     }),
                 )
                 .await;

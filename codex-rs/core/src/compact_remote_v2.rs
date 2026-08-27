@@ -38,6 +38,7 @@ use codex_context_fragments::to_annotated_content;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -361,6 +362,7 @@ struct RemoteCompactionV2Output {
     compaction_output: ResponseItem,
     response_id: String,
     token_usage: Option<TokenUsage>,
+    usage_metadata: Option<ResponseUsageMetadata>,
 }
 
 async fn run_remote_compaction_request_v2(
@@ -422,6 +424,7 @@ async fn collect_compaction_output(
     let mut saw_completed = false;
     let mut completed_response_id = None;
     let mut completed_token_usage = None;
+    let mut completed_usage_metadata = None;
     while let Some(event) = stream.next().await {
         match event? {
             ResponseEvent::OutputItemDone(item) => {
@@ -436,11 +439,13 @@ async fn collect_compaction_output(
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 ..
             } => {
                 saw_completed = true;
                 completed_response_id = Some(response_id);
                 completed_token_usage = token_usage;
+                completed_usage_metadata = usage_metadata;
                 break;
             }
             _ => {}
@@ -469,6 +474,7 @@ async fn collect_compaction_output(
         compaction_output,
         response_id,
         token_usage: completed_token_usage,
+        usage_metadata: completed_usage_metadata,
     })
 }
 
@@ -1161,6 +1167,9 @@ mod tests {
                     total_tokens: 123_498,
                     codex_rollout_budget_units: None,
                 }),
+                usage_metadata: Some(codex_protocol::ResponseUsageMetadata {
+                    amount: Some("0.125".to_string()),
+                }),
                 end_turn: Some(true),
             }),
         ]);
@@ -1169,6 +1178,12 @@ mod tests {
             .await
             .expect("compaction should be collected");
 
+        assert_eq!(
+            output.usage_metadata,
+            Some(codex_protocol::ResponseUsageMetadata {
+                amount: Some("0.125".to_string()),
+            }),
+        );
         assert_eq!(output.compaction_output, compaction);
         assert_eq!(output.response_id, "resp-compact");
         assert_eq!(

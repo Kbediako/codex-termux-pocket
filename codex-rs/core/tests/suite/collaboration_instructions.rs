@@ -84,6 +84,7 @@ fn model_with_collaboration_messages(
         permissions: None,
         multi_agent: None,
         token_budget: None,
+        confirmation_policies: None,
         guardian_v2: None,
     });
     model_messages.collaboration_modes = Some(CollaborationModeMessages {

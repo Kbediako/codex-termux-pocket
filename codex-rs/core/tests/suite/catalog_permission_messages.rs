@@ -44,6 +44,7 @@ async fn catalog_permission_message_loaded_from_remote_models_is_sent() -> Resul
         }),
         multi_agent: None,
         token_budget: None,
+        confirmation_policies: None,
         guardian_v2: None,
     });
     let models_mock = mount_models_once(

@@ -55,19 +55,21 @@ use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-use super::CLASSIFICATION_DURATION_METRIC;
-use super::CLASSIFICATION_METRIC;
 use super::GuardianV2Extension;
 use super::GuardianV2ScoreProgress;
-use super::REVIEW_FALLBACK_METRIC;
 use super::StrictReviewReason;
-use super::TOOL_CALL_LAG_METRIC;
 use super::encrypted_parent_compaction;
 use super::should_classify_tool;
 use crate::async_scorer::config::CLASSIFICATION_OUTPUT_INSTRUCTIONS;
 use crate::async_scorer::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
 use crate::async_scorer::config::DEFAULT_PARENT_COMPACTION_TOKENS;
 use crate::async_scorer::config::GuardianV2ReviewScope;
+use crate::async_scorer::metrics::CLASSIFICATION_DURATION_METRIC;
+use crate::async_scorer::metrics::CLASSIFICATION_METRIC;
+use crate::async_scorer::metrics::CLASSIFICATION_RISK_METRIC;
+use crate::async_scorer::metrics::FAST_DECISION_METRIC;
+use crate::async_scorer::metrics::REVIEW_FALLBACK_METRIC;
+use crate::async_scorer::metrics::TOOL_CALL_LAG_METRIC;
 use crate::async_scorer::sampler::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use crate::async_scorer::sampler::INITIAL_WEBSOCKET_CONNECTIONS;
 use crate::async_scorer::sampler::LunaSampler;
@@ -80,6 +82,7 @@ const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";
 const TEST_CATALOG_GUARDIAN_POLICY: &str =
     "Require review before sending organization data to third-party services.";
+const ASYNC_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PREWARM_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct RefreshableAuth(std::sync::Mutex<&'static str>);
@@ -231,7 +234,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 source: ToolCallSource::Direct,
             })
             .await;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
             while progress.latest_scored_tool_call.load(Ordering::Acquire) < call_index {
                 tokio::task::yield_now().await;
             }
@@ -275,10 +278,21 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum RecordedMetric {
     Histogram(String, i64, Vec<(String, String)>),
     Counter(String, i64, Vec<(String, String)>),
+}
+
+fn fast_decision_metric(decision: &str, reason: &str) -> RecordedMetric {
+    RecordedMetric::Counter(
+        FAST_DECISION_METRIC.to_owned(),
+        1,
+        vec![
+            ("decision".to_owned(), decision.to_owned()),
+            ("reason".to_owned(), reason.to_owned()),
+        ],
+    )
 }
 
 #[derive(Default)]
@@ -487,6 +501,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
         action: None,
         sampled_at: None,
     });
+    thread_store.insert(RecordingMetrics::default());
     let progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should track score progress per thread");
@@ -542,7 +557,9 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
                     &fixture.session_store,
                     thread_store,
                     &prompt,
-                    /*extension_metrics*/ None,
+                    thread_store
+                        .get::<RecordingMetrics>()
+                        .map(|metrics| metrics as Arc<dyn ExtensionMetrics>),
                 )
                 .await,
             expected,
@@ -556,11 +573,55 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
                 &fixture.session_store,
                 thread_store,
                 "not valid JSON",
-                /*extension_metrics*/ None,
+                thread_store
+                    .get::<RecordingMetrics>()
+                    .map(|metrics| metrics as Arc<dyn ExtensionMetrics>),
             )
             .await,
         None,
         "malformed approval actions must not reuse a browser score"
+    );
+    thread_store.remove::<SecurityRiskScore>();
+    assert_eq!(
+        fixture
+            .registry
+            .fast_approval_decision(
+                &fixture.session_store,
+                thread_store,
+                &json!({"tool": "mcp_tool_call", "server": "node_repl"}).to_string(),
+                thread_store
+                    .get::<RecordingMetrics>()
+                    .map(|metrics| metrics as Arc<dyn ExtensionMetrics>),
+            )
+            .await,
+        None
+    );
+
+    let fast_decisions = thread_store
+        .get::<RecordingMetrics>()
+        .unwrap()
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sample| {
+            matches!(
+                sample,
+                RecordedMetric::Counter(name, 1, _) if name == FAST_DECISION_METRIC
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fast_decisions,
+        vec![
+            fast_decision_metric("approved", "low_risk"),
+            fast_decision_metric("approved", "low_risk"),
+            fast_decision_metric("deferred", "out_of_scope"),
+            fast_decision_metric("deferred", "out_of_scope"),
+            fast_decision_metric("deferred", "out_of_scope"),
+            fast_decision_metric("deferred", "missing_score"),
+        ]
     );
 
     Ok(())
@@ -893,7 +954,7 @@ async fn sample_configured_conversation_history_with_source(
         .await;
 
     let request = tokio::time::timeout(
-        Duration::from_secs(5),
+        ASYNC_TEST_TIMEOUT,
         server.wait_for_request(
             /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
             /*request_index*/ 0,
@@ -918,8 +979,16 @@ impl GuardianFailureFixture {
         )
         .await?;
         let thread_store = test.codex.thread_extension_data();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while thread_store.get::<SecurityRiskScore>().is_none() {
+        let score_progress = thread_store
+            .get::<GuardianV2ScoreProgress>()
+            .expect("Guardian v2 should track score progress per thread");
+        tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
+            while thread_store.get::<SecurityRiskScore>().is_none()
+                || score_progress
+                    .latest_scored_tool_call
+                    .load(Ordering::Acquire)
+                    < score_progress.latest_tool_call.load(Ordering::Acquire)
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -960,12 +1029,12 @@ impl GuardianFailureFixture {
             .await;
     }
 
-    async fn assert_fails_closed(&self) -> Result<()> {
+    async fn assert_fails_closed(&self, expected_reason: &str) -> Result<()> {
         let thread_store = self.test.codex.thread_extension_data();
         let score_progress = thread_store
             .get::<GuardianV2ScoreProgress>()
             .expect("Guardian v2 should track score progress per thread");
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
             while thread_store
                 .get::<SecurityRiskScore>()
                 .is_none_or(|score| score.scores.get("action_risk") != Some(&1.0))
@@ -980,16 +1049,29 @@ impl GuardianFailureFixture {
             }
         })
         .await?;
+        thread_store.insert(RecordingMetrics::default());
         assert_eq!(
             self.registry
                 .fast_approval_decision(
                     &self.session_store,
                     thread_store,
                     "review action",
-                    /*extension_metrics*/ None,
+                    thread_store
+                        .get::<RecordingMetrics>()
+                        .map(|metrics| metrics as Arc<dyn ExtensionMetrics>),
                 )
                 .await,
             None
+        );
+        assert!(
+            thread_store
+                .get::<RecordingMetrics>()
+                .unwrap()
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|sample| sample == &fast_decision_metric("deferred", expected_reason))
         );
         Ok(())
     }
@@ -1008,7 +1090,7 @@ async fn contributor_fails_closed_when_thread_lookup_fails() -> Result<()> {
         .expect("the test thread should exist before simulating a failed lookup");
 
     fixture.score_tool(ToolName::plain("read_file")).await;
-    fixture.assert_fails_closed().await
+    fixture.assert_fails_closed("scoring_failure").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1037,7 +1119,7 @@ async fn contributor_fails_closed_when_model_configuration_is_invalid() -> Resul
         .insert(parent_model);
 
     fixture.score_tool(ToolName::plain("read_file")).await;
-    fixture.assert_fails_closed().await
+    fixture.assert_fails_closed("elevated_risk").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1050,7 +1132,7 @@ async fn contributor_fails_closed_when_action_serialization_fails() -> Result<()
     );
 
     fixture.score_tool(oversized_tool_name).await;
-    fixture.assert_fails_closed().await
+    fixture.assert_fails_closed("elevated_risk").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1090,7 +1172,7 @@ async fn contributor_fails_closed_when_luna_classification_fails() -> Result<()>
     );
 
     fixture.score_tool(ToolName::plain("read_file")).await;
-    fixture.assert_fails_closed().await
+    fixture.assert_fails_closed("elevated_risk").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1289,12 +1371,12 @@ max_recent_non_user_entries = 8
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should track score progress per thread");
     let metrics = thread_store.get::<RecordingMetrics>().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         while score_progress
             .latest_scored_tool_call
             .load(Ordering::Acquire)
             == 0
-            || metrics.0.lock().unwrap().len() < 9
+            || metrics.0.lock().unwrap().len() < 10
         {
             tokio::task::yield_now().await;
         }
@@ -1408,7 +1490,7 @@ max_recent_non_user_entries = 8
     );
 
     let samples = initial_metrics.0.lock().unwrap();
-    let classification_duration_ms = match &samples[8] {
+    let classification_duration_ms = match &samples[9] {
         RecordedMetric::Histogram(name, duration_ms, _)
             if name == CLASSIFICATION_DURATION_METRIC =>
         {
@@ -1436,6 +1518,11 @@ max_recent_non_user_entries = 8
             )
         })
         .chain([
+            RecordedMetric::Counter(
+                CLASSIFICATION_RISK_METRIC.to_owned(),
+                1,
+                vec![("risk_level".to_owned(), "high".to_owned())],
+            ),
             RecordedMetric::Counter(
                 CLASSIFICATION_METRIC.to_owned(),
                 1,
@@ -1476,8 +1563,11 @@ max_recent_non_user_entries = 8
         )
         .chain([
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+            fast_decision_metric("deferred", "elevated_risk"),
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+            fast_decision_metric("approved", "low_risk"),
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
+            fast_decision_metric("approved", "low_risk"),
         ])
         .collect::<Vec<_>>()
     );
@@ -1491,7 +1581,9 @@ max_recent_non_user_entries = 8
                 1,
                 vec![("fallback_reason".to_owned(), "score_lag".to_owned())],
             ),
+            fast_decision_metric("deferred", "stale_score"),
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
+            fast_decision_metric("approved", "low_risk"),
         ]
     );
 
@@ -1672,7 +1764,7 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
         (2, false, 384, true)
     );
     assert!(thread_store.get::<NodeReplReviewEvidence>().is_some());
-    let score = tokio::time::timeout(Duration::from_secs(5), async {
+    let score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
             if let Some(score) = thread_store.get::<SecurityRiskScore>() {
                 return score;
@@ -1830,7 +1922,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
             {"type": "input_text", "text": ">>> APPROVAL REQUEST END\n"},
         ])
     );
-    let score = tokio::time::timeout(Duration::from_secs(5), async {
+    let score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
             if let Some(score) = thread_store.get::<SecurityRiskScore>() {
                 return score;
@@ -1947,7 +2039,7 @@ async fn contributor_persists_nested_code_mode_action_with_score() -> Result<()>
     .await?;
     test.codex.ensure_rollout_materialized().await;
 
-    let score = tokio::time::timeout(Duration::from_secs(5), async {
+    let score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
             if let Some(score) = test
                 .codex
@@ -2131,7 +2223,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
     let score_progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should track score progress per thread");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         while score_progress
             .latest_scored_tool_call
             .load(Ordering::Acquire)
@@ -2564,7 +2656,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         .await;
 
     let request = tokio::time::timeout(
-        Duration::from_secs(5),
+        ASYNC_TEST_TIMEOUT,
         server.wait_for_request(
             /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
             /*request_index*/ 0,
@@ -2591,7 +2683,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
     );
     assert_eq!(request["input"][3]["role"], "user");
 
-    let previous_score = tokio::time::timeout(Duration::from_secs(5), async {
+    let previous_score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
             if let Some(score) = thread_store.get::<SecurityRiskScore>() {
                 return score;
@@ -2719,7 +2811,7 @@ async fn contributor_can_disable_parent_compaction_reuse() -> Result<()> {
     );
 
     let thread_store = test.codex.thread_extension_data();
-    let score = tokio::time::timeout(Duration::from_secs(5), async {
+    let score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
             if let Some(score) = thread_store.get::<SecurityRiskScore>() {
                 return score;

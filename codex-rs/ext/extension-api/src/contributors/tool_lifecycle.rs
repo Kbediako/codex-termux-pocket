@@ -5,9 +5,11 @@ use std::sync::Arc;
 use codex_config::McpServerConfig;
 use codex_mcp::McpServerSource;
 use codex_mcp::PreparedMcpCall;
+use codex_mcp::ResolvedMcpServer;
 use codex_tools::ToolCallSource;
 use codex_tools::ToolName;
 use codex_tools::ToolPayload;
+use codex_utils_path_uri::PathUri;
 
 use crate::ConversationHistorySnapshot;
 use crate::ExtensionData;
@@ -47,6 +49,8 @@ pub enum McpToolSource {
     Plugin {
         /// Identifier of the plugin that owns this MCP server.
         id: String,
+        /// Host-local plugin root captured with the exact server registration.
+        root: PathUri,
     },
     /// An executor-selected plugin whose root has not been attested by the host.
     SelectedPlugin,
@@ -71,21 +75,24 @@ impl McpToolContext {
         configured_server: Option<&McpServerConfig>,
     ) -> Self {
         let tool = call.tool_info().clone();
+        let registration = call.config().mcp_server_catalog.server(call.server_name());
         let source = if tool.connector_id.is_some() && call.is_host_owned_apps() {
             McpToolSource::Connector
         } else if call.is_selected_plugin_server() {
             McpToolSource::SelectedPlugin
-        } else if let Some(id) = call.plugin_id() {
-            McpToolSource::Plugin { id: id.to_owned() }
-        } else if call
-            .config()
-            .mcp_server_catalog
-            .server(call.server_name())
-            .is_some_and(|server| {
-                matches!(server.source(), McpServerSource::Config)
-                    && configured_server.is_some_and(|configured| server.config() == configured)
-            })
+        } else if let Some(McpServerSource::Plugin(plugin)) =
+            registration.map(ResolvedMcpServer::source)
+            && Some(plugin.plugin_id()) == call.plugin_id()
+            && let Some(root) = plugin.host_root()
         {
+            McpToolSource::Plugin {
+                id: plugin.plugin_id().to_owned(),
+                root: root.clone(),
+            }
+        } else if registration.is_some_and(|server| {
+            matches!(server.source(), McpServerSource::Config)
+                && configured_server.is_some_and(|configured| server.config() == configured)
+        }) {
             McpToolSource::Config
         } else {
             McpToolSource::Other

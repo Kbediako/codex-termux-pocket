@@ -30,6 +30,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::binding::call_tool_result_from_rmcp;
+use crate::catalog::McpServerSource;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -284,14 +285,19 @@ impl McpConnectionSet {
             .into_iter()
             .filter(|(_, server)| server.enabled())
         {
-            let is_host_owned_codex_apps = config
-                .mcp_server_catalog
-                .server(&server_name)
-                .is_some_and(|server| {
-                    server
-                        .source()
-                        .is_host_owned_apps(&server_name, server.config())
-                });
+            let registration = config.mcp_server_catalog.server(&server_name);
+            let is_host_owned_codex_apps = registration.is_some_and(|server| {
+                server
+                    .source()
+                    .is_host_owned_apps(&server_name, server.config())
+            });
+            let host_plugin_root = registration.and_then(|server| match server.source() {
+                McpServerSource::Plugin(plugin) => plugin.host_root(),
+                McpServerSource::SelectedPlugin(_)
+                | McpServerSource::Config
+                | McpServerSource::Compatibility { .. }
+                | McpServerSource::Extension { .. } => None,
+            });
             let catalog_item_limit = if is_host_owned_codex_apps {
                 MAX_CODEX_APPS_TOOL_CATALOG_ITEMS
             } else {
@@ -348,6 +354,7 @@ impl McpConnectionSet {
             let connection_identity = McpServerConnectionIdentity::new(
                 &server_name,
                 &server,
+                host_plugin_root,
                 store_mode,
                 keyring_backend_kind,
                 &resolved_environment,

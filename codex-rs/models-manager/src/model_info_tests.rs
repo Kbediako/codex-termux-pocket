@@ -4,6 +4,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::openai_models::ApprovalMessages;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
+use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
@@ -67,6 +68,10 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         classifier_instructions: Some("Guardian experiment".to_string()),
         ..Default::default()
     };
+    let confirmation_policies = ConfirmationPolicies {
+        browser_use: Some("# Browser policy\n\n{{literal_markdown}}\n".to_string()),
+        computer_use: Some("  # Native policy\r\n\n${native_markdown}\n".to_string()),
+    };
     model.model_messages = Some(ModelMessages {
         persistent_instructions: Some(persistent_instructions.to_string()),
         instructions_template: Some("template".to_string()),
@@ -81,6 +86,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         permissions: Some(permissions.clone()),
         multi_agent: Some(multi_agent.clone()),
         token_budget: Some(token_budget.clone()),
+        confirmation_policies: Some(confirmation_policies.clone()),
         guardian_v2: Some(guardian_v2.clone()),
     });
     let config = ModelsManagerConfig {
@@ -102,6 +108,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
             permissions: Some(permissions),
             multi_agent: Some(multi_agent),
             token_budget: Some(token_budget),
+            confirmation_policies: Some(confirmation_policies),
             guardian_v2: Some(guardian_v2),
         })
     );
@@ -134,6 +141,7 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
         permissions: None,
         multi_agent: None,
         token_budget: None,
+        confirmation_policies: None,
         guardian_v2: None,
     });
     let config = ModelsManagerConfig {
@@ -155,6 +163,7 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         })
     );
@@ -183,6 +192,7 @@ fn disabled_personality_uses_plain_base_instructions_for_local_personality_model
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
                 guardian_v2: None,
             }),
             "unexpected model messages for {slug}"
@@ -225,6 +235,7 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         });
 

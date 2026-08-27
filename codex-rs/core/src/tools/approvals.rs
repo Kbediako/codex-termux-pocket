@@ -631,6 +631,7 @@ impl Session {
                     plugin_attribution_override: None,
                     approval_request_source: GuardianApprovalRequestSource::MainTurn,
                     external_cancel: Some(cancellation_token.clone()),
+                    require_synchronous_review: false,
                 },
             );
             review.await.unwrap_or_else(|_| {
@@ -653,6 +654,7 @@ impl Session {
                         plugin_attribution_override: None,
                         approval_request_source: GuardianApprovalRequestSource::MainTurn,
                         external_cancel: Some(review_cancel),
+                        require_synchronous_review: false,
                     },
                 )
                 .await

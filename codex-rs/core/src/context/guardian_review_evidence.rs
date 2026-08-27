@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -13,11 +14,14 @@ use super::ContextualUserFragment;
 use crate::codex_thread::GuardianAuthorizationVersion;
 
 const MAX_RETAINED_REVIEWS: usize = 8;
+const MAX_TRUSTED_SKILLS: usize = 16;
+const MAX_TRUSTED_SKILL_PATHS_BYTES: usize = 2_048;
 
-/// Trusted user answers and completed reviews retained only for this thread's Guardian reviewers.
+/// Trusted user answers, verified skill paths, and completed Guardian reviews.
 ///
-/// This runtime-only evidence is never inserted into the agent's conversation or
-/// inherited by another thread. Authorization changes make stale records ineligible.
+/// This runtime-only evidence is never inserted into the agent's conversation.
+/// Only bounded, turn-matched skill paths are exposed to delegated workers;
+/// completed reviews remain thread-local, and authorization changes invalidate stale records.
 #[derive(Debug, Default)]
 pub struct GuardianReviewEvidence(Mutex<GuardianReviewEvidenceState>);
 
@@ -26,9 +30,45 @@ struct GuardianReviewEvidenceState {
     reviews: VecDeque<Arc<GuardianReviewEvidenceRecord>>,
     user_inputs: VecDeque<(String, String)>,
     user_input_response_count: usize,
+    trusted_skill_turn_id: Option<String>,
+    trusted_skill_paths: BTreeSet<String>,
 }
 
 impl GuardianReviewEvidence {
+    /// Records a bounded, verified user-owned skill path for one host-owned turn.
+    pub fn record_trusted_skill(&self, turn_id: &str, path: String) {
+        if turn_id.is_empty() {
+            return;
+        }
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.trusted_skill_turn_id.as_deref() != Some(turn_id) {
+            state.trusted_skill_turn_id = Some(turn_id.to_owned());
+            state.trusted_skill_paths.clear();
+        }
+        if state.trusted_skill_paths.contains(&path)
+            || state.trusted_skill_paths.len() >= MAX_TRUSTED_SKILLS
+            || state
+                .trusted_skill_paths
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                .saturating_add(path.len())
+                > MAX_TRUSTED_SKILL_PATHS_BYTES
+        {
+            return;
+        }
+        state.trusted_skill_paths.insert(path);
+    }
+
+    /// Returns verified skill paths only for their original host-owned turn.
+    pub fn trusted_skill_paths(&self, turn_id: &str) -> Vec<String> {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.trusted_skill_turn_id.as_deref() != Some(turn_id) {
+            return Vec::new();
+        }
+        state.trusted_skill_paths.iter().cloned().collect()
+    }
+
     /// Records a bounded user answer before post-tool hooks can replace or reject its output.
     pub(crate) fn record_user_input(&self, call_id: &str, fragment: String) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);

@@ -8,6 +8,7 @@ use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::tests::mcp_config_for_test;
 use crate::session::tests::update_selected_settings_for_test;
+use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnEnvironment;
 use crate::state::ActiveTurn;
 use crate::test_support::models_manager_with_provider;
@@ -32,7 +33,10 @@ use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GranularApprovalConfig;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_utils_path_uri::PathUri;
 use core_test_support::hooks::trusted_config_layer_stack;
@@ -1110,6 +1114,7 @@ async fn mcp_tool_call_request_meta_uses_the_issuing_step(
         Some(serde_json::json!({
             "callId": "call-b",
             crate::X_CODEX_TURN_METADATA_HEADER: expected,
+            CONFIRMATION_POLICIES_META_KEY: {},
         })),
     );
     assert_eq!(
@@ -1128,6 +1133,49 @@ async fn mcp_tool_call_request_meta_uses_the_issuing_step(
             .expect("Responses turn metadata")["node_repl_disabled"],
         serde_json::json!(false),
     );
+}
+
+#[tokio::test]
+async fn guardian_mcp_tool_call_request_meta_excludes_actor_confirmation_policy() {
+    for session_source in [
+        SessionSource::Internal(InternalSessionSource::Guardian),
+        SessionSource::SubAgent(SubAgentSource::Other(
+            crate::guardian::GUARDIAN_REVIEWER_NAME.to_string(),
+        )),
+    ] {
+        let (_, mut turn_context) = make_session_and_context().await;
+        turn_context.session_source = session_source;
+        update_turn_settings_for_test(&mut turn_context, |settings| {
+            Arc::make_mut(&mut settings.model_info).model_messages = Some(
+                serde_json::from_value(serde_json::json!({
+                    "confirmation_policies": {
+                        "browser_use": "actor-only raw Markdown",
+                        "computer_use": "actor-only native Markdown",
+                    },
+                }))
+                .expect("confirmation policy fixture should deserialize"),
+            );
+        });
+        let expected = Some(serde_json::json!({
+            "callId": "call-guardian",
+            crate::X_CODEX_TURN_METADATA_HEADER: expected_mcp_turn_metadata(&turn_context),
+        }));
+        let step_context = StepContext::for_test(Arc::new(turn_context));
+
+        for server in ["node_repl", "cua_repl"] {
+            assert_eq!(
+                build_mcp_tool_call_request_meta(
+                    &step_context,
+                    server,
+                    "call-guardian",
+                    /*metadata*/ None,
+                ),
+                expected,
+                "{server}: {:?}",
+                step_context.turn.session_source,
+            );
+        }
+    }
 }
 
 #[tokio::test]

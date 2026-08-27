@@ -198,6 +198,7 @@ enum ThreadLifecycle {
     Fork,
     RootRollback,
     RootRestriction,
+    RootTrustedSkill,
     RootUserRestriction,
     RootUserInputRestriction,
     RootUserInputHookBlocked,
@@ -209,6 +210,7 @@ impl ThreadLifecycle {
             self,
             Self::RootRollback
                 | Self::RootRestriction
+                | Self::RootTrustedSkill
                 | Self::RootUserInputRestriction
                 | Self::RootUserInputHookBlocked
         )
@@ -508,6 +510,7 @@ async fn guardian_v2_routes_tool_approvals(
         review_outcome,
         transcript_content,
         GuardianToolScope::AllTools,
+        /*sensitive_action*/ None,
     )
     .await
 }
@@ -519,6 +522,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     review_outcome: ReviewOutcome,
     transcript_content: TranscriptContent,
     scope: GuardianToolScope,
+    sensitive_action: Option<bool>,
 ) -> Result<()> {
     let server_name = match scope {
         GuardianToolScope::AllTools => TEST_SERVER_NAME,
@@ -533,7 +537,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let node_repl_review_required = matches!(requirement, ModelReviewRequirement::Required)
         && codex_protocol::mcp::is_node_repl_backed_server(server_name);
     let (luna_score, expected_guardian_reviews) = match risk {
-        GuardianRisk::Low if classifier_in_scope => (0.25, 1),
+        GuardianRisk::Low if classifier_in_scope && sensitive_action != Some(true) => (0.25, 1),
         GuardianRisk::Low | GuardianRisk::InvalidResponse => (0.25, 2),
         GuardianRisk::Threshold => (0.5, 2),
         GuardianRisk::High => (0.95, 2),
@@ -579,9 +583,20 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let responses_server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(sensitive_action).await?;
 
     let codex_home = TempDir::new()?;
+    let root_skill = if matches!(lifecycle, ThreadLifecycle::RootTrustedSkill) {
+        let path = codex_home.path().join("skills/root-trusted/SKILL.md");
+        std::fs::create_dir_all(path.parent().expect("root skill parent"))?;
+        std::fs::write(
+            &path,
+            "---\nname: root-trusted\ndescription: Delegated user skill\n---\n\nDelegate the requested work.\n",
+        )?;
+        Some(path.canonicalize()?)
+    } else {
+        None
+    };
     if lifecycle.has_post_tool_hook() {
         let output = if matches!(lifecycle, ThreadLifecycle::UserInputHookFeedback) {
             json!({ "continue": false, "stopReason": USER_INPUT_HOOK_FEEDBACK })
@@ -654,6 +669,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputHookBlocked
         | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
+        | ThreadLifecycle::RootTrustedSkill
         | ThreadLifecycle::RootUserRestriction
         | ThreadLifecycle::RootUserInputRestriction
         | ThreadLifecycle::RootUserInputHookBlocked => None,
@@ -699,6 +715,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputHookBlocked
         | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
+        | ThreadLifecycle::RootTrustedSkill
         | ThreadLifecycle::RootUserRestriction
         | ThreadLifecycle::RootUserInputRestriction
         | ThreadLifecycle::RootUserInputHookBlocked => {
@@ -753,13 +770,20 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         .root_thread_id
         .lock()
         .expect("root thread lock should not be poisoned") = Some(thread_id.clone());
+    let mut turn_input = vec![UserInput::Text {
+        text: USER_CONTEXT.to_owned(),
+        text_elements: Vec::new(),
+    }];
+    if let Some(skill_path) = root_skill.as_ref() {
+        turn_input.push(UserInput::Skill {
+            name: "root-trusted".to_owned(),
+            path: skill_path.clone(),
+        });
+    }
     let turn_request_id = app_server
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.clone(),
-            input: vec![UserInput::Text {
-                text: USER_CONTEXT.to_owned(),
-                text_elements: Vec::new(),
-            }],
+            input: turn_input,
             approval_policy: Some(AskForApproval::OnRequest),
             approvals_reviewer: match requirement {
                 ModelReviewRequirement::Optional => Some(ApprovalsReviewer::AutoReview),
@@ -786,6 +810,26 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             luna_request["prompt_cache_key"],
             format!("guardian-v2:{reviewed_thread_id}")
         );
+        if let Some(skill_path) = root_skill.as_ref() {
+            let trusted_message = luna_request["input"]
+                .as_array()
+                .expect("Luna input should be an array")
+                .iter()
+                .find(|item| {
+                    item["role"] == "developer"
+                        && item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                            == json!(["guardian.trusted_skills"])
+                })
+                .and_then(|item| item["content"][0]["text"].as_str())
+                .expect("delegated workers should inherit invoked root-user skills");
+            let (_, evidence) = trusted_message
+                .split_once('\n')
+                .expect("trusted skill message should contain JSON evidence");
+            assert_eq!(
+                serde_json::from_str::<Value>(evidence)?,
+                json!([skill_path.display().to_string()]),
+            );
+        }
         if !lifecycle.uses_root_worker() {
             let trusted_tool_context = luna_request["input"]
                 .as_array()
@@ -1109,6 +1153,19 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             sync_review_fragments(&post_authorization_change_sample).is_empty(),
             "root authorization changes must remove stale review evidence from classification"
         );
+        if root_skill.is_some() {
+            assert!(
+                !post_authorization_change_sample["input"]
+                    .as_array()
+                    .expect("Luna input should be an array")
+                    .iter()
+                    .any(|item| {
+                        item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                            == json!(["guardian.trusted_skills"])
+                    }),
+                "a new root turn must not preserve authorization from an earlier skill"
+            );
+        }
         if matches!(
             lifecycle,
             ThreadLifecycle::RootRestriction
@@ -1258,7 +1315,7 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
     let responses_server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
 
     MockResponsesConfig::new(&responses_url)
         .with_model(MODEL)
@@ -1376,6 +1433,23 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_v2_inherits_root_user_skills_for_delegated_workers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    guardian_v2_routes_scoped_tool_approvals(
+        GuardianRisk::High,
+        ThreadLifecycle::RootTrustedSkill,
+        ModelReviewRequirement::Optional,
+        ReviewOutcome::Allow,
+        TranscriptContent::Normal,
+        GuardianToolScope::ComputerUseOnly {
+            server_name: "node_repl",
+        },
+        /*sensitive_action*/ None,
+    )
+    .await
+}
+
 #[test_case("node_repl", GuardianRisk::Low; "low risk browser skips full review")]
 #[test_case("cua_repl", GuardianRisk::Low; "low risk computer use skips full review")]
 #[test_case("node_repl", GuardianRisk::High; "high risk browser receives full review")]
@@ -1393,21 +1467,27 @@ async fn guardian_v2_computer_use_only_scopes_classification_and_fast_reviews(
         ReviewOutcome::Allow,
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
+        /*sensitive_action*/ None,
     )
     .await
 }
 
-#[test_case("node_repl", GuardianRisk::Low; "browser low risk")]
-#[test_case("cua_repl", GuardianRisk::Low; "computer use low risk")]
-#[test_case("node_repl", GuardianRisk::High; "browser high risk")]
-#[test_case("cua_repl", GuardianRisk::High; "computer use high risk")]
-#[test_case("node_repl", GuardianRisk::InvalidResponse; "browser classifier failure")]
-#[test_case("cua_repl", GuardianRisk::InvalidResponse; "computer use classifier failure")]
-#[test_case(TEST_SERVER_NAME, GuardianRisk::Low; "other tools retain full review")]
+#[test_case("node_repl", GuardianRisk::Low, None; "browser low risk")]
+#[test_case("cua_repl", GuardianRisk::Low, None; "computer use low risk")]
+#[test_case("node_repl", GuardianRisk::Low, Some(false); "browser low risk sensitive action false")]
+#[test_case("cua_repl", GuardianRisk::Low, Some(false); "computer use low risk sensitive action false")]
+#[test_case("node_repl", GuardianRisk::Low, Some(true); "browser low risk sensitive action true")]
+#[test_case("cua_repl", GuardianRisk::Low, Some(true); "computer use low risk sensitive action true")]
+#[test_case("node_repl", GuardianRisk::High, None; "browser high risk")]
+#[test_case("cua_repl", GuardianRisk::High, None; "computer use high risk")]
+#[test_case("node_repl", GuardianRisk::InvalidResponse, None; "browser classifier failure")]
+#[test_case("cua_repl", GuardianRisk::InvalidResponse, None; "computer use classifier failure")]
+#[test_case(TEST_SERVER_NAME, GuardianRisk::Low, None; "other tools retain full review")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_v2_required_model_computer_use_preserves_strict_approval(
     server_name: &'static str,
     risk: GuardianRisk,
+    sensitive_action: Option<bool>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     guardian_v2_routes_scoped_tool_approvals(
@@ -1417,6 +1497,7 @@ async fn guardian_v2_required_model_computer_use_preserves_strict_approval(
         ReviewOutcome::Allow,
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
+        sensitive_action,
     )
     .await
 }
@@ -1437,6 +1518,7 @@ async fn guardian_v2_discards_sync_reviews_after_user_input_answer(
         GuardianToolScope::ComputerUseOnly {
             server_name: "node_repl",
         },
+        /*sensitive_action*/ None,
     )
     .await
 }
@@ -1458,6 +1540,7 @@ async fn guardian_v2_validates_user_input_before_history_truncation(
         GuardianToolScope::ComputerUseOnly {
             server_name: "node_repl",
         },
+        /*sensitive_action*/ None,
     )
     .await
 }
@@ -1478,6 +1561,7 @@ async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
         GuardianToolScope::ComputerUseOnly {
             server_name: "node_repl",
         },
+        /*sensitive_action*/ None,
     )
     .await
 }

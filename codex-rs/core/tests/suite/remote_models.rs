@@ -124,6 +124,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         ..specific
@@ -140,6 +141,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         ..generic
@@ -415,6 +417,7 @@ async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
         multi_agent: None,
         token_budget: None,
         guardian_v2: None,
+        confirmation_policies: None,
     });
     mount_models_once(
         &server,
@@ -854,6 +857,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         include_skills_usage_instructions: false,

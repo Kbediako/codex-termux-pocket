@@ -58,6 +58,7 @@ use codex_rmcp_client::InProcessTransportFactory;
 use codex_rmcp_client::McpAuthState;
 use codex_rmcp_client::McpLoginRequirement;
 use codex_rmcp_client::RmcpClient;
+use codex_utils_path_uri::PathUri;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
@@ -3854,6 +3855,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             McpServerConnectionIdentity::new(
                 "fake-first-party",
                 remote_server,
+                /*host_plugin_root*/ None,
                 OAuthCredentialsStoreMode::File,
                 keyring_backend_kind,
                 &resolved_environment,
@@ -4354,6 +4356,7 @@ fn reusable_server_identity(
     McpServerConnectionIdentity::new(
         "docs",
         &server,
+        /*host_plugin_root*/ None,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
         &resolved_environment,
@@ -4406,16 +4409,29 @@ async fn reconcile_reusable_server(
     config: McpServerConfig,
     runtime_context: McpRuntimeContext,
 ) -> McpConnectionSet {
-    let (tx_event, _rx_event) = async_channel::unbounded();
     let codex_home = tempdir().expect("tempdir");
+    reconcile_reusable_server_with_mcp_config(
+        previous,
+        config,
+        runtime_context,
+        crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf()),
+    )
+    .await
+}
+
+async fn reconcile_reusable_server_with_mcp_config(
+    previous: &McpConnectionSet,
+    config: McpServerConfig,
+    runtime_context: McpRuntimeContext,
+    mcp_config: crate::McpConfig,
+) -> McpConnectionSet {
+    let (tx_event, _rx_event) = async_channel::unbounded();
     McpConnectionSet::new(
         Some(previous),
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
-            config: Arc::new(crate::mcp::tests::test_mcp_config(
-                codex_home.path().to_path_buf(),
-            )),
+            config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
@@ -4738,6 +4754,7 @@ fn connection_identity_uses_effective_authorization_headers() {
             McpServerConnectionIdentity::new(
                 "docs",
                 &server,
+                /*host_plugin_root*/ None,
                 OAuthCredentialsStoreMode::File,
                 keyring_backend_kind,
                 &Ok(None),
@@ -5119,6 +5136,81 @@ async fn reconciliation_reconnects_when_connection_identity_changes() {
 }
 
 #[tokio::test]
+async fn reconciliation_reconnects_when_host_plugin_root_changes() {
+    let runtime_context = reusable_server_runtime_context();
+    let server_config = reusable_server_config("http://127.0.0.1:1");
+    let original_root = PathUri::parse("file:///plugins/original").expect("valid plugin root URI");
+    let replacement_root =
+        PathUri::parse("file:///plugins/replacement").expect("valid plugin root URI");
+    let mut previous = manager_with_reusable_ready_server(
+        &server_config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+    let server = EffectiveMcpServer::configured(server_config.clone());
+    let resolved_environment = runtime_context.resolve_server_environment("docs", &server_config);
+    let original_identity = McpServerConnectionIdentity::new(
+        "docs",
+        &server,
+        Some(&original_root),
+        OAuthCredentialsStoreMode::default(),
+        AuthKeyringBackendKind::default(),
+        &resolved_environment,
+        &runtime_context,
+        /*runtime_auth_provider*/ None,
+        /*auth*/ None,
+        /*codex_apps_cache_identity*/ None,
+        ElicitationCapability::default(),
+        ClientMcpExtensions::default(),
+        /*previous_identity*/ None,
+    );
+    Arc::get_mut(
+        &mut previous
+            .servers
+            .get_mut("docs")
+            .expect("test server should exist")
+            .connection,
+    )
+    .expect("test server should have one connection owner")
+    .identity = Some(original_identity);
+
+    let codex_home = tempdir().expect("tempdir");
+    let config_for_root = |root| {
+        let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_plugin(
+            "docs".to_string(),
+            crate::McpPluginAttribution::new("docs@test".to_string(), "Docs".to_string())
+                .with_host_root(root),
+            /*plugin_order*/ 0,
+            server_config.clone(),
+        ));
+        config.mcp_server_catalog = catalog.build();
+        config
+    };
+
+    let unchanged = reconcile_reusable_server_with_mcp_config(
+        &previous,
+        server_config.clone(),
+        runtime_context.clone(),
+        config_for_root(original_root),
+    )
+    .await;
+    assert!(previous.shares_test_connection_with(&unchanged, "docs"));
+
+    let replacement_config = config_for_root(replacement_root);
+    let replacement = reconcile_reusable_server_with_mcp_config(
+        &unchanged,
+        server_config,
+        runtime_context,
+        replacement_config,
+    )
+    .await;
+    assert!(!unchanged.shares_test_connection_with(&replacement, "docs"));
+}
+
+#[tokio::test]
 async fn connection_identity_distinguishes_accounts_with_the_same_token() -> anyhow::Result<()> {
     let runtime_context = reusable_server_runtime_context();
     let config = reusable_server_config("http://127.0.0.1:1");
@@ -5139,6 +5231,7 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
         McpServerConnectionIdentity::new(
             "docs",
             &server,
+            /*host_plugin_root*/ None,
             OAuthCredentialsStoreMode::default(),
             AuthKeyringBackendKind::default(),
             &Ok(None),
@@ -5191,6 +5284,7 @@ async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> a
         McpServerConnectionIdentity::new(
             CODEX_APPS_MCP_SERVER_NAME,
             &server,
+            /*host_plugin_root*/ None,
             OAuthCredentialsStoreMode::default(),
             AuthKeyringBackendKind::default(),
             &Ok(None),

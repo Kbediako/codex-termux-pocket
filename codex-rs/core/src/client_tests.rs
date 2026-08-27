@@ -728,6 +728,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         Ok(ResponseEvent::Completed {
             response_id: "resp-123".to_string(),
             token_usage: None,
+            usage_metadata: None,
             end_turn: Some(true),
         }),
     ]);

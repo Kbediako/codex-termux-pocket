@@ -153,6 +153,53 @@ fn websocket_connection_metadata(harness: &WebsocketTestHarness) -> CodexRespons
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_preserves_credit_usage_metadata() {
+    skip_if_no_network!();
+
+    let mut completed = ev_completed("resp-1");
+    completed["response"]["usage_metadata"] = json!({ "amount": "0.12345678901234567890" });
+    let server =
+        start_websocket_server(vec![vec![vec![ev_response_created("resp-1"), completed]]]).await;
+    let harness = websocket_harness_for_codex_backend(&server).await;
+    let mut client_session = harness.client.new_session();
+    let prompt = prompt_with_input(vec![message_item("hello")]);
+    let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &harness.model_info,
+            &harness.session_telemetry,
+            harness.effort.clone(),
+            harness.summary,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await
+        .expect("websocket stream failed");
+
+    let mut usage_metadata = None;
+    while let Some(event) = stream.next().await {
+        if let ResponseEvent::Completed {
+            usage_metadata: metadata,
+            ..
+        } = event.expect("websocket stream failed")
+        {
+            usage_metadata = metadata;
+            break;
+        }
+    }
+    assert_eq!(
+        usage_metadata,
+        Some(codex_protocol::ResponseUsageMetadata {
+            amount: Some("0.12345678901234567890".to_string()),
+        }),
+    );
+    assert_eq!(server.single_connection().len(), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_websocket_streams_request() {
     skip_if_no_network!();
 

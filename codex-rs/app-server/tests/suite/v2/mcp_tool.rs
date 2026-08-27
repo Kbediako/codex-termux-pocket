@@ -100,7 +100,7 @@ const LATE_ENVIRONMENT_ID: &str = "late-environment";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -166,7 +166,7 @@ async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_forwards_only_server_extensions() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -261,7 +261,7 @@ async fn model_mcp_tool_call_uses_session_client_extensions() -> Result<()> {
         create_final_assistant_message_sse_response("done")?,
     ];
     let responses_server = create_mock_responses_server_sequence(responses).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -491,7 +491,7 @@ async fn assert_full_access_form_elicitation_is_declined(
     case: FullAccessElicitationCase,
 ) -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -565,7 +565,7 @@ async fn mcp_server_tool_call_round_trips_elicitation_for_thread(
     mut elicitation_thread: ElicitationThread,
 ) -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -727,7 +727,7 @@ async fn initialize_elicitation_app_server(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_elicitation_survives_environment_runtime_refresh() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let exec_listener = TcpListener::bind("127.0.0.1:0").await?;
     let exec_server_url = format!("ws://{}", exec_listener.local_addr()?);
     let codex_home = TempDir::new()?;
@@ -847,7 +847,7 @@ async fn mcp_server_elicitation_survives_environment_runtime_refresh() -> Result
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_forwards_url_elicitation() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -944,7 +944,7 @@ async fn mcp_tool_call_completion_notification_contains_truncated_large_result()
         create_final_assistant_message_sse_response("done")?,
     ];
     let responses_server = create_mock_responses_server_sequence(responses).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(
         &responses_server.uri(),
@@ -1057,7 +1057,7 @@ async fn mcp_tool_call_hint_survives_mid_call_thread_read_and_resume() -> Result
         create_final_assistant_message_sse_response("done")?,
     ];
     let responses_server = create_mock_responses_server_sequence(responses).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
@@ -1196,7 +1196,9 @@ async fn mcp_tool_call_hint_survives_mid_call_thread_read_and_resume() -> Result
 }
 
 #[derive(Clone, Default)]
-struct ToolAppsMcpServer;
+struct ToolAppsMcpServer {
+    sensitive_action: Option<bool>,
+}
 
 impl ServerHandler for ToolAppsMcpServer {
     async fn initialize(
@@ -1273,7 +1275,7 @@ impl ServerHandler for ToolAppsMcpServer {
             .and_then(serde_json::Value::as_bool)
             == Some(true)
         {
-            let approval_meta = json!({
+            let mut approval_meta = json!({
                 "codex_request_type": "approval_request",
                 "codex_approval_kind": "mcp_tool_call",
                 "codex_strict_auto_review": true,
@@ -1281,6 +1283,9 @@ impl ServerHandler for ToolAppsMcpServer {
                 "tool_params": request.arguments,
                 "x-codex-turn-metadata": turn_metadata,
             });
+            if let Some(sensitive_action) = self.sensitive_action {
+                approval_meta["codex_sensitive_action"] = json!(sensitive_action);
+            }
             let result = context
                 .peer
                 .create_elicitation(ElicitRequestParams::FormElicitationParams {
@@ -1398,11 +1403,13 @@ impl ServerHandler for ToolAppsMcpServer {
     }
 }
 
-pub(super) async fn start_mcp_server() -> Result<(String, JoinHandle<()>)> {
+pub(super) async fn start_mcp_server(
+    sensitive_action: Option<bool>,
+) -> Result<(String, JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let mcp_service = StreamableHttpService::new(
-        || Ok(ToolAppsMcpServer),
+        move || Ok(ToolAppsMcpServer { sensitive_action }),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );

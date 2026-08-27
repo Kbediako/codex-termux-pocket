@@ -132,3 +132,6 @@ subject	termux: promote termux-v0.150.0-alpha.13-75e619d2b9	tooling	Promotes the
 subject	ci: stage protected alpha1515 update	tooling	Temporary issue-triggered maintainer transaction for the exact official 0.151.0-alpha.5 source.
 subject	termux: update to 0.151.0-alpha.5	runtime-critical	Merges the exact official 0.151.0-alpha.5 source and preserves the maintained Android and Termux runtime patch stack.
 subject	chore: remove temporary alpha1515 orchestration	tooling	Removes the temporary 0.151.0-alpha.5 maintainer job and script before exact-source validation.
+subject	ci: stage protected alpha1516 update	tooling	Temporary issue-triggered maintainer transaction for the exact official alpha.13 source.
+subject	termux: update to 0.151.0-alpha.6	runtime-critical	Merges the exact official 0.151.0-alpha.6 source and preserves the maintained Android and Termux runtime patch stack.
+subject	chore: remove temporary alpha1516 orchestration	tooling	Removes the temporary alpha.13 maintainer job and script before exact-source validation.

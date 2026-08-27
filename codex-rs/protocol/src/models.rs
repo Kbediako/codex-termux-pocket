@@ -937,11 +937,23 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub content_item_kinds: Option<Vec<ContentItemKind>>,
+    // Ignore input values so requests cannot fake tool call records.
+    /// Host-owned Code Mode cell shared by its `exec` and subsequent `wait` outputs.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub cell_id: Option<String>,
     /// Warehouse-only Responses metadata, not part of the public app-server protocol.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     #[ts(skip)]
     pub executed_tool_calls: Option<Vec<ExecutedToolCall>>,
+    /// Whether the host finished recording this cell's calls without losing calls or arguments.
+    /// This describes the call inventory across the cell's outputs, not tool success.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub tool_calls_complete: Option<bool>,
 }
 
 impl InternalChatMessageMetadataPassthrough {

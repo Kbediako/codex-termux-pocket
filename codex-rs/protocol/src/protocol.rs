@@ -1882,13 +1882,14 @@ pub struct RawResponseItemEvent {
     pub item: ResponseItem,
 }
 
-/// Exact usage reported by one upstream Responses API completion.
+/// Exact usage and metadata reported by one upstream Responses API completion.
 ///
 /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct RawResponseCompletedEvent {
     pub response_id: String,
     pub token_usage: Option<TokenUsage>,
+    pub usage_metadata: Option<crate::ResponseUsageMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]

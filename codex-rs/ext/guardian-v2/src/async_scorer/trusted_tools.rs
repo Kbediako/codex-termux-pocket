@@ -68,13 +68,13 @@ pub(crate) async fn trusted_tool_context(
 ) -> Option<GuardianTrustedToolFragment> {
     let codex_home = config.codex_home.as_path().canonicalize().ok()?;
     let plugins = match source {
-        McpToolSource::Connector | McpToolSource::Plugin { .. } => Some(
+        McpToolSource::Connector => Some(
             manager
                 .plugins_manager()
                 .plugins_for_config(&config.plugins_config_input())
                 .await,
         ),
-        McpToolSource::Config => None,
+        McpToolSource::Config | McpToolSource::Plugin { .. } => None,
         McpToolSource::SelectedPlugin | McpToolSource::Other => return None,
     };
 
@@ -98,18 +98,16 @@ pub(crate) async fn trusted_tool_context(
                 trusted_user_config_source(config, "apps", connector_id, &codex_home)?
             }
         }
-        McpToolSource::Plugin { id: plugin_id } => {
-            let plugin = plugins.as_ref()?.plugins().iter().find(|plugin| {
-                plugin.is_active()
-                    && plugin.config_name == plugin_id.as_str()
-                    && plugin.mcp_servers.contains_key(&tool.server_name)
-                    && is_home_owned_plugin_capability(
-                        plugin.root.as_path(),
-                        &codex_home,
-                        PluginCapability::Mcp,
-                    )
-            })?;
-            plugin.root.as_path().display().to_string()
+        McpToolSource::Plugin { root, .. } => {
+            let plugin_root = root.to_abs_path().ok()?;
+            if !is_home_owned_plugin_capability(
+                plugin_root.as_path(),
+                &codex_home,
+                PluginCapability::Mcp,
+            ) {
+                return None;
+            }
+            plugin_root.as_path().display().to_string()
         }
         McpToolSource::Config => {
             trusted_user_config_source(config, "mcp_servers", &tool.server_name, &codex_home)?

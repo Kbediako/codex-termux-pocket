@@ -8,6 +8,7 @@ use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use codex_protocol::protocol::ModelVerification;
@@ -118,6 +119,7 @@ struct ResponseCompleted {
     id: String,
     #[serde(default)]
     usage: Option<ResponseCompletedUsage>,
+    usage_metadata: Option<ResponseUsageMetadata>,
     #[serde(default)]
     end_turn: Option<bool>,
 }
@@ -481,6 +483,7 @@ pub fn process_responses_event(
                         return Ok(Some(ResponseEvent::Completed {
                             response_id: resp.id,
                             token_usage: resp.usage.map(Into::into),
+                            usage_metadata: resp.usage_metadata,
                             end_turn: resp.end_turn,
                         }));
                     }
@@ -864,10 +867,12 @@ mod tests {
             Ok(ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
+                assert!(usage_metadata.is_none());
                 assert!(end_turn.is_none());
             }
             other => panic!("unexpected third event: {other:?}"),
@@ -1060,10 +1065,12 @@ mod tests {
             Ok(ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
+                assert!(usage_metadata.is_none());
                 assert!(end_turn.is_none());
             }
             other => panic!("unexpected event: {other:?}"),
@@ -1570,6 +1577,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1607,6 +1615,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1642,6 +1651,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1677,6 +1687,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );

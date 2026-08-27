@@ -1702,7 +1702,8 @@ impl Config {
                     plugin.config_name.clone(),
                     plugin.display_name().to_string(),
                 )
-            };
+            }
+            .with_host_root(PathUri::from_abs_path(&plugin.root));
             for (name, plugin_server) in plugin_mcp_servers {
                 catalog.register(McpServerRegistration::from_plugin(
                     name,

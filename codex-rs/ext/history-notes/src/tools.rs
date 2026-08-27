@@ -278,6 +278,7 @@ impl HistoryNotesTool {
                 &self.session_id,
                 &self.current_agent_name,
                 arguments,
+                call.truncation_policy,
             )
             .await
             .map_err(FunctionCallError::RespondToModel)?;

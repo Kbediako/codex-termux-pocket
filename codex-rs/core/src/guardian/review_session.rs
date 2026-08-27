@@ -1921,6 +1921,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         };
 
@@ -1960,6 +1961,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         };
 
@@ -2007,6 +2009,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         };
 

@@ -55,6 +55,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ConfigShellToolType;
+use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelVisibility;
@@ -104,6 +105,7 @@ use image::DynamicImage;
 use image::GenericImageView;
 use image::ImageBuffer;
 use image::Rgba;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use serial_test::serial;
@@ -1633,16 +1635,28 @@ async fn local_stdio_server_uses_runtime_fallback_cwd_when_config_omits_cwd() ->
     Ok(())
 }
 
-#[test_case(false, false, false; "both disabled")]
-#[test_case(true, false, false; "auto review required")]
-#[test_case(false, true, false; "disabled")]
-#[test_case(true, true, false; "both enabled")]
-#[test_case(false, false, true; "attachment-owned permissions preserve foreign workspace roots")]
+#[test_case("rmcp", false, false, false, Some("catalog policy"), Some("native catalog policy"); "both disabled")]
+#[test_case("rmcp", true, false, false, Some("catalog policy"), Some("native catalog policy"); "auto review required")]
+#[test_case("rmcp", false, true, false, Some("catalog policy"), Some("native catalog policy"); "disabled")]
+#[test_case("rmcp", true, true, false, Some("catalog policy"), Some("native catalog policy"); "both enabled")]
+#[test_case("rmcp", false, false, true, Some("catalog policy"), Some("native catalog policy"); "attachment-owned permissions preserve foreign workspace roots")]
+#[test_case("node_repl", false, false, false, Some("  # Policy A\r\n{literal} <raw> & café\n"), Some("\t# Native A\n{{literal}} & desktop\r\n"); "node repl raw policy")]
+#[test_case("cua_repl", false, false, false, Some("\t# Policy B\n${literal} </policy>\r\n "), Some("  # Native B\r\n<computer> ${native}\n "); "cua repl raw policy")]
+#[test_case("node_repl", false, false, false, None, None; "node repl missing policy")]
+#[test_case("cua_repl", false, false, false, Some(""), Some("native retained"); "cua repl empty policy")]
+#[test_case("node_repl", false, false, false, Some(" \r\n\t"), Some("native retained"); "node repl blank policy")]
+#[test_case("node_repl", false, false, false, None, Some("native retained"); "node repl missing browser policy")]
+#[test_case("cua_repl", false, false, false, Some("browser retained"), None; "cua repl missing computer policy")]
+#[test_case("node_repl", false, false, false, Some("browser retained"), Some(""); "node repl empty computer policy")]
+#[test_case("cua_repl", false, false, false, Some("browser retained"), Some(" \r\n\t"); "cua repl blank computer policy")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
+    server_name: &'static str,
     node_repl_auto_review_required: bool,
     node_repl_disabled: bool,
     attachment_owned_permissions: bool,
+    browser_policy: Option<&str>,
+    computer_policy: Option<&str>,
 ) -> anyhow::Result<()> {
     // TODO(anp): Remove after packaging a Windows stdio test server for Wine exec.
     skip_if_wine_exec!(
@@ -1655,7 +1669,6 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
 
     let call_id = "sandbox-meta-call";
     let restricted_call_id = "owner-restricted-call";
-    let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
     let mut models = codex_models_manager::bundled_models_response()?;
     let model = models
@@ -1665,11 +1678,33 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
         .expect("bundled model should exist");
     model.node_repl_auto_review_required = node_repl_auto_review_required;
     model.node_repl_disabled = node_repl_disabled;
+    let messages = model
+        .model_messages
+        .as_mut()
+        .expect("bundled model messages");
+    messages.confirmation_policies = Some(ConfirmationPolicies {
+        browser_use: browser_policy.map(str::to_owned),
+        computer_use: computer_policy.map(str::to_owned),
+    });
     let models_mock = mount_models_once(&server, models).await;
 
     let mut response_events = vec![
         responses::ev_response_created("resp-1"),
-        responses::ev_function_call_with_namespace(call_id, &namespace, "sandbox_meta", "{}"),
+        responses::ev_function_call_with_namespace(
+            call_id,
+            &namespace,
+            "sandbox_meta",
+            &json!({
+                "_meta": {
+                    "openai/confirmation_policies": {
+                        "browser_use": "forged argument policy",
+                        "computer_use": "forged computer policy",
+                    },
+                    "threadId": "forged-thread",
+                },
+            })
+            .to_string(),
+        ),
     ];
     if attachment_owned_permissions {
         response_events.push(responses::ev_function_call_with_namespace(
@@ -1859,6 +1894,26 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
         output_json.pointer("/x-codex-turn-metadata/node_repl_disabled"),
         Some(&json!(node_repl_disabled))
     );
+    let expected_policies = match server_name {
+        "node_repl" | "cua_repl" => Some(match (browser_policy, computer_policy) {
+            (Some(browser), Some(computer)) => {
+                json!({"browser_use": browser, "computer_use": computer})
+            }
+            (Some(browser), None) => json!({"browser_use": browser}),
+            (None, Some(computer)) => json!({"computer_use": computer}),
+            (None, None) => json!({}),
+        }),
+        _ => None,
+    };
+    assert_eq!(
+        meta.get("openai/confirmation_policies"),
+        expected_policies.as_ref(),
+    );
+    assert_eq!(
+        output_json["threadId"],
+        json!(fixture.session_configured.thread_id.to_string()),
+    );
+    assert_eq!(output_json["callId"], json!(call_id));
 
     let sandbox_meta = meta
         .get(MCP_SANDBOX_STATE_META_CAPABILITY)

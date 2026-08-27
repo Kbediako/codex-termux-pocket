@@ -3,6 +3,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_utils_output_truncation::TruncationPolicy;
 use http::HeaderMap;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
@@ -56,6 +57,7 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
                     "current_agent_name": "/root/spoofed",
                 }
             }),
+            TruncationPolicy::Bytes(1024),
         )
         .await
         .expect("History request should succeed");
@@ -129,6 +131,7 @@ async fn marks_encrypted_history_and_notes_arguments_without_changing_the_json_b
                 "session-123",
                 "/root",
                 arguments.clone(),
+                TruncationPolicy::Bytes(1024),
             )
             .await
             .expect("encrypted argument request should succeed");

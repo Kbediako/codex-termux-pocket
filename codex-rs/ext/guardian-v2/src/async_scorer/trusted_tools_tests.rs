@@ -149,6 +149,11 @@ async fn trusts_connector_declared_by_home_owned_plugin() -> Result<()> {
         &mcp,
         &McpToolSource::Plugin {
             id: "trusted@test".to_string(),
+            root: test
+                .config
+                .codex_home
+                .join("plugins/cache/test/trusted/local")
+                .into(),
         },
         &test.thread_manager,
         &test.config,
@@ -156,6 +161,20 @@ async fn trusts_connector_declared_by_home_owned_plugin() -> Result<()> {
     .await
     .expect("home-owned plugin MCP server should be trusted");
     assert_eq!(mcp_context.metadata, expected_context(&mcp, &plugin_root));
+    // A trusted cached plugin with the same ID must not replace the frozen outside-home root.
+    assert_eq!(
+        trusted_tool_context(
+            &mcp,
+            &McpToolSource::Plugin {
+                id: "trusted@test".to_string(),
+                root: test.config.cwd.clone().into(),
+            },
+            &test.thread_manager,
+            &test.config,
+        )
+        .await,
+        None,
+    );
     assert_eq!(
         trusted_tool_context(
             &mcp,

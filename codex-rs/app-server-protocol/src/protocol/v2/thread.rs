@@ -1841,6 +1841,23 @@ pub struct RawResponseCompletedNotification {
     pub turn_id: String,
     pub response_id: String,
     pub usage: Option<TokenUsageBreakdown>,
+    pub usage_metadata: Option<ResponseUsageMetadata>,
+}
+
+/// Usage metadata reported for one upstream response.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ResponseUsageMetadata {
+    pub amount: Option<String>,
+}
+
+impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
+    fn from(value: codex_protocol::ResponseUsageMetadata) -> Self {
+        Self {
+            amount: value.amount,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

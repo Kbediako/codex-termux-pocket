@@ -322,7 +322,8 @@ async fn run_guardian_review(
     options: GuardianReviewOptions,
 ) -> ReviewDecision {
     let turn = Arc::clone(context.turn());
-    let requires_synchronous_review = reasons.retry.is_some()
+    let requires_synchronous_review = options.require_synchronous_review
+        || reasons.retry.is_some()
         || matches!(
             &request,
             GuardianApprovalRequest::ExecCommand {
@@ -331,7 +332,8 @@ async fn run_guardian_review(
             } if sandbox_permissions.requires_escalated_permissions()
         );
     // Guardian V2 may satisfy ordinary reviews, including required-model reviews, but broader
-    // permission requests and retries must run Guardian synchronously.
+    // permission requests, retries, and elicitations requiring synchronous review must not use
+    // extension fast approval.
     if (!turn
         .config
         .config_layer_stack
@@ -368,6 +370,7 @@ async fn run_guardian_review(
         plugin_attribution_override,
         approval_request_source,
         external_cancel,
+        require_synchronous_review: _,
     } = options;
     let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
     let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
@@ -739,6 +742,8 @@ pub(crate) struct GuardianReviewOptions {
     pub(crate) plugin_attribution_override: Option<PluginCommandAttribution>,
     pub(crate) approval_request_source: GuardianApprovalRequestSource,
     pub(crate) external_cancel: Option<CancellationToken>,
+    /// Escalate from extension fast approval to the synchronous Guardian reviewer.
+    pub(crate) require_synchronous_review: bool,
 }
 
 /// Public entrypoint for approval requests that should be reviewed by guardian.
@@ -760,6 +765,7 @@ pub(crate) async fn review_approval_request(
             plugin_attribution_override: None,
             approval_request_source: GuardianApprovalRequestSource::MainTurn,
             external_cancel: None,
+            require_synchronous_review: false,
         },
     ));
     review.await

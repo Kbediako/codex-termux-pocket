@@ -13386,6 +13386,16 @@
               "type": "null"
             }
           ]
+        },
+        "usageMetadata": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResponseUsageMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -14633,6 +14643,18 @@
           "type": "object"
         }
       ]
+    },
+    "ResponseUsageMetadata": {
+      "description": "Usage metadata reported for one upstream response.",
+      "properties": {
+        "amount": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ResponsesApiWebSearchAction": {
       "oneOf": [

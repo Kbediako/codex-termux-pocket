@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
@@ -113,6 +114,7 @@ pub enum ResponseEvent {
     Completed {
         response_id: String,
         token_usage: Option<TokenUsage>,
+        usage_metadata: Option<ResponseUsageMetadata>,
         /// Did the model affirmatively end its turn? Some providers do not set this,
         /// so we rely on fallback logic when this is `None`.
         end_turn: Option<bool>,

@@ -1118,6 +1118,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_id: event_turn_id,
                 response_id: raw_response_completed_event.response_id,
                 usage: raw_response_completed_event.token_usage.map(Into::into),
+                usage_metadata: raw_response_completed_event.usage_metadata.map(Into::into),
             };
             outgoing
                 .send_server_notification(ServerNotification::RawResponseCompleted(notification))

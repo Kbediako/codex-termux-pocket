@@ -547,6 +547,20 @@ pub struct ModelMessages {
     pub token_budget: Option<ModelTokenBudgetConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_v2: Option<GuardianV2ModelConfig>,
+    /// Replacement confirmation-policy documents forwarded in actor MCP request metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_policies: Option<ConfirmationPolicies>,
+}
+
+/// Model-owned confirmation-policy Markdown, forwarded unchanged to actor tools.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct ConfirmationPolicies {
+    /// Replacement Markdown for the Browser Use confirmation-policy document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_use: Option<String>,
+    /// Replacement Markdown for the native Computer Use confirmation policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<String>,
 }
 
 /// Model-owned defaults for the context-window token-budget feature.
@@ -774,6 +788,7 @@ where
                     permissions: None,
                     multi_agent: None,
                     token_budget: None,
+                    confirmation_policies: None,
                     guardian_v2: None,
                 });
                 messages.instructions_template = Some(base_instructions);
@@ -981,6 +996,7 @@ mod tests {
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
                 guardian_v2: None,
             }
         );
@@ -1130,6 +1146,7 @@ mod tests {
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
                 guardian_v2: None,
             }
         );
@@ -1219,6 +1236,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }));
 
@@ -1243,6 +1261,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }));
         assert_eq!(
@@ -1268,6 +1287,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }));
         assert_eq!(
@@ -1304,6 +1324,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }));
 
@@ -1346,6 +1367,7 @@ mod tests {
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
                 guardian_v2: None,
             })
         );
@@ -1399,6 +1421,7 @@ mod tests {
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
                 guardian_v2: None,
             }))],
         };
@@ -1440,6 +1463,14 @@ mod tests {
             }),
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: Some(ConfirmationPolicies {
+                browser_use: Some(
+                    "# Browser confirmations\n\nKeep {{literal_markdown}}.\n".to_string(),
+                ),
+                computer_use: Some(
+                    "  # Native confirmations\r\n\nKeep ${native_markdown}.\n".to_string(),
+                ),
+            }),
             guardian_v2: Some(GuardianV2ModelConfig {
                 classifier_instructions: Some("Guardian classification".to_string()),
                 review_threshold_basis_points: Some(7_500),
@@ -1456,6 +1487,13 @@ mod tests {
             models: vec![test_model(Some(messages.clone()))],
         })
         .expect("serialize models response");
+        assert_eq!(
+            value["models"][0]["model_messages"]["confirmation_policies"],
+            serde_json::json!({
+                "browser_use": "# Browser confirmations\n\nKeep {{literal_markdown}}.\n",
+                "computer_use": "  # Native confirmations\r\n\nKeep ${native_markdown}.\n",
+            })
+        );
         value["models"][0]["base_instructions"] = serde_json::json!("legacy instructions");
 
         let response: ModelsResponse =
@@ -1474,6 +1512,7 @@ mod tests {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         };
         let mut value = serde_json::to_value(ModelsResponse {

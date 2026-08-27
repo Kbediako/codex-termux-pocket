@@ -5533,7 +5533,8 @@ async fn rebuild_preserving_session_layers_refreshes_plugin_derived_mcp_config()
             .plugin_attributions_by_server_name(),
         HashMap::from([(
             "sample".to_string(),
-            McpPluginAttribution::new("sample@test".to_string(), "sample".to_string()),
+            McpPluginAttribution::new("sample@test".to_string(), "sample".to_string())
+                .with_host_root(PathUri::from_host_native_path(&plugin_root)?),
         )])
     );
 

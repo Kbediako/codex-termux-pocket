@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_config::McpServerConfig;
 use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
@@ -9,6 +10,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -24,9 +26,12 @@ use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_response_sequence;
@@ -40,6 +45,7 @@ use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
+use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -332,6 +338,211 @@ async fn settings_updates_preserve_turn_identity_and_target(target: SettingsTarg
     );
     assert_eq!(requests[2].header(TURN_STATE_HEADER), None);
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_confirmation_policy_follows_step_model_changes() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const BROWSER_POLICY_A: &str = "  # Browser policy A\r\n{literal}\n";
+    const BROWSER_POLICY_B: &str = "\t# Browser policy B\n<raw> & café\r\n ";
+    const COMPUTER_POLICY_A: &str = "\t# Native policy A\n{{literal}}\r\n";
+    const COMPUTER_POLICY_B: &str = "  # Native policy B\r\n<computer> ${native}\n ";
+    const BROWSER_ONLY_MODEL: &str = "policy-browser-only";
+    const COMPUTER_ONLY_MODEL: &str = "policy-computer-only";
+    let server = start_mock_server().await;
+    AppsTestServer::mount(&server).await?;
+    let policy_call = |response_id: &str, call_id: &str| {
+        sse(vec![
+            ev_response_created(response_id),
+            ev_function_call_with_namespace(
+                call_id,
+                "mcp__node_repl",
+                "calendar_list_events",
+                "{}",
+            ),
+            ev_completed(response_id),
+        ])
+    };
+    mount_sse_sequence(
+        &server,
+        vec![
+            policy_call("resp-1", "policy-a"),
+            sse_completed("resp-2"),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_function_call_with_namespace(
+                    "policy-a-pending",
+                    "mcp__node_repl",
+                    "calendar_create_event",
+                    &json!({
+                        "title": "Policy snapshot test",
+                        "starts_at": "2026-08-26T12:00:00Z",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-3"),
+            ]),
+            policy_call("resp-4", "policy-b"),
+            sse_completed("resp-5"),
+            policy_call("resp-6", "browser-only"),
+            sse_completed("resp-7"),
+            policy_call("resp-8", "computer-only"),
+            sse_completed("resp-9"),
+            policy_call("resp-10", "no-policy"),
+            sse_completed("resp-11"),
+        ],
+    )
+    .await;
+    let mcp_url = format!("{}/api/codex/ps/mcp", server.uri());
+    let test = step_settings_test()
+        .with_config(move |config| {
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation for the approval barrier");
+            let models = &mut config.model_catalog.as_mut().expect("test models").models;
+            for slug in [BROWSER_ONLY_MODEL, COMPUTER_ONLY_MODEL] {
+                let mut model = models[0].clone();
+                model.slug = slug.to_string();
+                models.push(model);
+            }
+            for model in models {
+                let messages = model
+                    .model_messages
+                    .as_mut()
+                    .expect("bundled model messages");
+                messages.confirmation_policies = match model.slug.as_str() {
+                    MODEL_A => Some(ConfirmationPolicies {
+                        browser_use: Some(BROWSER_POLICY_A.to_string()),
+                        computer_use: Some(COMPUTER_POLICY_A.to_string()),
+                    }),
+                    MODEL_B => Some(ConfirmationPolicies {
+                        browser_use: Some(BROWSER_POLICY_B.to_string()),
+                        computer_use: Some(COMPUTER_POLICY_B.to_string()),
+                    }),
+                    BROWSER_ONLY_MODEL => Some(ConfirmationPolicies {
+                        browser_use: Some(BROWSER_POLICY_B.to_string()),
+                        computer_use: None,
+                    }),
+                    COMPUTER_ONLY_MODEL => Some(ConfirmationPolicies {
+                        browser_use: None,
+                        computer_use: Some(COMPUTER_POLICY_B.to_string()),
+                    }),
+                    MODEL_C => None,
+                    _ => unreachable!("unexpected test model"),
+                };
+            }
+            let node_repl: McpServerConfig = serde_json::from_value(json!({
+                "url": mcp_url,
+                "tools": {
+                    "calendar_create_event": {
+                        "approval_mode": "prompt",
+                    },
+                },
+            }))
+            .expect("valid test MCP server");
+            config
+                .mcp_servers
+                .set(HashMap::from([("node_repl".to_string(), node_repl)]))
+                .expect("configure test MCP server");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&test.codex, "node_repl").await?;
+    test.submit_text_turn("call the tool with model A").await?;
+
+    let request = start_paused_turn(&test.codex).await?;
+    assert_eq!(request.call_id, "policy-a-pending");
+    // The pending call must retain model A's policies after this settings update.
+    assert_eq!(
+        submit_turn_settings(
+            &test.codex,
+            &request.turn_id,
+            TurnSettingsUpdate {
+                model: Some(MODEL_B.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?,
+        TurnSettingsUpdateOutcome::Applied,
+    );
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id.clone(),
+            response: RequestUserInputResponse {
+                answers: HashMap::from([(
+                    request.questions[0].id.clone(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Allow".to_string()],
+                    },
+                )]),
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    for model in [BROWSER_ONLY_MODEL, COMPUTER_ONLY_MODEL, MODEL_C] {
+        core_test_support::submit_thread_settings(
+            &test.codex,
+            ThreadSettingsOverrides {
+                model: Some(model.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        test.submit_text_turn("call the tool").await?;
+    }
+
+    assert_eq!(
+        recorded_apps_tool_calls(&server)
+            .await
+            .into_iter()
+            .map(|call| {
+                let meta = &call["params"]["_meta"];
+                (
+                    meta["callId"].clone(),
+                    meta["openai/confirmation_policies"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                json!("policy-a"),
+                json!({
+                    "browser_use": BROWSER_POLICY_A,
+                    "computer_use": COMPUTER_POLICY_A,
+                })
+            ),
+            (
+                json!("policy-a-pending"),
+                json!({
+                    "browser_use": BROWSER_POLICY_A,
+                    "computer_use": COMPUTER_POLICY_A,
+                })
+            ),
+            (
+                json!("policy-b"),
+                json!({
+                    "browser_use": BROWSER_POLICY_B,
+                    "computer_use": COMPUTER_POLICY_B,
+                })
+            ),
+            (
+                json!("browser-only"),
+                json!({"browser_use": BROWSER_POLICY_B})
+            ),
+            (
+                json!("computer-only"),
+                json!({"computer_use": COMPUTER_POLICY_B})
+            ),
+            (json!("no-policy"), json!({})),
+        ],
+    );
     Ok(())
 }
 

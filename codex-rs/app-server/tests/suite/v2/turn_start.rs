@@ -799,27 +799,43 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
     Ok(())
 }
 
+#[test_case(None, json!(null); "without_usage_metadata")]
+#[test_case(Some(json!({})), json!({ "amount": null }); "without_amount")]
+#[test_case(Some(json!({ "amount": null })), json!({ "amount": null }); "null_amount")]
+#[test_case(Some(json!({ "amount": "0" })), json!({ "amount": "0" }); "zero_amount")]
+#[test_case(
+    Some(json!({ "amount": "0.12345678901234567890" })),
+    json!({ "amount": "0.12345678901234567890" });
+    "exact_amount"
+)]
 #[tokio::test]
-async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result<()> {
+async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+    upstream_metadata: Option<Value>,
+    expected_metadata: Value,
+) -> Result<()> {
     let server = responses::start_mock_server().await;
+    let mut completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp-1",
+            "usage": {
+                "input_tokens": 30,
+                "input_tokens_details": { "cached_tokens": 11 },
+                "output_tokens": 7,
+                "output_tokens_details": { "reasoning_tokens": 3 },
+                "total_tokens": 37
+            }
+        }
+    });
+    if let Some(metadata) = upstream_metadata {
+        completed["response"]["usage_metadata"] = metadata;
+    }
     let body = responses::sse(vec![
         responses::ev_response_created("resp-1"),
         responses::ev_assistant_message("msg-1", "Done"),
-        json!({
-            "type": "response.completed",
-            "response": {
-                "id": "resp-1",
-                "usage": {
-                    "input_tokens": 30,
-                    "input_tokens_details": { "cached_tokens": 11 },
-                    "output_tokens": 7,
-                    "output_tokens_details": { "reasoning_tokens": 3 },
-                    "total_tokens": 37
-                }
-            }
-        }),
+        completed,
     ]);
-    responses::mount_sse_once(&server, body).await;
+    let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
@@ -856,6 +872,13 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
         mcp.read_stream_until_notification_message("rawResponse/completed"),
     )
     .await??;
+    assert_eq!(
+        notification
+            .params
+            .as_ref()
+            .and_then(|params| params.get("usageMetadata")),
+        Some(&expected_metadata),
+    );
     let notification: codex_app_server_protocol::ServerNotification = notification.try_into()?;
     let codex_app_server_protocol::ServerNotification::RawResponseCompleted(notification) =
         notification
@@ -869,6 +892,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
             thread_id: thread.id,
             turn_id: turn.id,
             response_id: "resp-1".to_string(),
+            usage_metadata: serde_json::from_value(expected_metadata)?,
             usage: Some(TokenUsageBreakdown {
                 total_tokens: 37,
                 input_tokens: 30,
@@ -880,6 +904,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
         }
     );
 
+    response_mock.single_request();
     Ok(())
 }
 

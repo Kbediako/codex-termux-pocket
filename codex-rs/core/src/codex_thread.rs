@@ -205,6 +205,7 @@ impl GuardianAuthorizationVersion {
 pub struct GuardianRootSnapshot {
     pub authorization_version: GuardianAuthorizationVersion,
     pub messages: Vec<GuardianRootMessage>,
+    pub trusted_skill_paths: Vec<String>,
 }
 
 pub struct CodexThread {

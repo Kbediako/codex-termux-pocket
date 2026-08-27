@@ -408,6 +408,7 @@ export type { RemoteControlEnableParams } from "./RemoteControlEnableParams";
 export type { RemoteControlStatusChangedNotification } from "./RemoteControlStatusChangedNotification";
 export type { RequestPermissionProfile } from "./RequestPermissionProfile";
 export type { ResidencyRequirement } from "./ResidencyRequirement";
+export type { ResponseUsageMetadata } from "./ResponseUsageMetadata";
 export type { ReviewDelivery } from "./ReviewDelivery";
 export type { ReviewStartParams } from "./ReviewStartParams";
 export type { ReviewStartResponse } from "./ReviewStartResponse";

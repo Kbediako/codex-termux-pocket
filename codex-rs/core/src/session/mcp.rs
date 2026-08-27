@@ -23,6 +23,7 @@ use codex_protocol::mcp_approval_meta::CONNECTOR_NAME_KEY as MCP_ELICITATION_CON
 use codex_protocol::mcp_approval_meta::PERSIST_KEY as MCP_ELICITATION_PERSIST_KEY;
 use codex_protocol::mcp_approval_meta::REQUEST_TYPE_APPROVAL_REQUEST as MCP_ELICITATION_REQUEST_TYPE_APPROVAL_REQUEST;
 use codex_protocol::mcp_approval_meta::REQUEST_TYPE_KEY as MCP_ELICITATION_REQUEST_TYPE_KEY;
+use codex_protocol::mcp_approval_meta::SENSITIVE_ACTION_KEY as MCP_ELICITATION_SENSITIVE_ACTION_KEY;
 use codex_protocol::mcp_approval_meta::STRICT_AUTO_REVIEW_KEY as MCP_ELICITATION_STRICT_AUTO_REVIEW_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_DESCRIPTION_KEY as MCP_ELICITATION_TOOL_DESCRIPTION_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_NAME_KEY as MCP_ELICITATION_TOOL_NAME_KEY;
@@ -723,6 +724,14 @@ async fn review_guardian_mcp_elicitation(
         return Ok(None);
     };
 
+    let require_synchronous_review = matches!(
+        request
+            .elicitation
+            .meta()
+            .and_then(|meta| meta.get(MCP_ELICITATION_SENSITIVE_ACTION_KEY)),
+        Some(Value::Bool(true))
+    );
+
     if matches!(
         request
             .elicitation
@@ -809,6 +818,7 @@ async fn review_guardian_mcp_elicitation(
                 plugin_attribution_override: None,
                 approval_request_source: codex_analytics::GuardianApprovalRequestSource::MainTurn,
                 external_cancel: Some(cancellation_token),
+                require_synchronous_review,
             },
         )
         .await;
@@ -897,6 +907,7 @@ async fn review_guardian_mcp_elicitation(
             plugin_attribution_override: None,
             approval_request_source: codex_analytics::GuardianApprovalRequestSource::MainTurn,
             external_cancel: Some(cancellation_token),
+            require_synchronous_review,
         },
     )
     .await;

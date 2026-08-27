@@ -17,6 +17,7 @@ use codex_extension_api::ToolExecutor;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::AgentPath;
+use codex_utils_output_truncation::TruncationPolicy;
 use serde_json::json;
 
 use crate::backend::HistoryNotesBackend;
@@ -110,6 +111,7 @@ impl ContextContributor for HistoryNotesExtension {
                     session_store.level_id(),
                     &identity.agent_name,
                     json!({}),
+                    TruncationPolicy::Bytes(MAX_THREAD_HINT_BYTES),
                 )
                 .await
             else {

@@ -18,6 +18,7 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_protocol::models::ContentItem;
+use codex_utils_path_uri::PathUri;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_LIST_TOOL;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
@@ -280,6 +281,70 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
             .pointer("/params/name")
             .and_then(Value::as_str),
         Some("calendar_list_events")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_start_receives_frozen_host_plugin_root() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "requires a native test_stdio_server");
+
+    let server = responses::start_mock_server().await;
+    let codex_home = Arc::new(tempfile::tempdir()?);
+    let plugin_root = super::plugins::write_sample_plugin_manifest_and_config(codex_home.as_ref());
+    let server_config = json!({
+        "command": super::rmcp_client::remote_aware_stdio_server_bin()?,
+        "environment_id": super::rmcp_client::remote_aware_environment_id(),
+    });
+    fs::write(
+        plugin_root.join(".mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers": {"sample": server_config}}))?,
+    )?;
+
+    let recorder = Arc::new(ConversationHistoryRecorder::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(recorder.clone());
+    let test = test_codex()
+        .with_home(codex_home)
+        .with_extensions(Arc::new(extensions.build()))
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&test.codex, "sample").await?;
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_function_call_with_namespace(
+                    "plugin-lifecycle-call",
+                    "mcp__sample",
+                    "echo",
+                    r#"{"message":"ping"}"#,
+                ),
+                responses::ev_completed("first-response"),
+            ]),
+            responses::sse(vec![responses::ev_completed("second-response")]),
+        ],
+    )
+    .await;
+    test.submit_text_turn("Call the sample echo tool.").await?;
+
+    let histories = recorder
+        .histories
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let [history] = histories.as_slice() else {
+        panic!("expected one tool start, got {}", histories.len());
+    };
+    let expected_source = McpToolSource::Plugin {
+        id: "sample@test".to_string(),
+        root: PathUri::from_host_native_path(&plugin_root)?,
+    };
+    assert_eq!(
+        history.mcp_tool,
+        Some(("sample".to_string(), None, expected_source)),
     );
 
     Ok(())
