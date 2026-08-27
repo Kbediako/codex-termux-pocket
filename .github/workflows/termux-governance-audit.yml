@@ -39,8 +39,8 @@ jobs:
           cancel_cutoff_epoch="$(( now_epoch - 6 * 60 * 60 ))"
           gh api --paginate \
             "/repos/${GITHUB_REPOSITORY}/actions/runs?status=queued&per_page=100" \
-            --jq '.workflow_runs[] | [.id, .path, .created_at] | @tsv' \
-            | while IFS=$'\t' read -r run_id workflow_path created_at; do
+            --jq '.workflow_runs[] | [.id, .path, .created_at, .workflow_id] | @tsv' \
+            | while IFS=$'\t' read -r run_id workflow_path created_at workflow_id; do
                 [[ "$run_id" != "$GITHUB_RUN_ID" ]] || continue
                 [[ "$workflow_path" == ".github/workflows/termux-governance-audit.yml" ]] || continue
                 created_epoch="$(date -u -d "$created_at" +%s)"
@@ -52,9 +52,13 @@ jobs:
                   && ! gh api --method POST \
                     "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/force-cancel" \
                     >/dev/null 2>&1; then
-                  gh workflow disable termux-governance-audit.yml
+                  gh api --method PUT \
+                    "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/disable" \
+                    >/dev/null
                   sleep 5
-                  gh workflow enable termux-governance-audit.yml
+                  gh api --method PUT \
+                    "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/enable" \
+                    >/dev/null
                 fi
 
                 cancelled=false
