@@ -291,6 +291,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          release_files=(
+            codex-termux-aarch64-unknown-linux-musl.tar.gz
+            metadata.env
+            SHA256SUMS
+            codex-termux-sbom.spdx.json
+            release-manifest.env
+          )
+          expected_assets="$(printf '%s\n' "${release_files[@]}" | LC_ALL=C sort)"
+
           existing_release="$(
             gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
               | jq -sc --arg tag "$RELEASE_TAG" \
@@ -299,12 +308,42 @@ jobs:
           if [[ -n "$existing_release" ]]; then
             existing_id="$(jq -r .id <<<"$existing_release")"
             existing_draft="$(jq -r .draft <<<"$existing_release")"
+            existing_prerelease="$(jq -r .prerelease <<<"$existing_release")"
             existing_target="$(jq -r .target_commitish <<<"$existing_release")"
+
+            if [[ "$existing_draft" == "false" \
+              && "$existing_prerelease" == "false" \
+              && "$existing_target" == "$SOURCE_SHA" ]]; then
+              actual_assets="$(jq -r '.assets[].name' <<<"$existing_release" | LC_ALL=C sort)"
+              [[ "$actual_assets" == "$expected_assets" ]] || {
+                echo "::error::Existing public release assets are incomplete"
+                diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+                exit 1
+              }
+              for file in "${release_files[@]}"; do
+                local_size="$(stat -c '%s' "dist/${file}")"
+                remote_size="$(jq -r --arg name "$file" '.assets[] | select(.name == $name) | .size' <<<"$existing_release")"
+                [[ "$local_size" == "$remote_size" ]] || {
+                  echo "::error::Existing public asset size mismatch for ${file}"
+                  exit 1
+                }
+              done
+              latest_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+              [[ "$latest_tag" == "$RELEASE_TAG" ]] || {
+                echo "::error::Existing exact release is not GitHub Latest"
+                exit 1
+              }
+              echo "release_id=${existing_id}" >> "$GITHUB_OUTPUT"
+              echo "html_url=$(jq -r .html_url <<<"$existing_release")" >> "$GITHUB_OUTPUT"
+              echo "Reusing the already published exact release without modifying it."
+              exit 0
+            fi
+
             if [[ "$existing_draft" == "true" && "$existing_target" == "$SOURCE_SHA" ]]; then
               echo "Removing an abandoned draft for the exact requested source."
               gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/releases/${existing_id}" >/dev/null
             else
-              echo "::error::Release ${RELEASE_TAG} already exists and will not be modified"
+              echo "::error::Release ${RELEASE_TAG} already exists with a different or unsafe state"
               exit 1
             fi
           fi
@@ -347,13 +386,6 @@ jobs:
           [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
           upload_url="${upload_url%%\{*}"
 
-          release_files=(
-            codex-termux-aarch64-unknown-linux-musl.tar.gz
-            metadata.env
-            SHA256SUMS
-            codex-termux-sbom.spdx.json
-            release-manifest.env
-          )
           for file in "${release_files[@]}"; do
             encoded_name="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$file")"
             gh api --method POST "${upload_url}?name=${encoded_name}" \
@@ -363,7 +395,6 @@ jobs:
 
           draft_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
           [[ "$(jq -r .draft <<<"$draft_json")" == "true" ]]
-          expected_assets="$(printf '%s\n' "${release_files[@]}" | LC_ALL=C sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"$draft_json" | LC_ALL=C sort)"
           [[ "$actual_assets" == "$expected_assets" ]] || {
             echo "::error::Draft release assets are incomplete"
@@ -466,12 +497,20 @@ jobs:
             echo "- Archive SHA-256: \`${{ steps.manifest.outputs.archive_sha256 }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove known stray test branch
+      - name: Remove completed release staging branches
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.request.outputs.expected_package_version }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/__should_not_exist" >/dev/null 2>&1; then
-            gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/__should_not_exist" >/dev/null
-          fi
+          branches=(
+            "__should_not_exist"
+            "alpha-${PACKAGE_VERSION}-staging"
+          )
+          for branch in "${branches[@]}"; do
+            if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
+              gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null
+              echo "Removed completed staging branch ${branch}." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
