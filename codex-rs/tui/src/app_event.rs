@@ -982,6 +982,15 @@ pub(crate) enum AppEvent {
         service_tier: Option<String>,
     },
 
+    /// Fetch the current catalog even when cached models produce no picker.
+    FetchModels {
+        request_id: uuid::Uuid,
+    },
+    ModelsLoaded {
+        request_id: uuid::Uuid,
+        result: Result<Vec<ModelPreset>, String>,
+    },
+
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
         model: ModelPreset,
@@ -1005,9 +1014,7 @@ pub(crate) enum AppEvent {
     },
 
     /// Open the full model picker (non-auto models).
-    OpenAllModelsPopup {
-        models: Vec<ModelPreset>,
-    },
+    OpenAllModelsPopup,
 
     /// Open the confirmation prompt before enabling full access mode.
     OpenFullAccessConfirmation {

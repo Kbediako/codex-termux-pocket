@@ -165,7 +165,10 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     let multi_agent_mode = match mode_hint_text {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
         None => match turn_context.effective_reasoning_effort() {
-            Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
+            Some(ReasoningEffort::Ultra) => catalog_mode
+                .and_then(|messages| messages.proactive.clone())
+                .map(MultiAgentMode::Custom)
+                .unwrap_or(MultiAgentMode::Proactive),
             _ => catalog_mode
                 .and_then(|messages| messages.explicit.clone())
                 .map(MultiAgentMode::Custom)

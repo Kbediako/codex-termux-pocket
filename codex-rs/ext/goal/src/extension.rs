@@ -279,6 +279,20 @@ where
             }
 
             let turn_id = input.turn_store.level_id();
+            if let Some(expected_goal_id) =
+                runtime.accounting_state().execution_failure_goal(turn_id)
+                && let Err(err) = runtime
+                    .stop_active_goal_for_turn(
+                        turn_id,
+                        ActiveGoalStopReason::ExecutionUnavailable { expected_goal_id },
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    "failed to stop active goal after repeated execution failures for {turn_id}: {err}"
+                );
+                return;
+            }
             if let Err(err) = runtime
                 .account_active_goal_progress(
                     turn_id,
@@ -390,10 +404,18 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            let should_count_for_goal_progress = runtime.is_enabled()
-                && tool_attempt_counts_for_goal_progress(input.outcome)
-                && !(input.tool_name.is_default_namespace()
-                    && input.tool_name.name == UPDATE_GOAL_TOOL_NAME);
+            if !runtime.is_enabled() {
+                return;
+            }
+            runtime.accounting_state().record_tool_outcome(
+                input.turn_id,
+                input.tool_name,
+                input.outcome,
+            );
+            let should_count_for_goal_progress =
+                tool_attempt_counts_for_goal_progress(input.outcome)
+                    && !(input.tool_name.is_default_namespace()
+                        && input.tool_name.name == UPDATE_GOAL_TOOL_NAME);
             if !should_count_for_goal_progress {
                 return;
             }

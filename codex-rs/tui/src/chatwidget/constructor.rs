@@ -119,6 +119,8 @@ impl ChatWidget {
             has_chatgpt_account,
             has_codex_backend_auth,
             model_catalog,
+            model_popup_request_id: None,
+            model_popup_model_ids: Vec::new(),
             session_telemetry,
             session_header: SessionHeader::new(header_model),
             initial_user_message,

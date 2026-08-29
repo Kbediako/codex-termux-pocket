@@ -753,7 +753,7 @@ async fn guardian_node_repl_policy_follows_production_approval_path(
         .collect::<Vec<_>>();
     assert_eq!(guardian_requests.len(), actions.len());
 
-    let policy = include_str!("../../src/guardian/node_repl_policy.md");
+    let policy = include_str!("../../assets/guardian/node_repl_policy.md");
     let first_guardian_thread = guardian_requests[0].body_json()["client_metadata"]["thread_id"]
         .as_str()
         .expect("Guardian reviewer thread id")

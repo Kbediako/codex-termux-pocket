@@ -98,6 +98,7 @@ legacy alias for declaring the `openai/form` extension.
   "capabilities": {
     "extensions": {
       "openai/form": {},
+      "openai/elicitation": { "form": {} },
       "io.modelcontextprotocol/ui": {
         "mimeTypes": ["text/html;profile=mcp-app"]
       }
@@ -105,6 +106,15 @@ legacy alias for declaring the `openai/form` extension.
   }
 }
 ```
+
+`openai/elicitation.form: {}` declares support for forms received as
+`mode: "openaiForm"`. It does not follow from the legacy capability.
+App-server retains only the `form` key under `openai/elicitation`, preserving
+its value when present. Form requests require an object-valued `form`
+declaration. A bare namespace does not imply form support. User verification
+requests are not implemented.
+Clients must only advertise features supported by both the client and the
+connected app-server.
 
 App-server keeps the complete value under `io.modelcontextprotocol/ui`, rather
 than deriving a WebView boolean, so clients can advertise additional supported
@@ -1931,16 +1941,25 @@ Order of messages:
 
 1. `mcpServer/elicitation/request` (request) — includes `threadId`, nullable `turnId`, `serverName`, and either:
    - a form request: `{ "mode": "form", "message": "...", "requestedSchema": { ... } }`
-   - an OpenAI extended form request: `{ "mode": "openai/form", "message": "...", "requestedSchema": { ... } }`
+   - an OpenAI form request: `{ "mode": "openaiForm", "message": "...", "requestedSchema": { ... } }`
+   - a legacy OpenAI extended form request: `{ "mode": "openai/form", "message": "...", "requestedSchema": { ... } }`
    - a URL request: `{ "mode": "url", "message": "...", "url": "...", "elicitationId": "..." }`
 2. Client response — `{ "action": "accept", "content": ... }`, `{ "action": "decline", "content": null }`, or `{ "action": "cancel", "content": null }`.
 3. `serverRequest/resolved` — `{ threadId, requestId }` confirms the pending request has been resolved or cleared, including lifecycle cleanup on turn start/complete/interrupt.
 
 `turnId` is best-effort. When the elicitation is correlated with an active turn, the request includes that turn id; otherwise it is `null`.
 
-For `openai/form`, app-server forwards `requestedSchema` as opaque JSON. The
-client owns validation and rendering of supported field types and must return a
-valid `decline` or `cancel` response when it cannot render a form.
+MCP `openai/elicitation/create` requests must explicitly specify `mode: "form"`.
+App-server forwards them as `mode: "openaiForm"`, preserving
+`requestedSchema` as opaque JSON, including `x-openai-*` annotations. The legacy
+`openai/form` route remains independent and also preserves its schema.
+
+The client owns validation and rendering. Graphical clients show an unsupported
+state for unknown semantic inputs, never a partial form or generic approval,
+and wait for the user to decline or cancel instead of returning a JSON-RPC
+error. The TUI automatically declines OpenAI forms, including requests replayed
+from another client. Capability advertisement describes the session's initial
+client, not all clients that may later attach.
 
 For MCP tool approval elicitations, form request `meta` includes
 `codex_approval_kind: "mcp_tool_call"` and may include `persist: "session"`,

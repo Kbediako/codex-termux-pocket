@@ -1613,8 +1613,12 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
 
 #[tokio::test]
 async fn get_base_instructions_no_user_content() {
+    let prompt_path = codex_utils_cargo_bin::find_resource!(
+        "tests/fixtures/prompt_with_apply_patch_instructions.md"
+    )
+    .expect("resolve prompt fixture path");
     let prompt_with_apply_patch_instructions =
-        include_str!("../../prompt_with_apply_patch_instructions.md");
+        std::fs::read_to_string(prompt_path).expect("read prompt fixture");
     let models_response = bundled_models_response()
         .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
     let model_info_for_slug = |slug: &str, config: &Config| {
@@ -5326,6 +5330,55 @@ async fn resolved_environments_for_configuration(
         &session_configuration.inferred_environment_config(),
     );
     (environment_manager, turn_environments.snapshot().await)
+}
+
+#[tokio::test]
+async fn session_configuration_apply_client_metadata_preserves_permissions() {
+    let mut configuration = make_session_configuration_for_tests().await;
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let cwd = workspace.path().abs();
+    configuration.legacy_fallback_cwd = cwd.clone();
+    let permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
+        SandboxEnforcement::Managed,
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: cwd.join("writable").into(),
+                },
+                FileSystemAccessMode::Write,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: cwd.join("writable/private").into(),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    configuration
+        .set_permission_profile_for_tests(permission_profile)
+        .expect("set custom permission profile");
+    let expected = configuration.thread_settings_snapshot(&[]);
+    let updated = configuration
+        .apply(
+            &SessionSettingsUpdate {
+                app_server_client_name: Some("codex-tui".to_string()),
+                app_server_client_version: Some("1.0.0".to_string()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .expect("update client metadata");
+
+    assert_eq!(updated.thread_settings_snapshot(&[]), expected);
+    assert_eq!(
+        (
+            updated.app_server_client_name,
+            updated.app_server_client_version
+        ),
+        (Some("codex-tui".to_string()), Some("1.0.0".to_string())),
+    );
 }
 
 #[tokio::test]

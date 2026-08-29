@@ -216,6 +216,7 @@ impl ChatWidget {
     ) {
         // Account-update notifications are the identity boundary. The visible account fields can
         // be identical across two accounts, so always invalidate account-scoped requests and data.
+        self.model_popup_request_id = None;
         self.invalidate_connector_scope();
         self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();

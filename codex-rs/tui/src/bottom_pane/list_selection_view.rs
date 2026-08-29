@@ -262,7 +262,7 @@ pub(crate) struct ListSelectionView {
     active_tab_idx: Option<usize>,
     state: ScrollState,
     completion: Option<ViewCompletion>,
-    dismiss_after_child_accept: bool,
+    pub(super) dismiss_after_child_accept: bool,
     app_event_tx: AppEventSender,
     is_searchable: bool,
     search_query: String,
