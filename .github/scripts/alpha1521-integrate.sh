@@ -60,6 +60,38 @@ collect_conflicts() {
   done < "$conflict_dir/conflicts.txt"
 }
 
+resolve_verified_version_conflict() {
+  mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+  [[ "${#conflicts[@]}" -eq 1 ]]
+  [[ "${conflicts[0]}" == "codex-rs/Cargo.toml" ]]
+
+  python3 - "$upstream_commit" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+upstream_commit = sys.argv[1]
+path = Path("codex-rs/Cargo.toml")
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(
+    r'<<<<<<< HEAD\n'
+    r'version = "0\.151\.0-alpha\.12"\n'
+    r'=======\n'
+    r'version = "0\.152\.0-alpha\.1"\n'
+    r'>>>>>>> ' + re.escape(upstream_commit) + r'\n'
+)
+updated, count = pattern.subn('version = "0.152.0-alpha.1"\n', text)
+if count != 1:
+    raise SystemExit(f"expected one verified workspace-version conflict, found {count}")
+if any(marker in updated for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+    raise SystemExit("unexpected conflict marker remains after guarded resolution")
+path.write_text(updated, encoding="utf-8")
+PY
+
+  git add codex-rs/Cargo.toml
+  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+}
+
 on_error() {
   local rc=$?
   local line="${BASH_LINENO[0]:-unknown}"
@@ -103,10 +135,14 @@ phase="merging-exact-upstream-source"
 update_tracker running "$phase"
 if ! git merge --no-ff --no-commit "$upstream_commit"; then
   collect_conflicts
-  conflicts="$(paste -sd, "$conflict_dir/conflicts.txt")"
-  update_tracker failed "merge-conflicts:${conflicts}"
-  trap - ERR
-  exit 1
+  if resolve_verified_version_conflict; then
+    echo "Resolved the sole verified workspace package-version conflict in favour of the exact upstream alpha.1 version."
+  else
+    conflicts="$(paste -sd, "$conflict_dir/conflicts.txt")"
+    update_tracker failed "merge-conflicts:${conflicts}"
+    trap - ERR
+    exit 1
+  fi
 fi
 
 phase="recording-fork-patch-classification"
