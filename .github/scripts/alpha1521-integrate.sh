@@ -133,7 +133,11 @@ peeled="$(git rev-parse "refs/tags/${upstream_tag}^{}")"
 
 phase="merging-exact-upstream-source"
 update_tracker running "$phase"
+merge_failed=false
 if ! git merge --no-ff --no-commit "$upstream_commit"; then
+  merge_failed=true
+fi
+if [[ "$merge_failed" == "true" ]]; then
   collect_conflicts
   if resolve_verified_version_conflict; then
     echo "Resolved the sole verified workspace package-version conflict in favour of the exact upstream alpha.1 version."
