@@ -3,6 +3,11 @@
 This workflow is intentionally separate from installation on a phone. Only a
 maintainer refreshing the fork's patch stack should rebase OpenAI alpha tags.
 
+Before any alpha sync, CI repair, publication, or release takeover, read
+[`termux-release-runbook.md`](termux-release-runbook.md) completely. It is the
+hard completion contract and records the known failure signatures, exact-source
+rules, publication sequence, connected-tooling lessons, and cleanup requirements.
+
 ## Refresh the patch stack
 
 Start from a clean `main` checkout and run:
@@ -27,6 +32,22 @@ To validate or refresh only the lockfile after manual conflict work:
 ```shell
 scripts/termux/maintainer-update-alpha --lock-only
 ```
+
+## Record exact source identity
+
+Peel annotated upstream tags and keep the upstream commit, fork merge commit,
+and clean release source separate. Do not infer exact source from the current
+branch name or from a presumed merge parent.
+
+```shell
+upstream_commit="$(git rev-parse 'refs/tags/rust-vX.Y.Z-alpha.N^{}')"
+git merge-base --is-ancestor "$upstream_commit" "$source_sha"
+```
+
+A retry may create a single-parent commit even when the initial integration was
+a merge. `HEAD^2` is optional diagnostic evidence, not the source-validation
+contract. See the runbook for the safe parent check and the historical
+`fatal: ambiguous argument 'HEAD^2'` failure.
 
 ## Build the runtime
 
@@ -53,15 +74,20 @@ The build workflow then:
 `termux-mobile-artifact.yml` is deliberately build-only. It cannot publish a
 GitHub release and has no `contents: write` permission.
 
-## Validate Android and the control plane
+## Validate Android, Linux sandbox, CI, and the control plane
 
-The exact runtime source must also have successful runs of:
+The exact runtime source must have successful runs of:
 
+- `.github/workflows/blocking-ci.yml`
 - `.github/workflows/termux-control-plane.yml`
+- `.github/workflows/termux-linux-sandbox.yml`, including x64 and ARM64
+- `.github/workflows/termux-mobile-artifact.yml`
 - `.github/workflows/termux-android-emulator.yml`
 
 Do not substitute a successful run from another commit. Record the exact source
-SHA and the three successful run IDs before preparing publication.
+SHA and every successful run ID before preparing publication. A run is reusable
+only when its live `head_sha`, workflow path, conclusion, matrix jobs, and
+retained artifacts all match the selected source.
 
 ## Publish a validated runtime
 
@@ -86,8 +112,18 @@ draft. Its only release update occurs while that object is still a draft: it
 publishes the complete set and designates it GitHub Latest in the same
 draft-to-public transaction. It never modifies an already-published release.
 
-Only after anonymous asset downloads, checksums, release identity, and
-`/releases/latest` verify does the workflow promote
+The complete public asset set is:
+
+```text
+codex-termux-aarch64-unknown-linux-musl.tar.gz
+codex-termux-sbom.spdx.json
+metadata.env
+release-manifest.env
+SHA256SUMS
+```
+
+Only after anonymous asset downloads, strict checksums, release identity,
+attestations, and `/releases/latest` verify does the workflow promote
 `scripts/termux/release-manifest.env`. Fresh installs then use the public release
 without requiring `gh auth login`.
 
@@ -100,6 +136,11 @@ on every relevant run instead of relying on GitHub's immutability setting.
 `termux-governance.yml` independently checks the public channel when the
 manifest or release controls change, on its daily schedule, or manually.
 
+Because commits created by the workflow `GITHUB_TOKEN` do not recursively start
+new workflows, explicitly dispatch release-channel, governance, control-plane,
+and Fork CI checks on final cleaned `main` when the promotion transaction did not
+create those runs itself. Do not infer post-promotion success from the publisher.
+
 ## Failed or delayed builds
 
 - Queued and running builds may exceed the phone's local wait; they continue on
@@ -107,6 +148,25 @@ manifest or release controls change, on its daily schedule, or manually.
 - Do not dispatch another build while an exact queued or running run exists.
 - A failed exact run is reported with its URL and is not duplicated
   automatically. Fix the first failing step, then deliberately rerun or dispatch.
-- Never publish or pin a manifest until the artifact, control-plane, and
-  Android/Termux validations have all passed for the same exact source.
+- Read the complete failed job log. A workflow can pass compilation and fail
+  later in generated release orchestration.
+- Never publish or pin a manifest until Fork CI, Linux sandbox, artifact,
+  control-plane, and Android/Termux validation have all passed for the same exact
+  source.
 - Never use the local Android/V8 source build as an end-user fallback.
+- Never assume `HEAD^2` exists on a retry.
+- Never let Actions rewrite workflow YAML; make workflow edits directly.
+- Never repair an already-public release by uploading missing assets or changing
+  its source identity.
+
+## Completion and cleanup
+
+Do not close the tracker until the public release, promoted manifest, permanent
+post-promotion checks, and final repository topology have all been read back from
+GitHub. The tracker body must be rewritten with final evidence rather than left
+with stale `state=failed` text.
+
+Final cleanup requires only the permanent workflows, no temporary maintenance
+job or script, no staging or gate branch, one completed tracker, and a live
+Latest release matching the promoted manifest. The complete checklist and
+recommended tracker body are in the release runbook.
