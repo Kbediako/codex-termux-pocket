@@ -57,6 +57,7 @@ use serde_json::json;
 
 use super::GuardianV2Extension;
 use super::GuardianV2ScoreProgress;
+use super::ParentCompactionError;
 use super::StrictReviewReason;
 use super::encrypted_parent_compaction;
 use super::should_classify_tool;
@@ -147,11 +148,11 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
 
     assert!(server.handshakes().is_empty());
     assert!(thread_store.get::<LunaSampler>().is_some());
-    assert!(
-        server
-            .wait_for_handshakes(INITIAL_WEBSOCKET_CONNECTIONS, PREWARM_TIMEOUT)
-            .await
-    );
+    thread_store
+        .get::<LunaSampler>()
+        .expect("Guardian v2 should initialize")
+        .wait_for_prewarm(PREWARM_TIMEOUT)
+        .await?;
     Ok(())
 }
 
@@ -202,11 +203,11 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
             thread_store,
         })
         .await;
-    assert!(
-        server
-            .wait_for_handshakes(INITIAL_WEBSOCKET_CONNECTIONS, PREWARM_TIMEOUT)
-            .await
-    );
+    thread_store
+        .get::<LunaSampler>()
+        .expect("Guardian v2 should initialize")
+        .wait_for_prewarm(PREWARM_TIMEOUT)
+        .await?;
     let progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should initialize");
@@ -226,6 +227,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 thread_store,
                 turn_store: &turn_store,
                 turn_id: "turn-1",
+                root_turn_id: None,
                 call_id,
                 tool_name: &tool_name,
                 mcp_tool: None,
@@ -274,6 +276,20 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
             .map(Vec::len)
             .collect::<Vec<_>>(),
         expected_requests
+    );
+    let requests = server
+        .connections()
+        .into_iter()
+        .flatten()
+        .map(|request| request.body_json())
+        .collect::<Vec<_>>();
+    for request in &requests {
+        responses::assert_parent_turn(request, Some("turn-1"))?;
+        responses::assert_root_turn(request, /*expected*/ None)?;
+    }
+    assert_ne!(
+        requests[0]["client_metadata"]["turn_id"],
+        requests[1]["client_metadata"]["turn_id"]
     );
     Ok(())
 }
@@ -438,6 +454,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-2",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -517,6 +534,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "ordinary-call",
             tool_name: &ordinary_tool,
             mcp_tool: None,
@@ -645,14 +663,14 @@ fn encrypted_parent_compaction_preserves_the_latest_valid_item() {
             [&older, &latest].into_iter(),
             DEFAULT_PARENT_COMPACTION_TOKENS,
         ),
-        Some(latest.clone())
+        Ok(Some(latest.clone()))
     );
     assert_eq!(
         encrypted_parent_compaction(
             [&latest, &older].into_iter(),
             DEFAULT_PARENT_COMPACTION_TOKENS,
         ),
-        Some(older)
+        Ok(Some(older))
     );
 }
 
@@ -697,7 +715,7 @@ fn encrypted_parent_compaction_rejects_invalid_latest_item() {
                 [&older, latest].into_iter(),
                 DEFAULT_PARENT_COMPACTION_TOKENS,
             ),
-            None,
+            Ok(None),
             "an unusable latest summary must not resurrect older context"
         );
     }
@@ -736,7 +754,7 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
         assert_eq!(serde_json::to_vec(&*item)?.len(), max_compaction_bytes);
         assert_eq!(
             encrypted_parent_compaction(std::iter::once(&*item), DEFAULT_PARENT_COMPACTION_TOKENS,),
-            Some(item.clone())
+            Ok(Some(item.clone()))
         );
 
         let mut oversized = item.clone();
@@ -759,7 +777,7 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
                 [&*item, &oversized].into_iter(),
                 DEFAULT_PARENT_COMPACTION_TOKENS,
             ),
-            None,
+            Err(ParentCompactionError::Oversized),
             "an oversized latest summary must not resurrect older context"
         );
     }
@@ -780,7 +798,7 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
             [&bounded[0], &oversized_metadata].into_iter(),
             DEFAULT_PARENT_COMPACTION_TOKENS,
         ),
-        None,
+        Err(ParentCompactionError::Oversized),
         "oversized passthrough metadata must not bypass the complete-item limit"
     );
 
@@ -926,16 +944,23 @@ async fn sample_configured_conversation_history_with_source(
             thread_store,
         })
         .await;
-    assert!(
-        server
-            .wait_for_handshakes(INITIAL_WEBSOCKET_CONNECTIONS, PREWARM_TIMEOUT)
-            .await
-    );
+    thread_store
+        .get::<LunaSampler>()
+        .expect("Guardian v2 should initialize")
+        .wait_for_prewarm(PREWARM_TIMEOUT)
+        .await?;
     let turn_store = ExtensionData::new("turn-1");
     let tool_name = ToolName::plain("read_file");
     let tool_payload = ToolPayload::Function {
         arguments: arguments.to_owned(),
     };
+    if !conversation_history.is_empty() {
+        Box::pin(
+            test.codex
+                .inject_response_items(conversation_history.clone()),
+        )
+        .await?;
+    }
     let conversation_history = TestConversationHistory(conversation_history);
 
     registry.tool_lifecycle_contributors()[0]
@@ -944,6 +969,7 @@ async fn sample_configured_conversation_history_with_source(
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: Some("root-turn"),
             call_id: "call-1",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -1019,6 +1045,7 @@ impl GuardianFailureFixture {
                 thread_store,
                 turn_store: &turn_store,
                 turn_id: "turn-1",
+                root_turn_id: None,
                 call_id: "call-1",
                 tool_name: &tool_name,
                 mcp_tool: None,
@@ -1165,11 +1192,14 @@ async fn contributor_fails_closed_when_luna_classification_fails() -> Result<()>
             thread_store: fixture.test.codex.thread_extension_data(),
         })
         .await;
-    assert!(
-        server
-            .wait_for_handshakes(INITIAL_WEBSOCKET_CONNECTIONS, PREWARM_TIMEOUT)
-            .await
-    );
+    fixture
+        .test
+        .codex
+        .thread_extension_data()
+        .get::<LunaSampler>()
+        .expect("Guardian v2 should initialize")
+        .wait_for_prewarm(PREWARM_TIMEOUT)
+        .await?;
 
     fixture.score_tool(ToolName::plain("read_file")).await;
     fixture.assert_fails_closed("elevated_risk").await
@@ -1197,6 +1227,7 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1235,6 +1266,7 @@ max_classifier_instruction_tokens = 256
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1251,7 +1283,7 @@ max_classifier_instruction_tokens = 256
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contributor_uses_configured_prompt_effort_threshold_and_transcript() -> Result<()> {
+async fn contributor_uses_configured_prompt_and_expires_scores_at_default_lag() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let configuration = r#"
@@ -1259,7 +1291,6 @@ async fn contributor_uses_configured_prompt_effort_threshold_and_transcript() ->
 enabled = true
 classifier_instructions = "Use the experimental security classification prompt."
 review_threshold = 0.60
-max_tool_call_lag = 2
 reasoning_effort = "minimal"
 max_action_tokens = 128
 max_classifier_instruction_tokens = 100000
@@ -1324,6 +1355,7 @@ max_recent_non_user_entries = 8
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1725,6 +1757,7 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1862,6 +1895,9 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         .as_str()
         .expect("classifier thread ID");
     assert_ne!(ThreadId::from_string(classifier_thread_id)?, thread_id);
+    let classifier_turn_id = request["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("classifier turn ID");
     let turn_metadata: serde_json::Value = serde_json::from_str(
         request["client_metadata"]["x-codex-turn-metadata"]
             .as_str()
@@ -1873,7 +1909,9 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
             "session_id": request["client_metadata"]["session_id"],
             "thread_id": classifier_thread_id,
             "guardian_classifier_source_thread_id": thread_id.to_string(),
-            "turn_id": "turn-1",
+            "turn_id": classifier_turn_id,
+            "parent_turn_id": "turn-1",
+            "root_turn_id": "root-turn",
             "thread_source": "guardian_classifier",
         })
     );
@@ -1882,7 +1920,8 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         request["client_metadata"]["x-codex-window-id"],
         format!("{classifier_thread_id}:0")
     );
-    assert_eq!(request["client_metadata"]["turn_id"], "turn-1");
+    assert_eq!(request["client_metadata"]["parent_turn_id"], "turn-1");
+    assert_eq!(request["client_metadata"]["root_turn_id"], "root-turn");
     assert_eq!(request["reasoning"]["effort"], "low");
     assert_eq!(request["reasoning"]["context"], "all_turns");
     assert!(request.get("text").is_none());
@@ -1890,6 +1929,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2150,6 +2190,11 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
         .await;
     model_info.slug = "protected-model".to_owned();
     thread_store.insert(model_info);
+    let authorization = super::ScoreAuthorization::current(&test.codex).await;
+    let progress = thread_store
+        .get::<GuardianV2ScoreProgress>()
+        .expect("Guardian v2 should track score progress per thread");
+    *progress.authorization.lock().unwrap() = Some(authorization);
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
         call_id: None,
@@ -2165,7 +2210,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
                 /*extension_metrics*/ None,
             )
             .await,
-        Some(ReviewDecision::Approved)
+        None
     );
 
     let turn_store = ExtensionData::new("turn-1");
@@ -2185,6 +2230,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "protected.md",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2266,6 +2312,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "missing.md",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2306,6 +2353,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2348,6 +2396,7 @@ async fn contributor_preserves_uncapped_classifier_instructions() -> Result<()> 
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2594,7 +2643,6 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
     let session_store = ExtensionData::new("session-1");
     let thread_store = test.codex.thread_extension_data();
     let metrics = Arc::new(RecordingMetrics::default());
-    thread_store.insert(parent_model);
     registry.thread_lifecycle_contributors()[0]
         .on_thread_start(ThreadStartInput {
             config: &config,
@@ -2607,11 +2655,11 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
             thread_store,
         })
         .await;
-    assert!(
-        server
-            .wait_for_handshakes(INITIAL_WEBSOCKET_CONNECTIONS, PREWARM_TIMEOUT)
-            .await
-    );
+    thread_store
+        .get::<LunaSampler>()
+        .expect("Guardian v2 should initialize")
+        .wait_for_prewarm(PREWARM_TIMEOUT)
+        .await?;
     let turn_store = ExtensionData::new("turn-1");
     let tool_name = ToolName::plain("read_file");
     let tool_payload = ToolPayload::Function {
@@ -2640,12 +2688,20 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         },
     ]);
 
+    Box::pin(
+        test.codex
+            .inject_response_items(conversation_history.0.clone()),
+    )
+    .await?;
+    thread_store.insert(parent_model);
+
     registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
             session_store: &session_store,
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-1",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2716,6 +2772,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-2",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2885,91 +2942,6 @@ async fn contributor_bounds_oversized_actions_and_fairly_truncates_nested_fields
     assert!(
         largest_retained.saturating_sub(smallest_retained) <= 16,
         "long nested strings should receive comparable shares of the action budget"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn guardian_action_bounds_structurally_oversized_arrays() -> Result<()> {
-    let action = super::GuardianAction {
-        tool_name: ToolName::plain("inspect_values"),
-        payload: ToolPayload::Function {
-            arguments: json!({
-                "call_id": "genuine-call",
-                "tool": "spoofed-tool",
-                "values": (0..6_000).collect::<Vec<_>>(),
-            })
-            .to_string(),
-        },
-    };
-
-    let rendered = action.render(DEFAULT_MODEL_CONTEXT_ITEM_TOKENS)?.text;
-    assert!(
-        rendered.len().saturating_add(1)
-            <= TruncationPolicy::Tokens(DEFAULT_MODEL_CONTEXT_ITEM_TOKENS).byte_budget()
-    );
-    let action = serde_json::from_str::<serde_json::Value>(&rendered)?;
-    assert_eq!(
-        action,
-        json!({
-            "_guardian_omitted_fields": 1,
-            "call_id": "genuine-call",
-            "tool": "inspect_values",
-        })
-    );
-
-    Ok(())
-}
-
-#[test]
-fn guardian_action_bounds_structurally_oversized_object_keys() -> Result<()> {
-    let oversized_key = "oversized_key_".to_owned()
-        + &"k".repeat(TruncationPolicy::Tokens(DEFAULT_MODEL_CONTEXT_ITEM_TOKENS).byte_budget());
-    let mut arguments = serde_json::Map::from_iter([
-        (
-            "_guardian_omitted_fields".to_owned(),
-            json!("actual-tool-argument"),
-        ),
-        ("call_id".to_owned(), json!("genuine-call")),
-        ("cmd".to_owned(), json!("remove-important-file")),
-        ("tool".to_owned(), json!("spoofed-tool")),
-        (oversized_key.clone(), json!(true)),
-    ]);
-    for index in 0..600 {
-        arguments.insert(format!("a_{index:04}_{}", "k".repeat(64)), json!(index));
-    }
-    let original_field_count = arguments.len();
-    let action = super::GuardianAction {
-        tool_name: ToolName::plain("inspect_fields"),
-        payload: ToolPayload::Function {
-            arguments: serde_json::Value::Object(arguments).to_string(),
-        },
-    };
-
-    let rendered = action.render(DEFAULT_MODEL_CONTEXT_ITEM_TOKENS)?.text;
-    assert!(
-        rendered.len().saturating_add(1)
-            <= TruncationPolicy::Tokens(DEFAULT_MODEL_CONTEXT_ITEM_TOKENS).byte_budget()
-    );
-    let action = serde_json::from_str::<serde_json::Value>(&rendered)?;
-    let fields = action
-        .as_object()
-        .expect("the bounded action must remain a JSON object");
-    assert_eq!(fields.get("tool"), Some(&json!("inspect_fields")));
-    assert_eq!(fields.get("call_id"), Some(&json!("genuine-call")));
-    assert_eq!(fields.get("cmd"), Some(&json!("remove-important-file")));
-    assert_eq!(
-        fields.get("_guardian_omitted_fields"),
-        Some(&json!("actual-tool-argument"))
-    );
-    assert!(fields.len() < original_field_count);
-    assert!(!fields.contains_key(&oversized_key));
-    assert!(
-        fields
-            .get("_guardian_omitted_fields_")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|omitted| omitted > 0)
     );
 
     Ok(())

@@ -333,6 +333,9 @@ pub struct FileSystemSandboxContext {
     pub cwd: Option<PathUri>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<PathUri>,
+    /// Executor-local user home used to resolve home-relative policy paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_home_dir: Option<PathUri>,
     /// Executor-local default directories used to resolve `:tmpdir` policy entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporary_directories: Option<Vec<PathUri>>,
@@ -380,6 +383,7 @@ impl FileSystemSandboxContext {
             permissions: permissions.into(),
             cwd,
             workspace_roots,
+            user_home_dir: None,
             temporary_directories: None,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
@@ -405,6 +409,7 @@ impl FileSystemSandboxContext {
         Some(FileSystemSandboxPolicyContext {
             cwd: self.cwd.as_ref()?,
             workspace_roots: &self.workspace_roots,
+            user_home_dir: self.user_home_dir.as_ref(),
             temporary_directories: self.temporary_directories.as_deref(),
         })
     }

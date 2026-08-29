@@ -162,10 +162,22 @@ impl Session {
                 }
 
                 let environment_id = &selected.selection.environment_id;
-                let servers = match environment
+                let discovery = environment
                     .discover_http_mcp_servers(selected.cwd().clone())
-                    .await
-                {
+                    .await;
+                let outcome = if discovery.is_ok() {
+                    "success"
+                } else {
+                    "error"
+                };
+                // Count completed discovery attempts, including refreshes, before host policy
+                // or MCP startup determines whether the server's tools become available.
+                self.services.session_telemetry.counter(
+                    "codex.mcp.executor_discovery",
+                    /*inc*/ 1,
+                    &[("outcome", outcome)],
+                );
+                let servers = match discovery {
                     Ok(servers) => servers,
                     Err(error) => {
                         tracing::warn!(
@@ -177,6 +189,16 @@ impl Session {
                     }
                 };
                 for (name, mut server) in servers {
+                    let outcome = if server.enabled {
+                        "found"
+                    } else {
+                        "unavailable"
+                    };
+                    self.services.session_telemetry.counter(
+                        "codex.mcp.executor_discovery.server",
+                        /*inc*/ 1,
+                        &[("server_name", name.as_str()), ("outcome", outcome)],
+                    );
                     if name == CODEX_APPS_MCP_SERVER_NAME
                         || !server.is_local_environment()
                         || projection

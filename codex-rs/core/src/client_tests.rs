@@ -31,6 +31,7 @@ use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::ModelProvider;
 use codex_model_provider::ModelProviderFuture;
 use codex_model_provider::ProviderAccountResult;
+use codex_model_provider::ProviderAuthRecoveryMessages;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
@@ -50,6 +51,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -364,16 +366,134 @@ fn test_session_telemetry() -> SessionTelemetry {
     )
 }
 
+fn spawned_session_source() -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
+
+fn reasoning_effort_in_request(
+    model_info: &ModelInfo,
+    session_source: SessionSource,
+    effort: ReasoningEffort,
+) -> ReasoningEffort {
+    let client = test_model_client(session_source);
+    client
+        .build_responses_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                &client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+        .expect("build responses request")
+        .reasoning
+        .expect("request should include reasoning")
+        .effort
+        .expect("request should include reasoning effort")
+}
+
 #[test]
-fn reasoning_effort_for_requests_maps_ultra_and_persistent() {
+fn reasoning_effort_for_requests_uses_multi_agent_override_for_ultra() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::High);
+    model_info
+        .supported_reasoning_levels
+        .push(ReasoningEffortPreset {
+            effort: ReasoningEffort::High,
+            description: "high".to_string(),
+        });
+
+    let actual = [SessionSource::Cli, spawned_session_source()].map(|session_source| {
+        reasoning_effort_in_request(&model_info, session_source, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(actual, [ReasoningEffort::High, ReasoningEffort::High]);
+}
+
+#[test]
+fn reasoning_effort_for_requests_falls_back_for_missing_or_invalid_override() {
+    let mut model_info = test_model_info();
+    model_info.supported_reasoning_levels = vec![
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Low,
+            description: "low".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::XHigh,
+            description: "xhigh".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Ultra,
+            description: "ultra".to_string(),
+        },
+    ];
+
+    let actual = [
+        None,
+        Some(ReasoningEffort::Ultra),
+        Some(ReasoningEffort::High),
+    ]
+    .map(|multi_agent_reasoning_effort| {
+        model_info.multi_agent_reasoning_effort = multi_agent_reasoning_effort;
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(
+        actual,
+        [
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+        ]
+    );
+
+    model_info.multi_agent_reasoning_effort = None;
+    model_info.supported_reasoning_levels.insert(
+        1,
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Max,
+            description: "max".to_string(),
+        },
+    );
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Max
+    );
+
+    model_info.supported_reasoning_levels.clear();
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Medium
+    );
+}
+
+#[test]
+fn reasoning_effort_for_requests_preserves_non_ultra_and_persistent_behavior() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::Low);
+
     assert_eq!(
         (
-            super::reasoning_effort_for_request(ReasoningEffort::Ultra),
-            super::reasoning_effort_for_request(ReasoningEffort::High),
-            super::reasoning_effort_for_request(ReasoningEffort::Persistent),
+            reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::High,),
+            reasoning_effort_in_request(
+                &model_info,
+                SessionSource::Cli,
+                ReasoningEffort::Persistent,
+            ),
         ),
         (
-            ReasoningEffort::Max,
             ReasoningEffort::High,
             ReasoningEffort::Custom("disabled".to_string()),
         )
@@ -776,6 +896,8 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
         &mut provider_auth_recovery_attempted,
         &test_session_telemetry(),
         &provider,
+        /*event_sender*/ None,
+        /*turn_id*/ None,
     )
     .await
     .expect_err("expired Bedrock signature should fail");
@@ -810,6 +932,13 @@ impl ModelProvider for TestRecoveryProvider {
 
     fn account_state(&self) -> ProviderAccountResult {
         self.inner.account_state()
+    }
+
+    fn auth_recovery_messages(&self) -> Option<ProviderAuthRecoveryMessages> {
+        Some(ProviderAuthRecoveryMessages {
+            started: "Refreshing provider authentication.",
+            succeeded: "Provider authentication recovered.",
+        })
     }
 
     fn recover_from_unauthorized(
@@ -856,12 +985,15 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
         let mut auth_recovery = None;
         let mut provider_auth_recovery_attempted = false;
         let telemetry = test_session_telemetry();
+        let (event_sender, event_receiver) = async_channel::unbounded();
         let result = super::handle_unauthorized(
             unauthorized(),
             &mut auth_recovery,
             &mut provider_auth_recovery_attempted,
             &telemetry,
             &provider,
+            Some(&event_sender),
+            Some("turn-1"),
         )
         .await;
 
@@ -879,6 +1011,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
                 &mut provider_auth_recovery_attempted,
                 &telemetry,
                 &provider,
+                Some(&event_sender),
+                Some("turn-1"),
             )
             .await
             .expect_err("provider recovery should not run more than once")
@@ -892,6 +1026,29 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
             other => panic!("unexpected error after provider recovery: {other}"),
         }
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
+
+        let events = std::iter::from_fn(|| event_receiver.try_recv().ok())
+            .map(|event| serde_json::to_value(event).expect("recovery event should serialize"))
+            .collect::<Vec<_>>();
+        let mut expected = vec![json!({
+            "id": "turn-1",
+            "msg": {
+                "type": "auth_recovery_started",
+                "provider": provider.info().name,
+                "message": "Refreshing provider authentication.",
+            }
+        })];
+        if !should_fail {
+            expected.push(json!({
+                "id": "turn-1",
+                "msg": {
+                    "type": "auth_recovery_completed",
+                    "provider": provider.info().name,
+                    "message": "Provider authentication recovered.",
+                }
+            }));
+        }
+        assert_eq!(events, expected);
     }
 }
 

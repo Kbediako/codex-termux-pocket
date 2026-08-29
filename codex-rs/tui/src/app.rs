@@ -642,6 +642,13 @@ struct RuntimePermissionProfileOverride {
     permission_profile: PermissionProfile,
     active_permission_profile: Option<ActivePermissionProfile>,
     network: Option<crate::legacy_core::config::NetworkProxySpec>,
+    turn_override: RuntimePermissionProfileTurnOverride,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePermissionProfileTurnOverride {
+    Preserve,
+    LegacySandbox,
 }
 
 impl RuntimePermissionProfileOverride {
@@ -650,7 +657,29 @@ impl RuntimePermissionProfileOverride {
             permission_profile: config.permissions.permission_profile().clone(),
             active_permission_profile: config.permissions.active_permission_profile(),
             network: config.permissions.network.clone(),
+            turn_override: RuntimePermissionProfileTurnOverride::LegacySandbox,
         }
+    }
+
+    fn from_restored_config(config: &Config) -> Self {
+        Self {
+            turn_override: RuntimePermissionProfileTurnOverride::Preserve,
+            ..Self::from_config(config)
+        }
+    }
+
+    fn matches_config(&self, config: &Config) -> bool {
+        self.permission_profile == *config.permissions.permission_profile()
+            && self.active_permission_profile == config.permissions.active_permission_profile()
+            && self.network == config.permissions.network
+    }
+
+    fn turn_permission_profile(&self) -> Option<&PermissionProfile> {
+        matches!(
+            self.turn_override,
+            RuntimePermissionProfileTurnOverride::LegacySandbox
+        )
+        .then_some(&self.permission_profile)
     }
 }
 

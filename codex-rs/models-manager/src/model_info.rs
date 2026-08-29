@@ -184,6 +184,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
     }
 }
 

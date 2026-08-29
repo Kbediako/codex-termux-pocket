@@ -629,6 +629,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

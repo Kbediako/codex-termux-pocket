@@ -295,14 +295,27 @@ Example with notification opt-out:
 - `config/batchWrite` — apply multiple config edits atomically to the user's config.toml on disk, with optional `reloadUserConfig: true` to hot-reload loaded threads, including multiple `desktop.*` edits. Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and personality defaults do not reload existing threads.
 - `configRequirements/read` — fetch loaded requirements constraints from `requirements.toml` and/or MDM (or `null` if none are configured), including exact managed values (`cliAuthCredentialsStore`, `chatgptBaseUrl`, `sqliteHome`, `logDir`, `modelCatalogJson`, `checkForUpdateOnStartup`, `allowLoginShell`, `feedback.enabled`, and `windowsSandboxPrivateDesktop`), requirements-only developer instructions (`additionalDeveloperInstructions`, supplied independently of ordinary developer instructions), allow-lists (`allowedApprovalPolicies`, `allowedSandboxModes`, `allowedWebSearchModes`), the layered permission-profile allow map (`allowedPermissionProfiles`), the managed permission-profile default (`defaultPermissions`), lifecycle hook lockdown (`allowManagedHooksOnly`), remote-control policy (`allowRemoteControl`; `false` force-disables remote control while `true` or `null` preserves existing behavior), the Browser/Computer Use umbrella policy (`allowBrowserAndComputerUse`), computer use policy (`computerUse`, including persistent approval, default application access, and per-platform application rules), Browser Use policy (`browserUse`, including history access, origin rules, auto-review, and approval controls), interactive browser import policy (`inAppBrowser.allowExternalBrowserSettingsImport`), pinned feature values (`featureRequirements`, including the default-allowed `in_app_updates` policy that administrators can set to `false`), managed lifecycle hooks (`hooks`, including command handlers with optional `additionalContextLimit` and `mcp_tool` handlers with `server`, `tool`, `input`, `timeoutSec`, and `statusMessage`), `enforceResidency`, managed automatic review (`autoReview.requiredOnModels` and `autoReview.ignoreRules`), model defaults (`models.newThread.model`, `models.newThread.modelReasoningEffort`, and `models.newThread.serviceTier`), and `network` constraints such as canonical domain/socket permissions plus `managedAllowedDomainsOnly` and `dangerFullAccessDenylistOnly`.
 
+`mcpServer/resource/read` and `mcpServer/tool/call` preserve MCP protocol errors
+with their original `code`, `message`, and `data`, including authentication
+metadata in `data._meta`. Other operation failures retain the existing
+internal-error response. Tool results with `isError: true` remain results,
+including their `_meta`.
+
 ### Plugin configuration scope
 
 Plugin activation and MCP settings use the existing merged configuration, including
 system settings and trusted project overrides. `skills/list` resolves plugin skills
 independently for each requested working directory.
 
-Omitted or empty catalog `cwds` exclude project configuration, including the
-app-server process's project.
+For local `plugin/list` and `plugin/installed` results, each requested cwd supplies
+its effective plugin state and plugin feature flag. When a plugin appears in multiple
+contexts, the first source wins and installed/enabled state is merged across contexts.
+Invalid project configurations are reported in `marketplaceLoadErrors` without hiding
+other projects or remote plugins. Omitted or empty `cwds` exclude project
+configuration, including the app-server process's project. `forceRefetch` refreshes the selected local plugin
+sources before returning; ordinary listing schedules the same work in the background.
+Remote catalog settings and feature gating remain request-wide rather than being
+selected from the requested repos. Search continues to report `enabled: false`.
 
 Marketplace definitions can come from system configuration, but configured Git
 marketplaces currently require an existing downloaded snapshot.
@@ -440,6 +453,28 @@ To branch from a stored session, call `thread/fork` with the `thread.id`. This c
 ```
 
 Like `thread/resume`, full-history hydration is deprecated for paginated `thread/fork` and emits `deprecationNotice`. Clients should pass `excludeTurns: true` to return only thread metadata in `thread.turns` and page history with `thread/turns/list` and `thread/items/list`. Metadata-only forks do not replay restored `thread/tokenUsage/updated`. Ephemeral forks of paginated threads require `excludeTurns: true`.
+
+### Listing projects
+
+`project/list` accepts optional `sortKey` (`position` or `recencyAt`) and
+`sortDirection` (`asc` or `desc`), alongside `limit` and the opaque `cursor`.
+Omitting `sortKey` preserves manual position order. A non-null `sortDirection`
+requires an explicit key; it defaults to `asc` for `position` and `desc` for `recencyAt`.
+
+```json
+{ "sortKey": "recencyAt", "sortDirection": "desc", "limit": 50, "cursor": null }
+```
+
+Every project response includes `recencyAt`: the newest non-archived, explicitly
+assigned thread's recency in Unix seconds, across all sources, or `null` when none
+exist. Like `thread/list`, thread recency starts at creation and advances at turn
+start, not for background output. Removing or archiving members can lower project
+recency. Task activity does not change project `updatedAt` or emit `project/changed`.
+
+Nulls sort last in either direction; project IDs break ties in the same direction.
+Cursor anchors retain millisecond precision. Continue with the same sort options;
+existing position cursors remain supported. Pagination is a live view, so concurrent
+activity can move projects across a cursor.
 
 ### Example: List threads (with pagination & filters)
 
@@ -888,7 +923,14 @@ Use `thread/shellCommand` for the TUI `!` workflow. The request returns immediat
 This API runs unsandboxed with full access; it does not inherit the thread
 sandbox policy.
 
-If the thread already has an active turn, the command runs as an auxiliary action on that turn. In that case, progress is emitted as standard `item/*` notifications on the existing turn and the formatted output is injected into the turn’s message stream:
+Set `timeoutMs` to a non-negative integer to control command execution time.
+Omitting it or setting it to `null` preserves the one-hour default (3,600,000 ms).
+Values above one hour are supported; `0` requests an immediate timeout, not
+unlimited execution. Invalid values are rejected before execution. This deadline
+does not change the immediate RPC acknowledgement, and `turn/interrupt` can still
+cancel execution before the deadline.
+
+If the thread already has an active turn, the command runs as an auxiliary action on that turn. A timeout ends only the shell command, not the active turn. Progress is emitted as standard `item/*` notifications on the existing turn and the formatted output is injected into the turn’s message stream:
 
 - `item/started` with `item: { "type": "commandExecution", "source": "userShell", ... }`
 - zero or more `item/commandExecution/outputDelta`
@@ -905,6 +947,13 @@ If the thread does not already have an active turn, the server starts a standalo
 ```json
 { "method": "thread/shellCommand", "id": 26, "params": { "threadId": "thr_b", "command": "git status --short" } }
 { "id": 26, "result": {} }
+```
+
+For example, allow up to eight hours for a workflow command:
+
+```json
+{ "method": "thread/shellCommand", "id": 27, "params": { "threadId": "thr_b", "command": "./workflow.sh", "timeoutMs": 28800000 } }
+{ "id": 27, "result": {} }
 ```
 
 ### Example: Start a turn (send user input)
@@ -1714,6 +1763,8 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
 - `model/safetyBuffering/updated` — `{ threadId, turnId, model, useCases, reasons, showBufferingUi, fasterModel }` when a response enters safety buffering. `fasterModel` is nullable. This notification is transient and is not persisted in rollout history.
 - `model/rerouted` — `{ threadId, turnId, fromModel, toModel, reason }` when the backend reroutes a request to a different model (for example, due to high-risk cyber safety checks).
 - `model/verification` — `{ threadId, turnId, verifications }` when the backend flags additional account verification, such as `trustedAccessForCyber`.
+- `modelProvider/authRecoveryStarted` — `{ threadId, turnId, provider, message }` when model-provider authentication recovery begins.
+- `modelProvider/authRecoveryCompleted` — `{ threadId, turnId, provider, message }` when model-provider authentication recovery succeeds.
 - `turn/moderationMetadata` — experimental; `{ threadId, turnId, metadata }` when a first-party backend supplies turn-scoped moderation metadata for client-side presentation.
 
 `turn/started` carries no items. `turn/completed` carries only the final agent message as a summary fallback; continue consuming `item/*` notifications for the full canonical item list.
@@ -1841,6 +1892,10 @@ Order of messages:
 `kind` distinguishes command approvals from writes to an existing terminal. Requests from older servers without `kind` retain `command` semantics; `approvalId` alone does not distinguish stdin writes from execve interception.
 
 When stdin approvals are enabled, a `write_stdin` approval sets `kind: "writeStdin"`, references the original terminal command's `itemId`, and has its own `approvalId`. The request belongs to the current turn, which may differ from the turn that opened the terminal. With `approvalsReviewer: "auto_review"`, the `item/autoApprovalReview/*` notifications likewise target the original command item and carry an action of type `writeStdin` with `approvalId`, `processId`, `stdin`, and `cwd`. For stdin approvals, `cwd` is the terminal’s launch directory, not its current working directory. Approving or denying a stdin write does not start, complete, or change the status of the parent command-execution item.
+
+Non-empty input is reviewed when strict auto-review is active, the terminal bypassed the sandbox at launch, or its retained permissions differ from the current environment's policy, including additional grants and permission changes between turns. Changing permission settings does not re-sandbox or stop existing processes. Input is rejected when the original environment is unavailable, the retained filesystem sandbox cannot enforce current denied-read restrictions, or environment-owned network restrictions changed; empty output polls and non-TTY interrupts remain available without review. Approval reasons describe retained authority and user-visible grants even for clients that do not receive the experimental `additionalPermissions` field. Internal grant paths remain private.
+
+For reviewed stdin, the complete formatted action and approval reason must fit within 8,000 bytes. Oversized or truncated actions are rejected before any bytes reach the terminal, rather than reviewing a shortened input and executing the full input.
 
 ### File change approvals
 

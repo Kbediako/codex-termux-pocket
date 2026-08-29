@@ -482,10 +482,10 @@ impl App {
                 self.runtime_approval_policy_override =
                     Some(self.config.permissions.approval_policy.value().into());
             }
-            let destination_permissions =
-                RuntimePermissionProfileOverride::from_config(&self.config);
-            if destination_permissions != baseline_permissions {
-                self.runtime_permission_profile_override = Some(destination_permissions);
+            if !baseline_permissions.matches_config(&self.config) {
+                self.runtime_permission_profile_override = Some(
+                    RuntimePermissionProfileOverride::from_restored_config(&self.config),
+                );
             }
             if !self
                 .backfill_loaded_subagent_threads(app_server)
@@ -587,7 +587,7 @@ impl App {
         };
         if let Some(profile) = self.runtime_permission_profile_override.as_ref()
             && profile.active_permission_profile.is_some()
-            && (RuntimePermissionProfileOverride::from_config(&config) != *profile
+            && (!profile.matches_config(&config)
                 || config.permissions.profile_workspace_roots()
                     != self.config.permissions.profile_workspace_roots())
         {

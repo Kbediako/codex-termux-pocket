@@ -105,9 +105,13 @@ impl Session {
                 personality_is_baked,
             ));
         }
-        if turn_context.config.features.enabled(Feature::TokenBudget)
-            && turn_context.model_context_window().is_some()
-        {
+        let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget)
+            && step_context
+                .settings
+                .model_info
+                .resolved_context_window()
+                .is_some();
+        if token_budget_enabled {
             let window_ids = self.state.lock().await.auto_compact_window_ids();
             world_state.add_section(TokenBudgetContext::new(
                 turn_context
@@ -119,16 +123,13 @@ impl Session {
                 window_ids.window_id,
                 /*thread_hint*/ None,
             ));
-            if let Some(guidance) = turn_context
-                .config
-                .token_budget
-                .as_ref()
-                .and_then(|config| config.guidance_message.as_deref())
-                .filter(|message| !message.trim().is_empty())
-            {
-                world_state.add_section(ContextWindowGuidanceState::new(guidance));
-            }
         }
+        let guidance = step_context
+            .token_budget
+            .as_ref()
+            .and_then(|config| config.guidance_message.as_deref())
+            .filter(|_| token_budget_enabled);
+        world_state.add_section(ContextWindowGuidanceState::new(guidance));
         let realtime_mode_instructions = self.conversation.mode_instructions().await;
         world_state.add_section(RealtimeState::new(
             turn_context.realtime_active,
@@ -226,6 +227,7 @@ impl Session {
                     &step_context.environments,
                     Some(current_date),
                 )
+                .await
                 .with_subagents(environment_subagents),
             );
         }

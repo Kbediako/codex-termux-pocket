@@ -509,7 +509,7 @@ impl McpRequestProcessor {
         origin_call_id: Option<String>,
     ) {
         let result = result
-            .map_err(|error| internal_error(format!("{error:#}")))
+            .map_err(mcp_operation_error)
             .and_then(|result| {
                 serde_json::from_value::<McpResourceReadResponse>(result).map_err(|error| {
                     internal_error(format!(
@@ -541,10 +541,21 @@ impl McpRequestProcessor {
                 .call_mcp_tool(&params.server, &params.tool, params.arguments, meta)
                 .await
                 .map(McpServerToolCallResponse::from)
-                .map_err(|error| internal_error(format!("{error:#}")));
+                .map_err(mcp_operation_error);
             outgoing.send_result(request_id, result).await;
         });
         Ok(())
+    }
+}
+
+fn mcp_operation_error(error: anyhow::Error) -> JSONRPCErrorError {
+    match codex_rmcp_client::mcp_error(&error) {
+        Some(error) => JSONRPCErrorError {
+            code: i64::from(error.code.0),
+            message: error.message.to_string(),
+            data: error.data.clone(),
+        },
+        None => internal_error(format!("{error:#}")),
     }
 }
 

@@ -27,6 +27,7 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         auth_keyring_backend_kind: AuthKeyringBackendKind::default(),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
+        optional_mcp_startup_grace: DEFAULT_OPTIONAL_MCP_STARTUP_GRACE,
         skill_mcp_dependency_install_enabled: true,
         approval_policy: Constrained::allow_any(AskForApproval::OnRequest),
         permission_profile: PermissionProfile::default(),

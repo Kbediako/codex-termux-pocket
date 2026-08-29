@@ -33,6 +33,7 @@ pub(crate) struct GoalRuntimeConfig {
     pub(crate) analytics: GoalAnalytics,
     pub(crate) enabled: bool,
     pub(crate) tools_available_for_thread: bool,
+    pub(crate) root_accounting_state: Option<Arc<GoalAccountingState>>,
 }
 
 pub(crate) enum ActiveGoalStopReason {
@@ -48,6 +49,7 @@ struct GoalRuntimeInner {
     metrics: GoalMetrics,
     thread_manager: Weak<ThreadManager>,
     accounting_state: Arc<GoalAccountingState>,
+    root_accounting_state: Option<Arc<GoalAccountingState>>,
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     goal_state_lock: Semaphore,
@@ -100,6 +102,7 @@ impl GoalRuntimeHandle {
                 metrics,
                 thread_manager,
                 accounting_state,
+                root_accounting_state: config.root_accounting_state,
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
@@ -125,6 +128,10 @@ impl GoalRuntimeHandle {
 
     pub(crate) fn accounting_state(&self) -> Arc<GoalAccountingState> {
         Arc::clone(&self.inner.accounting_state)
+    }
+
+    pub(crate) fn root_accounting_state(&self) -> Option<Arc<GoalAccountingState>> {
+        self.inner.root_accounting_state.clone()
     }
 
     pub(crate) async fn goal_state_permit(&self) -> Result<SemaphorePermit<'_>, String> {
@@ -546,7 +553,7 @@ impl GoalRuntimeHandle {
             .account_thread_goal_usage(
                 self.thread_id(),
                 snapshot.time_delta_seconds,
-                /*token_delta*/ 0,
+                snapshot.token_delta,
                 mode,
                 Some(snapshot.expected_goal_id.as_str()),
             )

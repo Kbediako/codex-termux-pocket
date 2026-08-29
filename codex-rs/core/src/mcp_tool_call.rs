@@ -17,6 +17,7 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::ApprovalContext;
 use crate::tools::hook_names::HookToolName;
+use crate::tools::lifecycle::process_mcp_tool_result;
 use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ToolError;
 use crate::turn_metadata::McpTurnMetadataContext;
@@ -29,6 +30,7 @@ use codex_config::types::AppToolApproval;
 use codex_connectors::AppToolPolicy;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_connectors::AppToolPolicyInput;
+use codex_extension_api::McpToolContext;
 use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
@@ -422,7 +424,7 @@ async fn handle_approved_mcp_tool_call(
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
     let result = async {
         let result = async {
-            let result = prepared_call
+            let mut result = prepared_call
                 .call_with_preparation(/*requested_timeout*/ None, || async {
                     if let McpToolApprovalApplication::Apply { decision, policy } =
                         &approval_application
@@ -501,6 +503,19 @@ async fn handle_approved_mcp_tool_call(
                 })
                 .await
                 .map_err(|error| format!("tool call error: {error:?}"))?;
+            let mcp_tool = McpToolContext::from_prepared_call(
+                &prepared_call,
+                turn_context.config.mcp_servers.get().get(&server),
+            );
+            process_mcp_tool_result(
+                sess,
+                turn_context,
+                call_id,
+                &mcp_tool,
+                &tool_input,
+                &mut result,
+            )
+            .await;
             let result = sanitize_mcp_tool_result_for_model(
                 &turn_context.model_info().input_modalities,
                 Ok(result),

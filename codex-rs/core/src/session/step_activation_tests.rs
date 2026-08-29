@@ -1,15 +1,13 @@
 use super::*;
 use crate::guardian::BUNDLED_GUARDIAN_POLICY;
-use crate::session::TurnInput;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::StepSettings;
+use crate::session::tests::HeldStepTask;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::state::TaskKind;
-use crate::tasks::SessionTask;
-use crate::tasks::SessionTaskResult;
 use codex_config::AutoReviewRequirementsToml;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
@@ -33,6 +31,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -162,35 +161,6 @@ impl ModelsManager for GatedModelsManager {
     }
 }
 
-struct HeldStepTask {
-    finish: Arc<Notify>,
-}
-
-impl SessionTask for HeldStepTask {
-    fn kind(&self) -> TaskKind {
-        // Publication also works for a non-regular task that never samples.
-        TaskKind::Compact
-    }
-
-    fn span_name(&self) -> &'static str {
-        "session_task.step_activation_test"
-    }
-
-    async fn run(
-        self: Arc<Self>,
-        _session: Arc<Session>,
-        _turn: Arc<TurnContext>,
-        _input: Vec<TurnInput>,
-        cancellation_token: CancellationToken,
-    ) -> SessionTaskResult {
-        tokio::select! {
-            _ = cancellation_token.cancelled() => {},
-            _ = self.finish.notified() => {},
-        }
-        Ok(None)
-    }
-}
-
 struct ActivationFixture {
     session: Arc<Session>,
     turn: Arc<TurnContext>,
@@ -204,7 +174,11 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
     let mutable = Arc::get_mut(&mut session).expect("unshared test session");
     let (models, lookup) = GatedModelsManager::new(models);
     mutable.services.models_manager = models;
-    for feature in [Feature::StepModelSwitching, Feature::FastMode] {
+    for feature in [
+        Feature::StepModelSwitching,
+        Feature::FastMode,
+        Feature::TokenBudget,
+    ] {
         mutable
             .features
             .enable(feature)
@@ -232,6 +206,7 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
             prepared,
             Vec::new(),
             HeldStepTask {
+                kind: TaskKind::Compact,
                 finish: Arc::clone(&finish),
             },
         )
@@ -296,6 +271,27 @@ fn settings_submission(
 #[tokio::test]
 async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     let mut models = activation_models();
+    for model in &mut models {
+        model
+            .model_messages
+            .as_mut()
+            .expect("model messages")
+            .token_budget = Some(ModelTokenBudgetConfig {
+            reminder_threshold_tokens: 2_000,
+            reminder_message_template: "{n_remaining} tokens remain.".to_string(),
+            guidance_message: format!("Guidance for {}.", model.slug),
+            auto_compact_fallback_prompt: "Save state before rollover.".to_string(),
+            auto_compact_fallback_buffer_tokens: 4_000,
+        });
+    }
+    let initial_model = models
+        .iter_mut()
+        .find(|model| model.slug == MODEL_A)
+        .expect("initial model");
+    initial_model.context_window = Some(272_000);
+    initial_model.max_context_window = Some(272_000);
+    initial_model.auto_compact_token_limit = None;
+    initial_model.effective_context_window_percent = 95;
     let destination = models
         .iter_mut()
         .find(|model| model.slug == MODEL_B)
@@ -303,6 +299,7 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     destination.context_window = Some(190_000);
     destination.max_context_window = Some(190_000);
     destination.auto_compact_token_limit = Some(150_000);
+    destination.effective_context_window_percent = 80;
     destination.default_reasoning_summary = ReasoningSummary::Detailed;
     destination
         .model_messages
@@ -435,9 +432,36 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     );
     assert!(Arc::ptr_eq(&before.turn, &after.turn));
     assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
-    assert_ne!(
-        before.settings.model_info.context_window,
-        after.settings.model_info.context_window
+    let initial_budget = turn
+        .config
+        .token_budget
+        .clone()
+        .expect("initial model budget");
+    let destination_budget = crate::config::TokenBudgetConfig {
+        guidance_message: Some(format!("Guidance for {MODEL_B}.")),
+        ..initial_budget.clone()
+    };
+    assert_eq!(
+        [&before, &during, &after].map(|step| step.token_budget.clone()),
+        [
+            Some(initial_budget.clone()),
+            Some(initial_budget),
+            Some(destination_budget),
+        ]
+    );
+    assert_eq!(
+        [&before, &during, &after].map(|step| {
+            (
+                step.settings.model_info.resolved_context_window(),
+                step.settings.model_info.usable_context_window(),
+                step.settings.model_info.auto_compact_token_limit(),
+            )
+        }),
+        [
+            (Some(272_000), Some(258_400), Some(244_800)),
+            (Some(272_000), Some(258_400), Some(244_800)),
+            (Some(190_000), Some(152_000), Some(150_000)),
+        ]
     );
     assert_eq!(desired_step_settings(&session).await, desired);
     assert!(Arc::ptr_eq(&before.settings, &during.settings));
@@ -553,6 +577,7 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
                     Arc::clone(&replacement),
                     Vec::new(),
                     HeldStepTask {
+                        kind: TaskKind::Compact,
                         finish: Arc::new(Notify::new()),
                     },
                 )

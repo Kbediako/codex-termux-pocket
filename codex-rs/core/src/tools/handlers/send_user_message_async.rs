@@ -37,13 +37,13 @@ impl ToolExecutor<ToolInvocation> for SendUserMessageAsyncHandler {
         let properties = BTreeMap::from([(
             "message".to_string(),
             JsonSchema::string(Some(
-                "The concise question or update to send to the user.".to_string(),
+                "The concise question to send to the user.".to_string(),
             )),
         )]);
 
         ToolSpec::Function(ResponsesApiTool {
             name: TOOL_NAME.to_string(),
-            description: "Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message. Use this tool to ask for missing information, preferences, constraints, clarification, or approval; report a critical blocker or a finding that may change the task's direction; or answer a user question or status request received while work is still in progress. Use this tool when a message needs the user's immediate attention; use commentary for routine progress and intermediate context. Use clear formatting, such as bolding questions, to make requests easy to notice and answer."
+            description: "Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message.\nOnly use this tool to ask for missing information, preferences, constraints, clarification, or approval. The message should be concise, easy to read and understand, and at the right level of abstraction that is appropriate for the user and task at hand."
                 .to_string(),
             strict: false,
             defer_loading: None,

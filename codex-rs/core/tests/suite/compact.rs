@@ -2666,9 +2666,11 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
     let mut previous_model_info =
         model_info_with_context_window("gpt-5.4", /*context_window*/ 273_000);
     previous_model_info.slug = previous_model_family.to_string();
+    previous_model_info.use_responses_lite = true;
     let mut next_model_info =
         model_info_with_context_window("gpt-5.4", /*context_window*/ 125_000);
     next_model_info.slug = next_model.to_string();
+    next_model_info.use_responses_lite = false;
 
     let models_mock = mount_models_once(
         &server,
@@ -2710,6 +2712,7 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
         .with_model(retired_model)
         .with_config(move |config| {
             config.model_provider = model_provider;
+            config.tool_registry.turn_metadata_includes_tool_info = true;
             set_test_compact_prompt(config);
             let _ = config.features.enable(Feature::RemoteCompactionV2);
         });
@@ -2755,6 +2758,25 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
     );
     assert_eq!(requests[2].body_json()["model"].as_str(), Some(next_model));
     assert_eq!(requests[3].body_json()["model"].as_str(), Some(next_model));
+
+    // Preparing the non-Lite fallback must not clear the previous model's inventory
+    // before its compaction attempt is sent.
+    let [first_metadata, compact_metadata] = [&requests[0], &requests[1]].map(|request| {
+        serde_json::from_str::<Value>(
+            request.body_json()["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("request should include turn metadata"),
+        )
+        .expect("turn metadata should be valid JSON")
+    });
+    let inventory = first_metadata["tool_namespaces_info"]
+        .as_object()
+        .expect("Responses Lite request should include tool inventory");
+    assert!(!inventory.is_empty());
+    assert_eq!(
+        compact_metadata["tool_namespaces_info"],
+        first_metadata["tool_namespaces_info"],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

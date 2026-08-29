@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use codex_core::config::Config;
 use codex_extension_api::ContentItemKind;
@@ -104,14 +103,11 @@ impl TrustedSkillRoots {
 
 /// Bounded, deduplicated user-owned skill paths observed in one turn.
 #[derive(Default)]
-pub(crate) struct TrustedSkillInvocations(Mutex<BTreeSet<String>>);
+pub(crate) struct TrustedSkillInvocations(BTreeSet<String>);
 
 impl TrustedSkillInvocations {
-    pub(crate) fn record(&self, path: String) {
-        let mut skills = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub(crate) fn record(&mut self, path: String) {
+        let skills = &mut self.0;
         if skills.contains(&path)
             || skills.len() >= MAX_TRUSTED_SKILLS
             || skills
@@ -126,13 +122,8 @@ impl TrustedSkillInvocations {
         skills.insert(path);
     }
 
-    pub(crate) fn snapshot(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .cloned()
-            .collect()
+    pub(crate) fn into_paths(self) -> Vec<String> {
+        self.0.into_iter().collect()
     }
 }
 

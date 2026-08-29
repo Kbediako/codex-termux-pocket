@@ -26,7 +26,6 @@ use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -140,6 +139,7 @@ fn test_tool_router(
 ) -> ToolRouter {
     let mut registry = build_core_tool_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &step_context.environments,
         step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -147,6 +147,7 @@ fn test_tool_router(
     );
     let hosted_specs = append_source_tools(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &mut registry,
         mcp_tools,
         extension_tool_executors,
@@ -154,6 +155,7 @@ fn test_tool_router(
     );
     ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         registry,
         hosted_specs,
         &Default::default(),
@@ -601,10 +603,12 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
         )
         .await?;
 
-    let response = result.into_response();
+    let response = result.into_response().item;
     match response {
-        ResponseInputItem::FunctionCallOutput { call_id, output } => {
-            assert_eq!(call_id, "call-extension");
+        ResponseItem::FunctionCallOutput {
+            call_id, output, ..
+        } => {
+            assert_eq!(call_id.as_deref(), Some("call-extension"));
             let FunctionCallOutputBody::Text(text) = output.body else {
                 panic!("expected text function call output")
             };

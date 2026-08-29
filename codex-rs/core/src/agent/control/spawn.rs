@@ -415,6 +415,7 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
+        config.service_tier = self.root_service_tier();
         if let Some(model) = stored_model {
             config.model = Some(model);
         }

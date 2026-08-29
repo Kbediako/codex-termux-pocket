@@ -604,6 +604,7 @@ impl WebSocketTestServer {
         request_index: usize,
     ) -> WebSocketRequest {
         loop {
+            let notified = self.request_log_updated.notified();
             if let Some(request) = self
                 .connections
                 .lock()
@@ -614,7 +615,7 @@ impl WebSocketTestServer {
             {
                 return request;
             }
-            self.request_log_updated.notified().await;
+            notified.await;
         }
     }
 

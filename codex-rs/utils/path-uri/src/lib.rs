@@ -186,6 +186,13 @@ impl PathUri {
         self.0.path()
     }
 
+    /// Returns the percent-decoded URI path without requiring valid UTF-8.
+    ///
+    /// The URL authority is not included.
+    pub fn decoded_path_bytes(&self) -> Cow<'_, [u8]> {
+        urlencoding::decode_binary(self.encoded_path().as_bytes())
+    }
+
     fn windows_identity_path_bytes(&self) -> Option<Cow<'_, [u8]>> {
         if self.infer_path_convention() != Some(PathConvention::Windows)
             || self.opaque_fallback_bytes().is_some()

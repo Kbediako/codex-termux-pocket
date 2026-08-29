@@ -244,8 +244,7 @@ impl GuardianRejectionCircuitBreaker {
     }
 }
 
-#[cfg(test)]
-use approval_request::format_guardian_action_pretty;
+pub(crate) use approval_request::format_guardian_action_pretty;
 #[cfg(test)]
 use approval_request::guardian_assessment_action;
 #[cfg(test)]

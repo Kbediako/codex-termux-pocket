@@ -6,6 +6,7 @@ pub(crate) use super::step_settings::tests::update_selected_settings_for_test;
 use super::turn_context::TurnEnvironment;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
+use crate::compact::InitialContextInjection;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::config::test_config;
@@ -24,6 +25,8 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
+use codex_analytics::CompactionPhase;
+use codex_analytics::CompactionReason;
 use codex_config::ConfigLayerStack;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::LoaderOverrides;
@@ -49,6 +52,7 @@ use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
@@ -70,6 +74,7 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelServiceTier;
+use codex_protocol::openai_models::ToolMode;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -170,6 +175,7 @@ use core_test_support::PathExt;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::ContextSnapshotRenderMode;
+use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -179,6 +185,8 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_metadata_from_items;
 use core_test_support::responses::strip_response_item_ids;
 use core_test_support::responses::strip_response_item_ids_from_json;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_path_buf;
@@ -193,10 +201,13 @@ use opentelemetry_sdk::metrics::data::MetricData;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use std::path::Path;
 use std::time::Duration;
+use test_case::test_case;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use wiremock::ResponseTemplate;
 
 use uuid::Uuid;
 
@@ -240,6 +251,11 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            token_budget: token_budget::resolve_token_budget(
+                turn.configured_token_budget.as_ref(),
+                turn.use_model_token_budget_defaults,
+                settings.model_info.as_ref(),
+            ),
             settings: Arc::new(settings),
             session_telemetry: turn.session_telemetry.clone(),
             turn: Arc::clone(&turn),
@@ -252,6 +268,10 @@ impl StepContext {
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
+                ToolMode::Direct,
+                BTreeMap::new(),
+                /*tool_namespaces_info*/ None,
+                &[],
             )),
             loaded_agents_md: None,
         })
@@ -872,6 +892,7 @@ pub(crate) fn tool_registry_for_test_step(
 ) -> (ToolRegistry, Vec<ToolSpec>) {
     let mut registry = crate::tools::spec_plan::build_core_tool_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &step_context.environments,
         step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -879,6 +900,7 @@ pub(crate) fn tool_registry_for_test_step(
     );
     let hosted_specs = crate::tools::spec_plan::append_source_tools(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &mut registry,
         Vec::new(),
         Vec::new(),
@@ -892,6 +914,7 @@ fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> T
     let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
     let router = Arc::new(ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         registry,
         hosted_specs,
         &Default::default(),
@@ -1536,6 +1559,7 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
         Arc::clone(&session),
         turn_context,
         command,
+        /*timeout_ms*/ None,
         CancellationToken::new(),
         UserShellCommandMode::StandaloneTurn,
     )
@@ -1570,6 +1594,7 @@ async fn user_shell_commands_remain_login_shells_when_model_login_shells_are_dis
         Arc::clone(&session),
         turn_context,
         command,
+        /*timeout_ms*/ None,
         CancellationToken::new(),
         UserShellCommandMode::StandaloneTurn,
     )
@@ -9284,6 +9309,7 @@ async fn capability_discovery_uses_environment_permission_profile() {
         permissions: environment.permission_profile().clone().into(),
         cwd: Some(environment.cwd().clone()),
         workspace_roots: environment.workspace_roots().to_vec(),
+        user_home_dir: environment.user_home_dir.clone(),
         temporary_directories: environment.temporary_directories.clone(),
         windows_sandbox_level: WindowsSandboxLevel::Elevated,
         windows_sandbox_private_desktop: false,
@@ -9710,6 +9736,86 @@ async fn record_context_updates_emits_realtime_end_when_session_stops_being_live
             .any(|text| text.contains("<realtime_conversation>")),
         "expected a realtime end update, got {developer_texts:?}"
     );
+}
+
+#[tokio::test]
+async fn build_initial_context_reuses_in_flight_recommendation_prewarm() {
+    use wiremock::Mock;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+    use wiremock::matchers::query_param;
+
+    core_test_support::skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    Mock::given(method("GET"))
+        .and(path("/ps/plugins/suggested/codex"))
+        .and(query_param("scope", "GLOBAL"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": true,
+            "plugins": [{
+                "id": "plugin_github",
+                "name": "github",
+                "display_name": "GitHub"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (session, turn_context, _rx_event) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        /*dynamic_tools*/ Vec::new(),
+        |config| {
+            config.chatgpt_base_url = server.uri();
+            config
+                .features
+                .disable(Feature::ToolSuggest)
+                .expect("test config should allow feature update");
+            for enabled_feature in [
+                Feature::Apps,
+                Feature::Plugins,
+                Feature::RemotePlugin,
+                Feature::RecommendedPlugins,
+            ] {
+                config
+                    .features
+                    .enable(enabled_feature)
+                    .expect("test config should allow feature update");
+            }
+        },
+    )
+    .await;
+    let plugins_manager = &session.services.plugins_manager;
+    let plugins_config = turn_context.config.plugins_config_input();
+    let auth = session.services.auth_manager.auth().await;
+    // Cached plugin loading and auth let initial context reach the shared recommendation lookup
+    // without awaiting unrelated I/O.
+    plugins_manager.plugins_for_config(&plugins_config).await;
+    let prewarm =
+        plugins_manager.recommended_plugins_mode_for_config(&plugins_config, auth.as_ref());
+    tokio::pin!(prewarm);
+    assert!(futures::poll!(prewarm.as_mut()).is_pending());
+
+    // Keep the OnceCell initializer unpolled while first-thread context joins its in-flight fetch.
+    // This does not depend on how quickly the HTTP server returns its response.
+    let world_state = WorldState::default();
+    let initial_context =
+        session.build_initial_context_with_world_state(&turn_context, &world_state);
+    tokio::pin!(initial_context);
+    assert!(futures::poll!(initial_context.as_mut()).is_pending());
+
+    let (_, initial_context) = tokio::join!(prewarm, initial_context);
+    assert_eq!(
+        user_input_texts(&initial_context),
+        vec![concat!(
+            "<recommended_plugins>\n",
+            "Here is a list of plugins that are available but not installed.\n\n",
+            "- GitHub (github@openai-curated-remote)\n",
+            "</recommended_plugins>",
+        )]
+    );
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -10474,8 +10580,13 @@ async fn run_user_shell_command_does_not_set_reference_context_item() {
         state.set_reference_context_item(/*item*/ None);
     }
 
-    handlers::run_user_shell_command(&session, "sub-id".to_string(), "echo shell".to_string())
-        .await;
+    handlers::run_user_shell_command(
+        &session,
+        "sub-id".to_string(),
+        "echo shell".to_string(),
+        /*timeout_ms*/ None,
+    )
+    .await;
 
     let deadline = StdDuration::from_secs(15);
     let start = std::time::Instant::now();
@@ -10744,6 +10855,292 @@ impl SessionTask for GuardianDeniedApprovalTask {
         cancellation_token.cancelled().await;
         Ok(None)
     }
+}
+
+pub(super) struct HeldStepTask {
+    pub(super) kind: TaskKind,
+    pub(super) finish: Arc<Notify>,
+}
+
+impl SessionTask for HeldStepTask {
+    fn kind(&self) -> TaskKind {
+        self.kind
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.step_activation_test"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<Session>,
+        _turn: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {},
+            _ = self.finish.notified() => {},
+        }
+        Ok(None)
+    }
+}
+
+#[test_case(TerminalEventKind::TurnComplete; "completion")]
+#[test_case(TerminalEventKind::TurnAborted; "interruption")]
+#[tokio::test]
+async fn finished_turn_retains_last_known_step_context(terminal: TerminalEventKind) {
+    let (session, turn, events) = make_session_and_context_with_rx().await;
+    let finish = Arc::new(Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            HeldStepTask {
+                kind: TaskKind::Regular,
+                finish: Arc::clone(&finish),
+            },
+        )
+        .await;
+    let expected = session
+        .capture_step_context(turn, &CancellationToken::new())
+        .await
+        .expect("capture executing step");
+    let state = {
+        let active = session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().expect("active turn").turn_state)
+    };
+
+    match terminal {
+        TerminalEventKind::TurnComplete => finish.notify_one(),
+        TerminalEventKind::TurnAborted => {
+            session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        }
+    }
+    recv_terminal_event(&events, terminal).await;
+
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(
+        state
+            .lock()
+            .await
+            .last_known_step_context
+            .as_ref()
+            .map(Arc::as_ptr),
+        Some(Arc::as_ptr(&expected)),
+    );
+}
+
+#[derive(Clone, Copy)]
+enum FirstAttempt {
+    Succeeds,
+    Retries,
+}
+
+async fn make_remote_compaction_session(
+    server_uri: &str,
+) -> (
+    Arc<Session>,
+    Arc<TurnContext>,
+    async_channel::Receiver<Event>,
+) {
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{server_uri}/v1"));
+    provider.supports_websockets = false;
+    make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        move |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_provider = provider;
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
+            let _ = config.features.disable(Feature::TokenBudget);
+        },
+    )
+    .await
+}
+
+#[test_case(FirstAttempt::Succeeds; "primary succeeds")]
+#[test_case(FirstAttempt::Retries; "fallback executes")]
+#[tokio::test]
+async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAttempt) {
+    let server = responses::start_mock_server().await;
+    let (session, turn, events) = make_remote_compaction_session(&server.uri()).await;
+    session
+        .record_conversation_items(&turn, &[user_message("before compaction")])
+        .await;
+    session
+        .spawn_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    let primary_turn = Arc::new(
+        turn.with_model("gpt-5.4".to_string(), &session.services.models_manager)
+            .await,
+    );
+    let primary = session
+        .capture_step_context(primary_turn, &CancellationToken::new())
+        .await
+        .expect("capture primary step");
+    let fallback = session
+        .capture_speculative_step_context(turn, &CancellationToken::new())
+        .await
+        .expect("capture speculative fallback");
+    let state = {
+        let active = session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().expect("active turn").turn_state)
+    };
+    assert_eq!(
+        state
+            .lock()
+            .await
+            .last_known_step_context
+            .as_ref()
+            .map(Arc::as_ptr),
+        Some(Arc::as_ptr(&primary)),
+    );
+
+    let success = ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+        "output": [{ "type": "compaction", "encrypted_content": "summary" }]
+    }));
+    let replies = match first_attempt {
+        FirstAttempt::Succeeds => vec![success],
+        FirstAttempt::Retries => vec![
+            ResponseTemplate::new(/*status*/ 400)
+                .set_body_json(json!({ "detail": "previous model unavailable" })),
+            success,
+        ],
+    };
+    let requests = responses::mount_compact_response_sequence(&server, replies).await;
+    crate::compact_remote::run_inline_remote_auto_compact_task(
+        Arc::clone(&session),
+        Arc::clone(&primary),
+        Some(Arc::clone(&fallback)),
+        Arc::new(OnceLock::new()),
+        InitialContextInjection::DoNotInject,
+        CompactionReason::ModelDownshift,
+        CompactionPhase::PreTurn,
+    )
+    .await
+    .expect("compaction succeeds");
+
+    let (expected, models) = match first_attempt {
+        FirstAttempt::Succeeds => (&primary, vec![json!("gpt-5.4")]),
+        FirstAttempt::Retries => (&fallback, vec![json!("gpt-5.4"), json!("gpt-5.2")]),
+    };
+    assert_eq!(
+        state
+            .lock()
+            .await
+            .last_known_step_context
+            .as_ref()
+            .map(Arc::as_ptr),
+        Some(Arc::as_ptr(expected)),
+    );
+    assert_eq!(
+        requests
+            .requests()
+            .iter()
+            .map(|request| request.body_json()["model"].clone())
+            .collect::<Vec<_>>(),
+        models,
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    recv_terminal_event(&events, TerminalEventKind::TurnAborted).await;
+}
+
+#[tokio::test]
+async fn interrupting_compaction_fallback_retains_last_known_step_context() {
+    let (release_primary, primary_gate) = tokio::sync::oneshot::channel();
+    let (release_fallback, fallback_gate) = tokio::sync::oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: Some(primary_gate),
+            body: responses::sse_failed(
+                "primary",
+                "context_length_exceeded",
+                "compact with the current model",
+            ),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(fallback_gate),
+            body: responses::sse_completed("fallback"),
+        }],
+    ])
+    .await;
+    let (session, mut turn, events) = make_remote_compaction_session(server.uri()).await;
+    update_turn_settings_for_test(
+        Arc::get_mut(&mut turn).expect("unshared turn"),
+        |settings| {
+            Arc::make_mut(&mut settings.model_info).comp_hash = Some("new".to_string());
+        },
+    );
+    session
+        .set_previous_turn_settings(Some(PreviousTurnSettings {
+            model: "gpt-5.4".to_string(),
+            comp_hash: Some("old".to_string()),
+            realtime_active: Some(turn.realtime_active),
+        }))
+        .await;
+    session
+        .record_conversation_items(&turn, &[user_message("before compaction")])
+        .await;
+    session
+        .spawn_task(turn, Vec::new(), crate::tasks::RegularTask::new())
+        .await;
+    let state = {
+        let active = session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().expect("active turn").turn_state)
+    };
+
+    // The real turn loop has prepared both contexts before sending its first compact request.
+    timeout(
+        Duration::from_secs(/*secs*/ 10),
+        server.wait_for_request_count(/*count*/ 1),
+    )
+    .await
+    .expect("primary compaction request");
+    let primary = state
+        .lock()
+        .await
+        .last_known_step_context
+        .clone()
+        .expect("primary step");
+    assert_eq!(primary.settings.model_info.slug, "gpt-5.4");
+
+    release_primary.send(()).expect("release primary failure");
+    timeout(
+        Duration::from_secs(/*secs*/ 10),
+        server.wait_for_request_count(/*count*/ 2),
+    )
+    .await
+    .expect("fallback compaction request");
+    let fallback = state
+        .lock()
+        .await
+        .last_known_step_context
+        .clone()
+        .expect("fallback step");
+    assert_eq!(fallback.settings.model_info.slug, "gpt-5.2");
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    recv_terminal_event(&events, TerminalEventKind::TurnAborted).await;
+    assert_eq!(
+        state
+            .lock()
+            .await
+            .last_known_step_context
+            .as_ref()
+            .map(Arc::as_ptr),
+        Some(Arc::as_ptr(&fallback)),
+    );
+    drop(release_fallback);
+    server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11607,6 +12004,7 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
     let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
     let router = ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         registry,
         hosted_specs,
         &Default::default(),

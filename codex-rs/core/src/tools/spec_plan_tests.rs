@@ -20,6 +20,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -46,6 +47,7 @@ use crate::config::CurrentTimeReminderConfig;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::TurnToolFunctionInfo;
+use crate::responses_metadata::TurnToolNamespacesInfo;
 use crate::responses_metadata::TurnToolSource;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
@@ -74,12 +76,19 @@ struct ToolPlanInputs {
     dynamic_tools: Vec<DynamicToolSpec>,
 }
 
+#[derive(Debug, PartialEq)]
 struct ToolPlanProbe {
     visible_specs: Vec<ToolSpec>,
     visible_names: Vec<String>,
     namespace_functions: BTreeMap<String, Vec<String>>,
     registered_names: Vec<String>,
     exposures: BTreeMap<String, ToolExposure>,
+    tool_namespaces_info: Option<TurnToolNamespacesInfo>,
+    code_mode_tool_names: BTreeMap<String, ToolName>,
+    tool_mode: ToolMode,
+    requires_code_mode_worker: bool,
+    has_terminal_controls: bool,
+    can_manage_children: bool,
 }
 
 impl ToolPlanProbe {
@@ -129,6 +138,12 @@ impl ToolPlanProbe {
             namespace_functions,
             registered_names,
             exposures,
+            tool_namespaces_info: router.tool_namespaces_info().cloned(),
+            code_mode_tool_names: router.code_mode_tool_names().clone(),
+            tool_mode: router.tool_mode(),
+            requires_code_mode_worker: router.requires_code_mode_worker(),
+            has_terminal_controls: router.has_terminal_controls(),
+            can_manage_children: router.can_manage_children(),
         }
     }
 
@@ -204,29 +219,38 @@ async fn probe_with(
 ) -> ToolPlanProbe {
     let (_session, mut turn) = make_session_and_context().await;
     configure_turn(&mut turn);
-    let turn = Arc::new(turn);
-    let step_context = StepContext::for_test(Arc::clone(&turn));
+    ToolPlanProbe::from_router(plan_with_model(&turn, turn.model_info(), inputs))
+}
+
+fn plan_with_model(
+    turn: &TurnContext,
+    model_info: &ModelInfo,
+    inputs: ToolPlanInputs,
+) -> ToolRouter {
+    let mcp = codex_mcp::McpBinding::empty(mcp_config_for_test(&turn.config));
     let mut registry = build_core_tool_registry(
-        step_context.turn.as_ref(),
-        &step_context.environments,
-        step_context.mcp.as_ref(),
+        turn,
+        model_info,
+        &turn.environments,
+        &mcp,
         inputs.tool_suggest_candidates.as_ref(),
         inputs.wait_for_environment_tool_config.as_ref(),
     );
     let hosted_specs = append_source_tools(
-        step_context.turn.as_ref(),
+        turn,
+        model_info,
         &mut registry,
         inputs.tool_runtimes,
         inputs.extension_tool_executors,
         &inputs.dynamic_tools,
     );
-    let router = ToolRouter::from_registry(
-        step_context.turn.as_ref(),
+    ToolRouter::from_registry(
+        turn,
+        model_info,
         registry,
         hosted_specs,
         &Default::default(),
-    );
-    ToolPlanProbe::from_router(router)
+    )
 }
 
 async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
@@ -475,6 +499,13 @@ fn has_parameter(spec: &ToolSpec, parameter_name: &str) -> bool {
         .is_some()
 }
 
+fn has_windows_shell_guidance(spec: &ToolSpec) -> bool {
+    let ToolSpec::Function(tool) = spec else {
+        return false;
+    };
+    tool.description.contains("Windows safety rules:")
+}
+
 fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
     match spec {
         ToolSpec::Freeform(tool) if tool.name == "apply_patch" => {
@@ -497,6 +528,7 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -548,6 +580,7 @@ async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -583,6 +616,7 @@ async fn internal_guardian_sessions_preserve_code_mode() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -652,6 +686,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -867,7 +902,47 @@ async fn shell_family_registers_only_unified_exec_tools() {
 
     plan.assert_visible_contains(&["exec_command", "write_stdin"]);
     plan.assert_registered_contains(&["exec_command", "write_stdin"]);
+    assert!(plan.has_terminal_controls);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
+}
+
+#[tokio::test]
+async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
+    let opposite_host_os = if cfg!(windows) { "linux" } else { "windows" };
+    for (platform_os, multiple_environments, expect_windows_guidance) in [
+        (Some("windows"), false, true),
+        (Some("linux"), false, false),
+        (None, false, cfg!(windows)),
+        (Some(opposite_host_os), true, cfg!(windows)),
+    ] {
+        let plan = probe(|turn| {
+            set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+            set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+            update_turn_settings_for_test(turn, |settings| {
+                Arc::make_mut(&mut settings.model_info).shell_type =
+                    ConfigShellToolType::UnifiedExec;
+            });
+            let TurnEnvironmentState::Ready(environment) = turn
+                .environments
+                .environments
+                .first_mut()
+                .expect("primary environment")
+            else {
+                panic!("primary environment should be ready");
+            };
+            environment.executor_platform_os = platform_os.map(str::to_string);
+            if multiple_environments {
+                duplicate_primary_environment(turn);
+            }
+        })
+        .await;
+
+        assert_eq!(
+            has_windows_shell_guidance(plan.visible_spec("exec_command")),
+            expect_windows_guidance,
+            "unexpected guidance for executor platform {platform_os:?} with multiple_environments={multiple_environments}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -907,6 +982,7 @@ async fn login_shell_parameter_follows_selected_environment() {
                 has_parameter(plan.visible_spec("exec_command"), "login"),
                 allow_login_shell
             );
+            assert!(plan.has_terminal_controls);
         }
     }
 }
@@ -959,6 +1035,7 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
     .await;
     remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
     remote_environment.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    assert!(!remote_environment.has_terminal_controls);
 
     let multiple_local_environments = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
@@ -1159,6 +1236,7 @@ async fn environment_count_controls_environment_backed_tools() {
         "view_image",
         "request_permissions",
     ]);
+    assert!(!no_environment.has_terminal_controls);
 
     let multiple_environments = probe(|turn| {
         duplicate_primary_environment(turn);
@@ -1176,6 +1254,7 @@ async fn environment_count_controls_environment_backed_tools() {
         "view_image",
         "request_permissions",
     ]);
+    assert!(multiple_environments.has_terminal_controls);
     assert!(has_parameter(
         multiple_environments.visible_spec("exec_command"),
         "environment_id"
@@ -1206,14 +1285,16 @@ async fn environment_tools_follow_the_step_context() {
 
     let plan = ToolPlanProbe::from_router(ToolRouter::from_registry(
         turn.as_ref(),
+        turn.model_info(),
         build_core_tool_registry(
             turn.as_ref(),
+            turn.model_info(),
             &environments,
             mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
             /*wait_for_environment_tool_config*/ None,
         ),
-        super::hosted_model_tool_specs(turn.as_ref(), &[]),
+        super::hosted_model_tool_specs(turn.as_ref(), turn.model_info(), &[]),
         &Default::default(),
     ));
 
@@ -1424,9 +1505,8 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
 #[tokio::test]
 async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
-    for enabled in [false, true] {
-        let mut metadata_state = None;
-        probe_with(
+    for (enabled, use_responses_lite) in [(false, true), (true, false), (true, true)] {
+        let plan = probe_with(
             |turn| {
                 update_config(turn, |config| {
                     config.tool_registry.turn_metadata_includes_tool_info = enabled;
@@ -1434,9 +1514,8 @@ async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
                 set_feature(turn, Feature::CodeMode, /*enabled*/ true);
                 update_turn_settings_for_test(turn, |settings| {
                     Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-                    Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
+                    Arc::make_mut(&mut settings.model_info).use_responses_lite = use_responses_lite;
                 });
-                metadata_state = Some(Arc::clone(&turn.turn_metadata_state));
             },
             ToolPlanInputs {
                 tool_runtimes: vec![
@@ -1453,18 +1532,14 @@ async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
         )
         .await;
 
-        let metadata = metadata_state
-            .expect("tool planning should capture the turn metadata")
-            .to_responses_metadata(
-                "installation".to_string(),
-                "window".to_string(),
-                CodexResponsesRequestKind::Turn,
+        let Some(namespaces) = plan.tool_namespaces_info else {
+            assert!(
+                !enabled || !use_responses_lite,
+                "opted-in Responses Lite planning should return namespaces"
             );
-        let Some(namespaces) = metadata.tool_namespaces_info else {
-            assert!(!enabled, "opted-in tool planning should publish namespaces");
             continue;
         };
-        assert!(enabled, "tool namespaces require opt-in");
+        assert!(enabled && use_responses_lite);
 
         let namespace = namespaces
             .get("mcp__registry")
@@ -1498,6 +1573,80 @@ async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
 }
 
 #[tokio::test]
+async fn candidate_model_plan_leaves_selected_model_and_inventory_unchanged() {
+    let (_session, mut turn) = make_session_and_context().await;
+    set_features(&mut turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+    update_config(&mut turn, |config| {
+        config.tool_registry.turn_metadata_includes_tool_info = true;
+    });
+    update_turn_settings_for_test(&mut turn, |settings| {
+        let model = Arc::make_mut(&mut settings.model_info);
+        model.tool_mode = Some(ToolMode::Direct);
+        model.use_responses_lite = true;
+        model.shell_type = ConfigShellToolType::Disabled;
+        model.apply_patch_tool_type = None;
+    });
+    let selected_model = Arc::clone(turn.model_info());
+    let selected = ToolPlanProbe::from_router(plan_with_model(
+        &turn,
+        turn.model_info(),
+        ToolPlanInputs::default(),
+    ));
+    let selected_inventory = selected
+        .tool_namespaces_info
+        .clone()
+        .expect("selected plan inventory");
+    turn.turn_metadata_state
+        .set_tool_namespaces_info(selected_inventory.clone());
+
+    let mut candidate_model = selected_model.as_ref().clone();
+    candidate_model.tool_mode = Some(ToolMode::CodeModeOnly);
+    candidate_model.shell_type = ConfigShellToolType::UnifiedExec;
+    candidate_model.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    let candidate = ToolPlanProbe::from_router(plan_with_model(
+        &turn,
+        &candidate_model,
+        ToolPlanInputs::default(),
+    ));
+
+    candidate.assert_visible_contains(&["exec", "wait"]);
+    candidate.assert_visible_lacks(&["exec_command", "write_stdin", "apply_patch"]);
+    candidate.assert_registered_contains(&["exec_command", "write_stdin", "apply_patch"]);
+    assert_eq!(candidate.tool_mode, ToolMode::CodeModeOnly);
+    assert!(candidate.requires_code_mode_worker);
+    assert!(candidate.has_terminal_controls);
+    assert_eq!(
+        candidate
+            .tool_namespaces_info
+            .as_ref()
+            .expect("candidate inventory")["functions"]
+            .functions["apply_patch"],
+        TurnToolFunctionInfo {
+            name: "apply_patch".to_string(),
+            direct: false,
+            code_mode_name: Some("apply_patch".to_string()),
+            deferred: false,
+            source: TurnToolSource::Harness,
+        }
+    );
+    let metadata = turn.turn_metadata_state.to_responses_metadata(
+        "installation".to_string(),
+        "window".to_string(),
+        CodexResponsesRequestKind::Turn,
+    );
+    assert_eq!(metadata.tool_namespaces_info, Some(selected_inventory));
+    assert_eq!(turn.model_info(), &selected_model);
+    assert_eq!(
+        ToolPlanProbe::from_router(plan_with_model(
+            &turn,
+            turn.model_info(),
+            ToolPlanInputs::default(),
+        )),
+        selected,
+    );
+}
+
+#[tokio::test]
 async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
     for (enabled, second_exposure) in [
         (false, ToolExposure::Direct),
@@ -1515,6 +1664,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
         let step_context = StepContext::for_test(Arc::new(turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
@@ -1536,6 +1686,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
         .collect();
         let hosted_specs = append_source_tools(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &mut registry,
             runtimes,
             Vec::new(),
@@ -1543,6 +1694,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
         );
         let result = super::finalize_tool_router(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             registry,
             hosted_specs,
             &Default::default(),
@@ -1772,6 +1924,7 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
         let step_context = StepContext::for_test(Arc::clone(&turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             inputs.tool_suggest_candidates.as_ref(),
@@ -1779,6 +1932,7 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
         );
         let hosted_specs = append_source_tools(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &mut registry,
             inputs.tool_runtimes,
             inputs.extension_tool_executors,
@@ -1787,6 +1941,7 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
 
         let error = super::finalize_tool_router(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             registry,
             hosted_specs,
             &Default::default(),
@@ -1915,7 +2070,6 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
         (true, ToolExposure::Direct, true),
         (true, ToolExposure::Deferred, false),
     ] {
-        let mut metadata_state = None;
         let plan = probe_with(
             |turn| {
                 update_config(turn, |config| {
@@ -1929,7 +2083,6 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
                     Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
                     Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
                 });
-                metadata_state = Some(Arc::clone(&turn.turn_metadata_state));
             },
             ToolPlanInputs {
                 tool_runtimes: vec![mcp_runtime(
@@ -1961,17 +2114,14 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
             },
         );
 
-        let metadata = metadata_state
-            .expect("tool planning should capture the turn metadata")
-            .to_responses_metadata(
-                "installation".to_string(),
-                "window".to_string(),
-                CodexResponsesRequestKind::Turn,
-            );
-        let tool_namespaces = metadata
+        let tool_namespaces = plan
             .tool_namespaces_info
             .as_ref()
-            .expect("opted-in Responses Lite should receive the supported tools");
+            .expect("opted-in Responses Lite plan should contain the supported tools");
+        assert_eq!(
+            plan.code_mode_tool_names.get("normalized_alias__lookup"),
+            Some(&winner_name),
+        );
         assert_eq!(
             tool_namespaces["normalized-alias"].functions["lookup"]
                 .code_mode_name
@@ -2040,6 +2190,7 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let first_step_context = StepContext::for_test(Arc::clone(&first_turn));
     let mut first_registry = build_core_tool_registry(
         first_step_context.turn.as_ref(),
+        first_step_context.turn.model_info(),
         &first_step_context.environments,
         first_step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -2049,8 +2200,13 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     first_registry.register_external_with_exposure(first_tool.runtime, first_tool.exposure);
     let first_router = ToolRouter::from_registry(
         first_step_context.turn.as_ref(),
+        first_step_context.turn.model_info(),
         first_registry,
-        super::hosted_model_tool_specs(first_step_context.turn.as_ref(), &[]),
+        super::hosted_model_tool_specs(
+            first_step_context.turn.as_ref(),
+            first_step_context.turn.model_info(),
+            &[],
+        ),
         &cache,
     );
     let first_plan = ToolPlanProbe::from_router(first_router);
@@ -2063,6 +2219,7 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let second_step_context = StepContext::for_test(Arc::clone(&second_turn));
     let mut second_registry = build_core_tool_registry(
         second_step_context.turn.as_ref(),
+        second_step_context.turn.model_info(),
         &second_step_context.environments,
         second_step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -2072,8 +2229,13 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     second_registry.register_external_with_exposure(second_tool.runtime, second_tool.exposure);
     let second_router = ToolRouter::from_registry(
         second_step_context.turn.as_ref(),
+        second_step_context.turn.model_info(),
         second_registry,
-        super::hosted_model_tool_specs(second_step_context.turn.as_ref(), &[]),
+        super::hosted_model_tool_specs(
+            second_step_context.turn.as_ref(),
+            second_step_context.turn.model_info(),
+            &[],
+        ),
         &cache,
     );
     let second_plan = ToolPlanProbe::from_router(second_router);
@@ -2117,6 +2279,7 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
         let step_context = StepContext::for_test(Arc::clone(&turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
@@ -2131,8 +2294,13 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
         registry.register_external_with_exposure(tool.runtime, tool.exposure);
         let router = ToolRouter::from_registry(
             step_context.turn.as_ref(),
+            step_context.turn.model_info(),
             registry,
-            super::hosted_model_tool_specs(step_context.turn.as_ref(), &[]),
+            super::hosted_model_tool_specs(
+                step_context.turn.as_ref(),
+                step_context.turn.model_info(),
+                &[],
+            ),
             &cache,
         );
         let plan = ToolPlanProbe::from_router(router);
@@ -2303,6 +2471,10 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
+    assert_eq!(
+        (plain.tool_mode, plain.requires_code_mode_worker),
+        (ToolMode::Direct, false)
+    );
 
     let code_mode_only = probe_with(
         |turn| {
@@ -2322,6 +2494,13 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
+    assert_eq!(
+        (
+            code_mode_only.tool_mode,
+            code_mode_only.requires_code_mode_worker
+        ),
+        (ToolMode::CodeModeOnly, true),
+    );
     assert_eq!(
         code_mode_only.namespace_function_names("codex_app"),
         Vec::<String>::new().as_slice()
@@ -2484,6 +2663,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     })
     .await;
     v1.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
+    assert!(v1.can_manage_children);
     v1.assert_visible_lacks(&[
         "spawn_agent",
         "send_input",
@@ -2524,7 +2704,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    for property in ["model", "reasoning_effort", "service_tier"] {
+    for property in ["model", "reasoning_effort"] {
         assert!(
             properties.contains_key(property),
             "expected v1 spawn_agent to expose `{property}`"
@@ -2540,6 +2720,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     })
     .await;
     v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert!(v2.can_manage_children);
     v2.assert_visible_lacks(&[
         "spawn_agent",
         "send_message",
@@ -2674,6 +2855,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
     );
     plan.assert_visible_lacks(&["clock"]);
     plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
+    assert!(plan.can_manage_children);
 }
 
 #[tokio::test]
@@ -2856,6 +3038,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 
         let spawn_agent_name = ToolName::namespaced("agents", "spawn_agent").to_string();
         let followup_task_name = ToolName::namespaced("agents", "followup_task").to_string();
+        assert_eq!(plan.can_manage_children, supports_delegation);
         if supports_delegation {
             plan.assert_visible_contains(&["agents"]);
             plan.assert_registered_contains(&[&spawn_agent_name, &followup_task_name]);

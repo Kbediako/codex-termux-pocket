@@ -229,6 +229,25 @@ async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn load_config_applies_optional_mcp_startup_grace() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str("mcp_optional_startup_grace_ms = 2500")
+        .expect("optional MCP startup grace should parse from config.toml");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.mcp_optional_startup_grace,
+        Duration::from_millis(2500)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_toml_parsing() {
     let history_with_persistence = r#"
 [history]
@@ -6754,6 +6773,7 @@ approval_mode = "approve"
         server.tools.get("search"),
         Some(&McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         })
     );
 }
@@ -6797,6 +6817,7 @@ approval_mode = "approve"
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
 }

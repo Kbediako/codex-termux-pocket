@@ -63,6 +63,7 @@ use rmcp::model::JsonObject;
 use rmcp::model::ListToolsResult;
 use rmcp::model::MetaObject;
 use rmcp::model::PrimitiveSchemaDefinition;
+use rmcp::model::ProtocolVersion;
 use rmcp::model::RequestMetaObject;
 use rmcp::model::ServerCapabilities;
 use rmcp::model::ServerInfo;
@@ -75,6 +76,7 @@ use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -90,6 +92,7 @@ const LARGE_OUTPUT_AUTO_COMPACT_LIMIT: i64 = 1_000_000;
 pub(super) const TEST_SERVER_NAME: &str = "tool_server";
 pub(super) const TEST_TOOL_NAME: &str = "echo_tool";
 const LARGE_RESPONSE_MESSAGE: &str = "large";
+const PROTOCOL_ERROR_MESSAGE: &str = "protocol-error";
 const ELICITATION_TRIGGER_MESSAGE: &str = "confirm";
 const ELICITATION_MESSAGE: &str = "Allow this request?";
 const URL_ELICITATION_TRIGGER_MESSAGE: &str = "auth";
@@ -160,6 +163,73 @@ async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
     mcp_server_handle.abort();
     let _ = mcp_server_handle.await;
 
+    Ok(())
+}
+
+#[test_case(ProtocolVersion::V_2025_06_18; "legacy")]
+#[test_case(ProtocolVersion::V_2026_07_28; "modern")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_server_tool_call_preserves_protocol_errors(protocol: ProtocolVersion) -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server(/*sensitive_action*/ None).await?;
+    let codex_home = TempDir::new()?;
+    let config = mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT);
+    let config = if protocol == ProtocolVersion::V_2026_07_28 {
+        config.enable_feature(Feature::Mcp20260728)
+    } else {
+        config.disable_feature(Feature::Mcp20260728)
+    };
+    config.write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp.start_thread(ThreadStartParams::default()).await?;
+
+    for (server, expected_error) in [
+        (
+            TEST_SERVER_NAME,
+            json!({
+                "code": -32043,
+                "message": "tool authorization required",
+                "data": {
+                    "tool": TEST_TOOL_NAME,
+                    "protocolVersion": protocol,
+                    "_meta": {"_codex_apps": {"connector_auth_failure": {
+                        "is_auth_failure": true,
+                        "connector_id": "calendar",
+                        "requested_scopes": ["calendar.read"],
+                    }}},
+                },
+            }),
+        ),
+        (
+            "missing",
+            json!({"code": -32603, "message": "unknown MCP server 'missing'"}),
+        ),
+    ] {
+        let request_id = mcp
+            .send_mcp_server_tool_call_request(McpServerToolCallParams {
+                thread_id: thread.id.clone(),
+                server: server.to_string(),
+                tool: TEST_TOOL_NAME.to_string(),
+                arguments: Some(json!({"message": PROTOCOL_ERROR_MESSAGE})),
+                meta: None,
+            })
+            .await?;
+        let error = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert_eq!(
+            serde_json::to_value(error)?,
+            json!({"id": request_id, "error": expected_error})
+        );
+    }
+
+    mcp_server_handle.abort();
+    let _ = mcp_server_handle.await;
     Ok(())
 }
 
@@ -1310,6 +1380,22 @@ impl ServerHandler for ToolAppsMcpServer {
                     "_meta": { "approvals_reviewer": "auto_review" },
                 })
             );
+        }
+
+        if message == PROTOCOL_ERROR_MESSAGE {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32043),
+                "tool authorization required",
+                Some(json!({
+                    "tool": request.name,
+                    "protocolVersion": context.protocol_version(),
+                    "_meta": {"_codex_apps": {"connector_auth_failure": {
+                        "is_auth_failure": true,
+                        "connector_id": "calendar",
+                        "requested_scopes": ["calendar.read"],
+                    }}},
+                })),
+            ));
         }
 
         if message == LARGE_RESPONSE_MESSAGE {

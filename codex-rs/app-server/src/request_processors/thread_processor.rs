@@ -2426,11 +2426,25 @@ impl ThreadRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadShellCommandParams,
     ) -> Result<ThreadShellCommandResponse, JSONRPCErrorError> {
-        let ThreadShellCommandParams { thread_id, command } = params;
+        let ThreadShellCommandParams {
+            thread_id,
+            command,
+            timeout_ms,
+        } = params;
         let command = command.trim().to_string();
         if command.is_empty() {
             return Err(invalid_request("command must not be empty"));
         }
+
+        let timeout_ms = timeout_ms
+            .map(|timeout_ms| {
+                u64::try_from(timeout_ms).map_err(|_| {
+                    invalid_params(format!(
+                        "thread/shellCommand timeoutMs must be non-negative, got {timeout_ms}"
+                    ))
+                })
+            })
+            .transpose()?;
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
@@ -2449,7 +2463,10 @@ impl ThreadRequestProcessor {
         self.submit_core_op(
             request_id,
             thread.as_ref(),
-            Op::RunUserShellCommand { command },
+            Op::RunUserShellCommand {
+                command,
+                timeout_ms,
+            },
         )
         .await
         .map_err(|err| internal_error(format!("failed to start shell command: {err}")))?;

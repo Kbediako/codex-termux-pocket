@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::agents_md::LoadedAgentsMd;
+use crate::config::TokenBudgetConfig;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::step_settings::ResolvedStepSettings;
 use crate::session::turn_context::TurnContext;
@@ -15,6 +16,8 @@ pub(crate) struct StepContext {
     pub(crate) turn: Arc<TurnContext>,
     /// One immutable settings version captured before request preparation.
     pub(crate) settings: Arc<ResolvedStepSettings>,
+    /// Frozen turn preferences resolved against this step's captured model.
+    pub(crate) token_budget: Option<TokenBudgetConfig>,
     /// Telemetry context tagged with this sampling request's model.
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) environments: TurnEnvironmentSnapshot,

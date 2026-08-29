@@ -21,7 +21,6 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
-use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
@@ -37,8 +36,7 @@ use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
-use codex_utils_output_truncation::truncate_function_output_items_with_policy;
-use codex_utils_output_truncation::truncate_text;
+use codex_utils_output_truncation::truncate_function_output_payload;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -171,7 +169,7 @@ impl ContextManager {
         self.record_items_with_metadata(items.into_iter().map(|item| (item, None)), policy);
     }
 
-    /// Records history envelopes while preserving their history-only metadata.
+    /// Records output while preserving its history-only metadata.
     pub(crate) fn record_annotated_items(
         &mut self,
         items: &[ResponseItemEnvelope],
@@ -196,10 +194,20 @@ impl ContextManager {
                 continue;
             }
 
-            let processed = ResponseItemEnvelope {
-                item: Self::process_item(item, policy),
+            let mut processed = ResponseItemEnvelope {
+                item: item.clone(),
                 metadata: metadata.cloned(),
             };
+            if let ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
+            {
+                // The override already includes the tool's serialization allowance.
+                let policy = metadata
+                    .and_then(|metadata| metadata.fallback_token_limit_override)
+                    .map(TruncationPolicy::Tokens)
+                    .unwrap_or(policy * 1.2);
+                truncate_function_output_payload(output, policy, estimate_audio_token_count);
+            }
             Arc::make_mut(&mut self.items).push(processed);
         }
     }
@@ -473,55 +481,6 @@ impl ContextManager {
         normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
-    fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
-        let policy_with_serialization_budget = policy * 1.2;
-        match item {
-            ResponseItem::FunctionCallOutput {
-                id,
-                call_id,
-                name,
-                namespace,
-                output,
-                internal_chat_message_metadata_passthrough: metadata,
-            } => ResponseItem::FunctionCallOutput {
-                id: id.clone(),
-                call_id: call_id.clone(),
-                name: name.clone(),
-                namespace: namespace.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
-                internal_chat_message_metadata_passthrough: metadata.clone(),
-            },
-            ResponseItem::CustomToolCallOutput {
-                id,
-                call_id,
-                name,
-                output,
-                internal_chat_message_metadata_passthrough: metadata,
-            } => ResponseItem::CustomToolCallOutput {
-                id: id.clone(),
-                call_id: call_id.clone(),
-                name: name.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
-                internal_chat_message_metadata_passthrough: metadata.clone(),
-            },
-            ResponseItem::AdditionalTools { .. }
-            | ResponseItem::Message { .. }
-            | ResponseItem::AgentMessage { .. }
-            | ResponseItem::Reasoning { .. }
-            | ResponseItem::LocalShellCall { .. }
-            | ResponseItem::FunctionCall { .. }
-            | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::ToolSearchOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::Compaction { .. }
-            | ResponseItem::CompactionTrigger { .. }
-            | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => item.clone(),
-        }
-    }
-
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
     ///
     /// Returns the adjusted cut index after removing contextual developer/user items immediately
@@ -567,25 +526,6 @@ impl ContextManager {
             }
         }
         cut_idx
-    }
-}
-
-pub(crate) fn truncate_function_output_payload(
-    output: &FunctionCallOutputPayload,
-    policy: TruncationPolicy,
-) -> FunctionCallOutputPayload {
-    let body = match &output.body {
-        FunctionCallOutputBody::Text(content) => {
-            FunctionCallOutputBody::Text(truncate_text(content, policy))
-        }
-        FunctionCallOutputBody::ContentItems(items) => FunctionCallOutputBody::ContentItems(
-            truncate_function_output_items_with_policy(items, policy, estimate_audio_token_count),
-        ),
-    };
-
-    FunctionCallOutputPayload {
-        body,
-        success: output.success,
     }
 }
 

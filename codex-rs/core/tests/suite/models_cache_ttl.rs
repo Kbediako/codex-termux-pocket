@@ -544,5 +544,6 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
     }
 }

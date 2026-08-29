@@ -3,6 +3,7 @@ use codex_config::McpServerConfig;
 use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
+use codex_core::config::TokenBudgetConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
@@ -12,10 +13,13 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
+use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SafetyBufferingEvent;
@@ -337,6 +341,188 @@ async fn settings_updates_preserve_turn_identity_and_target(target: SettingsTarg
         Some("original-turn-state".to_string())
     );
     assert_eq!(requests[2].header(TURN_STATE_HEADER), None);
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TokenBudgetScenario {
+    ModelDefaults,
+    ExplicitDefaultTemplate,
+    ReloadPreferences,
+    DestinationWindowOnly,
+    InitialWindowOnly,
+    DestinationWithoutGuidance,
+}
+
+#[test_case(TokenBudgetScenario::ModelDefaults)]
+#[test_case(TokenBudgetScenario::ExplicitDefaultTemplate)]
+#[test_case(TokenBudgetScenario::ReloadPreferences)]
+#[test_case(TokenBudgetScenario::DestinationWindowOnly)]
+#[test_case(TokenBudgetScenario::InitialWindowOnly)]
+#[test_case(TokenBudgetScenario::DestinationWithoutGuidance)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_model_switch_resolves_token_budget_from_original_preferences(
+    scenario: TokenBudgetScenario,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let explicit_default_template =
+        matches!(scenario, TokenBudgetScenario::ExplicitDefaultTemplate);
+    let reload_user_config = matches!(scenario, TokenBudgetScenario::ReloadPreferences);
+    let context_window_model = match scenario {
+        TokenBudgetScenario::DestinationWindowOnly => Some(MODEL_B),
+        TokenBudgetScenario::InitialWindowOnly => Some(MODEL_A),
+        TokenBudgetScenario::ModelDefaults
+        | TokenBudgetScenario::ExplicitDefaultTemplate
+        | TokenBudgetScenario::ReloadPreferences
+        | TokenBudgetScenario::DestinationWithoutGuidance => None,
+    };
+    let destination_has_guidance =
+        !matches!(scenario, TokenBudgetScenario::DestinationWithoutGuidance);
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            paused_response("resp-1", "pause-before-model-budget-switch"),
+            paused_response("resp-2", "pause-after-model-budget-switch"),
+            sse_completed("resp-3"),
+        ],
+    )
+    .await;
+    let test = step_settings_test()
+        .with_pre_build_hook(move |home| {
+            let config = if explicit_default_template {
+                let default_template = TokenBudgetConfig::default().reminder_message_template;
+                format!(
+                    "[features.token_budget]\nenabled = true\nreminder_message_template = {default_template:?}\n"
+                )
+            } else {
+                "[features.token_budget]\nenabled = true\n".to_string()
+            };
+            std::fs::write(home.join("config.toml"), config)
+                .expect("write token-budget preferences");
+        })
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::TokenBudget)
+                .expect("enable token-budget feature");
+            if context_window_model.is_some() {
+                config.model_context_window = None;
+            }
+            for model in &mut config
+                .model_catalog
+                .as_mut()
+                .expect("controlled model catalog")
+                .models
+            {
+                let slug = model.slug.clone();
+                let initial_model = slug == MODEL_A;
+                if let Some(context_window_model) = context_window_model {
+                    model.context_window = (slug == context_window_model).then_some(128_000);
+                    model.max_context_window = None;
+                }
+                model
+                    .model_messages
+                    .as_mut()
+                    .expect("model messages")
+                    .token_budget = (initial_model || destination_has_guidance).then(|| ModelTokenBudgetConfig {
+                    reminder_threshold_tokens: if initial_model { 8_000 } else { 2_000 },
+                    reminder_message_template: format!(
+                        "Reminder for {slug}: {{n_remaining}} tokens remain."
+                    ),
+                    guidance_message: format!("Use {slug} token-budget guidance."),
+                    auto_compact_fallback_prompt: format!("Save {slug} state before rollover."),
+                    auto_compact_fallback_buffer_tokens: if initial_model {
+                        16_000
+                    } else {
+                        4_000
+                    },
+                });
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let request = start_paused_turn(&test.codex).await?;
+
+    if reload_user_config {
+        std::fs::write(
+            test.codex_home_path().join("config.toml"),
+            "[features.token_budget]\nenabled = true\nreminder_message_template = \"Reloaded reminder\"\n",
+        )?;
+        test.codex.submit(Op::ReloadUserConfig).await?;
+    }
+
+    assert_eq!(
+        submit_turn_settings(
+            &test.codex,
+            &request.turn_id,
+            TurnSettingsUpdate {
+                model: Some(MODEL_B.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    answer_paused_turn(&test.codex, &request.turn_id).await?;
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    answer_paused_turn(&test.codex, &request.turn_id).await?;
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::Error(error) => panic!("settings activation failed: {}", error.message),
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    let initial_guidance = format!("Use {MODEL_A} token-budget guidance.");
+    let initial_guidance_expected =
+        !explicit_default_template && context_window_model != Some(MODEL_B);
+    assert_eq!(
+        requests[0].body_contains_text(&initial_guidance),
+        initial_guidance_expected
+    );
+    let mut expected_guidance = Vec::new();
+    if initial_guidance_expected {
+        expected_guidance.push(format!(
+            "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\n{initial_guidance}\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
+        ));
+    }
+    if !explicit_default_template
+        && destination_has_guidance
+        && context_window_model != Some(MODEL_A)
+    {
+        let replacement_notice = if initial_guidance_expected {
+            "This context-window guidance replaces all previously provided context-window guidance.\n\n"
+        } else {
+            ""
+        };
+        expected_guidance.push(format!(
+            "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\n{replacement_notice}Use {MODEL_B} token-budget guidance.\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
+        ));
+    } else if initial_guidance_expected {
+        expected_guidance.push(format!(
+            "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\nThe previously provided context-window guidance no longer applies.\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
+        ));
+    }
+    for request in &requests[1..] {
+        let guidance = request
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with(CONTEXT_WINDOW_GUIDANCE_OPEN_TAG))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guidance, expected_guidance,
+            "preserve history and append the guidance transition only once"
+        );
+    }
 
     Ok(())
 }

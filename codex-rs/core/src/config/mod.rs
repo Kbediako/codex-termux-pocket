@@ -73,6 +73,7 @@ use codex_features::Features;
 use codex_features::FeaturesToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
+use codex_features::SleepToolMode;
 use codex_features::TokenBudgetConfigToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_http_client::HttpClientFactory;
@@ -80,6 +81,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_install_context::InstallContext;
 use codex_login::AuthManagerConfig;
 use codex_login::AuthRouteConfig;
+use codex_mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
 use codex_mcp::McpConfig;
 use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpProtocolMode;
@@ -140,6 +142,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::permissions::BUILT_IN_READ_ONLY_PROFILE;
 use crate::config::permissions::BUILT_IN_WORKSPACE_PROFILE;
@@ -847,6 +850,9 @@ pub struct Config {
     /// to 127.0.0.1 (using `mcp_oauth_callback_port` when provided).
     pub mcp_oauth_callback_url: Option<String>,
 
+    /// How long to wait for optional MCP servers while building the initial tool catalog.
+    pub mcp_optional_startup_grace: Duration,
+
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
@@ -1040,6 +1046,8 @@ pub struct Config {
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
     pub current_time_reminder: Option<CurrentTimeReminderConfig>,
+    /// How the sleep tool is selected when its feature gate is enabled.
+    pub sleep_tool_mode: SleepToolMode,
 
     /// Centralized feature flags; source of truth for feature gating.
     pub features: ManagedFeatures,
@@ -1731,6 +1739,7 @@ impl Config {
             auth_keyring_backend_kind: self.auth_keyring_backend_kind(),
             mcp_oauth_callback_port: self.mcp_oauth_callback_port,
             mcp_oauth_callback_url: self.mcp_oauth_callback_url.clone(),
+            optional_mcp_startup_grace: self.mcp_optional_startup_grace,
             skill_mcp_dependency_install_enabled: self
                 .features
                 .enabled(Feature::SkillMcpDependencyInstall),
@@ -3678,6 +3687,15 @@ impl Config {
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
+        let sleep_tool_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.sleep_tool.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.mode,
+            })
+            .unwrap_or_default();
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
         let agent_roles =
@@ -4165,6 +4183,10 @@ impl Config {
             ),
             mcp_oauth_callback_port: cfg.mcp_oauth_callback_port,
             mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
+            mcp_optional_startup_grace: cfg
+                .mcp_optional_startup_grace_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
@@ -4272,6 +4294,7 @@ impl Config {
             token_budget,
             rollout_budget,
             current_time_reminder,
+            sleep_tool_mode,
             features,
             suppress_unstable_features_warning: cfg
                 .suppress_unstable_features_warning

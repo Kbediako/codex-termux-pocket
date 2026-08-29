@@ -1507,7 +1507,7 @@ impl App {
                         config.permissions.active_permission_profile().as_ref(),
                         self.runtime_permission_profile_override
                             .as_ref()
-                            .map(|profile| &profile.permission_profile),
+                            .and_then(RuntimePermissionProfileOverride::turn_permission_profile),
                     );
                     if turn_permissions_overrides(permissions_override, config.cwd.as_path())
                         .is_ok()

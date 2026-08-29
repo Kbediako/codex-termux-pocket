@@ -144,6 +144,9 @@ pub(super) async fn spawn_review_thread(
         trace_id: current_span_trace_id(),
         realtime_active: parent_turn_context.realtime_active,
         code_mode_available: parent_turn_context.code_mode_available,
+        configured_token_budget: per_turn_config.token_budget.clone(),
+        use_model_token_budget_defaults: per_turn_config.features.enabled(Feature::TokenBudget)
+            && !super::token_budget::has_explicit_settings(&per_turn_config),
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         initial_settings: Arc::clone(&step_settings),

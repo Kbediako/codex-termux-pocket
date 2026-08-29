@@ -2220,6 +2220,58 @@ fn executor_stop_hooks_register_only_the_first_environment_and_handler() {
 }
 
 #[tokio::test]
+async fn executor_interrupt_hooks_register_and_run() {
+    let (mut engine, calls, stop_request, expected_stop_call, mut source) =
+        executor_stop_hook_fixture();
+    source.hooks.interrupt = source.hooks.stop.clone();
+    engine.set_executor_hooks(vec![source]);
+
+    assert_eq!(
+        engine
+            .handlers
+            .iter()
+            .map(|handler| handler.event_name)
+            .collect::<Vec<_>>(),
+        vec![HookEventName::Stop, HookEventName::Interrupt]
+    );
+    assert_eq!(engine.preview_interrupt(), Vec::new());
+
+    let outcome = engine
+        .run_interrupt(InterruptRequest {
+            session_id: stop_request.session_id,
+            turn_id: stop_request.turn_id,
+            cwd: stop_request.cwd,
+            transcript_path: stop_request.transcript_path,
+            model: stop_request.model,
+            permission_mode: stop_request.permission_mode,
+            request_metadata: stop_request.request_metadata,
+        })
+        .await;
+    wait_for_mcp_calls(&calls, /*count*/ 1).await;
+
+    assert!(outcome.hook_events.is_empty());
+    assert_eq!(
+        *calls.lock().expect("lock MCP calls"),
+        vec![expected_stop_call]
+    );
+}
+
+#[test]
+fn executor_hooks_use_one_environment_for_all_events() {
+    let (mut engine, _, _, _, mut first_source) = executor_stop_hook_fixture();
+    first_source.hooks.interrupt = std::mem::take(&mut first_source.hooks.stop);
+    engine.set_executor_hooks(vec![first_source.clone()]);
+    let expected_handlers = engine.handlers.clone();
+    let mut second_source = first_source.clone();
+    second_source.environment_id = "executor-b".to_string();
+    second_source.hooks.stop = std::mem::take(&mut second_source.hooks.interrupt);
+
+    engine.set_executor_hooks(vec![first_source, second_source]);
+
+    assert_eq!(engine.handlers, expected_handlers);
+}
+
+#[tokio::test]
 async fn memory_consolidation_stop_preserves_policy_and_executor_cleanup() {
     for (source, runs_policy) in [
         (HookSource::User, false),
@@ -2482,6 +2534,7 @@ async fn mcp_interrupt_hooks_expand_event_input_and_bound_timeout() {
             transcript_path: None,
             model: "gpt-test".to_string(),
             permission_mode: "default".to_string(),
+            request_metadata: None,
         })
         .await;
 

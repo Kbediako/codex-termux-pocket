@@ -233,7 +233,7 @@ print({python_output_literal})
     Ok(())
 }
 
-fn write_mcp_tool_hook(
+pub(super) fn write_mcp_tool_hook(
     home: &Path,
     event_name: &str,
     matcher: Option<&str>,

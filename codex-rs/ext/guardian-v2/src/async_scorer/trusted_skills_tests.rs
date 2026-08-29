@@ -137,21 +137,25 @@ async fn rejects_skills_that_escape_user_roots_through_symlinks() -> Result<()> 
 
 #[test]
 fn invoked_skill_paths_are_deduplicated_and_bounded() {
-    let skills = TrustedSkillInvocations::default();
+    let mut skills = TrustedSkillInvocations::default();
     for index in 0..MAX_TRUSTED_SKILLS.saturating_mul(2) {
         let path = format!("/home/user/.codex/skills/{index:03}/SKILL.md");
         skills.record(path.clone());
         skills.record(path);
     }
 
-    let snapshot = skills.snapshot();
-    assert_eq!(snapshot.len(), MAX_TRUSTED_SKILLS);
+    assert_eq!(
+        skills.into_paths(),
+        (0..MAX_TRUSTED_SKILLS)
+            .map(|index| format!("/home/user/.codex/skills/{index:03}/SKILL.md"))
+            .collect::<Vec<_>>()
+    );
 
-    let bounded = TrustedSkillInvocations::default();
+    let mut bounded = TrustedSkillInvocations::default();
     for index in 0..MAX_TRUSTED_SKILLS {
         bounded.record(format!("{index:03}{}", "x".repeat(500)));
     }
-    let snapshot = bounded.snapshot();
+    let snapshot = bounded.into_paths();
     assert!(snapshot.len() < MAX_TRUSTED_SKILLS);
     assert!(snapshot.iter().map(String::len).sum::<usize>() <= MAX_TRUSTED_SKILL_PATHS_BYTES);
 }

@@ -513,6 +513,7 @@ impl<'a> SandboxAttempt<'a> {
                 permissions: exec_server_permissions.into(),
                 cwd: Some(exec_request.windows_sandbox_policy_cwd.clone()),
                 workspace_roots: self.workspace_roots.to_vec(),
+                user_home_dir: None,
                 temporary_directories: None,
                 windows_sandbox_level: executor_windows_sandbox_level(
                     self.windows_sandbox_level,

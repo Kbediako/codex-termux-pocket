@@ -57,11 +57,21 @@ impl App {
         }
         if let Some(profile) = self.runtime_permission_profile_override.as_ref()
             && profile.active_permission_profile.is_some()
-            && (RuntimePermissionProfileOverride::from_config(&config) != *profile
+            && (!profile.matches_config(&config)
                 || config.permissions.profile_workspace_roots()
                     != self.config.permissions.profile_workspace_roots())
         {
             return self.working_directory_error("Permission profile has different settings.");
+        }
+        if let Some(profile) = self.runtime_permission_profile_override.as_ref()
+            && profile.turn_override == RuntimePermissionProfileTurnOverride::Preserve
+            && profile.active_permission_profile.is_none()
+            && !crate::app_server_session::permission_profile_is_safely_represented_by_sandbox_mode(
+                &profile.permission_profile,
+                cwd.as_path(),
+            )
+        {
+            return self.working_directory_error("Permission profile cannot be preserved by /cd.");
         }
         self.apply_runtime_policy_overrides(&mut config);
         if self.runtime_permission_profile_override.is_some() {
@@ -73,11 +83,10 @@ impl App {
             config.approvals_reviewer = reviewer;
         }
         let actual = config.permissions.approval_policy.value();
-        let snapshot = RuntimePermissionProfileOverride::from_config(&config);
         let approval = self.runtime_approval_policy_override;
         let profile = self.runtime_permission_profile_override.as_ref();
         if approval.is_some_and(|p| actual != p.to_core())
-            || profile.is_some_and(|p| snapshot != *p)
+            || profile.is_some_and(|profile| !profile.matches_config(&config))
         {
             return;
         }

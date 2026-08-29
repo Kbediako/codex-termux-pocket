@@ -134,6 +134,11 @@ pub struct McpConfig {
     pub mcp_oauth_callback_port: Option<u16>,
     /// Optional OAuth redirect URI override for MCP login.
     pub mcp_oauth_callback_url: Option<String>,
+    /// How long a tool catalog capture waits for optional MCP servers to initialize.
+    ///
+    /// A zero duration disables the shared grace and waits for each server's
+    /// configured startup timeout instead.
+    pub optional_mcp_startup_grace: Duration,
     /// Whether skill MCP dependency installation prompts are enabled.
     pub skill_mcp_dependency_install_enabled: bool,
     /// Approval policy used for MCP tool calls and MCP elicitation requests.
@@ -174,6 +179,9 @@ pub struct McpConfig {
     /// MCP registrations retain their own package attribution in the catalog.
     pub connector_snapshot: ConnectorSnapshot,
 }
+
+/// Default amount of time a tool catalog capture waits for optional MCP servers.
+pub const DEFAULT_OPTIONAL_MCP_STARTUP_GRACE: Duration = Duration::from_secs(1);
 
 impl McpConfig {
     /// Resolves enabled runtime servers against the exact attachment permissions being published.

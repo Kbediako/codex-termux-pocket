@@ -2762,6 +2762,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 model_specialty: None,
                 tool_mode: None,
                 multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             }],
         },
     )
@@ -3253,13 +3254,28 @@ impl StreamableHttpTestServer {
     }
 }
 
+enum HeadersHelperMode {
+    None,
+    Static,
+    Rotating,
+    RotatingAuthorization,
+}
+
 /// What this tests: Codex can discover and call a Streamable HTTP MCP tool in
 /// both local and remote-aware placements, and the tool observes the expected
 /// environment value from the server process that actually handled the request.
-#[test_case(false; "plain")]
-#[test_case(true; "headers helper")]
+#[test_case(HeadersHelperMode::None; "plain")]
+#[test_case(HeadersHelperMode::Static; "headers helper")]
+#[test_case(HeadersHelperMode::Rotating; "headers helper refreshes rejected tool call")]
+#[test_case(HeadersHelperMode::RotatingAuthorization; "Authorization helper refreshes rejected tool call")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn streamable_http_tool_call_round_trip(with_headers_helper: bool) -> anyhow::Result<()> {
+async fn streamable_http_tool_call_round_trip(mode: HeadersHelperMode) -> anyhow::Result<()> {
+    let with_headers_helper = !matches!(mode, HeadersHelperMode::None);
+    let helper_authorization = matches!(mode, HeadersHelperMode::RotatingAuthorization);
+    let refresh_rejected_call = matches!(
+        mode,
+        HeadersHelperMode::Rotating | HeadersHelperMode::RotatingAuthorization
+    );
     skip_if_no_network!(Ok(()));
     if with_headers_helper && is_remote_test_environment() {
         return Ok(());
@@ -3305,16 +3321,31 @@ async fn streamable_http_tool_call_round_trip(with_headers_helper: bool) -> anyh
     let expected_env_value = "propagated-env-http";
     let Some(http_server) = start_streamable_http_test_server(
         expected_env_value,
-        /*expected_token*/ None,
-        with_headers_helper.then_some("gateway-token"),
+        helper_authorization.then_some("gateway-token"),
+        (with_headers_helper && !helper_authorization).then_some("gateway-token"),
     )
     .await?
     else {
         return Ok(());
     };
     let server_url = http_server.url().to_string();
+    let helper_directory = tempdir()?;
+    let helper_invocations = helper_directory.path().join("helper-invocations");
     let http_headers_helper = with_headers_helper.then(|| {
-        if cfg!(windows) {
+        if refresh_rejected_call {
+            let authorization_arg = if helper_authorization {
+                " --authorization"
+            } else {
+                ""
+            };
+            format!(
+                "\"{}\" --http-headers-helper \"{}\"{authorization_arg}",
+                cargo_bin("test_streamable_http_server")
+                    .expect("streamable HTTP helper binary")
+                    .display(),
+                helper_invocations.display(),
+            )
+        } else if cfg!(windows) {
             r#"echo {"Proxy-Authorization":"Bearer gateway-token"}"#.to_string()
         } else {
             r#"printf '{"Proxy-Authorization":"Bearer gateway-token"}'"#.to_string()
@@ -3345,6 +3376,20 @@ async fn streamable_http_tool_call_round_trip(with_headers_helper: bool) -> anyh
         .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
+
+    if refresh_rejected_call {
+        let control_url = http_server
+            .url()
+            .replace("/mcp", "/test/control/session-post-failure");
+        let response = HttpClientBuilder::new()
+            .build_direct()?
+            .post(control_url)
+            .bearer_auth("gateway-token")
+            .json(&json!({ "status": 401, "remaining": 1 }))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
 
     // Phase 4: submit the user turn that should trigger the MCP tool call.
     fixture
@@ -3404,6 +3449,9 @@ async fn streamable_http_tool_call_round_trip(with_headers_helper: bool) -> anyh
         .and_then(Value::as_str)
         .expect("env snapshot inserted");
     assert_eq!(env_value, expected_env_value);
+    if refresh_rejected_call {
+        assert_eq!(fs::read_to_string(helper_invocations)?, "xx");
+    }
     // Phase 7: verify the scripted model calls were consumed and clean up the
     // placement-aware MCP server.
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;

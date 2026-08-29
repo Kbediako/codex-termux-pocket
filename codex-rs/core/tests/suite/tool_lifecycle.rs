@@ -2,22 +2,29 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
+use codex_extension_api::McpToolResultInput;
 use codex_extension_api::McpToolSource;
 use codex_extension_api::ResponseItem;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
+use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ContentItem;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_LIST_TOOL;
@@ -29,11 +36,19 @@ use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
+use tokio::sync::Notify;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
+use wiremock::Mock;
+use wiremock::Request;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
 
 struct RecordedHistory {
     call_id: String,
@@ -283,6 +298,194 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
         Some("calendar_list_events")
     );
 
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum McpCallMode {
+    Direct,
+    CodeMode,
+}
+
+#[derive(Clone, Copy)]
+enum McpResultProcessing {
+    Unchanged,
+    Replace,
+    Fail,
+}
+
+struct BlockingMcpResultContributor {
+    entered: Mutex<Option<oneshot::Sender<CallToolResult>>>,
+    release: Notify,
+    replacement: Option<CallToolResult>,
+}
+
+impl ToolLifecycleContributor for BlockingMcpResultContributor {
+    fn on_mcp_tool_result<'a>(&'a self, input: McpToolResultInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(input.mcp_tool.source(), &McpToolSource::Connector);
+            assert_eq!(input.mcp_tool.tool_info().tool.name, "calendar_list_events");
+            assert_eq!(input.arguments, &json!({"query": "callback test"}));
+            self.entered
+                .lock()
+                .expect("callback gate lock")
+                .take()
+                .expect("callback should run once")
+                .send(input.result.clone())
+                .expect("test should be waiting for the result");
+            self.release.notified().await;
+            if let Some(replacement) = &self.replacement {
+                *input.result = replacement.clone();
+            }
+        })
+    }
+}
+
+#[test_case(McpCallMode::Direct, McpResultProcessing::Unchanged; "direct_unchanged")]
+#[test_case(McpCallMode::Direct, McpResultProcessing::Replace; "direct_replaced")]
+#[test_case(McpCallMode::Direct, McpResultProcessing::Fail; "direct_error")]
+#[test_case(McpCallMode::CodeMode, McpResultProcessing::Replace; "code_mode_replaced")]
+#[test_case(McpCallMode::CodeMode, McpResultProcessing::Fail; "code_mode_error")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_result_processing_precedes_completion(
+    mode: McpCallMode,
+    processing: McpResultProcessing,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&server).await?;
+    let server_result: CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "server result"}],
+        "structuredContent": {"text": "server result"},
+        "isError": false,
+        "_meta": {"private-mcp-metadata": "server"},
+    }))?;
+    let response_result = server_result.clone();
+    Mock::given(body_partial_json(json!({"method": "tools/call"})))
+        .respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).expect("MCP request JSON");
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": response_result,
+            }))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let replacement = match processing {
+        McpResultProcessing::Unchanged => None,
+        McpResultProcessing::Replace | McpResultProcessing::Fail => {
+            Some(serde_json::from_value(json!({
+                "content": [{"type": "text", "text": "extension result"}],
+                "structuredContent": {"text": "extension result"},
+                "isError": matches!(processing, McpResultProcessing::Fail),
+                "_meta": {"private-mcp-metadata": "extension"},
+            }))?)
+        }
+    };
+    let expected_result = replacement.clone().unwrap_or_else(|| server_result.clone());
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let contributor = Arc::new(BlockingMcpResultContributor {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Notify::new(),
+        replacement,
+    });
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(contributor.clone());
+    let test = apps_enabled_builder(apps_server.chatgpt_base_url)
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(move |config| {
+            if matches!(mode, McpCallMode::CodeMode) {
+                let _ = config.features.enable(Feature::CodeMode);
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+
+    let call_id = "mcp-result-call";
+    let call = match mode {
+        McpCallMode::Direct => responses::ev_function_call_with_namespace(
+            call_id,
+            SEARCH_CALENDAR_NAMESPACE,
+            SEARCH_CALENDAR_LIST_TOOL,
+            r#"{"query":"callback test"}"#,
+        ),
+        McpCallMode::CodeMode => responses::ev_custom_tool_call(
+            call_id,
+            "exec",
+            r#"text(await tools.mcp__codex_apps__calendar_list_events({query: "callback test"}));"#,
+        ),
+    };
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![call, responses::ev_completed("first-response")]),
+    )
+    .await;
+    let follow_up = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![responses::ev_completed("second-response")]),
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "List my calendar events.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    assert_eq!(
+        timeout(Duration::from_secs(30), entered_rx).await??,
+        server_result
+    );
+    assert!(
+        timeout(
+            Duration::from_millis(100),
+            wait_for_event(&test.codex, |event| matches!(
+                event,
+                EventMsg::McpToolCallEnd(_) | EventMsg::TurnComplete(_)
+            )),
+        )
+        .await
+        .is_err(),
+        "completion must wait for the extension"
+    );
+    assert!(follow_up.requests().is_empty());
+
+    contributor.release.notify_one();
+    let EventMsg::McpToolCallEnd(end) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::McpToolCallEnd(_))
+    })
+    .await
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        end.result.expect("MCP server returned a result"),
+        expected_result
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = follow_up.single_request();
+    let output = match mode {
+        McpCallMode::Direct => request.function_call_output(call_id),
+        McpCallMode::CodeMode => request.custom_tool_call_output(call_id),
+    };
+    let output = output["output"].to_string();
+    assert!(
+        output.contains(
+            expected_result.content[0]["text"]
+                .as_str()
+                .expect("fixture should contain text")
+        )
+    );
+    assert!(!output.contains("private-mcp-metadata"));
     Ok(())
 }
 

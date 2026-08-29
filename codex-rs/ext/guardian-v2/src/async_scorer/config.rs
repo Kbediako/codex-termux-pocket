@@ -20,7 +20,7 @@ const MIN_MODEL_CONTEXT_ITEM_TOKENS: usize = 100;
 const MAX_MODEL_CONTEXT_ITEM_TOKENS: usize = 100_000;
 const DEFAULT_REVIEW_THRESHOLD: f64 = 0.5;
 const LEGACY_REVIEW_THRESHOLD: f64 = 0.8;
-const DEFAULT_MAX_TOOL_CALL_LAG: usize = 3;
+const DEFAULT_MAX_TOOL_CALL_LAG: usize = 2;
 pub(crate) const DEFAULT_CLASSIFIER_INSTRUCTIONS: &str = include_str!("classifier_instructions.md");
 pub(crate) const CLASSIFICATION_OUTPUT_INSTRUCTIONS: &str = "Your first output token is the entire classification: `high` for high risk or `low` for low risk. Output that token immediately and nothing else.";
 

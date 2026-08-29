@@ -2638,6 +2638,11 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
         ("../trusted", "profile", "permission profile override"),
         ("../trusted", "reviewer", "reviewer"),
         ("../p", "named", "different settings"),
+        (
+            "../trusted",
+            "restored",
+            "Permission profile cannot be preserved",
+        ),
         ("../p", "keymap", "open_transcript"),
         ("../unknown", "local", "This directory is not trusted"),
         ("../trusted", "main", "background terminals"),
@@ -2659,8 +2664,17 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
         let mut profile = RuntimePermissionProfileOverride::from_config(&app.config);
         profile.active_permission_profile =
             (kind == "named").then(|| ActivePermissionProfile::new("dev"));
+        if kind == "restored" {
+            profile.permission_profile = PermissionProfile::workspace_write_with(
+                &[failed.clone().abs()],
+                codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ false,
+                /*exclude_slash_tmp*/ false,
+            );
+            profile.turn_override = RuntimePermissionProfileTurnOverride::Preserve;
+        }
         app.runtime_permission_profile_override =
-            matches!(kind, "profile" | "reviewer" | "named").then_some(profile);
+            matches!(kind, "profile" | "reviewer" | "named" | "restored").then_some(profile);
         app.app_server_target = crate::AppServerTarget::Embedded;
         if kind == "workspace" {
             let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:8765")?;
@@ -2691,6 +2705,8 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
         let output = history().join("");
         if kind == "mcp" {
             assert_snapshot!(output, @"■ MCP inventory is still loading.");
+        } else if kind == "restored" {
+            assert_snapshot!(output, @"■ Permission profile cannot be preserved by /cd.");
         }
         assert!(output.contains(expected), "{path}");
         app.clear_committed_mcp_inventory_loading();

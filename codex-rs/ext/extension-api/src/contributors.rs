@@ -43,6 +43,7 @@ pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
 pub use tool_lifecycle::McpToolContext;
+pub use tool_lifecycle::McpToolResultInput;
 pub use tool_lifecycle::McpToolSource;
 pub use tool_lifecycle::ToolCallOutcome;
 pub use tool_lifecycle::ToolFinishInput;
@@ -318,15 +319,20 @@ pub trait ToolContributor: Send + Sync {
 
 /// Contributor for host-owned tool lifecycle gates.
 ///
-/// Implementations should use these callbacks to observe tool execution and its
-/// exposed input without rewriting the invocation. Use `ToolContributor` for
-/// owning a tool implementation and hooks for policy that changes tool payloads.
+/// Implementations can observe tool execution and process MCP responses without
+/// rewriting the invocation. Use `ToolContributor` for owning a tool implementation
+/// and hooks for policy that changes tool payloads.
 pub trait ToolLifecycleContributor: Send + Sync {
     /// Called after pre-tool hooks finalize an invocation and before execution.
     ///
     /// Calls blocked by hooks, or whose hook-provided input cannot be applied,
     /// do not reach this callback.
     fn on_tool_start<'a>(&'a self, _input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// Runs before the MCP result is sent to the client and model.
+    fn on_mcp_tool_result<'a>(&'a self, _input: McpToolResultInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(std::future::ready(()))
     }
 
