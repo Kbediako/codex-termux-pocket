@@ -140,3 +140,5 @@ subject	termux: promote termux-v0.151.0-alpha.6-2b9e7bdf3c	tooling	Promotes the 
 subject	ci: stage protected alpha15112 update	tooling	Temporary issue-triggered maintainer transaction for the exact official alpha.13 source.
 subject	termux: update to 0.151.0-alpha.12	runtime-critical	Merges the exact official 0.151.0-alpha.12 source and preserves the maintained Android and Termux runtime patch stack.
 subject	chore: remove temporary alpha15112 orchestration	tooling	Removes the temporary alpha.13 maintainer job and script before exact-source validation.
+subject	termux: stage 0.151.0-alpha.12 publication	tooling	Records successful exact-source control-plane, ARM64, and Android validation evidence for publication.
+subject	termux: promote termux-v0.151.0-alpha.12-ea2fed13d7	tooling	Promotes the byte-verified public release manifest after publication.
