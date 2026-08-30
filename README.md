@@ -5,7 +5,7 @@ platforms, use [OpenAI Codex](https://github.com/openai/codex).
 
 <p align="center">
   <img
-    src=".github/assets/termux-codex-screenshot.jpg"
+    src=".github/assets/termux-codex-screenshot.webp"
     alt="Codex CLI running in Termux on Android"
     width="70%"
   />
