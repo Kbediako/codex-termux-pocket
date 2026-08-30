@@ -7,20 +7,17 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event.issue.number || github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -89,18 +86,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  cleanup-temp-branch:
-    if: "${{ github.event_name == 'issues' && github.event.issue.title == 'Cleanup: delete tmp-hero-blob-verify' }}"
-    name: Delete temporary hero verification branch
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Delete temporary branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/git/refs/heads/tmp-hero-blob-verify"
