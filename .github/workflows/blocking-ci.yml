@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
   issues:
-    types: [opened]
+    types: [opened, reopened]
   workflow_dispatch:
 
 permissions:
@@ -91,7 +91,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   cleanup-temp-branch:
-    if: ${{ github.event_name == 'issues' && github.event.issue.title == 'Cleanup: delete tmp-hero-blob-verify' }}
+    if: "${{ github.event_name == 'issues' && github.event.issue.title == 'Cleanup: delete tmp-hero-blob-verify' }}"
     name: Delete temporary hero verification branch
     runs-on: ubuntu-24.04
     timeout-minutes: 5
