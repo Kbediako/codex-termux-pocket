@@ -13,9 +13,10 @@ from typing import Any
 
 from .artifact import validate_local_bundle, validate_manifest
 from .common import (
-    ARCHIVE, MANIFEST_FIELDS, PACKAGE_RE, RELEASE_ASSETS, RELEASE_MANIFEST,
-    SHA_RE, append_summary, fail, file_sha256, package_version_from_tag,
-    parse_env, require_repo, require_token, write_output,
+    ARCHIVE, MANIFEST_FIELDS, PACKAGE_RE, PUBLISHER_WORKFLOW_PATH,
+    RELEASE_ASSETS, RELEASE_MANIFEST, SHA_RE, append_summary, fail,
+    file_sha256, package_version_from_tag, parse_env, require_repo,
+    require_token, write_output,
 )
 from .github import (
     api_url, download_anonymous, peel_tag_ref, public_release_ready,
