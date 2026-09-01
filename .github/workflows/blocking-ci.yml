@@ -95,13 +95,13 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
-  alpha1531-integrate:
+  alpha1532-integrate:
     if: >-
       ${{ github.event_name == 'issues'
           && github.event.action == 'reopened'
           && github.event.issue.number == 102
-          && github.event.issue.title == 'Maintenance: update Codex Termux to 0.153.0-alpha.1' }}
-    name: Integrate exact 0.153.0-alpha.1 source
+          && github.event.issue.title == 'Maintenance: update Codex Termux to 0.153.0-alpha.2' }}
+    name: Integrate exact 0.153.0-alpha.2 source
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     permissions:
@@ -140,7 +140,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: alpha1531-integration-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/alpha1531-evidence
+          name: alpha1532-integration-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/alpha1532-evidence
           if-no-files-found: warn
           retention-days: 7
