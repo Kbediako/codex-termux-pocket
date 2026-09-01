@@ -20,7 +20,8 @@ concurrency:
 
 jobs:
   validate:
-    if: github.event.head_commit.message != 'ci: run final repository cleanup and release repair'
+    if: >-
+      github.event.head_commit.message != 'ci: run final repository cleanup and release repair'
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -94,7 +95,8 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   alpha1534-dispatch-android:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'ci: run final repository cleanup and release repair'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'ci: run final repository cleanup and release repair'
     name: Dispatch exact alpha.4 Android gate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
