@@ -117,6 +117,13 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data/data/com.termux/files/usr/bin
+          sudo ln -sfn /usr/bin/bash /data/data/com.termux/files/usr/bin/bash
+
       - name: Integrate exact upstream alpha
         shell: bash
         run: bash .github/scripts/alpha15272-integrate.sh
