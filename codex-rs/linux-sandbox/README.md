@@ -95,3 +95,12 @@ commands that would enter the bubblewrap path.
 
 **Notes**
 - The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.
+
+## Termux release gate
+
+The maintained Termux release treats the x86_64 and ARM64 jobs for this crate as
+one exact-source gate. Both matrix jobs must succeed for the same commit before
+the production Android/Termux runtime can be published. This dual-architecture
+check is intentionally separate from the ARM64 artifact build: it proves the
+sandbox implementation and policy tests independently of packaging, while the
+artifact and native Android gates prove the shipped runtime bundle.

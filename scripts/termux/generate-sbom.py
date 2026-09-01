@@ -12,6 +12,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+SHIPPED_CARGO_PACKAGES = frozenset(
+    {
+        "codex-cli",
+        "codex-code-mode-host",
+        "codex-responses-api-proxy",
+        "codex-bwrap",
+    }
+)
+
 
 def command_output(args: list[str], *, cwd: Path) -> str:
     return subprocess.check_output(args, cwd=cwd, text=True).strip()
@@ -122,14 +131,11 @@ def main() -> int:
                     }
                 )
 
-    shipped_crates = {
-        "codex-cli",
-        "codex-code-mode-host",
-        "codex-responses-api-proxy",
-        "codex-bwrap",
-    }
+    found_shipped: set[str] = set()
     for cargo_id, package in sorted(packages_by_id.items()):
-        if package["name"] in shipped_crates:
+        package_name = package["name"]
+        if package_name in SHIPPED_CARGO_PACKAGES:
+            found_shipped.add(package_name)
             relationships.append(
                 {
                     "spdxElementId": runtime_spdx_id,
@@ -137,6 +143,12 @@ def main() -> int:
                     "relatedSpdxElement": spdx_by_cargo_id[cargo_id],
                 }
             )
+    missing_shipped = SHIPPED_CARGO_PACKAGES - found_shipped
+    if missing_shipped:
+        raise SystemExit(
+            "Cargo metadata is missing shipped Termux packages: "
+            + ", ".join(sorted(missing_shipped))
+        )
 
     document = {
         "spdxVersion": "SPDX-2.3",
