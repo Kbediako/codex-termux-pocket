@@ -5,6 +5,8 @@ run-name: Verify promoted Termux release channel
 # contract used immediately before manifest promotion. It cannot publish or edit
 # a release, so publication and independent verification share semantics without
 # sharing write authority.
+# A maintainer push that changes this verifier or the promoted manifest
+# deliberately re-audits the live public channel at that exact main revision.
 on:
   push:
     branches:
