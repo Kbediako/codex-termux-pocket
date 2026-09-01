@@ -3,6 +3,7 @@ run-name: Reconcile orphaned temporary governance run
 
 # Temporary recovery workflow. It is deleted immediately after the exact
 # orphaned run, job, and check-run records are proven absent.
+# Retry requested during the 0.153.0-alpha.4 release takeover on 2026-09-02.
 on:
   push:
     branches:
