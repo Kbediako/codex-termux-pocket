@@ -1,0 +1,151 @@
+name: termux-governance-audit
+run-name: Retire orphaned temporary governance run
+
+# Temporary recovery workflow. Recreating the deleted workflow at its exact path
+# and concurrency key causes GitHub to cancel the orphaned pending run. This file
+# is deleted immediately after that exact run is proven absent.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/termux-governance-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: termux-governance-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  retire-orphan:
+    name: Retire exact orphaned run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Verify, complete, and delete exact orphan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORPHAN_RUN_ID: "32212182486"
+          ORPHAN_RUN_PATH: ".github/workflows/termux-governance-audit.yml"
+          ORPHAN_HEAD_SHA: "4cbbb06b331affb71fd6bf41bff3ea365d489b8a"
+          ORPHAN_EVENT: "workflow_dispatch"
+          ORPHAN_WORKFLOW_ID: "335426411"
+          ORPHAN_CREATED_AT: "2026-08-19T03:27:02Z"
+          ORPHAN_ACTOR: "github-actions[bot]"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ORPHAN_RUN_ID"
+          response="$RUNNER_TEMP/orphan-run.json"
+          mutation_response="$RUNNER_TEMP/orphan-run-mutation.json"
+          common=(
+            --silent
+            --show-error
+            --header "Authorization: Bearer $GH_TOKEN"
+            --header "Accept: application/vnd.github+json"
+            --header "X-GitHub-Api-Version: 2026-03-10"
+          )
+
+          get_run() {
+            curl "${common[@]}" \
+              --output "$response" \
+              --write-out '%{http_code}' \
+              "$api"
+          }
+
+          code="$(get_run)"
+          if [[ "$code" == "404" ]]; then
+            echo "Orphaned temporary workflow run $ORPHAN_RUN_ID is already absent."
+            exit 0
+          fi
+          if [[ "$code" != "200" ]]; then
+            cat "$response" >&2 || true
+            echo "::error::Unexpected lookup status for orphan run $ORPHAN_RUN_ID: $code"
+            exit 1
+          fi
+
+          actual_id="$(jq -r '.id' "$response")"
+          actual_path="$(jq -r '.path' "$response")"
+          actual_head="$(jq -r '.head_sha' "$response")"
+          actual_event="$(jq -r '.event' "$response")"
+          actual_workflow_id="$(jq -r '.workflow_id' "$response")"
+          actual_created_at="$(jq -r '.created_at' "$response")"
+          actual_actor="$(jq -r '.actor.login' "$response")"
+          if [[ "$actual_id" != "$ORPHAN_RUN_ID" || \
+                "$actual_path" != "$ORPHAN_RUN_PATH" || \
+                "$actual_head" != "$ORPHAN_HEAD_SHA" || \
+                "$actual_event" != "$ORPHAN_EVENT" || \
+                "$actual_workflow_id" != "$ORPHAN_WORKFLOW_ID" || \
+                "$actual_created_at" != "$ORPHAN_CREATED_AT" || \
+                "$actual_actor" != "$ORPHAN_ACTOR" ]]; then
+            cat "$response" >&2
+            echo "::error::Refusing to mutate a workflow run whose identity differs from the audited orphan."
+            exit 1
+          fi
+
+          status="$(jq -r '.status' "$response")"
+          if [[ "$status" != "completed" ]]; then
+            force_code="$(
+              curl "${common[@]}" \
+                --request POST \
+                --output "$mutation_response" \
+                --write-out '%{http_code}' \
+                "$api/force-cancel"
+            )"
+            if [[ "$force_code" != "202" && "$force_code" != "409" ]]; then
+              cat "$mutation_response" >&2 || true
+              echo "::error::Unexpected force-cancel status for orphan run $ORPHAN_RUN_ID: $force_code"
+              exit 1
+            fi
+
+            for attempt in $(seq 1 30); do
+              sleep 2
+              code="$(get_run)"
+              if [[ "$code" == "404" ]]; then
+                echo "Orphaned temporary workflow run $ORPHAN_RUN_ID disappeared during concurrency retirement."
+                exit 0
+              fi
+              if [[ "$code" != "200" ]]; then
+                cat "$response" >&2 || true
+                echo "::error::Unexpected poll status for orphan run $ORPHAN_RUN_ID: $code"
+                exit 1
+              fi
+              status="$(jq -r '.status' "$response")"
+              if [[ "$status" == "completed" ]]; then
+                break
+              fi
+            done
+          fi
+
+          if [[ "$status" != "completed" ]]; then
+            cat "$response" >&2 || true
+            echo "::error::Orphan run $ORPHAN_RUN_ID remained $status after exact-path concurrency replacement."
+            exit 1
+          fi
+
+          delete_code="$(
+            curl "${common[@]}" \
+              --request DELETE \
+              --output "$mutation_response" \
+              --write-out '%{http_code}' \
+              "$api"
+          )"
+          if [[ "$delete_code" != "204" ]]; then
+            cat "$mutation_response" >&2 || true
+            echo "::error::Unexpected deletion status for completed orphan run $ORPHAN_RUN_ID: $delete_code"
+            exit 1
+          fi
+
+          code="$(get_run)"
+          if [[ "$code" != "404" ]]; then
+            cat "$response" >&2 || true
+            echo "::error::Deleted orphan run $ORPHAN_RUN_ID is still visible: $code"
+            exit 1
+          fi
+          echo "Deleted completed orphaned workflow run $ORPHAN_RUN_ID after exact identity verification."
