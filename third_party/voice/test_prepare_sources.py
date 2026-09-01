@@ -80,6 +80,7 @@ class PreparationTests(unittest.TestCase):
                 },
             },
         )
+
     def test_rejects_changed_archive_before_extracting(self):
         source = self.source([("fixture-1/file", tarfile.REGTYPE, b"original")])
         (self.root / source["archive"]).write_bytes(b"changed")
@@ -106,9 +107,7 @@ class PreparationTests(unittest.TestCase):
             ]
         )
         with patch.object(preparation, "MAX_SOURCE_BYTES", 10):
-            with self.assertRaisesRegex(
-                ValueError, "Expanded source exceeds limits"
-            ):
+            with self.assertRaisesRegex(ValueError, "Expanded source exceeds limits"):
                 self.prepare(source)
         self.assertFalse(self.output.exists())
 

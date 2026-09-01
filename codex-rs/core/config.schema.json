@@ -147,6 +147,14 @@
           "description": "When `false`, Codex does not surface this app.",
           "type": "boolean"
         },
+        "links": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppLinksConfig"
+            }
+          ],
+          "description": "Per-account approval settings keyed by link ID."
+        },
         "open_world_enabled": {
           "description": "Whether tools with `open_world_hint = true` are allowed for this app.",
           "type": "boolean"
@@ -160,6 +168,36 @@
           "description": "Per-tool settings for this app."
         }
       },
+      "type": "object"
+    },
+    "AppLinkConfig": {
+      "additionalProperties": false,
+      "description": "Approval settings for a connected account within an app.",
+      "properties": {
+        "approvals_reviewer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            }
+          ],
+          "description": "Reviewer for approval prompts from this account, overriding the app default."
+        },
+        "default_tools_approval_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppToolApproval"
+            }
+          ],
+          "description": "Approval mode for this account unless a tool override exists."
+        }
+      },
+      "type": "object"
+    },
+    "AppLinksConfig": {
+      "additionalProperties": {
+        "$ref": "#/definitions/AppLinkConfig"
+      },
+      "description": "Account settings for a single app.",
       "type": "object"
     },
     "AppToolApproval": {
@@ -3770,6 +3808,11 @@
         "animations": {
           "default": true,
           "description": "Enable animations (welcome screen, shimmer effects, spinners). Defaults to `true`.",
+          "type": "boolean"
+        },
+        "auto_recap": {
+          "default": true,
+          "description": "Generate automatic conversation recaps when the terminal is unfocused. Defaults to `true`. Disabling this leaves `/recap` available on demand.",
           "type": "boolean"
         },
         "disable_paste_burst": {

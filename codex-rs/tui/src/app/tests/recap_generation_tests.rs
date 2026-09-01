@@ -191,8 +191,9 @@ stream_max_retries = 0
 }
 
 #[tokio::test]
-async fn manual_recap_bypasses_automatic_eligibility_and_reports_failure() -> Result<()> {
+async fn manual_recap_works_when_auto_recap_disabled() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.config.tui_auto_recap = false;
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);
     app.transcript_cells
@@ -205,6 +206,8 @@ async fn manual_recap_bypasses_automatic_eligibility_and_reports_failure() -> Re
     let (mut app_server, _requests, proxy) = start_recording_remote_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
+    // An automatic request must not occupy the slot needed by a manual request.
+    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
     app.handle_event(
         &mut tui,
         &mut app_server,
@@ -292,6 +295,72 @@ async fn manual_recap_bypasses_automatic_eligibility_and_reports_failure() -> Re
 
     app_server.shutdown().await?;
     proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    prepare_eligible_recap(&mut app, thread_id);
+    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.config.tui_auto_recap = false;
+    app.schedule_recap_check(thread_id, Instant::now());
+    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
+    app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::CheckRecap { thread_id },
+    )
+    .await?;
+    tokio::task::yield_now().await;
+
+    assert!(app_event_rx.try_recv().is_err());
+    assert_eq!(
+        recorded_params(&requests, "thread/start"),
+        Vec::<Value>::new()
+    );
+    let rendered = app
+        .transcript_cells
+        .iter()
+        .flat_map(|cell| cell.display_lines(/*width*/ 80))
+        .collect::<Vec<_>>();
+
+    app.config.tui_auto_recap = true;
+    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
+    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
+        .await?
+        .expect("recap start event");
+    assert!(matches!(started_event, AppEvent::RecapStarted { .. }));
+    app.config.tui_auto_recap = false;
+    app.handle_event(&mut tui, &mut app_server, started_event)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        while recorded_params(&requests, "thread/unsubscribe").is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+
+    // Finish the unsubscribe round trip before shutting down the recording proxy.
+    app_server
+        .thread_loaded_list(codex_app_server_protocol::ThreadLoadedListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await?;
+    assert_eq!(
+        recorded_params(&requests, "turn/start"),
+        Vec::<Value>::new()
+    );
+    assert!(app.temporary_structured_requests.is_empty());
+    app_server.shutdown().await?;
+    proxy.await??;
+    insta::assert_snapshot!(
+        "auto_recap_disabled_transcript",
+        lines_to_single_string(&rendered)
+    );
     Ok(())
 }
 

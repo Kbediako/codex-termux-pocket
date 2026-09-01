@@ -1,4 +1,4 @@
-//! Dashboard for inspecting and managing the daemon's active tasks.
+//! Dashboard for inspecting and managing the TUI's retained daemon tasks.
 
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use crate::app_event::AppEvent;
@@ -89,7 +89,6 @@ pub(super) struct AgentsOverviewViewState {
     search: String,
     searching: bool,
     pub(super) status_grouping: bool,
-    pub(super) refresh_task: Option<tokio::task::AbortHandle>,
     pub(super) renaming: bool,
 }
 
@@ -102,20 +101,6 @@ pub(super) struct AgentsOverviewView {
     app_event_tx: AppEventSender,
     keymap: ListKeymap,
     agents_keymap: AgentsKeymap,
-}
-
-impl Drop for AgentsOverviewView {
-    fn drop(&mut self) {
-        if let Some(task) = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .refresh_task
-            .take()
-        {
-            task.abort();
-        }
-    }
 }
 
 impl AgentsOverviewView {

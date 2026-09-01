@@ -1,4 +1,5 @@
 mod auth_status;
+mod bounded_stdio_transport;
 mod elicitation_client_service;
 mod ema_auth_policy;
 mod ema_claims;
@@ -10,6 +11,7 @@ mod http_client_adapter;
 mod http_client_redirect;
 mod http_headers;
 mod in_process_transport;
+mod local_child;
 mod local_stdio_transport;
 mod logging_client_handler;
 mod oauth;

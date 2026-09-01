@@ -1385,9 +1385,9 @@ async fn guardian_denial_rejects_tool_call_with_rationale(
     assert!(guardian_request.body_contains_text(&command));
     assert_eq!(guardian_request.body_json()["model"], "gpt-5.6-luna");
 
-    let feedback =
-        codex_feedback::guardian_review_failures_attachment(&[test.session_configured.thread_id])
-            .expect("failed Guardian review");
+    let feedback = codex_feedback::guardian_review_failures(&[test.session_configured.thread_id])
+        .attachment
+        .expect("failed Guardian review");
     let record: serde_json::Value = serde_json::from_slice(&feedback.buffer)?;
     assert!(
         guardian_request.body_contains_text(record["action"].as_str().expect("reviewed action"))

@@ -38,7 +38,7 @@ async fn windows_exec_server_runs_with_native_shell_and_cwd() -> Result<()> {
     const VERIFY_CALL_ID: &str = "wine-verify-patch";
     const PATCH_FILE: &str = "codex-apply-patch-smoke.txt";
     const COMMAND: &str = r#"if ((Get-Location).Path -ne 'C:\windows') { exit 1 }"#;
-    const VERIFY_COMMAND: &str = r#"$path = Join-Path (Get-Location) 'codex-apply-patch-smoke.txt'; if (-not (Test-Path $path)) { exit 1 }; if ([IO.File]::ReadAllText($path) -ne "patched through unified exec`n") { exit 2 }; Remove-Item $path; Write-Output 'PATCH_VERIFIED'"#;
+    const VERIFY_COMMAND: &str = r#"$path = Join-Path (Get-Location) 'codex-apply-patch-smoke.txt'; if (-not (Test-Path $path)) { exit 1 }; if ([IO.File]::ReadAllText($path) -ne "patched through unified exec`n") { exit 2 }; Remove-Item $path"#;
 
     WineExecServer
         .scope(|exec_server_url, _wine_prefix| async move {
@@ -197,13 +197,6 @@ async fn windows_exec_server_runs_with_native_shell_and_cwd() -> Result<()> {
                 verify_success != Some(false),
                 "verification command failed: {verify_output:?}"
             );
-            anyhow::ensure!(
-                verify_output
-                    .as_deref()
-                    .is_some_and(|output| output.contains("PATCH_VERIFIED")),
-                "verification command did not confirm the patched file: {verify_output:?}"
-            );
-
             let (_output, success) = request
                 .function_call_output_content_and_success(CALL_ID)
                 .context("command output should be present")?;

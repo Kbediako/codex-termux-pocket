@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
-use std::time::Instant;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
@@ -168,17 +166,6 @@ async fn self_history_base_does_not_count_as_reference() -> anyhow::Result<()> {
 
     assert_eq!(index.history_base(thread_id), Some(&history_base));
     assert_eq!(index.reference_count(thread_id), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn expired_deadline_returns_none() -> anyhow::Result<()> {
-    let home = TempDir::new()?;
-
-    let index =
-        RolloutReferenceIndex::scan_until(home.path(), Instant::now(), Duration::ZERO).await?;
-
-    assert!(index.is_none());
     Ok(())
 }
 

@@ -759,6 +759,7 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         message: message.to_string(),
         replacement_history: replacement_history
             .map(|items| items.into_iter().map(Into::into).collect()),
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,

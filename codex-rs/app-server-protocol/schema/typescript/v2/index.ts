@@ -20,6 +20,7 @@ export type { AllowDenyRequirement } from "./AllowDenyRequirement";
 export type { AnalyticsConfig } from "./AnalyticsConfig";
 export type { AppBranding } from "./AppBranding";
 export type { AppInfo } from "./AppInfo";
+export type { AppLinksConfig } from "./AppLinksConfig";
 export type { AppListUpdatedNotification } from "./AppListUpdatedNotification";
 export type { AppMetadata } from "./AppMetadata";
 export type { AppReview } from "./AppReview";

@@ -24,6 +24,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_analytics::TurnAnalyticsMetadata;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::AgentPath;
 use codex_protocol::models::PermissionProfile;
@@ -688,6 +689,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     );
     state.set_responses_api_metadata(BTreeMap::from([
         ("codex_security_surface".to_string(), "sdk".to_string()),
+        ("source".to_string(), " Configured_Source ".to_string()),
         (
             WINDOW_NUMBER_KEY.to_string(),
             "configured-value".to_string(),
@@ -708,6 +710,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         ("fiber_run_id".to_string(), "fiber-123".to_string()),
         ("origin".to_string(), "東京".to_string()),
         ("workspace_kind".to_string(), "projectless".to_string()),
+        ("source".to_string(), "client-source".to_string()),
         ("model".to_string(), "client-supplied".to_string()),
         (
             "reasoning_effort".to_string(),
@@ -910,6 +913,75 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert!(meta.get(WINDOW_ID_KEY).is_none());
     assert!(meta.get("codex_security_surface").is_none());
     assert_eq!(state.workspace_kind().as_deref(), Some("projectless"));
+    assert_eq!(
+        (state.turn_trigger(), state.codex_turn_source()),
+        (
+            Some("goal".to_string()),
+            Some(" Configured_Source ".to_string())
+        )
+    );
+    assert_eq!(model_request_json["source"], " Configured_Source ");
+
+    for (configured, client, expected) in [
+        (None, None, None),
+        (
+            None,
+            Some(" New_Source ".to_string()),
+            Some(" New_Source ".to_string()),
+        ),
+        (None, Some(String::new()), Some(String::new())),
+        (None, Some("é".repeat(/*n*/ 64)), Some("é".repeat(/*n*/ 64))),
+        (None, Some("é".repeat(/*n*/ 65)), None),
+        (
+            Some("x".repeat(/*n*/ 129)),
+            Some("client-source".to_string()),
+            None,
+        ),
+    ] {
+        state.set_responses_api_metadata(
+            configured
+                .map(|source| ("source".to_string(), source))
+                .into_iter()
+                .collect(),
+        );
+        state.set_responsesapi_client_metadata(
+            client
+                .map(|source| ("source".to_string(), source))
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(state.codex_turn_source(), expected);
+    }
+}
+
+#[test]
+fn turn_metadata_state_bounds_trigger_only_for_analytics() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    for (characters, included) in [(64, true), (65, false)] {
+        let state = TurnMetadataState::new(
+            "session-a".to_string(),
+            "thread-a".to_string(),
+            /*forked_from_thread_id*/ None,
+            /*parent_thread_id*/ None,
+            &SessionSource::Exec,
+            /*thread_source*/ None,
+            "turn-a".to_string(),
+            temp_dir.path().abs(),
+            &PermissionProfile::read_only(),
+            WindowsSandboxLevel::Disabled,
+            /*enforce_managed_network*/ false,
+            /*auto_review_enabled*/ false,
+            &model_info_from_slug("gpt-5.4"),
+        );
+        let trigger = "é".repeat(characters);
+        state.set_turn_trigger(trigger.clone());
+        let metadata: Value =
+            serde_json::from_str(&test_turn_metadata_header(&state)).expect("json");
+        assert_eq!(
+            (state.turn_trigger(), metadata[TURN_TRIGGER_KEY].as_str()),
+            (included.then(|| trigger.clone()), Some(trigger.as_str()))
+        );
+    }
 }
 
 #[test]

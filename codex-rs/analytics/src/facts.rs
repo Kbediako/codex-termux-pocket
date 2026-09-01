@@ -206,13 +206,17 @@ pub struct TurnResolvedConfigFact {
     pub is_first_turn: bool,
 }
 
-/// A live, read-only view of a turn's trusted analytics provenance.
+/// A live, read-only view of a turn's analytics metadata.
 ///
 /// Implementations must return `None` for unknown or ambiguous roots. The reducer
 /// reads this when constructing each event because steering can invalidate a root
 /// after the turn's configuration has been resolved.
 pub trait TurnAnalyticsMetadata: Send + Sync {
     fn root_turn_id(&self) -> Option<String>;
+    /// The caller-provided trigger recorded when this turn started.
+    fn turn_trigger(&self) -> Option<String>;
+    /// The effective Responses source at event emission, including accepted steers.
+    fn codex_turn_source(&self) -> Option<String>;
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

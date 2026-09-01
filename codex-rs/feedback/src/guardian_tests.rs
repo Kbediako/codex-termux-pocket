@@ -12,13 +12,18 @@ fn records_keep_recent_failures_and_select_the_requested_tree() {
     for index in 0..12 {
         records.push(root, format!(r#"{{"root":{index}}}"#).into_bytes());
     }
-    let attachment = records
-        .attachment(&[root, child])
-        .expect("task-tree records");
+    let snapshot = records.snapshot(&[root, child]);
+    let attachment = snapshot.attachment.expect("task-tree records");
     let expected = std::iter::once("{\"child\":\"denied\"}\n".to_string())
         .chain((4..12).map(|index| format!("{{\"root\":{index}}}\n")))
         .collect::<String>();
     assert_eq!(attachment.buffer, expected.into_bytes());
+    assert_eq!(snapshot.thread_ids, vec![root, child]);
+    assert_eq!(snapshot.process_discarded_records, 4);
+    let unrelated_snapshot = records.snapshot(&[unrelated]);
+    assert_eq!(unrelated_snapshot.thread_ids, vec![unrelated]);
+    // The diagnostic counter must not be mistaken for tree-specific omissions.
+    assert_eq!(unrelated_snapshot.process_discarded_records, 4);
 }
 
 #[test]
@@ -37,10 +42,12 @@ fn record_count_and_bytes_are_bounded_across_threads() {
     assert_eq!(records.records.len(), 2);
     assert_eq!(
         records
-            .attachment(&[thread_id])
+            .snapshot(&[thread_id])
+            .attachment
             .expect("bounded records")
             .buffer
             .len(),
         2 * (payload.len() + 1)
     );
+    assert_eq!(records.discarded_records, MAX_RECORDS + 3);
 }

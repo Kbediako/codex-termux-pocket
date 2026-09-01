@@ -43,6 +43,7 @@ use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathConvention;
+use codex_utils_string::truncate_middle_chars;
 
 use super::super::shell_spec::CommandToolOptions;
 use super::super::shell_spec::create_exec_command_tool_with_environment_id;
@@ -51,6 +52,9 @@ use super::ExecCommandEnvironmentArgs;
 use super::get_command;
 use super::post_unified_exec_tool_use_payload;
 use super::shell_mode_for_environment;
+
+// A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
+const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
@@ -276,8 +280,6 @@ impl ExecCommandHandler {
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
-        let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
-
         let ExecCommandArgs {
             mut tty,
             yield_time_ms,
@@ -454,9 +456,13 @@ impl ExecCommandHandler {
                     hook_command: Some(hook_command),
                 }))
             }
-            Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
-            ))),
+            Err(err) => {
+                let message = format!("exec_command failed: {err:?}");
+                Err(FunctionCallError::RespondToModel(truncate_middle_chars(
+                    &message,
+                    EXEC_COMMAND_REJECTION_MAX_BYTES,
+                )))
+            }
         }
     }
 }

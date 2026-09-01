@@ -3426,6 +3426,8 @@ fn codex_turn_event_params(
         session_id: thread_metadata.session_id.clone(),
         turn_id,
         root_turn_id: turn_metadata.root_turn_id(),
+        turn_trigger: turn_metadata.turn_trigger(),
+        codex_turn_source: turn_metadata.codex_turn_source(),
         app_server_client,
         runtime,
         submission_type,

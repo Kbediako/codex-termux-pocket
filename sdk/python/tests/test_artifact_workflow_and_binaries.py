@@ -272,11 +272,11 @@ def test_root_format_driver_covers_all_formatter_groups(
     )
     assert [group.commands[-1].args[-3:] for group in formatters[3:]] == [
         ("ruff", "format", "sdk/python"),
-        ("ruff", "format", "scripts"),
+        ("ruff", "format", "."),
     ]
     assert [group.commands[-1].args[-4:] for group in checks[3:]] == [
         ("ruff", "format", "--check", "sdk/python"),
-        ("ruff", "format", "--check", "scripts"),
+        ("ruff", "format", "--check", "."),
     ]
 
 

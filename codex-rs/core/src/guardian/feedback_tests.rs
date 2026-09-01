@@ -11,6 +11,7 @@ fn oversized_context_keeps_the_action_and_decision() -> anyhow::Result<()> {
     ReviewFeedbackRecord {
         reviewed_thread_id: thread_id,
         reviewed_turn_id: "parent-turn",
+        target_item_id: Some("push-call"),
         reviewer_thread_id,
         model: "review-model",
         status: "denied",
@@ -22,7 +23,8 @@ fn oversized_context_keeps_the_action_and_decision() -> anyhow::Result<()> {
         context_omitted: false,
     }
     .store();
-    let contents = codex_feedback::guardian_review_failures_attachment(&[thread_id])
+    let contents = codex_feedback::guardian_review_failures(&[thread_id])
+        .attachment
         .expect("failed-review record")
         .buffer;
     assert_eq!(
@@ -30,6 +32,7 @@ fn oversized_context_keeps_the_action_and_decision() -> anyhow::Result<()> {
         json!({
             "reviewed_thread_id": thread_id,
             "reviewed_turn_id": "parent-turn",
+            "target_item_id": "push-call",
             "reviewer_thread_id": reviewer_thread_id,
             "model": "review-model",
             "status": "denied",

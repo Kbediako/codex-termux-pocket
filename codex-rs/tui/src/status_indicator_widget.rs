@@ -3,6 +3,8 @@
 //! The row renders a separately owned clock, the optional interrupt hint, and short inline
 //! context (for example, the unified-exec background-process summary). Keeping
 //! these pieces on one line avoids vertical layout churn in the bottom pane.
+//! Hook activity uses the remaining space or its own line on overflow, so it
+//! never displaces background-process controls.
 
 use std::time::Duration;
 use std::time::Instant;
@@ -21,6 +23,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
 use crate::key_hint::ShortcutHint;
+use crate::line_truncation::line_width;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
@@ -29,6 +32,7 @@ use crate::motion::shimmer_text;
 use crate::render::renderable::Renderable;
 use crate::text_formatting::capitalize_first;
 use crate::tui::FrameRequester;
+use crate::width::display_width;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
@@ -52,6 +56,8 @@ pub(crate) struct StatusIndicatorWidget {
     details_max_lines: usize,
     /// Optional suffix rendered after the elapsed/interrupt segment.
     inline_message: Option<String>,
+    /// Hook activity may move below the status row when it cannot fit in full.
+    hook_status_message: Option<String>,
     show_interrupt_hint: bool,
     interrupt_binding: Option<ShortcutHint>,
 
@@ -88,6 +94,7 @@ impl StatusIndicatorWidget {
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
+            hook_status_message: None,
             show_interrupt_hint: true,
             interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
             app_event_tx,
@@ -133,6 +140,10 @@ impl StatusIndicatorWidget {
         self.inline_message = message
             .map(|message| message.trim().to_string())
             .filter(|message| !message.is_empty());
+    }
+
+    pub(crate) fn update_hook_status_message(&mut self, message: Option<String>) {
+        self.hook_status_message = message;
     }
 
     pub(crate) fn header(&self) -> &str {
@@ -194,22 +205,11 @@ struct StatusIndicator<'a> {
     timer: &'a StatusTimer,
 }
 
-impl Renderable for StatusIndicator<'_> {
-    fn desired_height(&self, width: u16) -> u16 {
-        1 + u16::try_from(self.row.wrapped_details_lines(width).len()).unwrap_or(0)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        if area.is_empty() {
-            return;
-        }
-
+impl StatusIndicator<'_> {
+    // Share width decisions between height measurement and rendering, including
+    // wide Unicode characters, remapped interrupt hints, and elapsed-time text.
+    fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let row = self.row;
-        if row.animations_enabled {
-            // Schedule next animation frame.
-            row.frame_requester
-                .schedule_frame_in(Duration::from_millis(32));
-        }
         let now = Instant::now();
         let elapsed_duration = self.timer.elapsed_at(now);
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
@@ -246,19 +246,46 @@ impl Renderable for StatusIndicator<'_> {
             spans.push(message.clone().dim());
         }
 
+        let mut header = Line::from(spans);
+        let mut hook_overflow = None;
+        if let Some(message) = &row.hook_status_message {
+            if line_width(&header) + display_width(" · ") + display_width(message)
+                <= usize::from(width)
+            {
+                header.spans.extend([" · ".dim(), message.clone().dim()]);
+            } else {
+                hook_overflow = Some(truncate_line_with_ellipsis_if_overflow(
+                    Line::from(vec![DETAILS_PREFIX.dim(), message.clone().dim()]),
+                    usize::from(width),
+                ));
+            }
+        }
         let mut lines = Vec::new();
         lines.push(truncate_line_with_ellipsis_if_overflow(
-            Line::from(spans),
-            usize::from(area.width),
+            header,
+            usize::from(width),
         ));
-        if area.height > 1 {
-            // If there is enough space, add the details lines below the header.
-            let details = row.wrapped_details_lines(area.width);
-            let max_details = usize::from(area.height.saturating_sub(1));
-            lines.extend(details.into_iter().take(max_details));
-        }
+        lines.extend(hook_overflow);
+        lines.extend(row.wrapped_details_lines(width));
+        lines
+    }
+}
 
-        Paragraph::new(Text::from(lines)).render(area, buf);
+impl Renderable for StatusIndicator<'_> {
+    fn desired_height(&self, width: u16) -> u16 {
+        self.lines(width).len() as u16
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        if self.row.animations_enabled {
+            self.row
+                .frame_requester
+                .schedule_frame_in(Duration::from_millis(32));
+        }
+        Paragraph::new(Text::from(self.lines(area.width))).render(area, buf);
     }
 }
 
@@ -396,6 +423,52 @@ mod tests {
             .draw(|f| w.with_timer(&timer).render(f.area(), f.buffer_mut()))
             .expect("draw");
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn hook_status_reflows_without_displacing_controls_or_details() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let mut w = StatusIndicatorWidget::new(
+            AppEventSender::new(tx),
+            crate::tui::FrameRequester::test_dummy(),
+            /*animations_enabled*/ false,
+        );
+        let mut timer = StatusTimer::default();
+        timer.pause_at(timer.last_resume_at);
+        w.update_hook_status_message(Some("checking 日本語 ｶﾞﾊﾟ policy".to_string()));
+        w.update_details(
+            Some("existing details".to_string()),
+            StatusDetailsCapitalization::Preserve,
+            STATUS_DETAILS_DEFAULT_MAX_LINES,
+        );
+
+        for (background, snapshot) in [
+            (None, "hook_status_reflows_without_background_activity"),
+            (
+                Some("1 background terminal running · /ps to view · /stop to close"),
+                "hook_status_reflows_with_background_activity",
+            ),
+        ] {
+            w.update_inline_message(background.map(str::to_string));
+            let mut expected = "Working (0s • esc to interrupt)".to_string();
+            if let Some(background) = background {
+                expected.push_str(&format!(" · {background}"));
+            }
+            expected.push_str(" · checking 日本語 ｶﾞﾊﾟ policy");
+            let fit_width = display_width(&expected) as u16;
+            let mut frames = Vec::new();
+            for width in [fit_width, fit_width - 1, 24, fit_width] {
+                let height = w.with_timer(&timer).desired_height(width);
+                assert_eq!(height, if width >= fit_width { 2 } else { 3 });
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal
+                    .draw(|f| w.with_timer(&timer).render(f.area(), f.buffer_mut()))
+                    .expect("draw");
+                frames.push(format!("{width} columns:\n{}", terminal.backend()));
+            }
+            insta::assert_snapshot!(snapshot, frames.join("\n"));
+        }
     }
 
     #[test]

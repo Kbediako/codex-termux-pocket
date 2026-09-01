@@ -1127,14 +1127,6 @@ pub(super) fn active_blob(chat: &ChatWidget) -> String {
     lines_to_single_string(&lines)
 }
 
-pub(super) fn active_hook_blob(chat: &ChatWidget) -> String {
-    let Some(cell) = chat.active_hook_cell.as_ref() else {
-        return "<empty>\n".to_string();
-    };
-    let lines = cell.display_lines(/*width*/ 80);
-    lines_to_single_string(&lines)
-}
-
 pub(super) fn expire_quiet_hook_linger(chat: &mut ChatWidget) {
     if let Some(cell) = chat.active_hook_cell.as_mut() {
         cell.expire_quiet_runs_now_for_test();
@@ -1649,6 +1641,7 @@ pub(super) async fn assert_hook_events_snapshot(
     snapshot_name: &str,
 ) {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.on_task_started();
 
     handle_hook_started(
         &mut chat,
@@ -1665,12 +1658,19 @@ pub(super) async fn assert_hook_events_snapshot(
         "hook start should update the live hook cell instead of writing history"
     );
     reveal_running_hooks(&mut chat);
+    let width = 100;
+    let height = chat.desired_height(width);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("render hook activity status");
+    let running = normalized_backend_snapshot(terminal.backend());
     assert!(
-        active_hook_blob(&chat).contains(&format!(
-            "Running {} hook: {status_message}",
-            hook_event_label(event_name)
-        )),
-        "hook start should render in the live hook cell"
+        running
+            .lines()
+            .any(|line| line.contains("Working") && line.contains(status_message)),
+        "hook start should render its status in the activity row: {running}"
     );
 
     let mut entries = vec![codex_app_server_protocol::HookOutputEntry {
@@ -1700,21 +1700,4 @@ pub(super) async fn assert_hook_events_snapshot(
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
     assert_chatwidget_snapshot!(snapshot_name, combined);
-}
-
-fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'static str {
-    match event_name {
-        codex_app_server_protocol::HookEventName::PreToolUse => "PreToolUse",
-        codex_app_server_protocol::HookEventName::PermissionRequest => "PermissionRequest",
-        codex_app_server_protocol::HookEventName::PostToolUse => "PostToolUse",
-        codex_app_server_protocol::HookEventName::PreCompact => "PreCompact",
-        codex_app_server_protocol::HookEventName::PostCompact => "PostCompact",
-        codex_app_server_protocol::HookEventName::SessionStart => "SessionStart",
-        codex_app_server_protocol::HookEventName::SessionEnd => "SessionEnd",
-        codex_app_server_protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
-        codex_app_server_protocol::HookEventName::SubagentStart => "SubagentStart",
-        codex_app_server_protocol::HookEventName::SubagentStop => "SubagentStop",
-        codex_app_server_protocol::HookEventName::Stop => "Stop",
-        codex_app_server_protocol::HookEventName::Interrupt => "Interrupt",
-    }
 }

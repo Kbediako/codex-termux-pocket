@@ -150,7 +150,7 @@ pub async fn run_plugin_add(
     )?;
     let outcome = manager
         .install_plugin(
-            &plugins_input.config_layer_stack,
+            &plugins_input,
             PluginInstallRequest {
                 plugin_name,
                 marketplace_path: marketplace.path,

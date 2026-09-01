@@ -148,12 +148,16 @@ impl JsonSchema for RolloutItem {
     }
 }
 
+mod guardian_history;
 mod rollout_payload;
+
+pub use guardian_history::GuardianHistoryCheckpoint;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
     pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
+    pub guardian_history: Option<GuardianHistoryCheckpoint>,
     pub mcp_resource_origins: Option<McpResourceOriginCheckpoint>,
     pub window_number: Option<u64>,
     pub first_window_id: Option<String>,

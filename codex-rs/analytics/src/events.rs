@@ -1012,6 +1012,8 @@ pub(crate) struct CodexTurnEventParams {
     pub(crate) session_id: String,
     pub(crate) turn_id: String,
     pub(crate) root_turn_id: Option<String>,
+    pub(crate) turn_trigger: Option<String>,
+    pub(crate) codex_turn_source: Option<String>,
     // TODO(rhan-oai): Populate once queued/default submission type is plumbed from
     // the turn/start callsites instead of always being reported as None.
     pub(crate) submission_type: Option<TurnSubmissionType>,

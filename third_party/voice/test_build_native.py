@@ -207,9 +207,10 @@ class NativeBuildTests(unittest.TestCase):
             with self.subTest(architecture=architecture):
                 self.args.target = f"{architecture}-pc-windows-msvc"
                 self.args.output = self.root / architecture
-                with patch(
-                    "build_native.platform.system", return_value="Windows"
-                ), patch("build_native.platform.machine", return_value=architecture):
+                with (
+                    patch("build_native.platform.system", return_value="Windows"),
+                    patch("build_native.platform.machine", return_value=architecture),
+                ):
                     build = NativeBuild(self.args, self.environment)
                 self.assertEqual(
                     build.environment["USERPROFILE"], self.environment["USERPROFILE"]
@@ -222,20 +223,23 @@ class NativeBuildTests(unittest.TestCase):
                         "-ID:/private/include -LD:/private/lib -lffi\n"
                     )
 
-                with patch(
-                    "build_native.prepare_sources",
-                    side_effect=lambda *args: (build.output / "build").mkdir(),
-                ), patch.object(build, "cmake") as cmake, patch.object(
-                    build, "meson"
-                ), patch.object(
-                    build, "run", side_effect=record
-                ), patch.object(
-                    build,
-                    "posix_path",
-                    side_effect=lambda path: "/cygdrive/d/" + path.name,
-                ), patch(
-                    "build_native.subprocess.check_output",
-                    return_value="/usr/share/automake-1.18\n",
+                with (
+                    patch(
+                        "build_native.prepare_sources",
+                        side_effect=lambda *args: (build.output / "build").mkdir(),
+                    ),
+                    patch.object(build, "cmake") as cmake,
+                    patch.object(build, "meson"),
+                    patch.object(build, "run", side_effect=record),
+                    patch.object(
+                        build,
+                        "posix_path",
+                        side_effect=lambda path: "/cygdrive/d/" + path.name,
+                    ),
+                    patch(
+                        "build_native.subprocess.check_output",
+                        return_value="/usr/share/automake-1.18\n",
+                    ),
                 ):
                     build.build()
                 opus_options = next(

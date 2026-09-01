@@ -976,6 +976,24 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         let second_sample = wait_for_luna_request(responses_state.as_ref(), /*index*/ 1).await?;
         let reviews = sync_review_fragments(&second_sample);
         if lifecycle.has_user_answer() {
+            let answer_items = second_sample["input"]
+                .as_array()
+                .expect("Luna input messages")
+                .iter()
+                .filter(|item| {
+                    item["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|part| {
+                            part["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains(">>> TRUSTED USER ANSWERS START"))
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(answer_items.len(), 1);
+            assert_eq!(answer_items[0]["role"], "user");
             assert!(
                 reviews.is_empty(),
                 "a user input answer must invalidate earlier synchronous Guardian decisions"

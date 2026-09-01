@@ -21,7 +21,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         app.config
             .permissions
             .set_permission_profile(PermissionProfile::read_only())?;
-        app.runtime_approval_policy_override = Some(AskForApproval::OnRequest);
+        app.runtime_approval_policy_override = Some(RuntimeApprovalPolicyOverride::Explicit(
+            AskForApproval::OnRequest,
+        ));
         app.runtime_permission_profile_override =
             Some(RuntimePermissionProfileOverride::from_config(&app.config));
         app.active_thread_id = Some(id);
@@ -180,8 +182,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             app.recap
                 .note_turn_finished(&TurnStatus::Completed, before_disconnect);
         }
-        app.recap
-            .schedule_check(id, app.app_event_tx.clone(), Instant::now());
+        app.schedule_recap_check(id, Instant::now());
         let old_sender = app.app_event_tx.clone();
         let connected = reconnect(
             app.app_server_target.clone(),

@@ -1,12 +1,7 @@
-//! Background terminal history cells, with bounded inline input and full transcript views.
+//! Background terminal interaction and process-summary history cells.
 
 use super::*;
-use crate::line_truncation::truncate_line_to_width;
 use crate::width::display_width;
-use crate::wrapping::word_wrap_lines;
-
-const INPUT_PREVIEW_ROWS: usize = 12;
-const INPUT_PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct UnifiedExecInteractionCell {
@@ -21,8 +16,10 @@ impl UnifiedExecInteractionCell {
             stdin,
         }
     }
+}
 
-    fn render_lines(&self, width: u16, max_input_rows: usize) -> Vec<Line<'static>> {
+impl HistoryCell for UnifiedExecInteractionCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
             return Vec::new();
         }
@@ -50,61 +47,20 @@ impl UnifiedExecInteractionCell {
             return out;
         }
 
-        // Limit work before wrapping, including payloads with no newlines or visible width.
-        let input = if max_input_rows == usize::MAX {
-            self.stdin.as_str()
-        } else {
-            &self.stdin[..self.stdin.floor_char_boundary(INPUT_PREVIEW_BYTES)]
-        };
-        let input_lines = input.lines().take(max_input_rows.saturating_add(1));
-        let options = RtOptions::new(wrap_width)
-            .initial_indent(Line::from("  └ ".dim()))
-            .subsequent_indent(Line::from("    ".dim()));
+        let input_lines: Vec<Line<'static>> = self
+            .stdin
+            .lines()
+            .map(|line| Line::from(line.to_string()))
+            .collect();
 
-        let mut remaining_rows = max_input_rows;
-        let mut omitted = input.len() < self.stdin.len();
-        for line in adaptive_wrap_lines(input_lines, options) {
-            if max_input_rows != usize::MAX {
-                let rows = Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width);
-                if rows > remaining_rows {
-                    // Keep fitting URLs intact; shorten only the overflowing final line.
-                    out.extend(
-                        word_wrap_lines([line], wrap_width)
-                            .into_iter()
-                            .take(remaining_rows)
-                            // Control sequences differ in textwrap and ratatui width.
-                            .map(|line| truncate_line_to_width(line, wrap_width)),
-                    );
-                    omitted = true;
-                    break;
-                }
-                remaining_rows -= rows;
-            }
-            out.push(line);
-        }
-        if omitted {
-            out.push(
-                format!(
-                    "  … Input preview limited ({}).",
-                    crate::ui_consts::TRANSCRIPT_HINT
-                )
-                .dim()
-                .into(),
-            );
-        }
+        let input_wrapped = adaptive_wrap_lines(
+            input_lines,
+            RtOptions::new(wrap_width)
+                .initial_indent(Line::from("  └ ".dim()))
+                .subsequent_indent(Line::from("    ".dim())),
+        );
+        out.extend(input_wrapped);
         out
-    }
-}
-
-impl HistoryCell for UnifiedExecInteractionCell {
-    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.render_lines(width, INPUT_PREVIEW_ROWS)
-    }
-
-    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.render_lines(width, usize::MAX)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -139,10 +95,6 @@ impl HistoryCell for UnifiedExecInteractionCell {
         out
     }
 }
-
-#[cfg(test)]
-#[path = "exec_tests.rs"]
-mod tests;
 
 pub(crate) fn new_unified_exec_interaction(
     command_display: Option<String>,

@@ -247,6 +247,7 @@ async fn settings_updates_preserve_turn_identity_and_target(target: SettingsTarg
                 effort: Some(Some(ReasoningEffort::High)),
                 summary: Some(ReasoningSummary::Detailed),
                 service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
+                ..Default::default()
             };
             assert_eq!(
                 submit_turn_settings(&test.codex, "different-turn", update.clone()).await?,

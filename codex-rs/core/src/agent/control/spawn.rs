@@ -996,6 +996,9 @@ impl AgentControl {
                 RolloutItem::Compacted(compacted) => {
                     // This checkpoint belongs to the inherited parent prefix.
                     compacted.latest_token_usage_record = None;
+                    // Parent-local review evidence must not become the child's authorization.
+                    // Root user authorization is collected separately by the host.
+                    compacted.guardian_history = None;
                     if let Some(replacement_history) = compacted.replacement_history.as_mut() {
                         // Matches before this checkpoint cannot survive its replacement history.
                         replaced_parent_developer_instructions = false;

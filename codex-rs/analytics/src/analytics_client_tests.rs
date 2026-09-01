@@ -209,6 +209,14 @@ impl TurnAnalyticsMetadata for TestTurnMetadata {
     fn root_turn_id(&self) -> Option<String> {
         self.root_turn_id.lock().expect("root turn ID").clone()
     }
+
+    fn turn_trigger(&self) -> Option<String> {
+        None
+    }
+
+    fn codex_turn_source(&self) -> Option<String> {
+        None
+    }
 }
 
 fn test_turn_metadata(root_turn_id: Option<&str>) -> Arc<TestTurnMetadata> {
@@ -4648,6 +4656,8 @@ fn turn_event_serializes_expected_shape() {
             session_id: "session-thread-2".to_string(),
             turn_id: "turn-2".to_string(),
             root_turn_id: Some("turn-2".to_string()),
+            turn_trigger: Some("user".to_string()),
+            codex_turn_source: Some("composer".to_string()),
             app_server_client: sample_app_server_client_metadata(),
             runtime: sample_runtime_metadata(),
             submission_type: None,
@@ -4722,6 +4732,8 @@ fn turn_event_serializes_expected_shape() {
                 "session_id": "session-thread-2",
                 "turn_id": "turn-2",
                 "root_turn_id": "turn-2",
+                "turn_trigger": "user",
+                "codex_turn_source": "composer",
                 "submission_type": null,
                 "app_server_client": {
                     "product_client_id": "codex_cli_rs",
@@ -5072,6 +5084,16 @@ async fn turn_lifecycle_emits_turn_event() {
         json!("session-thread-2")
     );
     assert_eq!(payload["event_params"]["turn_id"], json!("turn-2"));
+    assert_eq!(
+        (
+            payload["event_params"].get("turn_trigger"),
+            payload["event_params"].get("codex_turn_source"),
+        ),
+        (
+            Some(&serde_json::Value::Null),
+            Some(&serde_json::Value::Null)
+        )
+    );
     assert_eq!(
         payload["event_params"]["app_server_client"],
         json!({
