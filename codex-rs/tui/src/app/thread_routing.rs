@@ -443,6 +443,12 @@ impl App {
         thread_id: ThreadId,
         op: AppCommand,
     ) -> Result<()> {
+        if self.thread_unavailable(thread_id) {
+            self.chat_widget.add_error_message(
+                "This conversation is unavailable; no operation was sent.".into(),
+            );
+            return Ok(());
+        }
         if self.chat_widget.rejects_misalignment_policy_op(&op) {
             return Ok(());
         }
@@ -1546,7 +1552,7 @@ impl App {
 
     pub(super) fn replay_thread_snapshot(
         &mut self,
-        snapshot: ThreadEventSnapshot,
+        mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
         let request_changes = snapshot
@@ -1591,6 +1597,12 @@ impl App {
                 self.chat_widget.handle_thread_session(session);
             }
         }
+        let recovered_input = snapshot
+            .input_state
+            .as_ref()
+            .is_some_and(|input| input.recovered_queue)
+            .then(|| snapshot.input_state.take())
+            .flatten();
         self.chat_widget.restore_thread_input_state(
             snapshot.input_state,
             ThreadInputStateRestoreMode {
@@ -1615,6 +1627,9 @@ impl App {
         if should_buffer_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
+        }
+        if recovered_input.is_some() {
+            self.chat_widget.restore_reconnected_input(recovered_input);
         }
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ false);

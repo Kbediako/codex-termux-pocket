@@ -146,3 +146,4 @@ subject	ci: stage exact 0.152.0-alpha.7.2 integration	tooling	Temporary protecte
 subject	termux: update to 0.152.0-alpha.7.2	runtime-critical	Merges the exact official 0.152.0-alpha.7.2 source and reapplies the maintained Android and Termux runtime patch stack.
 subject	termux: repair hosted fixture interpreters for 0.152.0-alpha.7.2	tooling	Uses env bash only in generated hosted-CI test doubles so executable validation remains covered without changing production Termux launchers.
 subject	termux: preserve production launcher shebang in hosted tests	tooling	Executes the generated Termux launcher through the hosted Bash interpreter while separately asserting its required absolute Termux shebang.
+subject	termux: update to 0.153.0-alpha.2	runtime-critical	Merges the exact official 0.153.0-alpha.2 source and preserves the maintained Android and Termux runtime patch stack.

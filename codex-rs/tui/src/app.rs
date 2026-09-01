@@ -229,6 +229,7 @@ mod platform_actions;
 mod plugin_mentions;
 mod rate_limit_refresh;
 mod recap;
+mod reconnect;
 mod replay_filter;
 mod resize_reflow;
 mod safety_buffering;
@@ -422,7 +423,7 @@ const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
 pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub thread_id: Option<ThreadId>,
-    pub resume_hint: Option<String>,
+    pub resume_hint: Option<ResumableThread>,
     pub disconnect_info: Option<DisconnectInfo>,
     pub update_action: Option<UpdateAction>,
     pub exit_reason: ExitReason,
@@ -442,6 +443,7 @@ impl AppExitInfo {
 }
 
 pub use exit_summary::DisconnectInfo;
+pub use exit_summary::ResumableThread;
 
 #[derive(Debug)]
 pub(crate) enum AppRunControl {
@@ -476,12 +478,6 @@ fn session_summary(
         usage_line,
         resume_hint,
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResumableThread {
-    thread_id: ThreadId,
-    thread_name: Option<String>,
 }
 
 fn resumable_thread(
@@ -590,6 +586,7 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    reconnect: reconnect::ReconnectState,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -787,6 +784,18 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if self.reconnect.offline
+            && let TuiEvent::Key(key) = &event
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char(character) = key.code
+            && (character.eq_ignore_ascii_case(&'c')
+                || (character.eq_ignore_ascii_case(&'d')
+                    && self.chat_widget.composer_is_empty()
+                    && self.chat_widget.no_modal_or_popup_active()))
+        {
+            return Ok(AppRunControl::Exit(ExitReason::UserRequested));
+        }
         let screen_size = tui.screen_size_for_event(&event)?;
         if !matches!(
             &event,
@@ -804,6 +813,17 @@ impl App {
         } else {
             event
         };
+
+        if self.reconnect.offline
+            && let TuiEvent::Key(key) = &event
+        {
+            if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
+                self.chat_widget.handle_disconnected_view_key(*key);
+            } else {
+                self.chat_widget.handle_disconnected_key(*key);
+            }
+            return Ok(AppRunControl::Continue);
+        }
 
         match &event {
             TuiEvent::FocusLost => {
@@ -840,6 +860,15 @@ impl App {
                     // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
                     let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
                     self.chat_widget.handle_paste(pasted);
+                    if self.reconnect.offline
+                        && self.reconnect.presentation
+                            == reconnect::ReconnectPresentation::Conversation
+                    {
+                        self.chat_widget.handle_disconnected_key(KeyEvent::new(
+                            KeyCode::Null,
+                            KeyModifiers::NONE,
+                        ));
+                    }
                 }
                 TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                     if self.backtrack_render_pending {

@@ -12,6 +12,7 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
+use crate::tools::handlers::file_system_sandbox_policy_context_for_cwd;
 use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
 use crate::tools::handlers::parse_arguments;
@@ -301,12 +302,20 @@ impl ExecCommandHandler {
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
         let requested_additional_permissions = additional_permissions.clone();
-        // TODO(anp): Make permission matching operate on PathUri for remote environments.
-        let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
+        let sandbox_context =
+            turn_environment.sandbox_context(/*additional_permissions*/ None);
+        let Some(permission_context) =
+            file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd)
+        else {
+            manager.release_process_id(process_id).await;
+            return Err(FunctionCallError::RespondToModel(
+                "selected environment sandbox context is missing cwd".to_string(),
+            ));
+        };
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            &turn_environment.selection.environment_id,
-            permission_cwd.as_path(),
+            turn_environment,
+            &cwd,
             sandbox_permissions,
             additional_permissions,
         )
@@ -343,7 +352,7 @@ impl ExecCommandHandler {
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
-                    permission_cwd,
+                    &permission_context,
                 )
             },
             |permissions| Ok(Some(permissions)),

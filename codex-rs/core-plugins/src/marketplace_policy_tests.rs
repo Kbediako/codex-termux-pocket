@@ -11,6 +11,9 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+#[path = "marketplace_policy/curated_tests.rs"]
+mod curated;
+
 fn config_layer_stack(requirements_toml: &str) -> ConfigLayerStack {
     config_layer_stack_with_user_config(requirements_toml, /*user_config*/ None)
 }
@@ -361,6 +364,9 @@ fn curated_marketplace_requires_its_expected_name() {
         r#"
 [marketplaces]
 restrict_to_allowed_sources = true
+[marketplaces.allowed_sources.curated]
+source = "git"
+url = "https://github.com/openai/plugins.git"
 "#,
     );
     let marketplace_path = AbsolutePathBuf::try_from(

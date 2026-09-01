@@ -20,7 +20,6 @@ use crate::responses_metadata::TurnToolSource;
 use crate::responses_metadata::WINDOW_ID_KEY;
 use crate::responses_metadata::WINDOW_NUMBER_KEY;
 use crate::responses_metadata::validate_extra_metadata;
-use crate::sandbox_tags::permission_profile_sandbox_tag;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
@@ -32,6 +31,8 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
+use codex_sandboxing::SandboxType;
+use codex_sandboxing::get_platform_sandbox;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -249,11 +250,9 @@ fn turn_metadata_state_includes_sandbox_metadata() {
     let thread_id = json.get("thread_id").and_then(Value::as_str);
 
     assert!(json.get("request_kind").is_none());
-    let expected_sandbox = permission_profile_sandbox_tag(
-        &permission_profile,
-        WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
-    );
+    let expected_sandbox = get_platform_sandbox(/*windows_sandbox_enabled*/ false)
+        .map(SandboxType::as_metric_tag)
+        .unwrap_or("none");
     assert_eq!(sandbox_name, Some(expected_sandbox));
     assert_eq!(sandbox_mode, Some("read-only"));
     assert_eq!(auto_review_enabled, Some(true));

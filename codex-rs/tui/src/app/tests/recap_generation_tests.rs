@@ -267,6 +267,29 @@ async fn manual_recap_bypasses_automatic_eligibility_and_reports_failure() -> Re
         "rendered error: {rendered:?}"
     );
 
+    // A completion quarantined during reconnect must not leave the next recap stuck as busy.
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1".into(),
+            auth_token: None,
+        },
+    };
+    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
+    let stale = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
+        .await?
+        .expect("recap completion before disconnect");
+    assert!(matches!(stale, AppEvent::RecapStarted { .. }));
+    assert!(app.begin_reconnect());
+    app.handle_event(&mut tui, &mut app_server, stale).await?;
+    while app_event_rx.try_recv().is_ok() {}
+    app.reconnect.offline = false;
+    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
+    let next = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv()).await?;
+    assert!(
+        matches!(next, Some(AppEvent::RecapStarted { .. })),
+        "{next:?}"
+    );
+
     app_server.shutdown().await?;
     proxy.await??;
     Ok(())

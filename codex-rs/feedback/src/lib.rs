@@ -32,11 +32,14 @@ use tracing_subscriber::registry::LookupSpan;
 
 mod attachment_truncation;
 pub(crate) mod feedback_diagnostics;
+mod guardian;
 mod report_upload;
 mod upload;
 pub use feedback_diagnostics::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
 pub use feedback_diagnostics::FeedbackDiagnostic;
 pub use feedback_diagnostics::FeedbackDiagnostics;
+pub use guardian::guardian_review_failures_attachment;
+pub use guardian::record_guardian_review_failure;
 pub use report_upload::FeedbackDelivery;
 pub use report_upload::FeedbackTransport;
 pub use report_upload::prepare_report_attachment;

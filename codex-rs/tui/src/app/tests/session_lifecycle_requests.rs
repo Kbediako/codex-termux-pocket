@@ -601,7 +601,7 @@ async fn archive_current_thread_reports_success_only_after_archiving() -> Result
 
 #[tokio::test]
 async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() -> Result<()> {
-    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (mut app, events, _ops) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
@@ -612,7 +612,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         codex_home.path().join("config.toml"),
         "web_search = \"disabled\"\n",
     )?;
-    let (mut app_server, requests, proxy) = start_recording_app_server(
+    let (mut app_server, mut requests, mut proxy) = start_recording_app_server(
         &app.config,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
@@ -776,6 +776,41 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
                 }
             }))
     };
+    let transport = app_server.thread_tool_transport();
+    let crate::dynamic_tools_mcp::ThreadToolTransport::Mcp(tool_server) = &transport else {
+        panic!("expected the daemon task-tool bridge");
+    };
+    tool_server.suspend();
+    let paused = call_tool(0, "list_threads", serde_json::json!({}))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(
+        paused.contains("TUI is reconnecting; tool was not sent"),
+        "{paused}"
+    );
+    let (replacement, replacement_requests, replacement_proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    let (new_tx, new_rx) = mpsc::unbounded_channel();
+    let new_sender = AppEventSender::new(new_tx);
+    drop(events);
+    let mut events = new_rx;
+    assert!(app.app_event_tx.app_event_tx.is_closed());
+    tool_server.reconnect(replacement.request_handle(), new_sender);
+    let previous = std::mem::replace(
+        &mut app_server,
+        replacement.with_thread_tool_transport(transport),
+    );
+    previous.shutdown().await?;
+    proxy.await??;
+    requests = replacement_requests;
+    proxy = replacement_proxy;
+    // The same MCP URL and credentials now use the new connection and event receiver.
     let response = call_tool(1, "list_threads", serde_json::json!({}))
         .send()
         .await?;
@@ -824,9 +859,13 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         child["config"]["mcp_servers.codex_tui"],
         starts[0]["config"]["mcp_servers.codex_tui"]
     );
-    let forked = call_tool(3, "fork_thread", serde_json::json!({"threadId": thread_id}))
-        .send()
-        .await?;
+    let forked = call_tool(
+        3,
+        "fork_thread",
+        serde_json::json!({"threadId": delegation_source}),
+    )
+    .send()
+    .await?;
     assert!(forked.status().is_success());
     let forked = recorded_params(&requests, "thread/fork")
         .pop()

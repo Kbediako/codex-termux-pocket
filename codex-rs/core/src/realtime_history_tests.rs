@@ -1,11 +1,15 @@
 use super::*;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::DynamicToolCallItem;
+use codex_protocol::items::DynamicToolCallStatus;
 use codex_protocol::items::ImageGenerationItem;
 use codex_protocol::items::McpToolCallItem;
+use codex_protocol::items::McpToolCallStatus;
 use codex_protocol::items::SubAgentActivityItem;
+use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
@@ -13,18 +17,30 @@ use codex_protocol::protocol::RealtimeConversationClosedEvent;
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeConversationVersion;
+use codex_protocol::protocol::SubAgentActivityKind;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
 use pretty_assertions::assert_eq;
+use test_case::test_case;
 use uuid::Uuid;
 
 fn started_state() -> RealtimeHistoryState {
     let mut state = RealtimeHistoryState::default();
-    state.observe(
-        &EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
+    state.observe(&EventMsg::TurnStarted(
+        codex_protocol::protocol::TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        },
+    ));
+    state.observe(&EventMsg::RealtimeConversationStarted(
+        RealtimeConversationStartedEvent {
             realtime_session_id: Some("voice-1".to_string()),
             version: RealtimeConversationVersion::V2,
-        }),
-        Some("turn-1"),
-    );
+        },
+    ));
     state
 }
 
@@ -32,10 +48,9 @@ fn observe_realtime(
     state: &mut RealtimeHistoryState,
     payload: RealtimeEvent,
 ) -> RealtimeEventEffects {
-    state.observe(
-        &EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent { payload }),
-        /*active_turn_id*/ None,
-    )
+    state.observe(&EventMsg::RealtimeConversationRealtime(
+        RealtimeConversationRealtimeEvent { payload },
+    ))
 }
 
 fn assistant_delta(item_id: &str, delta: &str) -> EventMsg {
@@ -102,20 +117,96 @@ fn contents(effects: RealtimeEventEffects) -> Vec<RealtimeItemContent> {
         .collect()
 }
 
+#[test_case(Some("turn-1"), None; "matching_turn")]
+#[test_case(None, None; "without_turn_id")]
+#[test_case(Some("another-turn"), Some("voice-2"); "unrelated_turn")]
+fn interrupted_turn_is_not_associated_with_a_new_voice_session(
+    aborted_turn_id: Option<&str>,
+    expected_session_id: Option<&str>,
+) {
+    let mut state = RealtimeHistoryState::default();
+    state.observe(&EventMsg::TurnStarted(
+        codex_protocol::protocol::TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        },
+    ));
+    let aborted = EventMsg::TurnAborted(TurnAbortedEvent {
+        turn_id: aborted_turn_id.map(str::to_string),
+        reason: TurnAbortReason::Interrupted,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    });
+    assert!(state.should_observe(&aborted));
+    state.observe(&aborted);
+    state.observe(&EventMsg::RealtimeConversationStarted(
+        RealtimeConversationStartedEvent {
+            realtime_session_id: Some("voice-2".to_string()),
+            version: RealtimeConversationVersion::V2,
+        },
+    ));
+
+    let promoted = state
+        .observe(&completed_item(dynamic_tool_call(
+            "late-tool",
+            DynamicToolCallStatus::Completed,
+        )))
+        .items;
+    assert_eq!(
+        promoted
+            .iter()
+            .map(|item| item.realtime_session_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_session_id.into_iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn interrupted_turn_keeps_its_existing_voice_session_for_late_artifacts() {
+    let mut state = started_state();
+    state.observe(&EventMsg::TurnAborted(TurnAbortedEvent {
+        turn_id: Some("turn-1".to_string()),
+        reason: TurnAbortReason::Interrupted,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    }));
+    state.observe(&EventMsg::RealtimeConversationStarted(
+        RealtimeConversationStartedEvent {
+            realtime_session_id: Some("voice-2".to_string()),
+            version: RealtimeConversationVersion::V2,
+        },
+    ));
+    let promoted = state
+        .observe(&completed_item(dynamic_tool_call(
+            "late-tool",
+            DynamicToolCallStatus::Completed,
+        )))
+        .items;
+    assert_eq!(
+        promoted
+            .iter()
+            .map(|item| item.realtime_session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["voice-1"]
+    );
+}
+
 #[test]
 fn promotes_backing_agent_artifacts_once_without_a_client_request() {
     let mut state = started_state();
     let first_delta = assistant_delta("message-1", "[analysis] ::codex-realtime-inline{}");
-    assert!(
-        state
-            .observe(&first_delta, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&first_delta).items.is_empty());
 
     let second_delta = assistant_delta("message-1", "\nVisible explanation");
+    let effects = state.observe(&second_delta);
+    assert_eq!(effects.order, RealtimeEventOrder::AfterEvent);
     assert_eq!(
-        contents(state.observe(&second_delta, /*active_turn_id*/ None)),
+        contents(effects),
         vec![RealtimeItemContent::BemItemPromoted {
             turn_id: "turn-1".to_string(),
             item_id: "message-1".to_string(),
@@ -132,16 +223,11 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
         memory_citation: None,
         delivery: None,
     }));
-    assert!(
-        state
-            .observe(&completed, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&completed).items.is_empty());
 
     let next_message = assistant_delta("message-2", "::codex-realtime-inline{}\nNext message");
     assert_eq!(
-        contents(state.observe(&next_message, /*active_turn_id*/ None)),
+        contents(state.observe(&next_message)),
         vec![RealtimeItemContent::BemItemPromoted {
             turn_id: "turn-1".to_string(),
             item_id: "message-2".to_string(),
@@ -169,7 +255,7 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
     }));
     for (event, item_id) in [(image, "image-1"), (subagent, "subagent-1")] {
         assert_eq!(
-            contents(state.observe(&event, /*active_turn_id*/ None)),
+            contents(state.observe(&event)),
             vec![RealtimeItemContent::BemItemPromoted {
                 turn_id: "turn-1".to_string(),
                 item_id: item_id.to_string(),
@@ -177,6 +263,15 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
             }]
         );
     }
+    state.observe(&EventMsg::RealtimeConversationClosed(
+        RealtimeConversationClosedEvent { reason: None },
+    ));
+    let late = state.observe(&assistant_delta(
+        "late-artifact",
+        "::codex-realtime-inline{}\npresent later",
+    ));
+    assert_eq!(late.items.len(), 1);
+    assert_eq!(late.items[0].realtime_session_id, "voice-1");
 }
 
 #[test]
@@ -185,7 +280,7 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
     let text = "```\n::codex-inline-vis{file=hidden}\n```\n~~~\nvisualize{file=also-hidden}\n~~~\n::codex-inline-vis{file=first}\nvisualize{file=second}";
     let message = assistant_delta("message-1", text);
     assert_eq!(
-        contents(state.observe(&message, /*active_turn_id*/ None)),
+        contents(state.observe(&message)),
         (0..2)
             .map(|index| RealtimeItemContent::BemItemPromoted {
                 turn_id: "turn-1".to_string(),
@@ -204,12 +299,7 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
         memory_citation: None,
         delivery: None,
     }));
-    assert!(
-        state
-            .observe(&completed, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&completed).items.is_empty());
 }
 
 #[test]
@@ -302,12 +392,9 @@ fn preserves_first_transcript_activity_order_when_both_speakers_are_active() {
             );
         }
         let items = state
-            .observe(
-                &EventMsg::RealtimeConversationClosed(RealtimeConversationClosedEvent {
-                    reason: None,
-                }),
-                /*active_turn_id*/ None,
-            )
+            .observe(&EventMsg::RealtimeConversationClosed(
+                RealtimeConversationClosedEvent { reason: None },
+            ))
             .items;
         let observed_roles = items
             .iter()
@@ -333,13 +420,7 @@ fn does_not_replay_a_final_transcript_after_a_promotion_split() {
         "successful-tool",
         DynamicToolCallStatus::Completed,
     ));
-    assert_eq!(
-        state
-            .observe(&promotion, /*active_turn_id*/ None)
-            .items
-            .len(),
-        2
-    );
+    assert_eq!(state.observe(&promotion).items.len(), 2);
 
     let done = observe_realtime(
         &mut state,
@@ -356,17 +437,15 @@ fn generates_distinct_boundary_ids_for_reused_realtime_sessions() {
     let mut state = RealtimeHistoryState::default();
     let mut boundary_ids = Vec::new();
     for _ in 0..2 {
-        let started = state.observe(
-            &EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
+        let started = state.observe(&EventMsg::RealtimeConversationStarted(
+            RealtimeConversationStartedEvent {
                 realtime_session_id: Some("reused-session".to_string()),
                 version: RealtimeConversationVersion::V2,
-            }),
-            /*active_turn_id*/ None,
-        );
-        let closed = state.observe(
-            &EventMsg::RealtimeConversationClosed(RealtimeConversationClosedEvent { reason: None }),
-            /*active_turn_id*/ None,
-        );
+            },
+        ));
+        let closed = state.observe(&EventMsg::RealtimeConversationClosed(
+            RealtimeConversationClosedEvent { reason: None },
+        ));
         for item in started.items.into_iter().chain(closed.items) {
             assert_eq!(item.realtime_session_id, "reused-session");
             assert_eq!(Uuid::parse_str(&item.id).unwrap().get_version_num(), 7);
@@ -378,13 +457,12 @@ fn generates_distinct_boundary_ids_for_reused_realtime_sessions() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(unique_ids.len(), 4);
 
-    let fallback = state.observe(
-        &EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
+    let fallback = state.observe(&EventMsg::RealtimeConversationStarted(
+        RealtimeConversationStartedEvent {
             realtime_session_id: None,
             version: RealtimeConversationVersion::V2,
-        }),
-        /*active_turn_id*/ None,
-    );
+        },
+    ));
     assert_eq!(fallback.items.len(), 1);
     assert_eq!(
         Uuid::parse_str(&fallback.items[0].realtime_session_id)
@@ -410,10 +488,11 @@ fn promotes_successful_codex_app_mcp_calls_and_splits_active_transcripts() {
     ] {
         assert!(
             state
-                .observe(
-                    &completed_item(mcp_tool_call("not-promoted", server, status)),
-                    /*active_turn_id*/ None,
-                )
+                .observe(&completed_item(mcp_tool_call(
+                    "not-promoted",
+                    server,
+                    status
+                )),)
                 .items
                 .is_empty()
         );
@@ -424,7 +503,7 @@ fn promotes_successful_codex_app_mcp_calls_and_splits_active_transcripts() {
         McpToolCallStatus::Completed,
     ));
     assert_eq!(
-        contents(state.observe(&completed, /*active_turn_id*/ None)),
+        contents(state.observe(&completed)),
         vec![
             RealtimeItemContent::TranscriptSegment {
                 role: RealtimeTranscriptRole::Assistant,
@@ -437,12 +516,7 @@ fn promotes_successful_codex_app_mcp_calls_and_splits_active_transcripts() {
             },
         ]
     );
-    assert!(
-        state
-            .observe(&completed, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&completed).items.is_empty());
 }
 
 #[test]
@@ -461,18 +535,15 @@ fn promotes_successful_dynamic_tools_and_splits_active_transcripts() {
         "failed-tool",
         DynamicToolCallStatus::Failed,
     ));
-    assert!(
-        state
-            .observe(&failed, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&failed).items.is_empty());
 
     let completed = completed_item(dynamic_tool_call(
         "successful-tool",
         DynamicToolCallStatus::Completed,
     ));
-    let items = state.observe(&completed, /*active_turn_id*/ None).items;
+    let effects = state.observe(&completed);
+    assert_eq!(effects.order, RealtimeEventOrder::AfterEvent);
+    let items = effects.items;
     assert_eq!(items.len(), 2);
     assert_eq!(
         items[0],
@@ -505,37 +576,89 @@ fn promotes_successful_dynamic_tools_and_splits_active_transcripts() {
     .expect("second transcript stream");
     assert_ne!(first.item_id, second.item_id);
     assert!(second.started_item.is_some());
-    assert!(
-        state
-            .observe(&completed, /*active_turn_id*/ None)
-            .items
-            .is_empty()
-    );
+    assert!(state.observe(&completed).items.is_empty());
 
-    let closed = state.observe(
-        &EventMsg::RealtimeConversationClosed(RealtimeConversationClosedEvent { reason: None }),
-        /*active_turn_id*/ None,
-    );
+    let closed = state.observe(&EventMsg::RealtimeConversationClosed(
+        RealtimeConversationClosedEvent { reason: None },
+    ));
     assert_eq!(closed.items[0].id, second.item_id);
     let late = completed_item(dynamic_tool_call(
         "late-tool",
         DynamicToolCallStatus::Completed,
     ));
+    assert!(state.observe(&late).items.is_empty());
+
+    state.observe(&EventMsg::RealtimeConversationStarted(
+        RealtimeConversationStartedEvent {
+            realtime_session_id: Some("voice-2".to_string()),
+            version: RealtimeConversationVersion::V2,
+        },
+    ));
+    let resumed = state.observe(&late).items;
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].realtime_session_id, "voice-2");
+}
+
+#[test_case(|item| EventMsg::ItemStarted(ItemStartedEvent {
+    thread_id: ThreadId::new(),
+    turn_id: "turn-1".to_string(),
+    item,
+    started_at_ms: 0,
+}); "started")]
+#[test_case(completed_item; "completed")]
+fn typed_input_seals_both_roles_but_realtime_delegation_does_not(
+    user_event: fn(TurnItem) -> EventMsg,
+) {
+    let mut state = started_state();
+    for event in [
+        RealtimeEvent::OutputTranscriptDelta(RealtimeTranscriptDelta {
+            delta: "assistant".to_string(),
+        }),
+        RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
+            delta: "user".to_string(),
+        }),
+    ] {
+        observe_realtime(&mut state, event);
+    }
     assert!(
         state
-            .observe(&late, /*active_turn_id*/ None)
+            .observe(&user_event(TurnItem::UserMessage(UserMessageItem::new(&[
+                UserInput::Text {
+                    text: "<realtime_delegation>delegated</realtime_delegation>".to_string(),
+                    text_elements: Vec::new(),
+                }
+            ]))))
             .items
             .is_empty()
     );
-
-    state.observe(
-        &EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
-            realtime_session_id: Some("voice-2".to_string()),
-            version: RealtimeConversationVersion::V2,
-        }),
-        Some("turn-1"),
+    let effects = state.observe(&user_event(TurnItem::UserMessage(UserMessageItem::new(&[
+        UserInput::Text {
+            text: "typed steering".to_string(),
+            text_elements: Vec::new(),
+        },
+    ]))));
+    assert_eq!(effects.order, RealtimeEventOrder::BeforeEvent);
+    assert_eq!(
+        contents(effects),
+        vec![
+            RealtimeItemContent::TranscriptSegment {
+                role: RealtimeTranscriptRole::Assistant,
+                text: "assistant".to_string()
+            },
+            RealtimeItemContent::TranscriptSegment {
+                role: RealtimeTranscriptRole::User,
+                text: "user".to_string()
+            },
+        ]
     );
-    let resumed = state.observe(&late, /*active_turn_id*/ None).items;
-    assert_eq!(resumed.len(), 1);
-    assert_eq!(resumed[0].realtime_session_id, "voice-2");
+    for event in [
+        RealtimeEvent::OutputTranscriptDone(RealtimeTranscriptDone {
+            text: "assistant revised".to_string(),
+        }),
+        RealtimeEvent::InputTranscriptDone(RealtimeTranscriptDone {
+            text: "user revised".to_string(),
+        }),
+    ] {
+        assert!(observe_realtime(&mut state, event).items.is_empty());
+    }
 }

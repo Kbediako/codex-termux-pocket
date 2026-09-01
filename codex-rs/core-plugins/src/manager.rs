@@ -69,6 +69,7 @@ use crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot;
 use crate::remote_plugin_id_resolver::RemotePluginIdResolver;
 use crate::remote_plugin_id_resolver::persisted_remote_plugin_id_for_installation;
 use crate::skill_snapshots::new_plugin_skill_snapshots;
+use crate::startup_sync::OPENAI_PLUGINS_GIT_URL;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
 use crate::startup_sync::read_curated_plugins_sha;
@@ -677,7 +678,12 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         on_effective_plugins_changed: Option<EffectivePluginsChangedCallback>,
     ) {
-        if config.plugins_enabled && !self.remote_global_catalog_active(config) {
+        if config.plugins_enabled
+            && !self.remote_global_catalog_active(config)
+            && MarketplacePolicy::from_requirements(config.config_layer_stack.requirements())
+                .validate_git_source(OPENAI_PLUGINS_GIT_URL, /*ref_name*/ None)
+                .is_ok()
+        {
             self.start_curated_repo_sync(
                 config.http_client_factory.clone(),
                 on_effective_plugins_changed,

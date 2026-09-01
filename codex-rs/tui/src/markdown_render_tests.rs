@@ -33,8 +33,7 @@ fn plain_lines(text: &Text<'_>) -> Vec<String> {
 
 #[test]
 fn bare_url_with_tilde_keeps_complete_hyperlink() {
-    let destination =
-        "https://www.cs.tufts.edu/~nr/cs257/archive/olin-shivers/dissertation.pdf";
+    let destination = "https://www.cs.tufts.edu/~nr/cs257/archive/olin-shivers/dissertation.pdf";
     let lines = render_markdown_lines_with_width_and_cwd(
         destination,
         /*width*/ Some(80),
@@ -63,8 +62,7 @@ fn bare_url_with_tilde_keeps_complete_hyperlink() {
 
 #[test]
 fn table_url_with_tilde_keeps_complete_hyperlink() {
-    let destination =
-        "https://www.cs.tufts.edu/~nr/cs257/archive/olin-shivers/dissertation.pdf";
+    let destination = "https://www.cs.tufts.edu/~nr/cs257/archive/olin-shivers/dissertation.pdf";
     let markdown = format!("| URL |\n| --- |\n| {destination} |\n");
     let lines = render_markdown_lines_with_width_and_cwd(
         &markdown,
@@ -793,8 +791,10 @@ fn web_link_labels_use_link_style_and_preserve_inline_formatting() {
 fn web_link_labels_keep_link_style_in_wrapped_prose_and_tables() {
     let links =
         "[plain](https://example.com) [`code`](https://example.com) [<b>](https://example.com)";
-    for markdown in [links.to_string(), format!("| Links |\n| --- |\n| {links} |")]
-    {
+    for markdown in [
+        links.to_string(),
+        format!("| Links |\n| --- |\n| {links} |"),
+    ] {
         for width in [32, 80] {
             let text = render_markdown_text_with_width(&markdown, Some(width));
             let labels = text
@@ -836,8 +836,9 @@ fn file_link_hides_destination() {
         "[codex-rs/tui/src/markdown_render.rs](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter(["codex-rs/tui/src/markdown_render.rs".cyan()]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs".cyan()
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -847,9 +848,7 @@ fn file_link_decodes_percent_encoded_bare_path_destination() {
         "[report](/Users/example/code/codex/Example%20Folder/R%C3%A9sum%C3%A9/report.md)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected = Text::from(Line::from_iter([
-        "Example Folder/Résumé/report.md".cyan(),
-    ]));
+    let expected = Text::from(Line::from_iter(["Example Folder/Résumé/report.md".cyan()]));
     assert_eq!(text, expected);
 }
 
@@ -860,7 +859,7 @@ fn file_link_appends_line_number_when_label_lacks_it() {
         Path::new("/Users/example/code/codex"),
     );
     let expected = Text::from(Line::from_iter([
-        "codex-rs/tui/src/markdown_render.rs:74".cyan(),
+        "codex-rs/tui/src/markdown_render.rs:74".cyan()
     ]));
     assert_eq!(text, expected);
 }
@@ -871,7 +870,9 @@ fn file_link_keeps_absolute_paths_outside_cwd() {
         "[README.md:74](/Users/example/code/codex/README.md:74)",
         Path::new("/Users/example/code/codex/codex-rs/tui"),
     );
-    let expected = Text::from(Line::from_iter(["/Users/example/code/codex/README.md:74".cyan()]));
+    let expected = Text::from(Line::from_iter([
+        "/Users/example/code/codex/README.md:74".cyan()
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -881,10 +882,9 @@ fn file_link_appends_hash_anchor_when_label_lacks_it() {
         "[markdown_render.rs](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -894,10 +894,9 @@ fn file_link_uses_target_path_for_hash_anchor() {
         "[markdown_render.rs#L74C3](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -907,10 +906,9 @@ fn file_link_appends_range_when_label_lacks_it() {
         "[markdown_render.rs](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs:74:3-76:9)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -920,10 +918,9 @@ fn file_link_uses_target_path_for_range() {
         "[markdown_render.rs:74:3-76:9](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs:74:3-76:9)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -933,10 +930,9 @@ fn file_link_appends_hash_range_when_label_lacks_it() {
         "[markdown_render.rs](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3-L76C9)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -960,10 +956,9 @@ fn file_link_uses_target_path_for_hash_range() {
         "[markdown_render.rs#L74C3-L76C9](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3-L76C9)",
         Path::new("/Users/example/code/codex"),
     );
-    let expected =
-        Text::from(Line::from_iter([
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
-        ]));
+    let expected = Text::from(Line::from_iter([
+        "codex-rs/tui/src/markdown_render.rs:74:3-76:9".cyan(),
+    ]));
     assert_eq!(text, expected);
 }
 
@@ -1103,7 +1098,10 @@ fn code_block_known_lang_has_syntax_colors() {
         .iter()
         .flat_map(|l| l.spans.iter())
         .any(|sp| sp.style.fg.is_some());
-    assert!(has_colored_span, "expected syntax-highlighted spans with color");
+    assert!(
+        has_colored_span,
+        "expected syntax-highlighted spans with color"
+    );
 }
 
 #[test]
@@ -1132,7 +1130,10 @@ fn code_block_unknown_lang_plain() {
         .iter()
         .flat_map(|l| l.spans.iter())
         .any(|sp| sp.style.fg.is_some());
-    assert!(!has_colored_span, "expected no syntax coloring for unknown lang");
+    assert!(
+        !has_colored_span,
+        "expected no syntax coloring for unknown lang"
+    );
 }
 
 #[test]
@@ -1310,7 +1311,8 @@ fn list_item_after_code_block_keeps_blank_separator() {
 
 #[test]
 fn outer_list_item_after_nested_code_block_keeps_blank_separator() {
-    let md = "1. First:\n   - Nested:\n\n     ```rust\n     fn first() {}\n     ```\n\n2. Second:\n";
+    let md =
+        "1. First:\n   - Nested:\n\n     ```rust\n     fn first() {}\n     ```\n\n2. Second:\n";
     let text = render_markdown_text(md);
     let lines = plain_lines(&text);
     assert_eq!(
@@ -1613,7 +1615,8 @@ fn code_block_preserves_trailing_blank_lines() {
         "expected a line after 'fn main() {{}}' but content ends: {content:?}"
     );
     assert_eq!(
-        content[code_start + 1], "",
+        content[code_start + 1],
+        "",
         "trailing blank line inside code fence was lost: {content:?}"
     );
 }
@@ -1636,12 +1639,7 @@ fn table_renders_app_style_rows_with_themed_bold_header() {
             " 1      2".to_string(),
         ]
     );
-    assert!(
-        text.lines[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD)
-    );
+    assert!(text.lines[0].style.add_modifier.contains(Modifier::BOLD));
     assert!(
         text.lines[0].style.fg.is_some(),
         "expected the syntax theme to provide a table header accent"
@@ -1652,12 +1650,7 @@ fn table_renders_app_style_rows_with_themed_bold_header() {
             .add_modifier
             .contains(Modifier::DIM)
     );
-    assert!(
-        !text.lines[2]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD)
-    );
+    assert!(!text.lines[2].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -1839,7 +1832,11 @@ fn table_falls_back_to_key_value_records_if_grid_cannot_fit() {
         .collect();
 
     assert!(lines.first().is_some_and(|line| line.contains("c1")));
-    assert!(lines.iter().any(|line| line.contains("c10") && line.contains("10")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("c10") && line.contains("10"))
+    );
     assert!(
         !lines
             .iter()

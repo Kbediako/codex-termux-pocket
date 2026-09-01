@@ -78,6 +78,9 @@ impl App {
                     .await;
             }
             AppServerEvent::Disconnected { message } => {
+                if self.begin_reconnect() {
+                    return;
+                }
                 tracing::warn!("app-server event stream disconnected: {message}");
                 self.chat_widget.add_error_message(message.clone());
                 self.app_event_tx.send(AppEvent::FatalExitRequest(message));

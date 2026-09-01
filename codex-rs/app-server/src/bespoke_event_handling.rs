@@ -61,6 +61,9 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
 use codex_app_server_protocol::ThreadRealtimeErrorNotification;
 use codex_app_server_protocol::ThreadRealtimeItemAddedNotification;
+use codex_app_server_protocol::ThreadRealtimeItemCompletedNotification;
+use codex_app_server_protocol::ThreadRealtimeItemStartedNotification;
+use codex_app_server_protocol::ThreadRealtimeItemTranscriptDeltaNotification;
 use codex_app_server_protocol::ThreadRealtimeOutputAudioDeltaNotification;
 use codex_app_server_protocol::ThreadRealtimeSdpNotification;
 use codex_app_server_protocol::ThreadRealtimeStartedNotification;
@@ -463,6 +466,39 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::RealtimeConversationRealtime(event) => match event.payload {
+            RealtimeEvent::HistoryItemStarted(item) => {
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadRealtimeItemStarted(
+                        ThreadRealtimeItemStartedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item: item.into(),
+                        },
+                    ))
+                    .await;
+            }
+            RealtimeEvent::HistoryTranscriptDelta { item_id, delta } => {
+                outgoing
+                    .send_server_notification(
+                        ServerNotification::ThreadRealtimeItemTranscriptDelta(
+                            ThreadRealtimeItemTranscriptDeltaNotification {
+                                thread_id: conversation_id.to_string(),
+                                item_id,
+                                delta,
+                            },
+                        ),
+                    )
+                    .await;
+            }
+            RealtimeEvent::HistoryItemCompleted(item) => {
+                outgoing
+                    .send_server_notification(ServerNotification::ThreadRealtimeItemCompleted(
+                        ThreadRealtimeItemCompletedNotification {
+                            thread_id: conversation_id.to_string(),
+                            item: item.into(),
+                        },
+                    ))
+                    .await;
+            }
             RealtimeEvent::SessionUpdated { .. } => {}
             RealtimeEvent::InputAudioSpeechStarted(event) => {
                 let notification = ThreadRealtimeItemAddedNotification {

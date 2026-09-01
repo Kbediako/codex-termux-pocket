@@ -390,8 +390,15 @@ impl CodexThread {
             trace,
             cyber_access_program,
         } = request;
+        let root_turn_id = self
+            .session
+            .reference_context_item()
+            .await
+            .filter(|context| context.turn_id.as_deref() == Some(turn_id.as_str()))
+            .and_then(|context| context.root_turn_id);
         let start_options = TurnStartOptions {
             cyber_access_program,
+            root_turn_id,
             ..Default::default()
         };
         match self
@@ -512,18 +519,6 @@ impl CodexThread {
             return None;
         }
         task.turn_context.turn_metadata_state.root_turn_id()
-    }
-
-    /// Invalidates the trusted root when the expected turn is currently active.
-    pub async fn invalidate_turn_lineage(&self, expected_turn_id: &str) {
-        let active = self.session.active_turn.lock().await;
-        if let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref())
-            && task.turn_context.sub_id == expected_turn_id
-        {
-            task.turn_context
-                .turn_metadata_state
-                .mark_root_turn_ambiguous();
-        }
     }
 
     pub async fn set_app_server_client_info(

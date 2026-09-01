@@ -1843,7 +1843,11 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     assert_ne!(first_turn_id, second_turn_id);
     responses::assert_root_turn(
         &requests[1].body_json(),
-        (!automatic_continuation).then_some(second_turn_id.as_str()),
+        Some(if automatic_continuation {
+            first_turn_id.as_str()
+        } else {
+            second_turn_id.as_str()
+        }),
     )?;
     assert_eq!(
         warning_event

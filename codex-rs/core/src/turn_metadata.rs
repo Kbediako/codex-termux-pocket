@@ -23,8 +23,8 @@ use crate::responses_metadata::TurnToolNamespacesInfo;
 use crate::responses_metadata::filter_extra_metadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
-use crate::sandbox_tags::permission_profile_policy_tag;
-use crate::sandbox_tags::permission_profile_sandbox_tag;
+use crate::sandbox_tags::SandboxTags;
+use crate::sandbox_tags::record_policy_metadata;
 use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::get_git_remote_urls_assume_git_repo;
 use codex_git_utils::get_git_repo_root;
@@ -87,17 +87,16 @@ pub async fn detached_memory_responses_metadata(
     permission_profile: &PermissionProfile,
     sandbox: Option<&str>,
 ) -> CodexResponsesMetadata {
-    CodexResponsesMetadata {
+    let mut metadata = CodexResponsesMetadata {
         request_kind: Some(CodexResponsesRequestKind::Memory),
         thread_source: Some(ThreadSource::MemoryConsolidation),
         subagent_header: subagent_header_value(session_source),
         sandbox: sandbox.map(ToString::to_string),
-        sandbox_mode: Some(
-            permission_profile_policy_tag(permission_profile, cwd.as_path()).to_string(),
-        ),
         workspaces: memory_workspaces(cwd).await,
         ..CodexResponsesMetadata::new(installation_id, session_id, thread_id, window_id)
-    }
+    };
+    record_policy_metadata(permission_profile, cwd.as_path(), &mut metadata);
+    metadata
 }
 
 #[derive(Debug)]
@@ -119,8 +118,7 @@ pub(crate) struct TurnMetadataState {
     turn_id: String,
     // TODO(anp): Derive this cached tag from TurnEnvironment::sandbox_context
     // so metadata reflects the selected environment's backend.
-    sandbox: Option<String>,
-    sandbox_mode: Option<String>,
+    pub(crate) sandbox_tags: SandboxTags,
     auto_review_enabled: bool,
     node_repl_auto_review_required: bool,
     node_repl_disabled: bool,
@@ -129,7 +127,6 @@ pub(crate) struct TurnMetadataState {
     turn_started_at_unix_ms: RwLock<Option<i64>>,
     responses_api_metadata: RwLock<BTreeMap<String, String>>,
     responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
-    root_turn_ambiguous: AtomicBool,
     user_input_requested_during_turn: AtomicBool,
     enrichment_task: Mutex<Option<JoinHandle<()>>>,
     git_enrichment_complete: watch::Sender<bool>,
@@ -159,16 +156,12 @@ impl TurnMetadataState {
         model_info: &ModelInfo,
     ) -> Self {
         let repo_root = get_git_repo_root(&cwd);
-        let sandbox = Some(
-            permission_profile_sandbox_tag(
-                permission_profile,
-                windows_sandbox_level,
-                enforce_managed_network,
-            )
-            .to_string(),
+        let sandbox_tags = SandboxTags::new(
+            permission_profile,
+            cwd.as_path(),
+            windows_sandbox_level,
+            enforce_managed_network,
         );
-        let sandbox_mode =
-            Some(permission_profile_policy_tag(permission_profile, cwd.as_path()).to_string());
         let agent_name = session_source
             .get_agent_path()
             .unwrap_or_else(AgentPath::root)
@@ -189,8 +182,7 @@ impl TurnMetadataState {
             thread_source,
             turn_trigger: OnceLock::new(),
             turn_id,
-            sandbox,
-            sandbox_mode,
+            sandbox_tags,
             auto_review_enabled,
             node_repl_auto_review_required: model_info.node_repl_auto_review_required,
             node_repl_disabled: model_info.node_repl_disabled,
@@ -199,7 +191,6 @@ impl TurnMetadataState {
             turn_started_at_unix_ms: RwLock::new(None),
             responses_api_metadata: RwLock::new(BTreeMap::new()),
             responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
-            root_turn_ambiguous: AtomicBool::new(false),
             user_input_requested_during_turn: AtomicBool::new(false),
             enrichment_task: Mutex::new(None),
             git_enrichment_complete: watch::channel(/*init*/ true).0,
@@ -311,14 +302,7 @@ impl TurnMetadataState {
     }
 
     pub(crate) fn root_turn_id(&self) -> Option<String> {
-        self.root_turn_id
-            .get()
-            .filter(|_| !self.root_turn_ambiguous.load(Ordering::Relaxed))
-            .cloned()
-    }
-
-    pub(crate) fn mark_root_turn_ambiguous(&self) {
-        self.root_turn_ambiguous.store(true, Ordering::Relaxed);
+        self.root_turn_id.get().cloned()
     }
 
     pub(crate) fn can_start_root_turn(&self, session_source: &SessionSource) -> bool {
@@ -397,7 +381,7 @@ impl TurnMetadataState {
         {
             extra.remove(key);
         }
-        CodexResponsesMetadata {
+        let mut metadata = CodexResponsesMetadata {
             turn_id: Some(self.turn_id.clone()),
             agent_name: Some(self.agent_name.clone()),
             forked_from_thread_id: self.forked_from_thread_id,
@@ -408,8 +392,6 @@ impl TurnMetadataState {
             subagent_kind: self.subagent_kind.clone(),
             thread_source: self.thread_source.clone(),
             turn_trigger: self.turn_trigger.get().cloned(),
-            sandbox: self.sandbox.clone(),
-            sandbox_mode: self.sandbox_mode.clone(),
             auto_review_enabled: Some(self.auto_review_enabled),
             node_repl_auto_review_required: Some(self.node_repl_auto_review_required),
             node_repl_disabled: Some(self.node_repl_disabled),
@@ -427,7 +409,9 @@ impl TurnMetadataState {
                 self.thread_id.clone(),
                 String::new(),
             )
-        }
+        };
+        self.sandbox_tags.record_metadata(&mut metadata);
+        metadata
     }
 
     fn current_workspaces(&self) -> BTreeMap<String, TurnMetadataWorkspace> {

@@ -769,21 +769,10 @@ pub(crate) async fn drain_async_hook_results(
             .collect::<Vec<_>>();
 
         if before_user_prompt {
-            // A fresh user turn owns its root; automatic turns only inherit one.
-            let current_turn_id = Some(turn_context.sub_id.as_str());
-            if !additional_contexts.is_empty()
-                && result.turn_id.as_deref() != current_turn_id
-                && turn_context.turn_metadata_state.root_turn_id().as_deref() != current_turn_id
-            {
-                turn_context.turn_metadata_state.mark_root_turn_ambiguous();
-            }
             record_additional_contexts(sess, turn_context, additional_contexts).await;
         } else if !additional_contexts.is_empty() {
             let _ = sess
-                .inject_hook_context_if_running(
-                    additional_context_messages(additional_contexts),
-                    result.turn_id.as_deref(),
-                )
+                .inject_hook_context_if_running(additional_context_messages(additional_contexts))
                 .await;
         }
 

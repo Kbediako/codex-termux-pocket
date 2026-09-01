@@ -176,7 +176,7 @@ pub(super) struct RecapRequest {
 }
 
 impl App {
-    fn clear_recap_request(&mut self, trigger: RecapTrigger) {
+    pub(super) fn clear_recap_request(&mut self, trigger: RecapTrigger) {
         self.recap.clear_in_flight_request();
 
         if !matches!(trigger, RecapTrigger::Manual) {

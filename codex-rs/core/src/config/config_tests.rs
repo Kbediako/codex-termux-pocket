@@ -1210,6 +1210,7 @@ fn config_toml_deserializes_model_availability_nux() {
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             show_tooltips: true,
+            disable_paste_burst: None,
             vim_mode_default: false,
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
@@ -4289,6 +4290,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             show_tooltips: true,
+            disable_paste_burst: None,
             vim_mode_default: false,
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
@@ -4305,6 +4307,85 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             terminal_resize_reflow_max_rows: None,
         }
     );
+}
+
+#[tokio::test]
+async fn runtime_config_resolves_disable_paste_burst() -> anyhow::Result<()> {
+    for (toml, expected) in [
+        ("", false),
+        ("disable_paste_burst = true", true),
+        ("disable_paste_burst = true\n[tui]", true),
+        ("[tui]\ndisable_paste_burst = true", true),
+        (
+            "disable_paste_burst = true\n[tui]\ndisable_paste_burst = false",
+            false,
+        ),
+        (
+            "disable_paste_burst = false\n[tui]\ndisable_paste_burst = true",
+            true,
+        ),
+    ] {
+        let config = Config::load_from_base_config_with_overrides(
+            toml::from_str(toml)?,
+            ConfigOverrides::default(),
+            tempdir()?.abs(),
+        )
+        .await?;
+
+        assert_eq!(config.disable_paste_burst, expected, "config: {toml}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn disable_paste_burst_preserves_layering_and_new_key_precedence() -> anyhow::Result<()> {
+    for (toml, key, value, expected) in [
+        (
+            "disable_paste_burst = true",
+            "disable_paste_burst",
+            false,
+            false,
+        ),
+        (
+            "disable_paste_burst = true",
+            "tui.disable_paste_burst",
+            false,
+            false,
+        ),
+        (
+            "[tui]\ndisable_paste_burst = true",
+            "tui.disable_paste_burst",
+            false,
+            false,
+        ),
+        (
+            "[tui]\ndisable_paste_burst = true",
+            "disable_paste_burst",
+            false,
+            true,
+        ),
+        (
+            "[tui]\ndisable_paste_burst = false",
+            "disable_paste_burst",
+            true,
+            false,
+        ),
+    ] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(codex_home.path().join(CONFIG_TOML_FILE), toml)?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .cli_overrides(vec![(key.to_string(), TomlValue::Boolean(value))])
+            .build()
+            .await?;
+
+        assert_eq!(
+            config.disable_paste_burst, expected,
+            "config: {toml}, override: {key}={value}"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]

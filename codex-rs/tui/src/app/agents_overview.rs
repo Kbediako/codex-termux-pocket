@@ -34,6 +34,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) refresh_pending: bool,
     pub(super) rendered_full_screen: bool,
     pub(super) visible_thread_ids: Vec<ThreadId>,
+    pub(super) threads: Vec<Thread>,
     pub(super) view_state:
         Arc<std::sync::Mutex<super::agents_overview_view::AgentsOverviewViewState>>,
     pub(super) input_states: HashMap<ThreadId, ThreadInputState>,
@@ -93,7 +94,10 @@ impl App {
 
         self.agents_overview.request_id = None;
         self.agents_overview.refresh_pending = false;
-        let view = self.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+        let view = self.agents_overview_view(
+            self.agents_overview.threads.clone(),
+            /*selected_thread_id*/ None,
+        );
         self.agents_overview.visible_thread_ids = view.thread_ids();
         self.chat_widget.show_bottom_pane_view(Box::new(view));
         self.refresh_agents_overview_threads(app_server);
@@ -240,6 +244,7 @@ impl App {
                 return;
             }
         };
+        self.agents_overview.threads = threads.clone();
         let view = self.agents_overview_view(threads, selected_thread_id);
         self.agents_overview.visible_thread_ids = view.thread_ids();
         if selected_thread_id
@@ -247,6 +252,13 @@ impl App {
             && let Ok(mut state) = self.agents_overview.view_state.lock()
             && state.renaming
         {
+            self.chat_widget.add_info_message(
+                format!(
+                    "The rename target disappeared. Unsubmitted title: {}",
+                    state.input
+                ),
+                /*hint*/ None,
+            );
             state.renaming = false;
             state.input.clear();
         }
@@ -257,7 +269,7 @@ impl App {
         }
     }
 
-    fn agents_overview_view(
+    pub(super) fn agents_overview_view(
         &self,
         mut threads: Vec<Thread>,
         selected_thread_id: Option<ThreadId>,
@@ -320,7 +332,9 @@ impl App {
         app_server: &mut AppServerSession,
         root_thread_id: ThreadId,
     ) -> color_eyre::Result<AppRunControl> {
-        if self.current_displayed_thread_id() == Some(root_thread_id) {
+        if self.current_displayed_thread_id() == Some(root_thread_id)
+            && !self.thread_unavailable(root_thread_id)
+        {
             return Ok(AppRunControl::Continue);
         }
 
@@ -505,7 +519,9 @@ impl App {
             }
         }
 
-        if self.current_displayed_thread_id() != Some(root_thread_id) {
+        if self.current_displayed_thread_id() != Some(root_thread_id)
+            || self.thread_unavailable(root_thread_id)
+        {
             self.select_agent_thread_and_discard_side(tui, app_server, root_thread_id)
                 .await?;
         }

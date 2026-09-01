@@ -269,6 +269,8 @@ pub struct TuiVimNormalKeymap {
     pub start_yank_operator: Option<KeybindingsSpec>,
     /// Begin change operator; next keys select a text object.
     pub start_change_operator: Option<KeybindingsSpec>,
+    /// Undo the last complete edit (`u`).
+    pub undo: Option<KeybindingsSpec>,
     /// Cancel a pending operator and return to normal mode.
     pub cancel_operator: Option<KeybindingsSpec>,
 }

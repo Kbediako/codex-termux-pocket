@@ -1377,6 +1377,15 @@ impl MessageProcessor {
             ClientRequest::PluginInstalled { params, .. } => {
                 self.plugin_processor.plugin_installed(params).await
             }
+            ClientRequest::PluginReconcile { params, .. } => {
+                self.plugin_processor
+                    .plugin_reconcile(
+                        params,
+                        self.config_processor.clone(),
+                        &self.request_serialization_queues,
+                    )
+                    .await
+            }
             ClientRequest::PluginRead { params, .. } => {
                 self.plugin_processor.plugin_read(params).await
             }

@@ -1007,7 +1007,7 @@ fn record_protocol_discovery_metrics(
     );
 }
 
-fn mcp_initialize_request_params(
+pub(crate) fn mcp_initialize_request_params(
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
 ) -> InitializeRequestParams {
@@ -1067,7 +1067,7 @@ struct StartServerTaskParams {
 
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
-async fn make_rmcp_client(
+pub(crate) async fn make_rmcp_client(
     server_name: &str,
     server: EffectiveMcpServer,
     store_mode: OAuthCredentialsStoreMode,

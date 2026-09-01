@@ -1,3 +1,5 @@
+//! Generates the canonical config schema fixture for development and releases.
+
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
@@ -12,9 +14,9 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let out_path = args
-        .out
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.schema.json"));
+    let out_path = args.out.unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../core/config.schema.json")
+    });
     codex_config::schema::write_config_schema(&out_path)?;
     Ok(())
 }

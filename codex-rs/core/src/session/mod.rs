@@ -40,6 +40,7 @@ use crate::image_preparation::prepare_response_items as prepare_image_response_i
 use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
+use crate::realtime_history::RealtimeEventOrder;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
 use crate::session::step_settings::StepSettings;
@@ -90,6 +91,7 @@ use codex_network_proxy::normalize_host;
 use codex_otel::current_span_trace_id;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::set_parent_from_w3c_trace_context;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::ElicitationRequest;
@@ -226,6 +228,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod realtime_history;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -349,6 +352,7 @@ use codex_protocol::protocol::ModelVerificationEvent;
 use codex_protocol::protocol::NetworkApprovalContext;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::RequestUserInputEvent;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
@@ -360,6 +364,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInputMode;
@@ -1440,6 +1445,8 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                self.state.lock().await.latest_token_usage_record =
+                    Self::last_token_usage_record_from_rollout(&rollout_items);
 
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write to the rollout.
@@ -1460,6 +1467,8 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                self.state.lock().await.latest_token_usage_record =
+                    Self::last_token_usage_record_from_rollout(&rollout_items);
 
                 let thread_settings_applied =
                     RolloutItem::EventMsg(thread_settings::applied_event(self).await);
@@ -1622,6 +1631,21 @@ impl Session {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
             _ => None,
         })
+    }
+
+    fn last_token_usage_record_from_rollout(
+        rollout_items: &[RolloutItem],
+    ) -> Option<TokenUsageRecord> {
+        for item in rollout_items.iter().rev() {
+            match item {
+                RolloutItem::TokenUsageRecord(record) => return Some(record.clone()),
+                RolloutItem::Compacted(compacted) => {
+                    return compacted.latest_token_usage_record.clone();
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     async fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -2317,7 +2341,32 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+        // Keep realtime reduction, canonical append, and delivery in the same order.
+        // This lock must not acquire SessionState or ActiveTurn: event producers can
+        // already hold those locks. Host presentation policies are synchronous.
+        let mut realtime_history = match &self.realtime_history {
+            Some(history) => {
+                let history = history.lock().await;
+                history.should_observe(&event.msg).then_some(history)
+            }
+            None => None,
+        };
         self.services.mcp_runtime.observe_event(&event.msg);
+        let (before_event, after_event) = match realtime_history.as_mut() {
+            Some(history) => {
+                let effects = history.observe(&event.msg);
+                match effects.order {
+                    RealtimeEventOrder::BeforeEvent => (Some(effects), None),
+                    RealtimeEventOrder::AfterEvent => (None, Some(effects)),
+                }
+            }
+            None => (None, None),
+        };
+        if let Some(effects) = before_event
+            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
+        {
+            warn!("failed to persist realtime history: {error}");
+        }
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -2326,6 +2375,11 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
+        if let Some(effects) = after_event
+            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
+        {
+            warn!("failed to persist realtime history: {error}");
+        }
         self.deliver_event_raw(event).await;
     }
 
@@ -3668,6 +3722,8 @@ impl Session {
                 .previous_window_id
                 .map(|id| id.to_string()),
             window_id: Some(metadata.window_ids.window_id.to_string()),
+            compaction_response_id: metadata.compaction_response_id,
+            latest_token_usage_record: self.state.lock().await.latest_token_usage_record.clone(),
         };
         // Wait for accepted updates to finish persisting, then keep later updates from
         // overtaking the current settings snapshot while its checkpoint is written.
@@ -4118,6 +4174,7 @@ impl Session {
                 message: String::new(),
                 window_number,
                 window_ids,
+                compaction_response_id: None,
             },
         )
         .await;
@@ -4230,6 +4287,40 @@ impl Session {
             .await;
         self.send_token_count_event(turn_context).await;
         result
+    }
+
+    pub(crate) async fn record_observed_response_completed(
+        &self,
+        turn_context: &TurnContext,
+        response_id: &str,
+        usage: Option<&TokenUsage>,
+        usage_metadata: Option<&ResponseUsageMetadata>,
+    ) {
+        self.send_event(
+            turn_context,
+            EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                response_id: response_id.to_string(),
+                token_usage: usage.cloned(),
+                usage_metadata: usage_metadata.cloned(),
+            }),
+        )
+        .await;
+        let Some(usage) = usage else {
+            return;
+        };
+        let record = self.state.lock().await.record_token_usage(
+            self.thread_id,
+            &turn_context.sub_id,
+            self.session_id(),
+            turn_context
+                .turn_metadata_state
+                .root_turn_id()
+                .unwrap_or_else(|| turn_context.sub_id.clone()),
+            response_id.to_string(),
+            usage,
+        );
+        self.persist_rollout_items(&[RolloutItem::TokenUsageRecord(record)])
+            .await;
     }
 
     pub(crate) async fn record_token_usage_info(

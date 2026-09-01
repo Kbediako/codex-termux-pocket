@@ -1,12 +1,14 @@
-use codex_protocol::items::AgentMessageContent;
-use codex_protocol::items::DynamicToolCallStatus;
-use codex_protocol::items::McpToolCallStatus;
+//! Records canonical Voice history for every Core host. Presentation rules share
+//! transcript boundaries and deduplication state with the history reducer.
+//! The reducer selects when its effects are persisted relative to their source event.
+
+mod presentation;
+
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::RealtimeTranscriptDelta;
 use codex_protocol::protocol::RealtimeTranscriptDone;
-use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::realtime::BemItemPresentation;
 use codex_protocol::realtime::RealtimeItem;
 use codex_protocol::realtime::RealtimeItemContent;
@@ -17,12 +19,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use uuid::Uuid;
-
-const INLINE_MARKDOWN_DIRECTIVE: &str = "::codex-realtime-inline{}";
-const INLINE_VISUALIZATION_DIRECTIVE: &str = "::codex-inline-vis{";
-const VISUALIZE_DIRECTIVE: &str = "visualize{";
-const BACKTICK_FENCE: &str = "```";
-const TILDE_FENCE: &str = "~~~";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveSegment {
@@ -75,8 +71,16 @@ pub(crate) struct RealtimeTranscriptStream {
 
 #[derive(Debug, Default)]
 pub(crate) struct RealtimeEventEffects {
+    pub(crate) order: RealtimeEventOrder,
     pub(crate) items: Vec<RealtimeItem>,
     pub(crate) transcript_stream: Option<RealtimeTranscriptStream>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RealtimeEventOrder {
+    BeforeEvent,
+    #[default]
+    AfterEvent,
 }
 
 #[derive(Clone, Copy)]
@@ -86,11 +90,12 @@ enum Continuation {
 }
 
 /// Retains only live session state; durable history is served by the rollout index.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct RealtimeHistoryState {
     active_session_id: Option<String>,
     active_segments: ActiveTranscriptSegments,
     streaming_agent_message: Option<StreamingAgentMessage>,
+    active_turn_id: Option<String>,
     realtime_session_by_bem_turn: HashMap<String, String>,
     promoted_bem_presentation_keys: HashSet<String>,
     pending_handoffs: VecDeque<String>,
@@ -98,7 +103,7 @@ pub(crate) struct RealtimeHistoryState {
 }
 
 impl RealtimeHistoryState {
-    pub(crate) fn should_seal_user_input(&self, input: &[UserInput]) -> bool {
+    fn should_seal_user_input(&self, input: &[UserInput]) -> bool {
         self.active_session_id.is_some()
             && [&self.active_segments.user, &self.active_segments.assistant]
                 .into_iter()
@@ -111,7 +116,7 @@ impl RealtimeHistoryState {
             })
     }
 
-    pub(crate) fn seal_user_input(&mut self, input: &[UserInput]) -> Vec<RealtimeItem> {
+    fn seal_user_input(&mut self, input: &[UserInput]) -> Vec<RealtimeItem> {
         if !self.should_seal_user_input(input) {
             return Vec::new();
         }
@@ -121,17 +126,22 @@ impl RealtimeHistoryState {
     }
 
     pub(crate) fn should_observe(&self, event: &EventMsg) -> bool {
-        matches!(event, EventMsg::RealtimeConversationStarted(_))
-            || (self.active_session_id.is_some()
-                && matches!(
-                    event,
-                    EventMsg::RealtimeConversationRealtime(_)
-                        | EventMsg::RealtimeConversationClosed(_)
-                        | EventMsg::TurnStarted(_)
-                        | EventMsg::ItemStarted(_)
-                        | EventMsg::ItemCompleted(_)
-                        | EventMsg::AgentMessageContentDelta(_)
-                ))
+        matches!(
+            event,
+            EventMsg::RealtimeConversationStarted(_)
+                | EventMsg::TurnStarted(_)
+                | EventMsg::TurnComplete(_)
+                | EventMsg::TurnAborted(_)
+        ) || (self.active_session_id.is_some()
+            && matches!(
+                event,
+                EventMsg::RealtimeConversationRealtime(_)
+                    | EventMsg::RealtimeConversationClosed(_)
+                    | EventMsg::TurnStarted(_)
+                    | EventMsg::ItemStarted(_)
+                    | EventMsg::ItemCompleted(_)
+                    | EventMsg::AgentMessageContentDelta(_)
+            ))
             || match event {
                 EventMsg::ItemStarted(event) => self
                     .realtime_session_by_bem_turn
@@ -142,16 +152,29 @@ impl RealtimeHistoryState {
                 EventMsg::AgentMessageContentDelta(event) => self
                     .realtime_session_by_bem_turn
                     .contains_key(&event.turn_id),
-                EventMsg::TurnStarted(_) => !self.pending_handoffs.is_empty(),
                 _ => false,
             }
     }
 
-    pub(crate) fn observe(
-        &mut self,
-        event: &EventMsg,
-        active_turn_id: Option<&str>,
-    ) -> RealtimeEventEffects {
+    pub(crate) fn observe(&mut self, event: &EventMsg) -> RealtimeEventEffects {
+        match event {
+            EventMsg::TurnStarted(event) => self.active_turn_id = Some(event.turn_id.clone()),
+            EventMsg::TurnComplete(event)
+                if self.active_turn_id.as_deref() == Some(event.turn_id.as_str()) =>
+            {
+                self.active_turn_id = None;
+            }
+            EventMsg::TurnAborted(event)
+                if event.turn_id.is_none() || event.turn_id == self.active_turn_id =>
+            {
+                self.active_turn_id = None;
+            }
+            _ => {}
+        }
+        if !self.should_observe(event) {
+            return RealtimeEventEffects::default();
+        }
+        let mut order = RealtimeEventOrder::AfterEvent;
         let mut items = Vec::new();
         let mut transcript_stream = None;
         match event {
@@ -170,7 +193,7 @@ impl RealtimeHistoryState {
                         content: RealtimeItemContent::RealtimeSessionStarted,
                     });
                 }
-                if let Some(turn_id) = active_turn_id {
+                if let Some(turn_id) = &self.active_turn_id {
                     self.realtime_session_by_bem_turn
                         .insert(turn_id.to_string(), session_id);
                 }
@@ -211,6 +234,7 @@ impl RealtimeHistoryState {
             }
             EventMsg::ItemStarted(event) => {
                 if let TurnItem::UserMessage(item) = &event.item {
+                    order = RealtimeEventOrder::BeforeEvent;
                     items.extend(self.seal_user_input(&item.content));
                 }
                 self.observe_item(
@@ -222,6 +246,7 @@ impl RealtimeHistoryState {
             }
             EventMsg::ItemCompleted(event) => {
                 if let TurnItem::UserMessage(item) = &event.item {
+                    order = RealtimeEventOrder::BeforeEvent;
                     items.extend(self.seal_user_input(&item.content));
                 }
                 self.observe_item(
@@ -273,118 +298,9 @@ impl RealtimeHistoryState {
             _ => {}
         }
         RealtimeEventEffects {
+            order,
             items,
             transcript_stream,
-        }
-    }
-
-    fn observe_item(
-        &mut self,
-        items: &mut Vec<RealtimeItem>,
-        turn_id: &str,
-        item: &TurnItem,
-        completed: bool,
-    ) {
-        match item {
-            TurnItem::AgentMessage(message) => {
-                let text = message
-                    .content
-                    .iter()
-                    .map(|content| match content {
-                        AgentMessageContent::Text { text } => text.as_str(),
-                    })
-                    .collect::<String>();
-                if !completed {
-                    self.streaming_agent_message = Some(StreamingAgentMessage {
-                        item_id: message.id.clone(),
-                        text: text.clone(),
-                    });
-                }
-                self.observe_assistant_message(items, turn_id, &message.id, &text);
-            }
-            TurnItem::ImageGeneration(image) => {
-                self.add_promotion(items, turn_id, &image.id, BemItemPresentation::WholeItem);
-            }
-            TurnItem::Extension(extension)
-                if serde_json::to_value(extension)
-                    .is_ok_and(|item| item["kind"] == "image_gen.generation") =>
-            {
-                self.add_promotion(
-                    items,
-                    turn_id,
-                    extension.id(),
-                    BemItemPresentation::WholeItem,
-                );
-            }
-            TurnItem::SubAgentActivity(activity)
-                if completed && activity.kind == SubAgentActivityKind::Started =>
-            {
-                self.add_promotion(items, turn_id, &activity.id, BemItemPresentation::WholeItem);
-            }
-            TurnItem::DynamicToolCall(call)
-                if self.active_session_id.is_some()
-                    && completed
-                    && call.status == DynamicToolCallStatus::Completed
-                    && call.success == Some(true) =>
-            {
-                self.add_promotion(items, turn_id, &call.id, BemItemPresentation::WholeItem);
-            }
-            TurnItem::McpToolCall(call)
-                if self.active_session_id.is_some()
-                    && completed
-                    && call.server == "codex_app"
-                    && call.status == McpToolCallStatus::Completed =>
-            {
-                self.add_promotion(items, turn_id, &call.id, BemItemPresentation::WholeItem);
-            }
-            _ => {}
-        }
-    }
-
-    fn observe_assistant_message(
-        &mut self,
-        items: &mut Vec<RealtimeItem>,
-        turn_id: &str,
-        item_id: &str,
-        text: &str,
-    ) {
-        let mut lines = text.trim_start().lines();
-        let mut first = lines.next().unwrap_or_default();
-        if first.starts_with('[')
-            && let Some((_, content)) = first.split_once(']')
-        {
-            first = content.trim_start();
-            if first.is_empty() {
-                first = lines.next().unwrap_or_default();
-            }
-        }
-        if first == INLINE_MARKDOWN_DIRECTIVE && text.contains('\n') {
-            self.add_promotion(items, turn_id, item_id, BemItemPresentation::InlineMarkdown);
-            return;
-        }
-
-        let mut in_fence = false;
-        let mut visualization_index = 0;
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with(BACKTICK_FENCE) || trimmed.starts_with(TILDE_FENCE) {
-                in_fence = !in_fence;
-                continue;
-            }
-            if !in_fence
-                && (trimmed.starts_with(INLINE_VISUALIZATION_DIRECTIVE)
-                    || trimmed.starts_with(VISUALIZE_DIRECTIVE))
-            {
-                self.add_promotion(
-                    items,
-                    turn_id,
-                    item_id,
-                    BemItemPresentation::InlineVisualization {
-                        index: visualization_index,
-                    },
-                );
-                visualization_index += 1;
-            }
         }
     }
 

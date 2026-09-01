@@ -451,6 +451,22 @@ new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.
 
 include("//bazel/modules:wine.MODULE.bazel")
 
+voice_sources = use_extension("//third_party/voice:extensions.bzl", "voice_sources")
+use_repo(
+    voice_sources,
+    "voice_glib",
+    "voice_gst_plugins_base",
+    "voice_gst_plugins_good",
+    "voice_gstreamer",
+    "voice_libffi",
+    "voice_meson",
+    "voice_ninja",
+    "voice_opus",
+    "voice_pcre2",
+    "voice_proxy_libintl",
+    "voice_zlib",
+)
+
 new_local_repository(
     name = "v8_targets",
     build_file = "//third_party/v8:BUILD.bazel",

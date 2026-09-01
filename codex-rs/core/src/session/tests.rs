@@ -164,6 +164,7 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -2227,6 +2228,8 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         first_window_id: Some(first_window_id.to_string()),
         previous_window_id: Some(previous_window_id.to_string()),
         window_id: Some(window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })];
 
     let reconstructed = session
@@ -2883,6 +2886,49 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
     assert_eq!(actual, Some(info2));
 }
 
+#[test]
+fn latest_token_usage_record_stops_at_compaction_checkpoint() {
+    let thread_id = ThreadId::new();
+    let checkpoint_record = TokenUsageRecord {
+        thread_id,
+        turn_id: "turn-1".to_string(),
+        session_id: SessionId::from(thread_id),
+        root_turn_id: "turn-1".to_string(),
+        response_id: "response-1".to_string(),
+        usage: TokenUsage::default(),
+        turn_token_usage: TokenUsage::default(),
+        thread_token_usage: TokenUsage::default(),
+    };
+    let checkpoint = |latest_token_usage_record| {
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: None,
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record,
+        })
+    };
+
+    assert_eq!(
+        Session::last_token_usage_record_from_rollout(&[
+            RolloutItem::TokenUsageRecord(checkpoint_record.clone()),
+            checkpoint(Some(checkpoint_record.clone())),
+        ]),
+        Some(checkpoint_record.clone())
+    );
+    assert_eq!(
+        Session::last_token_usage_record_from_rollout(&[
+            RolloutItem::TokenUsageRecord(checkpoint_record),
+            checkpoint(None),
+        ]),
+        None
+    );
+}
+
 #[tokio::test]
 async fn recompute_token_usage_uses_session_base_instructions() {
     let (session, turn_context) = make_session_and_context().await;
@@ -3412,7 +3458,7 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 }
 
 #[tokio::test]
-async fn start_new_context_window_assigns_and_persists_item_ids() {
+async fn start_new_context_window_persists_checkpoint_state() {
     let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -3421,6 +3467,18 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     .await;
     let rollout_path =
         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let thread_id = ThreadId::new();
+    let token_usage_record = TokenUsageRecord {
+        thread_id,
+        turn_id: "turn-1".to_string(),
+        session_id: SessionId::from(thread_id),
+        root_turn_id: "turn-1".to_string(),
+        response_id: "response-1".to_string(),
+        usage: TokenUsage::default(),
+        turn_token_usage: TokenUsage::default(),
+        thread_token_usage: TokenUsage::default(),
+    };
+    session.state.lock().await.latest_token_usage_record = Some(token_usage_record.clone());
     let step_context = session
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
@@ -3447,8 +3505,8 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     else {
         panic!("expected resumed rollout history");
     };
-    let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
-        RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
+    let persisted_compacted = resumed.history.iter().rev().find_map(|item| match item {
+        RolloutItem::Compacted(compacted) => Some(compacted),
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
@@ -3456,12 +3514,22 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
     assert_eq!(
-        persisted_replacement_history.cloned(),
+        persisted_compacted.and_then(|compacted| compacted.replacement_history.clone()),
         Some(live_history.annotated_items().to_vec())
+    );
+    assert_eq!(
+        persisted_compacted.map(|compacted| {
+            (
+                compacted.compaction_response_id.as_deref(),
+                compacted.latest_token_usage_record.as_ref(),
+            )
+        }),
+        Some((None, Some(&token_usage_record)))
     );
 }
 
@@ -3535,6 +3603,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
@@ -3691,6 +3760,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
+        root_turn_id: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         workspace_roots: None,
@@ -4102,6 +4172,8 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
             first_window_id: Some(first_window_id.to_string()),
             previous_window_id: Some(previous_window_id.to_string()),
             window_id: Some(compacted_window_id.to_string()),
+            compaction_response_id: None,
+            latest_token_usage_record: None,
         }),
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: compact_turn_id,
@@ -5864,6 +5936,7 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
                 message: "summary".to_string(),
                 window_number,
                 window_ids,
+                compaction_response_id: None,
             },
         ),
     ));
@@ -6539,6 +6612,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_shutdown: CancellationToken::new(),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
+        realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
@@ -8819,6 +8893,7 @@ where
         mcp_prewarm_shutdown: CancellationToken::new(),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
+        realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
@@ -11908,6 +11983,66 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
 }
 
 #[tokio::test]
+async fn active_turn_keeps_first_root_when_mail_coalesces() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    tc.turn_metadata_state
+        .set_root_turn_id("root-a".to_string());
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    let first = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker_a").expect("worker path should parse"),
+        AgentPath::root(),
+        Vec::new(),
+        "first".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let second = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker_b").expect("worker path should parse"),
+        AgentPath::root(),
+        Vec::new(),
+        "second".to_string(),
+        /*trigger_turn*/ true,
+    );
+    for (communication, parent_turn_id, root_turn_id) in [
+        (first.clone(), "parent-a", "root-a"),
+        (second.clone(), "parent-b", "root-b"),
+    ] {
+        sess.input_queue
+            .enqueue_mailbox_communication(
+                communication,
+                codex_protocol::turn_input::TurnStartOptions {
+                    parent_turn_id: Some(parent_turn_id.to_string()),
+                    root_turn_id: Some(root_turn_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    assert_eq!(
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
+        vec![
+            TurnInput::InterAgentCommunication(first),
+            TurnInput::InterAgentCommunication(second),
+        ]
+    );
+    assert_eq!(
+        tc.turn_metadata_state.root_turn_id().as_deref(),
+        Some("root-a")
+    );
+    assert!(!sess.input_queue.has_pending_mailbox_items().await);
+
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+}
+
+#[tokio::test]
 async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let communication = InterAgentCommunication::new(
@@ -12271,6 +12406,8 @@ async fn sample_rollout(
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     }));
 
     let user2 = user_message("second user");
@@ -12301,6 +12438,8 @@ async fn sample_rollout(
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     }));
 
     let user3 = user_message("third user");

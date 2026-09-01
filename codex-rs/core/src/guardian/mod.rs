@@ -12,6 +12,7 @@
 //! 4. Apply the guardian's explicit allow/deny outcome.
 
 mod approval_request;
+mod feedback;
 mod metrics;
 mod prompt;
 mod review;
@@ -65,7 +66,7 @@ pub(crate) const MAX_RECENT_CYBER_AUTO_REVIEW_DENIALS_PER_TURN: u32 = 1;
 pub(crate) const MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN: u32 = 10;
 pub(crate) const AUTO_REVIEW_DENIAL_WINDOW_SIZE: usize = 50;
 pub(crate) const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX: &str =
-    "The user has manually approved a specific action that was previously `Rejected`.";
+    codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;
 const GUARDIAN_MAX_MESSAGE_TRANSCRIPT_TOKENS: usize = 20_000;
 const GUARDIAN_MAX_TOOL_TRANSCRIPT_TOKENS: usize = 10_000;
 const GUARDIAN_MAX_MESSAGE_ENTRY_TOKENS: usize = 5_000;
@@ -73,7 +74,6 @@ const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = 1_000;
 pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
 const GUARDIAN_MAX_ACTION_STRING_TOKENS: usize = 16_000;
 const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
-const TRUNCATION_TAG: &str = "truncated";
 
 /// Captures review inputs from the issuing step without retaining its MCP bindings or tool router.
 /// Background network approvals and Unix interception use the active task's resolved settings.
@@ -253,10 +253,6 @@ use approval_request::guardian_request_turn_id;
 use prompt::GuardianPromptMode;
 #[cfg(test)]
 use prompt::GuardianTranscriptCursor;
-#[cfg(test)]
-use prompt::GuardianTranscriptEntry;
-#[cfg(test)]
-use prompt::GuardianTranscriptEntryKind;
 #[cfg(test)]
 use prompt::build_guardian_prompt_items;
 #[cfg(test)]

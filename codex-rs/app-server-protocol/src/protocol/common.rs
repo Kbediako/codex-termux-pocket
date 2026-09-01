@@ -852,6 +852,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginInstalledResponse,
     },
+    PluginReconcile => "plugin/reconcile" {
+        params: v2::PluginReconcileParams,
+        serialization: None,
+        response: v2::PluginReconcileResponse,
+    },
     PluginRead => "plugin/read" {
         params: v2::PluginReadParams,
         serialization: None,

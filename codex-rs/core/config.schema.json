@@ -3772,6 +3772,10 @@
           "description": "Enable animations (welcome screen, shimmer effects, spinners). Defaults to `true`.",
           "type": "boolean"
         },
+        "disable_paste_burst": {
+          "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
+          "type": "boolean"
+        },
         "keymap": {
           "allOf": [
             {
@@ -3902,6 +3906,7 @@
               "substitute_char": null,
               "till_backward": null,
               "till_forward": null,
+              "undo": null,
               "yank_line": null
             },
             "vim_operator": {
@@ -4728,6 +4733,7 @@
             "substitute_char": null,
             "till_backward": null,
             "till_forward": null,
+            "undo": null,
             "yank_line": null
           }
         },
@@ -5245,6 +5251,14 @@
             }
           ],
           "description": "Stop before the next character on the current line (`t`)."
+        },
+        "undo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Undo the last complete edit (`u`)."
         },
         "yank_line": {
           "allOf": [
@@ -5788,7 +5802,7 @@
       "type": "string"
     },
     "disable_paste_burst": {
-      "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts.",
+      "description": "Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.",
       "type": "boolean"
     },
     "experimental_compact_prompt_file": {

@@ -557,7 +557,7 @@ impl GuardianV2Extension {
             guardian_evidence.user_input_fragments(input.conversation_history.as_ref());
         let transcript = guardian_config
             .transcript
-            .build(input.conversation_history.review_items());
+            .build_snapshot(input.conversation_history.as_ref());
         let local_trusted_skill_paths = guardian_evidence.trusted_skill_paths(input.turn_id);
         let node_repl_images = if guardian_config.transcript.include_images {
             input

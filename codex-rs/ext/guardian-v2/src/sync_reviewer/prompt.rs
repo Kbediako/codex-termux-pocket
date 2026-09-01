@@ -94,7 +94,7 @@ pub(super) fn build(
             _ => None,
         })
         .collect();
-    let transcript = transcript_config.build(input.conversation_history.items());
+    let transcript = transcript_config.build_snapshot(input.conversation_history.as_ref());
     let images = render_images(
         input.conversation_history.as_ref(),
         transcript_config,
