@@ -18,8 +18,8 @@ on:
       - "scripts/termux/release-manifest.env"
   workflow_dispatch:
 
-# Temporary exact-run cleanup authority. This permission and the guarded cleanup
-# step are removed immediately after orphan run 32212182486 is proven absent.
+# Temporary exact-run cleanup authority. This permission and guarded step are
+# removed immediately after orphan run 32212182486 is proven absent.
 permissions:
   actions: write
   contents: read
@@ -41,13 +41,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Remove exact orphaned temporary workflow run
+      - name: Delete exact orphaned temporary workflow run
         env:
           GH_TOKEN: ${{ github.token }}
           ORPHAN_RUN_ID: "32212182486"
           ORPHAN_RUN_PATH: ".github/workflows/termux-governance-audit.yml"
           ORPHAN_HEAD_SHA: "4cbbb06b331affb71fd6bf41bff3ea365d489b8a"
           ORPHAN_EVENT: "workflow_dispatch"
+          ORPHAN_WORKFLOW_ID: "335426411"
+          ORPHAN_CREATED_AT: "2026-08-19T03:27:02Z"
+          ORPHAN_ACTOR: "github-actions[bot]"
         shell: bash
         run: |
           set -euo pipefail
@@ -60,7 +63,7 @@ jobs:
             --show-error
             --header "Authorization: Bearer $GH_TOKEN"
             --header "Accept: application/vnd.github+json"
-            --header "X-GitHub-Api-Version: 2022-11-28"
+            --header "X-GitHub-Api-Version: 2026-03-10"
           )
 
           get_run() {
@@ -85,66 +88,18 @@ jobs:
           actual_path="$(jq -r '.path' "$response")"
           actual_head="$(jq -r '.head_sha' "$response")"
           actual_event="$(jq -r '.event' "$response")"
+          actual_workflow_id="$(jq -r '.workflow_id' "$response")"
+          actual_created_at="$(jq -r '.created_at' "$response")"
+          actual_actor="$(jq -r '.actor.login' "$response")"
           if [[ "$actual_id" != "$ORPHAN_RUN_ID" || \
                 "$actual_path" != "$ORPHAN_RUN_PATH" || \
                 "$actual_head" != "$ORPHAN_HEAD_SHA" || \
-                "$actual_event" != "$ORPHAN_EVENT" ]]; then
+                "$actual_event" != "$ORPHAN_EVENT" || \
+                "$actual_workflow_id" != "$ORPHAN_WORKFLOW_ID" || \
+                "$actual_created_at" != "$ORPHAN_CREATED_AT" || \
+                "$actual_actor" != "$ORPHAN_ACTOR" ]]; then
             cat "$response" >&2
-            echo "::error::Refusing to mutate a workflow run whose identity differs from the audited orphan."
-            exit 1
-          fi
-
-          status="$(jq -r '.status' "$response")"
-          if [[ "$status" != "completed" ]]; then
-            cancel_code="$(
-              curl "${common[@]}" \
-                --request POST \
-                --output "$mutation_response" \
-                --write-out '%{http_code}' \
-                "$api/cancel"
-            )"
-            if [[ "$cancel_code" != "202" && "$cancel_code" != "409" ]]; then
-              cat "$mutation_response" >&2 || true
-              echo "::error::Unexpected cancellation status for orphan run $ORPHAN_RUN_ID: $cancel_code"
-              exit 1
-            fi
-
-            for attempt in $(seq 1 20); do
-              sleep 2
-              code="$(get_run)"
-              if [[ "$code" == "404" ]]; then
-                echo "Orphaned temporary workflow run $ORPHAN_RUN_ID disappeared during cancellation."
-                exit 0
-              fi
-              if [[ "$code" != "200" ]]; then
-                cat "$response" >&2 || true
-                echo "::error::Unexpected poll status for orphan run $ORPHAN_RUN_ID: $code"
-                exit 1
-              fi
-              status="$(jq -r '.status' "$response")"
-              if [[ "$status" == "completed" ]]; then
-                break
-              fi
-              if [[ "$attempt" == "10" ]]; then
-                force_code="$(
-                  curl "${common[@]}" \
-                    --request POST \
-                    --output "$mutation_response" \
-                    --write-out '%{http_code}' \
-                    "$api/force-cancel"
-                )"
-                if [[ "$force_code" != "202" && "$force_code" != "409" ]]; then
-                  cat "$mutation_response" >&2 || true
-                  echo "::error::Unexpected force-cancel status for orphan run $ORPHAN_RUN_ID: $force_code"
-                  exit 1
-                fi
-              fi
-            done
-          fi
-
-          if [[ "$status" != "completed" ]]; then
-            cat "$response" >&2 || true
-            echo "::error::Orphan run $ORPHAN_RUN_ID did not reach completed state before deletion."
+            echo "::error::Refusing to delete a workflow run whose identity differs from the audited orphan."
             exit 1
           fi
 
