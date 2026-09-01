@@ -58,7 +58,12 @@ def validate_sbom(
     runtime_packages = by_name.get("codex-termux-runtime", [])
     if len(runtime_packages) != 1 or runtime_packages[0].get("versionInfo") != codex_version:
         fail("SBOM runtime package identity mismatch")
-    for shipped in ("codex-cli", "codex-code-mode-host", "codex-responses-api-proxy", "bwrap"):
+    for shipped in (
+        "codex-cli",
+        "codex-code-mode-host",
+        "codex-responses-api-proxy",
+        "codex-bwrap",
+    ):
         candidates = by_name.get(shipped, [])
         if len(candidates) != 1 or candidates[0].get("versionInfo") != package_version:
             fail(f"SBOM shipped package identity mismatch for {shipped}")
@@ -85,7 +90,12 @@ def validate_sbom(
     }
     expected_generated = {
         by_name[name][0]["SPDXID"]
-        for name in ("codex-cli", "codex-code-mode-host", "codex-responses-api-proxy", "bwrap")
+        for name in (
+            "codex-cli",
+            "codex-code-mode-host",
+            "codex-responses-api-proxy",
+            "codex-bwrap",
+        )
     }
     if not expected_generated.issubset(generated_ids):
         fail("SBOM is missing GENERATED_FROM relationships for shipped packages")
