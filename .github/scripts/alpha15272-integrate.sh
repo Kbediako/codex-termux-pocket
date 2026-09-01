@@ -40,7 +40,7 @@ resolve_verified_workspace_version_conflict() {
   [[ "${#conflicts[@]}" -eq 1 ]]
   [[ "${conflicts[0]}" == "codex-rs/Cargo.toml" ]]
 
-  python3 - <<'PY'
+  if ! python3 - <<'PY'
 from pathlib import Path
 import re
 
@@ -48,7 +48,7 @@ path = Path("codex-rs/Cargo.toml")
 text = path.read_text(encoding="utf-8")
 pattern = re.compile(
     r'<<<<<<< HEAD\n'
-    r'version = "0\.152\.0-alpha\.1"\n'
+    r'version = "0\.151\.0-alpha\.12"\n'
     r'=======\n'
     r'version = "0\.152\.0-alpha\.7\.2"\n'
     r'>>>>>>> [^\n]+\n'
@@ -60,9 +60,16 @@ if any(marker in updated for marker in ("<<<<<<<", "=======", ">>>>>>>")):
     raise SystemExit("unexpected conflict marker remains after guarded resolution")
 path.write_text(updated, encoding="utf-8")
 PY
+  then
+    return 1
+  fi
 
+  if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' codex-rs/Cargo.toml; then
+    echo "::error::Conflict marker remains in codex-rs/Cargo.toml"
+    return 1
+  fi
   git add codex-rs/Cargo.toml
-  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+  [[ -z "$(git diff --name-only --diff-filter=U)" ]] || return 1
 }
 
 update_dotted_alpha_support() {
