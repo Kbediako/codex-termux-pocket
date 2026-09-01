@@ -12,16 +12,12 @@ on:
 permissions:
   contents: read
 
-# The one staging revision uses an isolated group so its short dispatch job can
-# finish before the permanent file is restored.
 concurrency:
-  group: fork-ci-${{ github.sha }}
-  cancel-in-progress: false
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
-    if: >-
-      github.event.head_commit.message != 'ci: run final repository cleanup and release repair'
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -93,75 +89,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  alpha1534-dispatch-android:
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'ci: run final repository cleanup and release repair'
-    name: Dispatch exact alpha.4 Android gate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: write
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      SOURCE_SHA: 223220fd66f600b8bf3291ed84960b7d76b7774a
-      SOURCE_BRANCH: automation/alpha1534-integration
-    steps:
-      - name: Dispatch immutable source and delete staging branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          repo="$GITHUB_REPOSITORY"
-          workflow_path=".github/workflows/termux-android-emulator.yml"
-
-          branch_sha="$(
-            gh api "repos/$repo/git/ref/heads/automation%2Falpha1534-integration" \
-              --jq '.object.sha'
-          )"
-          [[ "$branch_sha" == "$SOURCE_SHA" ]]
-
-          before="$(
-            gh api "repos/$repo/actions/runs?head_sha=$SOURCE_SHA&per_page=100" \
-              --jq '[.workflow_runs[] | select(.path == ".github/workflows/termux-android-emulator.yml" and .event == "workflow_dispatch")] | map(.id) | max // 0'
-          )"
-          gh api --method POST \
-            "repos/$repo/actions/workflows/termux-android-emulator.yml/dispatches" \
-            -f ref="$SOURCE_BRANCH"
-
-          android_run_id=""
-          for attempt in $(seq 1 60); do
-            runs_json="$(gh api "repos/$repo/actions/runs?head_sha=$SOURCE_SHA&per_page=100")"
-            android_run_id="$(
-              jq -r --arg path "$workflow_path" --arg sha "$SOURCE_SHA" --argjson before "$before" '
-                [.workflow_runs[]
-                  | select(.path == $path and .event == "workflow_dispatch" and .head_sha == $sha and .id > $before)]
-                | sort_by(.id)
-                | last
-                | .id // empty
-              ' <<<"$runs_json"
-            )"
-            [[ -n "$android_run_id" ]] && break
-            sleep 2
-          done
-          [[ -n "$android_run_id" ]]
-
-          run_json="$(gh api "repos/$repo/actions/runs/$android_run_id")"
-          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$SOURCE_SHA" ]]
-          [[ "$(jq -r '.path' <<<"$run_json")" == "$workflow_path" ]]
-          [[ "$(jq -r '.event' <<<"$run_json")" == "workflow_dispatch" ]]
-
-          gh api --method DELETE \
-            "repos/$repo/git/refs/heads/automation%2Falpha1534-integration"
-          if gh api "repos/$repo/git/ref/heads/automation%2Falpha1534-integration" >/dev/null 2>&1; then
-            echo "::error::Temporary source branch still exists."
-            exit 1
-          fi
-
-          {
-            echo "### Exact alpha.4 Android gate dispatched"
-            echo
-            echo "- Source: \`$SOURCE_SHA\`"
-            echo "- Android run: \`$android_run_id\`"
-            echo "- Temporary source branch: \`deleted\`"
-          } >>"$GITHUB_STEP_SUMMARY"
