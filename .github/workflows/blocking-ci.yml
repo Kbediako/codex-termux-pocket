@@ -18,7 +18,8 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.event.head_commit.message != 'ci: stage exact alpha.4 integration' }}
+    if: >-
+      ${{ github.event.head_commit.message != 'ci: stage exact alpha.4 integration' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
