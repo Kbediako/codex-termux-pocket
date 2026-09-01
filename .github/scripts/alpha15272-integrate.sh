@@ -112,6 +112,16 @@ replace_once(
     "  assert_eq 'rust-v0.148.0-alpha.5' \"$(termux_latest_valid_alpha_tag \"$repo\" main)\" 'latest valid alpha merged into main'\n",
     "  assert_eq 'rust-v0.148.0-alpha.5.1' \"$(termux_latest_valid_alpha_tag \"$repo\" main)\" 'latest valid dotted alpha merged into main'\n",
 )
+replace_once(
+    "scripts/termux/tests/run-tests",
+    "  printf '#!/data/data/com.termux/files/usr/bin/bash\\nset -euo pipefail\\n%s\\n' \"$body\" >\"$path\"\n",
+    "  printf '#!/usr/bin/env bash\\nset -euo pipefail\\n%s\\n' \"$body\" >\"$path\"\n",
+)
+replace_once(
+    "scripts/termux/tests/run-tests",
+    "  cat >\"$fake_bin/gh\" <<EOF\n#!/data/data/com.termux/files/usr/bin/bash\n",
+    "  cat >\"$fake_bin/gh\" <<EOF\n#!/usr/bin/env bash\n",
+)
 PY
 }
 
@@ -121,6 +131,9 @@ append_patch_audit() {
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 
   line=$'subject\ttermux: update to 0.152.0-alpha.7.2\truntime-critical\tMerges the exact official 0.152.0-alpha.7.2 source and reapplies the maintained Android and Termux runtime patch stack.'
+  grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
+
+  line=$'subject\ttermux: repair hosted fixture interpreters for 0.152.0-alpha.7.2\ttooling\tUses env bash only in generated hosted-CI test doubles so executable validation remains covered without changing production Termux launchers.'
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 }
 
