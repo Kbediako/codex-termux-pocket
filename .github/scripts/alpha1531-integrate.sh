@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-upstream_tag="rust-v0.153.0-alpha.1"
-upstream_tag_object="5c6ff4778720d48159a37f058da09a00d58f727e"
-upstream_commit="f2802f5e1e7981187122cb0953d455e8ddb9deab"
-package_version="0.153.0-alpha.1"
-merge_subject="termux: update to 0.153.0-alpha.1"
+upstream_tag="rust-v0.153.0-alpha.2"
+upstream_tag_object="911237afc7e102adfd13167cfe69743f97df8125"
+upstream_commit="73919571da608749b867134722fe3b42c1c6097f"
+package_version="0.153.0-alpha.2"
+merge_subject="termux: update to 0.153.0-alpha.2"
 tracker_issue="102"
 temporary_script=".github/scripts/alpha1531-integrate.sh"
 release_request="scripts/termux/release-request.env"
 phase="initializing"
-evidence_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1531-evidence"
+evidence_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1532-evidence"
 mkdir -p "$evidence_dir"
 
 collect_diagnostics() {
@@ -78,10 +78,10 @@ replace_once(
     '''<<<<<<< HEAD
 version = "0.152.0-alpha.7.2"
 =======
-version = "0.153.0-alpha.1"
->>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+version = "0.153.0-alpha.2"
+>>>>>>> 73919571da608749b867134722fe3b42c1c6097f
 ''',
-    'version = "0.153.0-alpha.1"\n',
+    'version = "0.153.0-alpha.2"\n',
 )
 replace_once(
     "codex-rs/core/src/guardian/mod.rs",
@@ -89,7 +89,7 @@ replace_once(
     "The user has manually approved a specific action that was previously `Rejected`.";
 =======
     codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;
->>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+>>>>>>> 73919571da608749b867134722fe3b42c1c6097f
 ''',
     '    codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;\n',
 )
@@ -98,7 +98,7 @@ replace_once(
     '''<<<<<<< HEAD
 =======
             self.vim_history = VimHistory::default();
->>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+>>>>>>> 73919571da608749b867134722fe3b42c1c6097f
 ''',
     '            self.vim_history = VimHistory::default();\n',
 )
@@ -112,7 +112,7 @@ pub(super) struct VimCommandState {
 pub(crate) struct VimCommandState {
     pub(super) pending_change: Vec<VimEdit>,
     pub(crate) last_change: Vec<VimEdit>,
->>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+>>>>>>> 73919571da608749b867134722fe3b42c1c6097f
 ''',
     '''pub(crate) struct VimCommandState {
     pub(super) pending_change: Vec<VimEdit>,
@@ -127,7 +127,7 @@ PY
 
 append_patch_audit() {
   local line
-  line=$'subject\ttermux: update to 0.153.0-alpha.1\truntime-critical\tMerges the exact official 0.153.0-alpha.1 source and preserves the maintained Android and Termux runtime patch stack.'
+  line=$'subject\ttermux: update to 0.153.0-alpha.2\truntime-critical\tMerges the exact official 0.153.0-alpha.2 source and preserves the maintained Android and Termux runtime patch stack.'
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 }
 
@@ -372,14 +372,14 @@ while (( SECONDS < deadline )); do
   fi
 
   blocking_ci="$(git show "${candidate}:.github/workflows/blocking-ci.yml")"
-  if grep -Eq '(^|[[:space:]])issues:|alpha1531|Integrate exact 0\.153\.0-alpha\.1' <<<"$blocking_ci"; then
+  if grep -Eq '(^|[[:space:]])issues:|alpha1532|Integrate exact 0\.153\.0-alpha\.2' <<<"$blocking_ci"; then
     sleep 5
     continue
   fi
 
   [[ "$(manifest_value_from_commit "$candidate" format_version)" == "3" ]]
   [[ "$(manifest_value_from_commit "$candidate" source_mode)" == "workflow-head" ]]
-  [[ "$(manifest_value_from_commit "$candidate" release_tag_prefix)" == "termux-v0.153.0-alpha.1" ]]
+  [[ "$(manifest_value_from_commit "$candidate" release_tag_prefix)" == "termux-v0.153.0-alpha.2" ]]
   [[ "$(manifest_value_from_commit "$candidate" expected_package_version)" == "$package_version" ]]
 
   git merge-base --is-ancestor "$upstream_commit" "$candidate"
