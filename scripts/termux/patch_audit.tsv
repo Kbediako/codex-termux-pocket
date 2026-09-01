@@ -148,3 +148,27 @@ subject	termux: repair hosted fixture interpreters for 0.152.0-alpha.7.2	tooling
 subject	termux: preserve production launcher shebang in hosted tests	tooling	Executes the generated Termux launcher through the hosted Bash interpreter while separately asserting its required absolute Termux shebang.
 subject	termux: update to 0.153.0-alpha.2	runtime-critical	Merges the exact official 0.153.0-alpha.2 source and preserves the maintained Android and Termux runtime patch stack.
 subject	termux: update to 0.153.0-alpha.4	runtime-critical	Merges the exact official 0.153.0-alpha.4 source and preserves the maintained Android and Termux runtime patch stack.
+subject	chore: select clean 0.153.0-alpha.2 source	tooling	Selects the clean exact alpha.2 runtime source after disposable integration controls were removed.
+subject	release: publish validated 0.153.0-alpha.2 runtime	tooling	Records the exact successful gate set used by the permanent release publisher.
+subject	fix: identify bundled bwrap package in Termux SBOM	security-critical	Repairs release provenance so the shipped bubblewrap binary is related to its Cargo package in SPDX output.
+subject	fix: validate the bundled codex-bwrap SBOM package	security-critical	Makes the release contract fail closed when the shipped bubblewrap package identity is absent or mismatched.
+subject	release: harden exact-source Termux gate contract	security-critical	Strengthens exact-source artifact, SBOM, publication, anonymous audit, and promotion invariants.
+subject	release: request validated Termux 0.153.0-alpha.2 publication	tooling	Records the five successful exact-source alpha.2 release gates.
+subject	fix(release): import publisher workflow identity for audit receipt	security-critical	Repairs the anonymous audit receipt signer identity without weakening release verification.
+subject	release: retry exact public audit and manifest promotion	tooling	Retries the immutable public alpha.2 release audit and promotion after the verified audit-code repair.
+subject	termux: promote termux-v0.153.0-alpha.2-5a76b55d9a	tooling	Promotes the anonymously verified alpha.2 updater manifest.
+subject	docs(ci): clarify exact-head release-channel re-audit	docs	Documents that post-promotion release-channel verification must run against the exact final main head.
+subject	ci: remove orphaned temporary governance run	tooling	Attempts cleanup of a historical temporary Actions run without changing shipped runtime behavior.
+subject	ci: directly delete exact orphaned Actions run	tooling	Attempts exact historical Actions-run cleanup without changing shipped runtime behavior.
+subject	ci: recreate exact concurrency key to retire orphaned run	tooling	Attempts isolated historical Actions-run reconciliation without changing shipped runtime behavior.
+subject	ci: reconcile exact orphaned Actions check run	tooling	Attempts exact historical check-run reconciliation without changing shipped runtime behavior.
+subject	ci: disable exact temporary workflow before orphan cleanup	tooling	Disables the obsolete temporary workflow identity before historical-run cleanup.
+subject	ci: retry exact orphaned governance-run reconciliation	tooling	Retries isolated historical-run reconciliation without changing shipped runtime behavior.
+subject	ci: add exact alpha.4 integration transaction	tooling	Adds the disposable exact-tag merge transaction used only for the alpha.4 maintenance update.
+subject	ci: stage exact alpha.4 integration	tooling	Stages the disposable exact alpha.4 integration job and its reviewed conflict resolution.
+subject	release: remove obsolete governance recovery workflow	tooling	Removes obsolete temporary governance recovery orchestration before source selection.
+subject	release: remove completed alpha.4 integration helper	tooling	Removes the disposable alpha.4 merge helper before exact-source validation.
+subject	release: restore permanent release-channel auditor	security-critical	Restores the permanent independent public-byte and attestation auditor before source selection.
+subject	release: restore permanent Fork CI topology	tooling	Restores the permanent Fork CI inventory before selecting the alpha.4 runtime source.
+subject	release: request validated Termux 0.153.0-alpha.4 publication	tooling	Records the five successful exact-source alpha.4 release gates.
+subject	termux: promote termux-v0.153.0-alpha.4-223220fd66	tooling	Promotes the anonymously verified alpha.4 updater manifest.
