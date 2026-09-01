@@ -1,26 +1,24 @@
 name: termux-release-channel
 run-name: Verify promoted Termux release channel
 
-# Verify that the promoted manifest points to the complete GitHub Latest release.
-# This is the canonical post-promotion channel verifier; maintenance automation
-# must dispatch this workflow name rather than any retired governance filename.
-# Direct edits to this permanent verifier also provide an explicit post-promotion
-# recheck after a workflow-token manifest promotion suppresses recursive events.
-# Repository-level release editing remains enabled by owner policy, so this
-# workflow continuously verifies the current public identity, bytes, checksums,
-# SBOM, and provenance attestations. It never mutates a published release.
+# This read-only verifier executes the same machine-readable public-release
+# contract used immediately before manifest promotion. It cannot publish or edit
+# a release, so publication and independent verification share semantics without
+# sharing write authority.
 on:
   push:
     branches:
       - main
     paths:
       - ".github/scripts/audit-termux-public-channel.py"
+      - ".github/scripts/termux_release_control.py"
       - ".github/workflows/termux-release-channel.yml"
       - "scripts/termux/release-manifest.env"
   workflow_dispatch:
 
 permissions:
   contents: read
+  attestations: read
 
 concurrency:
   group: termux-release-channel-${{ github.ref_name }}
@@ -30,67 +28,16 @@ jobs:
   verify-latest-release:
     name: Verify promoted release is complete and Latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout promoted manifest
+      - name: Checkout promoted manifest and verifier
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Verify public release identity and channel
+      - name: Verify anonymous public bytes, identity, and attestations
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: python3 .github/scripts/audit-termux-public-channel.py
-
-      - name: Verify public bytes and provenance attestations
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          manifest="scripts/termux/release-manifest.env"
-          release_tag="$(sed -n 's/^release_tag=//p' "$manifest")"
-          head_sha="$(sed -n 's/^head_sha=//p' "$manifest")"
-          archive_sha256="$(sed -n 's/^archive_sha256=//p' "$manifest")"
-          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/termux-release-request.yml"
-
-          [[ "$release_tag" =~ ^termux-v[0-9A-Za-z._-]+$ ]]
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-
-          release_json="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
-          public_dir="$(mktemp -d)"
-          while IFS=$'\t' read -r asset_name asset_url; do
-            curl --fail --location --silent --show-error --retry 5 \
-              "$asset_url" -o "${public_dir}/${asset_name}"
-          done < <(jq -r '.assets[] | [.name, .browser_download_url] | @tsv' <<<"$release_json")
-
-          (cd "$public_dir" && sha256sum --check --strict SHA256SUMS)
-          [[ "$(sha256sum "${public_dir}/codex-termux-aarch64-unknown-linux-musl.tar.gz" | awk '{print $1}')" == "$archive_sha256" ]]
-          cmp --silent "$manifest" "${public_dir}/release-manifest.env"
-          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
-            "${public_dir}/codex-termux-sbom.spdx.json"
-
-          for file in \
-            codex-termux-aarch64-unknown-linux-musl.tar.gz \
-            metadata.env \
-            SHA256SUMS \
-            codex-termux-sbom.spdx.json \
-            release-manifest.env; do
-            gh attestation verify "${public_dir}/${file}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$signer_workflow" >/dev/null
-          done
-
-          {
-            echo '### Release channel verification'
-            echo
-            echo "- Release: \`${release_tag}\`"
-            echo "- Runtime source: \`${head_sha}\`"
-            echo '- GitHub Latest: `verified`'
-            echo '- Public assets: `byte- and checksum-verified`'
-            echo '- Provenance attestations: `verified`'
-            echo '- Repository release editing: `enabled by owner policy`'
-          } >>"$GITHUB_STEP_SUMMARY"

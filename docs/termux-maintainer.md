@@ -1,12 +1,9 @@
 # Termux Maintainer Guide
 
 This workflow is intentionally separate from installation on a phone. Only a
-maintainer refreshing the fork's patch stack should rebase OpenAI alpha tags.
-
-Before any alpha sync, CI repair, publication, or release takeover, read
-[`termux-release-runbook.md`](termux-release-runbook.md) completely. It is the
-hard completion contract and records the known failure signatures, exact-source
-rules, publication sequence, connected-tooling lessons, and cleanup requirements.
+maintainer refreshing the fork's patch stack should integrate OpenAI alpha tags.
+Before any alpha sync, CI repair, publication, or takeover, read
+[`termux-release-runbook.md`](termux-release-runbook.md) completely.
 
 ## Refresh the patch stack
 
@@ -16,157 +13,148 @@ Start from a clean `main` checkout and run:
 scripts/termux/maintainer-update-alpha --tag rust-vX.Y.Z-alpha.N
 ```
 
-The helper configures `origin` as the Termux fork, configures fetch-only
-`upstream` as OpenAI, fetches tags from `upstream`, and performs the rebase. It
-does not stash, commit, push, force-push, or dispatch CI. Merge conflicts remain
-a maintainer responsibility, never an end-user installation step.
+The helper configures `origin` as the Termux fork and fetch-only `upstream` as
+OpenAI. It fetches upstream tags and prepares the maintained patch stack; it does
+not stash, push, force-push, publish, or silently resolve conflicts. Review every
+conflict and classify every retained fork commit in
+`scripts/termux/patch_audit.tsv`.
 
-After the rebase it runs `cargo metadata --locked --format-version=1 --no-deps`.
-If the lockfile is stale, it refreshes resolution with unlocked metadata and
-reruns the locked check. Review `codex-rs/Cargo.lock`; when dependency changes
-require it, run `just bazel-lock-update` and include `MODULE.bazel.lock`.
-Classify every retained Termux commit in `scripts/termux/patch_audit.tsv`.
-
-To validate or refresh only the lockfile after manual conflict work:
+After integration, validate the complete locked graph. To refresh only the lock
+state after reviewed conflict work:
 
 ```shell
 scripts/termux/maintainer-update-alpha --lock-only
 ```
 
-## Record exact source identity
+When dependency changes require it, also run `just bazel-lock-update` on a
+supported host and commit `MODULE.bazel.lock` with `codex-rs/Cargo.lock`.
 
-Peel annotated upstream tags and keep the upstream commit, fork merge commit,
-and clean release source separate. Do not infer exact source from the current
-branch name or from a presumed merge parent.
+## Record separate identities
+
+An annotated tag object is not the source commit. Peel it and keep four values
+separate:
 
 ```shell
 upstream_commit="$(git rev-parse 'refs/tags/rust-vX.Y.Z-alpha.N^{}')"
 git merge-base --is-ancestor "$upstream_commit" "$source_sha"
 ```
 
-A retry may create a single-parent commit even when the initial integration was
-a merge. `HEAD^2` is optional diagnostic evidence, not the source-validation
-contract. See the runbook for the safe parent check and the historical
-`fatal: ambiguous argument 'HEAD^2'` failure.
+```text
+upstream_tag=<official annotated tag>
+upstream_commit=<recursively peeled OpenAI commit>
+merge_commit=<fork integration commit, when applicable>
+source_sha=<clean exact fork source used by every runtime gate>
+```
 
-## Build the runtime
+A retry may create an ordinary single-parent commit. Never require `HEAD^2`;
+ancestry is the durable proof.
 
-Dispatch `.github/workflows/termux-mobile-artifact.yml` with an exact commit SHA.
-The workflow run title is `Termux runtime <SHA>`, which lets the updater and the
-formal publisher identify the exact build without dispatching a duplicate.
+## Select a clean source before running gates
 
-CI first runs the locked Cargo metadata gate, before APT caches, cross-toolchain
-setup, V8 downloads, or compilation. A stale lockfile therefore fails quickly
-with the refresh command instead of consuming an ARM build slot.
+Remove every temporary maintenance workflow, job, script, helper, branch, and
+issue trigger before selecting `source_sha`. The source should already contain
+all intended runtime and permanent release-control changes. Do not move `main`
+until its exact-source gate set has finished, because manual workflow runs report
+the branch head as their `head_sha`.
 
-The build workflow then:
+## Run all exact-source gates
 
-1. Builds and strips `bwrap`, records its SHA-256, and embeds that digest while
-   compiling the matching Codex binaries.
-2. Builds `codex`, `codex-code-mode-host`, and
-   `codex-responses-api-proxy` from the same checkout and target.
-3. Writes canonical package metadata plus artifact commit/version metadata.
-4. Creates `SHA256SUMS`, extracts the archive again, checks every required file,
-   compares executable version to metadata, and runs the bundle smoke test.
-5. Generates the SPDX SBOM and provenance attestations for manual exact-ref runs.
-6. Uploads the Actions artifact only after all validation passes.
+The same full SHA must have successful live runs of:
 
-`termux-mobile-artifact.yml` is deliberately build-only. It cannot publish a
-GitHub release and has no `contents: write` permission.
-
-## Validate Android, Linux sandbox, CI, and the control plane
-
-The exact runtime source must have successful runs of:
-
-- `.github/workflows/blocking-ci.yml`
+- `.github/workflows/blocking-ci.yml` (`Termux fork checks`)
 - `.github/workflows/termux-control-plane.yml`
 - `.github/workflows/termux-linux-sandbox.yml`, including x64 and ARM64
 - `.github/workflows/termux-mobile-artifact.yml`
-- `.github/workflows/termux-android-emulator.yml`
+- `.github/workflows/termux-android-emulator.yml`, including fixture and real app
 
-Do not substitute a successful run from another commit. Record the exact source
-SHA and every successful run ID before preparing publication. A run is reusable
-only when its live `head_sha`, workflow path, conclusion, matrix jobs, and
-retained artifacts all match the selected source.
+Dispatch the sandbox and artifact workflows with `source_ref=<source_sha>` while
+`main` still equals that source. Dispatch Android manually on that same `main`.
+Do not duplicate an exact run that is queued or running. Inspect the complete log
+of any failed job, repair only evidenced defects, choose the repaired commit as a
+new source, and restart the whole gate set.
 
-## Publish a validated runtime
+The production artifact run must retain exactly one unexpired artifact named
+`codex-termux-aarch64-unknown-linux-musl`.
 
-Publication is owned only by `.github/workflows/termux-release-request.yml`.
-Write the exact release evidence to `scripts/termux/release-publication.env`:
+## Prepare the publication request
+
+After all five runs are green, update
+`scripts/termux/release-publication.env` using format 2:
 
 ```text
-format_version=1
-source_sha=<40-character commit SHA>
-release_tag=termux-v<version-or-date>-<source prefix>
-expected_package_version=<X.Y.Z-alpha.N>
-expected_codex_version=codex-cli <7-character source prefix>
-control_run_id=<successful control-plane run>
-artifact_run_id=<successful ARM64 artifact run>
-android_run_id=<successful Android/Termux run>
+format_version=2
+source_sha=<40-character exact runtime source>
+release_tag=termux-v<package-version>-<first 10 source characters>
+expected_package_version=<X.Y.Z-alpha.N[.P...]>
+expected_codex_version=codex-cli <first 7 source characters>
+fork_ci_run_id=<successful exact Fork CI run>
+control_run_id=<successful exact control-plane run>
+sandbox_run_id=<successful exact x64+ARM64 sandbox run>
+artifact_run_id=<successful exact ARM64 artifact run>
+android_run_id=<successful exact Android/Termux run>
 ```
 
-Review and commit that file on protected `main`. The release workflow then
-re-fetches and validates all three exact-source runs, downloads and verifies the
-artifact, checks the SBOM and attestations, and stages every final asset in a
-draft. Its only release update occurs while that object is still a draft: it
-publishes the complete set and designates it GitHub Latest in the same
-draft-to-public transaction. It never modifies an already-published release.
+Each run ID must be distinct. Commit this request to protected `main`; that push
+starts the only release writer, `.github/workflows/termux-release-request.yml`.
 
-The complete public asset set is:
+## Executable release contract
+
+`.github/scripts/termux_release_control.py` owns the release state machine:
+
+1. `validate-request` re-fetches all five runs, exact jobs, and the retained
+   artifact, and proves `source_sha` is an ancestor of current `main`.
+2. `prepare` verifies `SHA256SUMS`, strict metadata, archive safety, all internal
+   runtime checksums, `codex-package.json`, and SPDX package/source identity,
+   then creates `release-manifest.env` as the fifth asset.
+3. `publish` creates a draft, uploads all five assets, verifies the complete
+   draft, and makes it public and GitHub Latest in one update.
+4. `audit` anonymously downloads all five files, compares the bytes with the
+   attested candidate, checks GitHub API sizes/digests, metadata, archive,
+   checksums, SBOM, tag ref, `/releases/latest`, and publisher attestations.
+5. `promote` accepts only the same-job audit receipt and rechecks live release
+   identity before updating `scripts/termux/release-manifest.env`.
+
+The public release is never repaired incrementally. An abandoned exact draft may
+be deleted on retry; a conflicting public tag or release is a hard failure.
+
+## Production artifact contract
+
+`termux-mobile-artifact.yml` builds one source and target, then retains:
 
 ```text
 codex-termux-aarch64-unknown-linux-musl.tar.gz
 codex-termux-sbom.spdx.json
 metadata.env
-release-manifest.env
 SHA256SUMS
 ```
 
-Only after anonymous asset downloads, strict checksums, release identity,
-attestations, and `/releases/latest` verify does the workflow promote
-`scripts/termux/release-manifest.env`. Fresh installs then use the public release
-without requiring `gh auth login`.
+The publisher adds `release-manifest.env`. The archive contains the stripped
+`codex`, `codex-code-mode-host`, `codex-responses-api-proxy`, bundled `bwrap`,
+`codex-package.json`, and `runtime-files.sha256`. The artifact gate verifies the
+same contract before upload; the publisher and public auditors verify it again.
 
-Repository-level release editing remains enabled by owner policy. The release
-channel and governance workflows therefore verify the current public tag,
-source, exact asset set, metadata, checksums, attestations, and Latest endpoint
-on every relevant run instead of relying on GitHub's immutability setting.
+## Post-promotion verification
 
-`termux-release-channel.yml` is read-only post-promotion verification.
-`termux-governance.yml` independently checks the public channel when the
-manifest or release controls change, on its daily schedule, or manually.
+A workflow-token promotion commit does not recursively schedule other Actions.
+Explicitly dispatch the following against final cleaned `main`:
 
-Because commits created by the workflow `GITHUB_TOKEN` do not recursively start
-new workflows, explicitly dispatch release-channel, governance, control-plane,
-and Fork CI checks on final cleaned `main` when the promotion transaction did not
-create those runs itself. Do not infer post-promotion success from the publisher.
+```text
+termux-release-channel.yml
+termux-governance.yml
+termux-control-plane.yml
+blocking-ci.yml
+```
 
-## Failed or delayed builds
-
-- Queued and running builds may exceed the phone's local wait; they continue on
-  GitHub and can be resumed by run ID.
-- Do not dispatch another build while an exact queued or running run exists.
-- A failed exact run is reported with its URL and is not duplicated
-  automatically. Fix the first failing step, then deliberately rerun or dispatch.
-- Read the complete failed job log. A workflow can pass compilation and fail
-  later in generated release orchestration.
-- Never publish or pin a manifest until Fork CI, Linux sandbox, artifact,
-  control-plane, and Android/Termux validation have all passed for the same exact
-  source.
-- Never use the local Android/V8 source build as an end-user fallback.
-- Never assume `HEAD^2` exists on a retry.
-- Never let Actions rewrite workflow YAML; make workflow edits directly.
-- Never repair an already-public release by uploading missing assets or changing
-  its source identity.
+Release-channel and governance both invoke the same read-only public audit used
+before promotion. They independently download public bytes and verify provenance;
+they do not trust the publisher's earlier conclusion.
 
 ## Completion and cleanup
 
-Do not close the tracker until the public release, promoted manifest, permanent
-post-promotion checks, and final repository topology have all been read back from
-GitHub. The tracker body must be rewritten with final evidence rather than left
-with stale `state=failed` text.
-
-Final cleanup requires only the permanent workflows, no temporary maintenance
-job or script, no staging or gate branch, one completed tracker, and a live
-Latest release matching the promoted manifest. The complete checklist and
-recommended tracker body are in the release runbook.
+Do not close the maintenance tracker until live API reads prove every runbook
+condition. The final repository must have only the eight permanent workflows, no
+temporary maintenance job or script, no staging/gate branch, one completed
+tracker, and a GitHub Latest release matching the promoted manifest. Rewrite the
+tracker with exact run IDs, source identities, release asset evidence, final
+`main`, workflow inventory, and branch inventory before closing it as
+`completed`.

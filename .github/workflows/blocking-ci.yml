@@ -7,20 +7,17 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  issues:
-    types: [reopened]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-ci-${{ github.event_name == 'issues' && github.event.issue.number || github.event.pull_request.number || github.ref }}
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name != 'issues' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -66,11 +63,14 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -d '' -t python_files < <(
-            git ls-files -z '.github/scripts/*.py' 'scripts/termux/*.py'
+            git ls-files -z '.github/scripts/*.py' '.github/scripts/**/*.py' 'scripts/termux/*.py'
           )
           if (( ${#python_files[@]} > 0 )); then
             python3 -m py_compile "${python_files[@]}"
           fi
+
+      - name: Self-test the executable release contract
+        run: python3 .github/scripts/termux_release_control.py self-test
 
       - name: Validate locked Cargo metadata
         working-directory: codex-rs
@@ -89,50 +89,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  alpha15272-integrate:
-    if: >-
-      ${{ github.event_name == 'issues'
-          && github.event.action == 'reopened'
-          && github.event.issue.number == 101
-          && github.event.issue.title == 'Maintenance: update Codex Termux to 0.152.0-alpha.7.2' }}
-    name: Integrate exact 0.152.0-alpha.7.2 source
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 150
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout current main with full history
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up repository CI environment
-        uses: ./.github/actions/setup-ci
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-
-      - name: Simulate the Termux bash path
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /data/data/com.termux/files/usr/bin
-          sudo ln -sfn /usr/bin/bash /data/data/com.termux/files/usr/bin/bash
-
-      - name: Integrate exact upstream alpha
-        shell: bash
-        run: bash .github/scripts/alpha15272-integrate.sh
-
-      - name: Upload merge-conflict and failure evidence
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: alpha15272-integration-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/alpha15272-conflicts
-          if-no-files-found: warn
-          retention-days: 7

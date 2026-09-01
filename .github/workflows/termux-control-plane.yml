@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/CODEOWNERS"
+      - ".github/scripts/**"
       - ".github/scripts/build-termux-android-emulator-fixture.sh"
       - ".github/scripts/install-musl-build-tools.sh"
       - ".github/scripts/install-musl-build-tools-core-49035f.sh"
@@ -23,6 +24,7 @@ on:
       - main
     paths:
       - ".github/CODEOWNERS"
+      - ".github/scripts/**"
       - ".github/scripts/build-termux-android-emulator-fixture.sh"
       - ".github/scripts/install-musl-build-tools.sh"
       - ".github/scripts/install-musl-build-tools-core-49035f.sh"
@@ -75,7 +77,20 @@ jobs:
 
       - name: Validate Python utilities
         shell: bash
-        run: python3 -m py_compile scripts/termux/generate-sbom.py
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t python_files < <(
+            git ls-files -z '.github/scripts/*.py' '.github/scripts/**/*.py' 'scripts/termux/*.py'
+          )
+          python3 -m py_compile "${python_files[@]}"
+
+      - name: Self-test the executable release contract
+        shell: bash
+        run: python3 .github/scripts/termux_release_control.py self-test
+
+      - name: Validate permanent workflow topology
+        shell: bash
+        run: python3 .github/scripts/validate-termux-workflow-topology.py
 
       - name: Validate shell syntax
         shell: bash

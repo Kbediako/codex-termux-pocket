@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 concurrency:
   group: termux-governance-${{ github.ref }}
@@ -24,7 +25,7 @@ jobs:
   verify-public-channel:
     name: Verify release identity and governance state
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       FORCED_PUSH: ${{ github.event.forced || false }}
       GH_TOKEN: ${{ github.token }}
