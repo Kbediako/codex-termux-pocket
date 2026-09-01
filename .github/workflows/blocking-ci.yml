@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   validate:
+    if: ${{ github.event.head_commit.message != 'ci: stage exact alpha.4 integration' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -89,3 +90,52 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  alpha1534-integrate:
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.event.head_commit.message == 'ci: stage exact alpha.4 integration' }}
+    name: Integrate exact 0.153.0-alpha.4 source
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Checkout current main with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Simulate the Termux bash path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data/data/com.termux/files/usr/bin
+          sudo ln -sfn /usr/bin/bash /data/data/com.termux/files/usr/bin/bash
+
+      - name: Integrate exact upstream alpha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash .github/scripts/alpha1534-integrate.sh
+
+      - name: Upload complete integration failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: alpha1534-integration-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/alpha1534-evidence
+          if-no-files-found: warn
+          retention-days: 7
