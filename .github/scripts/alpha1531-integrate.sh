@@ -322,7 +322,7 @@ PREFIX=/data/data/com.termux/files/usr \
 TERMUX_APK_RELEASE=F_DROID \
   bash scripts/termux/tests/run-tests
 python3 .github/scripts/termux_release_control.py self-test
-(cd codex-rs && just fmt)
+(cd codex-rs && cargo fmt --all)
 (cd codex-rs && cargo fmt --all -- --check)
 git diff --check
 
