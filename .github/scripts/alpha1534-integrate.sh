@@ -6,6 +6,7 @@ upstream_tag_object="767248f1c50b650dbfca7b121bccb4110d00c891"
 upstream_commit="c7348a8ffb32269e147817ad61918278401fb474"
 package_version="0.153.0-alpha.4"
 merge_subject="termux: update to 0.153.0-alpha.4"
+staging_branch="automation/alpha1534-integration"
 phase="initializing"
 evidence_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1534-evidence"
 mkdir -p "$evidence_dir"
@@ -64,6 +65,36 @@ append_patch_audit() {
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 }
 
+resolve_evidenced_version_conflict() {
+  mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+  if (( ${#conflicts[@]} != 1 )) || [[ "${conflicts[0]}" != "codex-rs/Cargo.toml" ]]; then
+    return 1
+  fi
+
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("codex-rs/Cargo.toml")
+text = path.read_text(encoding="utf-8")
+conflict = """<<<<<<< HEAD
+version = \"0.153.0-alpha.2\"
+=======
+version = \"0.153.0-alpha.4\"
+>>>>>>> c7348a8ffb32269e147817ad61918278401fb474
+"""
+if text.count(conflict) != 1:
+    raise SystemExit("workspace-version conflict does not match the complete reviewed evidence")
+resolved = text.replace(conflict, 'version = "0.153.0-alpha.4"\n', 1)
+if any(marker in resolved for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+    raise SystemExit("unexpected conflict marker remains after version resolution")
+path.write_text(resolved, encoding="utf-8")
+PY
+
+  git add codex-rs/Cargo.toml
+  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+  echo "Resolved the sole reviewed conflict by taking the official alpha.4 workspace version."
+}
+
 phase="configuring-repository"
 git config user.name "Kbediako"
 git config user.email "70529246+Kbediako@users.noreply.github.com"
@@ -75,6 +106,10 @@ origin_head="$(git rev-parse refs/remotes/origin/main)"
   exit 1
 }
 [[ -z "$(git status --porcelain)" ]]
+if git ls-remote --exit-code --heads origin "refs/heads/${staging_branch}" >/dev/null 2>&1; then
+  echo "::error::staging branch ${staging_branch} already exists; refusing to overwrite it"
+  exit 1
+fi
 
 if git remote get-url upstream >/dev/null 2>&1; then
   git remote set-url upstream https://github.com/openai/codex.git
@@ -103,17 +138,18 @@ actual_package_version="$(
   '
 )"
 [[ "$actual_package_version" == "$package_version" ]]
-
 echo "Verified ${upstream_tag} tag object ${upstream_tag_object} -> ${upstream_commit}."
 
 phase="merging-exact-upstream-source"
 if ! git merge --no-ff --no-commit "$upstream_commit"; then
-  phase="unexpected-upstream-merge-conflict"
+  phase="reviewing-upstream-merge-conflict"
   collect_diagnostics
   print_conflict_evidence
-  echo "::error::Exact upstream merge has conflicts. No resolution was guessed; complete index evidence was captured."
-  trap - ERR
-  exit 86
+  if ! resolve_evidenced_version_conflict; then
+    echo "::error::The merge conflict differs from the complete reviewed evidence; refusing to guess a resolution."
+    trap - ERR
+    exit 86
+  fi
 fi
 
 phase="recording-fork-patch-classification"
@@ -154,10 +190,12 @@ read -r -a parents <<<"$(git rev-list --parents -n 1 "$merge_commit")"
 [[ "${#parents[@]}" -eq 3 ]]
 [[ "${parents[2]}" == "$upstream_commit" ]]
 
-phase="publishing-merge-to-main"
-git push origin HEAD:main
+phase="publishing-integration-staging-branch"
+git push origin "HEAD:refs/heads/${staging_branch}"
+remote_staging="$(git ls-remote origin "refs/heads/${staging_branch}" | awk '{print $1}')"
+[[ "$remote_staging" == "$merge_commit" ]]
 remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-[[ "$remote_main" == "$merge_commit" ]]
+[[ "$remote_main" == "$starting_head" ]]
 
 {
   echo "### Exact upstream alpha.4 integration"
@@ -166,7 +204,9 @@ remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
   echo "- Annotated tag object: \`${upstream_tag_object}\`"
   echo "- Peeled upstream commit: \`${upstream_commit}\`"
   echo "- Integration merge: \`${merge_commit}\`"
-  echo "- Next boundary: direct removal of all disposable controls before source selection"
+  echo "- Staging branch: \`${staging_branch}\`"
+  echo "- Main remained unchanged: \`${starting_head}\`"
+  echo "- Next boundary: direct cleanup of disposable controls on staging, then one fast-forward of clean source to main"
 } >>"$GITHUB_STEP_SUMMARY"
 
-echo "Integrated ${upstream_tag} as merge ${merge_commit}."
+echo "Integrated ${upstream_tag} as staged merge ${merge_commit}; main remains ${starting_head}."
