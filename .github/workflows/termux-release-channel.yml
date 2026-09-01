@@ -5,8 +5,6 @@ run-name: Verify promoted Termux release channel
 # contract used immediately before manifest promotion. It cannot publish or edit
 # a release, so publication and independent verification share semantics without
 # sharing write authority.
-# A maintainer push that changes this verifier or the promoted manifest
-# deliberately re-audits the live public channel at that exact main revision.
 on:
   push:
     branches:
@@ -18,10 +16,7 @@ on:
       - "scripts/termux/release-manifest.env"
   workflow_dispatch:
 
-# Temporary exact-workflow cleanup authority. This permission and guarded step
-# are removed immediately after orphan run 32212182486 is proven absent.
 permissions:
-  actions: write
   contents: read
   attestations: read
 
@@ -40,137 +35,6 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-
-      - name: Disable exact temporary workflow and retire its orphaned run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ORPHAN_RUN_ID: "32212182486"
-          ORPHAN_RUN_PATH: ".github/workflows/termux-governance-audit.yml"
-          ORPHAN_HEAD_SHA: "4cbbb06b331affb71fd6bf41bff3ea365d489b8a"
-          ORPHAN_EVENT: "workflow_dispatch"
-          ORPHAN_WORKFLOW_ID: "335426411"
-          ORPHAN_WORKFLOW_NAME: "termux-governance-audit"
-          ORPHAN_CREATED_AT: "2026-08-19T03:27:02Z"
-          ORPHAN_ACTOR: "github-actions[bot]"
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          repo_api="https://api.github.com/repos/$GITHUB_REPOSITORY"
-          workflow_api="$repo_api/actions/workflows/$ORPHAN_WORKFLOW_ID"
-          run_api="$repo_api/actions/runs/$ORPHAN_RUN_ID"
-          workflow_json="$RUNNER_TEMP/orphan-workflow.json"
-          run_json="$RUNNER_TEMP/orphan-run.json"
-          mutation_json="$RUNNER_TEMP/orphan-mutation.json"
-          common=(
-            --silent
-            --show-error
-            --header "Authorization: Bearer $GH_TOKEN"
-            --header "Accept: application/vnd.github+json"
-            --header "X-GitHub-Api-Version: 2022-11-28"
-          )
-
-          request() {
-            local output="$1"
-            local url="$2"
-            shift 2
-            curl "${common[@]}" "$@" \
-              --output "$output" \
-              --write-out '%{http_code}' \
-              "$url"
-          }
-
-          workflow_code="$(request "$workflow_json" "$workflow_api")"
-          if [[ "$workflow_code" != "200" ]]; then
-            cat "$workflow_json" >&2 || true
-            echo "::error::Unexpected temporary-workflow lookup status: $workflow_code"
-            exit 1
-          fi
-          workflow_state="$(jq -r '.state' "$workflow_json")"
-          if [[ "$(jq -r '.id' "$workflow_json")" != "$ORPHAN_WORKFLOW_ID" || \
-                "$(jq -r '.path' "$workflow_json")" != "$ORPHAN_RUN_PATH" || \
-                "$(jq -r '.name' "$workflow_json")" != "$ORPHAN_WORKFLOW_NAME" ]]; then
-            cat "$workflow_json" >&2
-            echo "::error::Refusing to disable a workflow whose identity differs from the audited temporary workflow."
-            exit 1
-          fi
-
-          run_code="$(request "$run_json" "$run_api")"
-          if [[ "$run_code" == "404" ]]; then
-            echo "Orphaned temporary workflow run $ORPHAN_RUN_ID is already absent."
-            exit 0
-          fi
-          if [[ "$run_code" != "200" ]]; then
-            cat "$run_json" >&2 || true
-            echo "::error::Unexpected orphan-run lookup status: $run_code"
-            exit 1
-          fi
-          if [[ "$(jq -r '.id' "$run_json")" != "$ORPHAN_RUN_ID" || \
-                "$(jq -r '.path' "$run_json")" != "$ORPHAN_RUN_PATH" || \
-                "$(jq -r '.head_sha' "$run_json")" != "$ORPHAN_HEAD_SHA" || \
-                "$(jq -r '.event' "$run_json")" != "$ORPHAN_EVENT" || \
-                "$(jq -r '.workflow_id' "$run_json")" != "$ORPHAN_WORKFLOW_ID" || \
-                "$(jq -r '.created_at' "$run_json")" != "$ORPHAN_CREATED_AT" || \
-                "$(jq -r '.actor.login' "$run_json")" != "$ORPHAN_ACTOR" ]]; then
-            cat "$run_json" >&2
-            echo "::error::Refusing to mutate a workflow run whose identity differs from the audited orphan."
-            exit 1
-          fi
-
-          if [[ "$workflow_state" == "active" ]]; then
-            disable_code="$(request "$mutation_json" "$workflow_api/disable" --request PUT)"
-            if [[ "$disable_code" != "204" ]]; then
-              cat "$mutation_json" >&2 || true
-              echo "::error::Unexpected temporary-workflow disable status: $disable_code"
-              exit 1
-            fi
-          elif [[ "$workflow_state" != "disabled_manually" ]]; then
-            cat "$workflow_json" >&2
-            echo "::error::Temporary workflow has unexpected state: $workflow_state"
-            exit 1
-          fi
-
-          for endpoint in cancel force-cancel; do
-            mutation_code="$(request "$mutation_json" "$run_api/$endpoint" --request POST)"
-            if [[ "$mutation_code" != "202" && "$mutation_code" != "409" ]]; then
-              cat "$mutation_json" >&2 || true
-              echo "::error::Unexpected $endpoint status for exact orphan: $mutation_code"
-              exit 1
-            fi
-          done
-
-          status="$(jq -r '.status' "$run_json")"
-          for attempt in $(seq 1 30); do
-            sleep 2
-            run_code="$(request "$run_json" "$run_api")"
-            if [[ "$run_code" == "404" ]]; then
-              echo "Orphaned temporary workflow run $ORPHAN_RUN_ID disappeared after workflow disablement."
-              exit 0
-            fi
-            if [[ "$run_code" != "200" ]]; then
-              cat "$run_json" >&2 || true
-              echo "::error::Unexpected orphan-run poll status: $run_code"
-              exit 1
-            fi
-            status="$(jq -r '.status' "$run_json")"
-            if [[ "$status" == "completed" ]]; then
-              break
-            fi
-          done
-
-          delete_code="$(request "$mutation_json" "$run_api" --request DELETE)"
-          if [[ "$delete_code" != "204" ]]; then
-            cat "$mutation_json" >&2 || true
-            echo "::error::Exact orphan remained $status and deletion returned $delete_code after workflow disablement."
-            exit 1
-          fi
-          run_code="$(request "$run_json" "$run_api")"
-          if [[ "$run_code" != "404" ]]; then
-            cat "$run_json" >&2 || true
-            echo "::error::Deleted orphan run is still visible: $run_code"
-            exit 1
-          fi
-          echo "Disabled temporary workflow $ORPHAN_WORKFLOW_ID and deleted exact orphan run $ORPHAN_RUN_ID."
 
       - name: Verify anonymous public bytes, identity, and attestations
         env:
