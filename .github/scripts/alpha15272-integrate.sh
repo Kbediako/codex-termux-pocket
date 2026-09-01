@@ -122,6 +122,12 @@ replace_once(
     "  cat >\"$fake_bin/gh\" <<EOF\n#!/data/data/com.termux/files/usr/bin/bash\n",
     "  cat >\"$fake_bin/gh\" <<EOF\n#!/usr/bin/env bash\n",
 )
+replace_once(
+    "scripts/termux/tests/run-tests",
+    "  assert_eq \"$version\" \"$(CODEX_TERMUX_DISABLE_PROOT=1 \"$prefix/bin/codex\" --version)\" 'launcher version'\n",
+    "  assert_eq '#!/data/data/com.termux/files/usr/bin/bash' \"$(head -n 1 \"$prefix/bin/codex\")\" 'launcher Termux shebang'\n"
+    "  assert_eq \"$version\" \"$(CODEX_TERMUX_DISABLE_PROOT=1 bash \"$prefix/bin/codex\" --version)\" 'launcher version'\n",
+)
 PY
 }
 
@@ -134,6 +140,9 @@ append_patch_audit() {
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 
   line=$'subject\ttermux: repair hosted fixture interpreters for 0.152.0-alpha.7.2\ttooling\tUses env bash only in generated hosted-CI test doubles so executable validation remains covered without changing production Termux launchers.'
+  grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
+
+  line=$'subject\ttermux: preserve production launcher shebang in hosted tests\ttooling\tExecutes the generated Termux launcher through the hosted Bash interpreter while separately asserting its required absolute Termux shebang.'
   grep -Fqx "$line" scripts/termux/patch_audit.tsv || printf '%s\n' "$line" >>scripts/termux/patch_audit.tsv
 }
 
