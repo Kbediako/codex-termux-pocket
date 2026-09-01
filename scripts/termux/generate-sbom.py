@@ -126,7 +126,7 @@ def main() -> int:
         "codex-cli",
         "codex-code-mode-host",
         "codex-responses-api-proxy",
-        "bwrap",
+        "codex-bwrap",
     }
     for cargo_id, package in sorted(packages_by_id.items()):
         if package["name"] in shipped_crates:
