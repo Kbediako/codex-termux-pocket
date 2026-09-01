@@ -47,45 +47,81 @@ trap on_error ERR
 
 resolve_verified_merge_conflicts() {
   mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
-  (( ${#conflicts[@]} >= 1 && ${#conflicts[@]} <= 2 )) || return 1
+  expected_conflicts=(
+    codex-rs/Cargo.toml
+    codex-rs/core/src/guardian/mod.rs
+    codex-rs/tui/src/bottom_pane/chat_composer.rs
+    codex-rs/tui/src/bottom_pane/textarea/vim_commands.rs
+  )
+  diff -u \
+    <(printf '%s\n' "${expected_conflicts[@]}") \
+    <(printf '%s\n' "${conflicts[@]}") || return 1
 
-  local path
-  for path in "${conflicts[@]}"; do
-    case "$path" in
-      codex-rs/Cargo.toml|codex-rs/Cargo.lock) ;;
-      *) return 1 ;;
-    esac
-  done
-
-  if printf '%s\n' "${conflicts[@]}" | grep -Fxq 'codex-rs/Cargo.toml'; then
-    python3 - <<'PY'
+  python3 - <<'PY'
 from pathlib import Path
-import re
 
-path = Path("codex-rs/Cargo.toml")
-text = path.read_text(encoding="utf-8")
-pattern = re.compile(
-    r'<<<<<<< HEAD\n'
-    r'version = "0\.152\.0-alpha\.7\.2"\n'
-    r'=======\n'
-    r'version = "0\.153\.0-alpha\.1"\n'
-    r'>>>>>>> [^\n]+\n'
+
+def replace_once(path: str, old: str, new: str) -> None:
+    file = Path(path)
+    text = file.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{path}: expected one guarded conflict, found {count}")
+    updated = text.replace(old, new)
+    if any(marker in updated for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+        raise SystemExit(f"{path}: unexpected conflict marker remains")
+    file.write_text(updated, encoding="utf-8")
+
+
+replace_once(
+    "codex-rs/Cargo.toml",
+    '''<<<<<<< HEAD
+version = "0.152.0-alpha.7.2"
+=======
+version = "0.153.0-alpha.1"
+>>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+''',
+    'version = "0.153.0-alpha.1"\n',
 )
-updated, count = pattern.subn('version = "0.153.0-alpha.1"\n', text)
-if count != 1:
-    raise SystemExit(f"expected one guarded workspace-version conflict, found {count}")
-if any(marker in updated for marker in ("<<<<<<<", "=======", ">>>>>>>")):
-    raise SystemExit("unexpected conflict marker remains in Cargo.toml")
-path.write_text(updated, encoding="utf-8")
+replace_once(
+    "codex-rs/core/src/guardian/mod.rs",
+    '''<<<<<<< HEAD
+    "The user has manually approved a specific action that was previously `Rejected`.";
+=======
+    codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;
+>>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+''',
+    '    codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;\n',
+)
+replace_once(
+    "codex-rs/tui/src/bottom_pane/chat_composer.rs",
+    '''<<<<<<< HEAD
+=======
+            self.vim_history = VimHistory::default();
+>>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+''',
+    '            self.vim_history = VimHistory::default();\n',
+)
+replace_once(
+    "codex-rs/tui/src/bottom_pane/textarea/vim_commands.rs",
+    '''<<<<<<< HEAD
+pub(super) struct VimCommandState {
+    pub(super) pending_change: Vec<VimEdit>,
+    last_change: Vec<VimEdit>,
+=======
+pub(crate) struct VimCommandState {
+    pub(super) pending_change: Vec<VimEdit>,
+    pub(crate) last_change: Vec<VimEdit>,
+>>>>>>> f2802f5e1e7981187122cb0953d455e8ddb9deab
+''',
+    '''pub(crate) struct VimCommandState {
+    pub(super) pending_change: Vec<VimEdit>,
+    pub(crate) last_change: Vec<VimEdit>,
+''',
+)
 PY
-    git add codex-rs/Cargo.toml
-  fi
 
-  if printf '%s\n' "${conflicts[@]}" | grep -Fxq 'codex-rs/Cargo.lock'; then
-    git checkout --ours -- codex-rs/Cargo.lock
-    git add codex-rs/Cargo.lock
-  fi
-
+  git add "${expected_conflicts[@]}"
   [[ -z "$(git diff --name-only --diff-filter=U)" ]]
 }
 
@@ -253,7 +289,7 @@ fi
 if [[ "$merge_failed" == "true" ]]; then
   collect_diagnostics
   if resolve_verified_merge_conflicts; then
-    echo "Resolved only the guarded workspace version/lockfile conflicts."
+    echo "Resolved only the four evidenced conflict hunks, preserving upstream guardian context and Vim history behavior."
   else
     echo "::error::Unexpected upstream merge conflict; complete evidence was captured."
     trap - ERR
