@@ -142,3 +142,7 @@ subject	termux: update to 0.151.0-alpha.12	runtime-critical	Merges the exact off
 subject	chore: remove temporary alpha15112 orchestration	tooling	Removes the temporary alpha.13 maintainer job and script before exact-source validation.
 subject	termux: stage 0.151.0-alpha.12 publication	tooling	Records successful exact-source control-plane, ARM64, and Android validation evidence for publication.
 subject	termux: promote termux-v0.151.0-alpha.12-ea2fed13d7	tooling	Promotes the byte-verified public release manifest after publication.
+subject	ci: stage exact 0.152.0-alpha.7.2 integration	tooling	Temporary protected-main integration job used to fetch, peel, and merge the exact official dotted alpha source; removed before selecting the release source.
+subject	termux: update to 0.152.0-alpha.7.2	runtime-critical	Merges the exact official 0.152.0-alpha.7.2 source and reapplies the maintained Android and Termux runtime patch stack.
+subject	termux: repair hosted fixture interpreters for 0.152.0-alpha.7.2	tooling	Uses env bash only in generated hosted-CI test doubles so executable validation remains covered without changing production Termux launchers.
+subject	termux: preserve production launcher shebang in hosted tests	tooling	Executes the generated Termux launcher through the hosted Bash interpreter while separately asserting its required absolute Termux shebang.

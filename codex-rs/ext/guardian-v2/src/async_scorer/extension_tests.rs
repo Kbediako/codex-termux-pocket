@@ -9,6 +9,9 @@ use anyhow::Result;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::LoaderOverrides;
+use codex_core::context::ContextualUserFragment;
+use codex_core::context::InternalContextSource;
+use codex_core::context::InternalModelContextFragment;
 use codex_core::context::NodeReplReviewEvidence;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ExtensionData;
@@ -41,6 +44,8 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TruncationPolicy;
@@ -52,6 +57,7 @@ use core_test_support::responses::ev_completed;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -338,9 +344,36 @@ impl ExtensionMetrics for RecordingMetrics {
 
 struct TestConversationHistory(Vec<ResponseItem>);
 
+struct TestRetainedHistory {
+    current: TestConversationHistory,
+    retained: Vec<ResponseItem>,
+}
+
+impl ConversationHistorySnapshot for TestRetainedHistory {
+    fn history_version(&self) -> u64 {
+        self.current.history_version()
+    }
+
+    fn user_message_revision(&self) -> u64 {
+        self.current.user_message_revision()
+    }
+
+    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        self.current.items()
+    }
+
+    fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        Box::new(self.retained.iter())
+    }
+}
+
 impl ConversationHistorySnapshot for TestConversationHistory {
     fn history_version(&self) -> u64 {
         0
+    }
+
+    fn user_message_revision(&self) -> u64 {
+        self.0.iter().filter(|item| item.is_user_message()).count() as u64
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -2253,6 +2286,84 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_score_survives_compaction_and_internal_context_but_not_user_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (_, test, registry) = sample_configured_conversation_history(
+        Vec::new(),
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        "[features]\ntoken_budget = true\n[features.guardianv2]\nenabled = true\n",
+        /*model_defaults*/ None,
+    )
+    .await?;
+    let session_store = ExtensionData::new("session-1");
+    let thread_store = test.codex.thread_extension_data();
+    let progress = thread_store.get::<GuardianV2ScoreProgress>().unwrap();
+    tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
+        while progress.latest_scored_tool_call.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    thread_store.insert(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        call_id: None,
+        action: None,
+        sampled_at: None,
+    });
+
+    test.codex
+        .inject_response_items(vec![ContextualUserFragment::into(
+            InternalModelContextFragment::new(
+                InternalContextSource::from_static("goal"),
+                "Continue inspecting the repository.",
+            ),
+        )])
+        .await?;
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        registry
+            .fast_approval_decision(
+                &session_store,
+                thread_store,
+                "review action",
+                /*extension_metrics*/ None,
+            )
+            .await,
+        Some(ReviewDecision::Approved),
+    );
+
+    test.codex
+        .inject_response_items(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: "Stop. Do not change any files.".to_owned(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }])
+        .await?;
+    assert_eq!(
+        registry
+            .fast_approval_decision(
+                &session_store,
+                thread_store,
+                "review action",
+                /*extension_metrics*/ None
+            )
+            .await,
+        None,
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2693,6 +2804,15 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
             .inject_response_items(conversation_history.0.clone()),
     )
     .await?;
+    let mut retained: Vec<ResponseItem> = serde_json::from_value(json!([
+        {"type":"function_call", "name":"check_repository", "arguments":"{}", "call_id":"before"},
+        {"type":"function_call_output", "call_id":"before", "output":"repository is private"}
+    ]))?;
+    retained.extend(conversation_history.0.clone());
+    let conversation_history = TestRetainedHistory {
+        retained,
+        current: conversation_history,
+    };
     thread_store.insert(parent_model);
 
     registry.tool_lifecycle_contributors()[0]
@@ -2738,6 +2858,9 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         serde_json::to_value(&latest_compaction)?
     );
     assert_eq!(request["input"][3]["role"], "user");
+    let transcript = serde_json::to_string(&request["input"][3])?;
+    assert!(transcript.contains("tool check_repository call"));
+    assert!(transcript.contains("tool check_repository result: repository is private"));
 
     let previous_score = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {

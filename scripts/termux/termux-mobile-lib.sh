@@ -225,7 +225,7 @@ termux_latest_valid_alpha_tag() {
     tag_command=(git -C "$repo_dir" tag --merged "$merged_ref" --list 'rust-v*-alpha.*' --sort=-version:refname)
   fi
   while IFS= read -r candidate_tag; do
-    if [[ "$candidate_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+    if [[ "$candidate_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+(\.[0-9]+)*$ ]]; then
       printf '%s\n' "$candidate_tag"
       return 0
     fi

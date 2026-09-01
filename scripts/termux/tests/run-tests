@@ -70,13 +70,14 @@ test_valid_alpha_tag_selection() {
   git -C "$repo" -c user.name=Test -c user.email=test@example.invalid \
     commit -q --allow-empty -m latest-main
   git -C "$repo" tag rust-v0.148.0-alpha.5
+  git -C "$repo" tag rust-v0.148.0-alpha.5.1
   git -C "$repo" tag rust-vrust-v9.0.0-alpha.99
   git -C "$repo" checkout -q --detach HEAD~1
   git -C "$repo" -c user.name=Test -c user.email=test@example.invalid \
     commit -q --allow-empty -m unmerged
   git -C "$repo" tag rust-v0.148.0-alpha.6
   assert_eq 'rust-v0.148.0-alpha.6' "$(termux_latest_valid_alpha_tag "$repo")" 'latest valid fetched alpha'
-  assert_eq 'rust-v0.148.0-alpha.5' "$(termux_latest_valid_alpha_tag "$repo" main)" 'latest valid alpha merged into main'
+  assert_eq 'rust-v0.148.0-alpha.5.1' "$(termux_latest_valid_alpha_tag "$repo" main)" 'latest valid dotted alpha merged into main'
   pass 'alpha selection ignores malformed and unmerged tags'
 }
 
@@ -84,7 +85,7 @@ write_fake_executable() {
   local path="$1"
   local body="$2"
   mkdir -p "$(dirname "$path")"
-  printf '#!/data/data/com.termux/files/usr/bin/bash\nset -euo pipefail\n%s\n' "$body" >"$path"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$body" >"$path"
   chmod 0755 "$path"
 }
 
@@ -134,7 +135,8 @@ test_bundle_install() {
   [[ -L "$prefix/libexec/codex-termux/current" ]] || fail 'current runtime is not an atomic symlink'
   [[ -x "$prefix/libexec/codex-termux/current/bin/codex-code-mode-host" ]] || fail 'code-mode host was not installed'
   [[ -x "$prefix/libexec/codex-termux/current/codex-resources/bwrap" ]] || fail 'bundled bwrap was not installed'
-  assert_eq "$version" "$(CODEX_TERMUX_DISABLE_PROOT=1 "$prefix/bin/codex" --version)" 'launcher version'
+  assert_eq '#!/data/data/com.termux/files/usr/bin/bash' "$(head -n 1 "$prefix/bin/codex")" 'launcher Termux shebang'
+  assert_eq "$version" "$(CODEX_TERMUX_DISABLE_PROOT=1 bash "$prefix/bin/codex" --version)" 'launcher version'
   # shellcheck disable=SC2016 # Match the literal variable in the generated launcher.
   grep -q 'export PATH="${RESOURCE_DIR}' "$prefix/bin/codex" || fail 'launcher does not expose bundled bwrap'
   termux_install_verified_bundle "$bundle" "$sha" "$version" '' "$prefix" >/dev/null
@@ -252,7 +254,7 @@ codex_version=codex-cli-stale
 archive_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   cat >"$fake_bin/gh" <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "\$*" >>'$gh_log'
 case "\$1 \${2:-}" in

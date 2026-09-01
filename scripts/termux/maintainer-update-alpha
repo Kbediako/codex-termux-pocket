@@ -11,7 +11,7 @@ lock_only="no"
 
 usage() {
   cat <<'USAGE'
-Usage: maintainer-update-alpha [--tag rust-vX.Y.Z-alpha.N] [--lock-only]
+Usage: maintainer-update-alpha [--tag rust-vX.Y.Z-alpha.N[.P...]] [--lock-only]
 
 Maintainer-only source workflow. It rebases the clean local Termux patch stack
 onto an OpenAI alpha from the fetch-only upstream remote, then refreshes and
@@ -55,7 +55,7 @@ if [[ "$lock_only" != "yes" ]]; then
   if [[ -z "$target_tag" ]]; then
     target_tag="$(termux_latest_valid_alpha_tag "$CODEX_SRC_DIR" || true)"
   fi
-  [[ "$target_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]] || \
+  [[ "$target_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+(\.[0-9]+)*$ ]] || \
     termux_abort "invalid or unavailable OpenAI alpha tag: ${target_tag:-none}"
   git -C "$CODEX_SRC_DIR" rev-parse --verify "${target_tag}^{commit}" >/dev/null
   base_tag="$(termux_latest_valid_alpha_tag "$CODEX_SRC_DIR" main || true)"
