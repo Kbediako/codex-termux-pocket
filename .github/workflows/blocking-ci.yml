@@ -12,12 +12,15 @@ on:
 permissions:
   contents: read
 
+# This exact staging revision isolates its long-running release orchestrator by
+# commit SHA so the immediate cleanup push cannot cancel it.
 concurrency:
-  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: fork-ci-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   validate:
+    if: ${{ github.event.head_commit.message != 'ci: stage protected alpha update' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -89,3 +92,262 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  alpha1534-orchestrate:
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.event.head_commit.message == 'ci: stage protected alpha update' }}
+    name: Dispatch Android gate and final post-promotion checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: write
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: 223220fd66f600b8bf3291ed84960b7d76b7774a
+      SOURCE_BRANCH: automation/alpha1534-integration
+      RELEASE_TAG: termux-v0.153.0-alpha.4-223220fd66
+      EXPECTED_VERSION: 0.153.0-alpha.4
+      MARKER: alpha1534-orchestrate
+    steps:
+      - name: Dispatch the exact-source Android gate and delete staging branch
+        id: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          api="https://api.github.com/repos/$repo"
+          headers=(
+            --header "Authorization: Bearer $GH_TOKEN"
+            --header "Accept: application/vnd.github+json"
+            --header "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          branch_json="$RUNNER_TEMP/source-branch.json"
+          branch_code="$(
+            curl --silent --show-error "${headers[@]}" \
+              --output "$branch_json" --write-out '%{http_code}' \
+              "$api/git/ref/heads/automation%2Falpha1534-integration"
+          )"
+          [[ "$branch_code" == "200" ]]
+          [[ "$(jq -r '.object.sha' "$branch_json")" == "$SOURCE_SHA" ]]
+
+          runs_url="$api/actions/runs?head_sha=$SOURCE_SHA&per_page=100"
+          before="$(
+            curl --silent --show-error "${headers[@]}" "$runs_url" |
+              jq '[.workflow_runs[] | select(.path == ".github/workflows/termux-android-emulator.yml" and .event == "workflow_dispatch")] | map(.id) | max // 0'
+          )"
+
+          gh api --method POST \
+            "repos/$repo/actions/workflows/termux-android-emulator.yml/dispatches" \
+            -f ref="$SOURCE_BRANCH"
+
+          android_run_id=""
+          for attempt in $(seq 1 60); do
+            runs_json="$(curl --silent --show-error "${headers[@]}" "$runs_url")"
+            android_run_id="$(
+              jq -r --argjson before "$before" '
+                [.workflow_runs[]
+                  | select(.path == ".github/workflows/termux-android-emulator.yml")
+                  | select(.event == "workflow_dispatch")
+                  | select(.head_sha == env.SOURCE_SHA)
+                  | select(.id > $before)]
+                | sort_by(.id)
+                | last
+                | .id // empty
+              ' <<<"$runs_json"
+            )"
+            [[ -n "$android_run_id" ]] && break
+            sleep 2
+          done
+          [[ -n "$android_run_id" ]]
+
+          run_json="$(curl --silent --show-error "${headers[@]}" "$api/actions/runs/$android_run_id")"
+          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$SOURCE_SHA" ]]
+          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/termux-android-emulator.yml" ]]
+          [[ "$(jq -r '.event' <<<"$run_json")" == "workflow_dispatch" ]]
+          printf 'android_run_id=%s\n' "$android_run_id" >>"$GITHUB_OUTPUT"
+
+          delete_code="$(
+            curl --silent --show-error "${headers[@]}" \
+              --request DELETE --output "$RUNNER_TEMP/delete-branch.json" \
+              --write-out '%{http_code}' \
+              "$api/git/refs/heads/automation%2Falpha1534-integration"
+          )"
+          [[ "$delete_code" == "204" ]]
+          verify_code="$(
+            curl --silent --show-error "${headers[@]}" \
+              --output "$RUNNER_TEMP/deleted-branch.json" --write-out '%{http_code}' \
+              "$api/git/ref/heads/automation%2Falpha1534-integration"
+          )"
+          [[ "$verify_code" == "404" ]]
+
+          {
+            echo "### Exact-source Android gate dispatched"
+            echo
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Run: \`$android_run_id\`"
+            echo "- Temporary source branch: \`deleted after immutable run creation\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for exact-source Android and Termux success
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          run_id="${{ steps.android.outputs.android_run_id }}"
+          for attempt in $(seq 1 240); do
+            run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+            if [[ "$status" == "completed" ]]; then
+              [[ "$conclusion" == "success" ]]
+              break
+            fi
+            sleep 15
+          done
+          run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]]
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]]
+
+          jobs_json="$(gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100")"
+          for required in \
+            "Build fixture from triggering source" \
+            "Real Termux app on Android emulator"; do
+            [[ "$(jq -r --arg name "$required" '[.jobs[] | select(.name == $name and .status == "completed" and .conclusion == "success")] | length' <<<"$jobs_json")" == "1" ]]
+          done
+
+      - name: Wait for immutable public release and cleaned promoted main
+        id: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          api="https://api.github.com/repos/$repo"
+          headers=(
+            --header "Authorization: Bearer $GH_TOKEN"
+            --header "Accept: application/vnd.github+json"
+            --header "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          final_main=""
+          release_id=""
+          for attempt in $(seq 1 480); do
+            release_file="$RUNNER_TEMP/release.json"
+            latest_file="$RUNNER_TEMP/latest.json"
+            release_code="$(
+              curl --silent --show-error --output "$release_file" --write-out '%{http_code}' \
+                "$api/releases/tags/$RELEASE_TAG"
+            )"
+            latest_code="$(
+              curl --silent --show-error --output "$latest_file" --write-out '%{http_code}' \
+                "$api/releases/latest"
+            )"
+            if [[ "$release_code" == "200" && "$latest_code" == "200" ]]; then
+              release_id="$(jq -r '.id' "$release_file")"
+              if [[ "$(jq -r '.draft' "$release_file")" == "false" && \
+                    "$(jq -r '.prerelease' "$release_file")" == "false" && \
+                    "$(jq -r '.target_commitish' "$release_file")" == "$SOURCE_SHA" && \
+                    "$(jq -r '.tag_name' "$latest_file")" == "$RELEASE_TAG" && \
+                    "$(jq -r '.id' "$latest_file")" == "$release_id" && \
+                    "$(jq -r '[.assets[].name] | sort | join("\n")' "$release_file")" == $'SHA256SUMS\ncodex-termux-aarch64-unknown-linux-musl.tar.gz\ncodex-termux-sbom.spdx.json\nmetadata.env\nrelease-manifest.env' ]]; then
+                main_json="$(curl --silent --show-error "${headers[@]}" "$api/branches/main")"
+                final_main="$(jq -r '.commit.sha' <<<"$main_json")"
+                manifest_json="$(curl --silent --show-error "${headers[@]}" "$api/contents/scripts/termux/release-manifest.env?ref=main")"
+                manifest_text="$(jq -r '.content' <<<"$manifest_json" | tr -d '\n' | base64 --decode)"
+                blocking_json="$(curl --silent --show-error "${headers[@]}" "$api/contents/.github/workflows/blocking-ci.yml?ref=main")"
+                blocking_text="$(jq -r '.content' <<<"$blocking_json" | tr -d '\n' | base64 --decode)"
+                if grep -Fqx "release_tag=$RELEASE_TAG" <<<"$manifest_text" && \
+                   grep -Fqx "head_sha=$SOURCE_SHA" <<<"$manifest_text" && \
+                   ! grep -Fq "$MARKER" <<<"$blocking_text"; then
+                  compare_json="$(curl --silent --show-error "${headers[@]}" "$api/compare/$SOURCE_SHA...$final_main")"
+                  compare_status="$(jq -r '.status' <<<"$compare_json")"
+                  [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ]]
+                  break
+                fi
+              fi
+            fi
+            final_main=""
+            sleep 15
+          done
+          [[ -n "$final_main" ]]
+          [[ -n "$release_id" ]]
+          printf 'final_main=%s\nrelease_id=%s\n' "$final_main" "$release_id" >>"$GITHUB_OUTPUT"
+
+      - name: Dispatch and wait for all permanent post-promotion checks
+        id: post
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          final_main="${{ steps.public.outputs.final_main }}"
+          evidence="$RUNNER_TEMP/alpha1534-postchecks.env"
+          : >"$evidence"
+          printf 'format_version=1\nsource_sha=%s\nrelease_tag=%s\nfinal_main_sha=%s\nandroid_run_id=%s\nrelease_id=%s\n' \
+            "$SOURCE_SHA" "$RELEASE_TAG" "$final_main" \
+            "${{ steps.android.outputs.android_run_id }}" \
+            "${{ steps.public.outputs.release_id }}" >>"$evidence"
+
+          dispatch_one() {
+            local workflow="$1"
+            local key="$2"
+            local before run_id runs_json run_json status conclusion
+            before="$(
+              gh api "repos/$repo/actions/runs?branch=main&event=workflow_dispatch&per_page=100" \
+                --jq "[.workflow_runs[] | select(.path == \".github/workflows/$workflow\")] | map(.id) | max // 0"
+            )"
+            gh workflow run "$workflow" --repo "$repo" --ref main
+            run_id=""
+            for attempt in $(seq 1 60); do
+              runs_json="$(gh api "repos/$repo/actions/runs?branch=main&event=workflow_dispatch&per_page=100")"
+              run_id="$(
+                jq -r --arg path ".github/workflows/$workflow" --arg sha "$final_main" --argjson before "$before" '
+                  [.workflow_runs[]
+                    | select(.path == $path and .event == "workflow_dispatch" and .head_sha == $sha and .id > $before)]
+                  | sort_by(.id)
+                  | last
+                  | .id // empty
+                ' <<<"$runs_json"
+              )"
+              [[ -n "$run_id" ]] && break
+              sleep 2
+            done
+            [[ -n "$run_id" ]]
+            printf '%s=%s\n' "$key" "$run_id" >>"$evidence"
+
+            for attempt in $(seq 1 240); do
+              run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+              status="$(jq -r '.status' <<<"$run_json")"
+              conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+              if [[ "$status" == "completed" ]]; then
+                [[ "$conclusion" == "success" ]]
+                return 0
+              fi
+              sleep 10
+            done
+            return 1
+          }
+
+          dispatch_one termux-release-channel.yml release_channel_run_id
+          dispatch_one termux-governance.yml governance_run_id
+          dispatch_one termux-control-plane.yml post_control_run_id
+          dispatch_one blocking-ci.yml post_fork_ci_run_id
+
+          [[ "$(gh api "repos/$repo/branches/main" --jq '.commit.sha')" == "$final_main" ]]
+          if gh api "repos/$repo/git/ref/heads/automation%2Falpha1534-integration" >/dev/null 2>&1; then
+            echo "::error::Temporary integration branch reappeared."
+            exit 1
+          fi
+
+          cat "$evidence" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final orchestration evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: alpha1534-final-orchestration-${{ github.run_id }}
+          path: ${{ runner.temp }}/alpha1534-postchecks.env
+          if-no-files-found: warn
+          retention-days: 30
