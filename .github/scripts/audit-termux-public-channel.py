@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the shared Termux public-release contract against the promoted manifest."""
+"""Run the shared Termux public-release contract against the promoted manifest.
+
+This path is also the permanent push trigger for exact-head post-promotion
+release-channel, governance, control-plane, and Fork CI verification.
+"""
 
 from termux_release.publication import public_audit_main
 
