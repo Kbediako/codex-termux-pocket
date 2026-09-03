@@ -5134,6 +5134,9 @@ fn cached_remote_catalog_plugin_ids(codex_home: &std::path::Path) -> Result<Vec<
     let mut plugin_ids = Vec::new();
     for entry in std::fs::read_dir(cache_dir)? {
         let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
         let cached_catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
         let Some(plugins) = cached_catalog["plugins"].as_array() else {
             continue;
@@ -5156,6 +5159,9 @@ fn rewrite_cached_remote_catalog_fetched_at(
     let cache_dir = codex_home.join("cache/remote_plugin_catalog");
     for entry in std::fs::read_dir(cache_dir)? {
         let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
         let mut cached_catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         cached_catalog["fetched_at"] = serde_json::json!(fetched_at);
         std::fs::write(path, serde_json::to_vec_pretty(&cached_catalog)?)?;

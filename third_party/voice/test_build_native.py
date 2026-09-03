@@ -119,6 +119,42 @@ class NativeBuildTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "linked")
 
+    @unittest.skipIf(os.name == "nt", "Unix install paths; Windows layout is unchanged")
+    def test_cmake_installs_relative_library_paths(self):
+        for argument, tool in (
+            ("cc", "cc"),
+            ("cxx", "c++"),
+            ("cmake", "cmake"),
+            ("make", "make"),
+        ):
+            setattr(self.args, argument, Path(shutil.which(tool)))
+        source = self.root / "library-source"
+        source.mkdir()
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.15)\nproject(relative_paths LANGUAGES C)\n"
+            "add_library(fixture SHARED fixture.c)\ninstall(TARGETS fixture DESTINATION lib)\n"
+        )
+        (source / "fixture.c").write_text("int fixture(void) { return 42; }\n")
+        build = NativeBuild(self.args, self.environment)
+        build.output.mkdir()
+        build.sources = {"fixture": source}
+        build.cmake("fixture", [], bootstrap=True)
+        if sys.platform == "darwin":
+            from macos_runtime import inspect
+
+            metadata = inspect(build.tools / "lib/libfixture.dylib", self.args.target)
+            self.assertEqual(
+                (metadata.identity, metadata.rpaths),
+                ("@rpath/libfixture.dylib", ("@loader_path",)),
+            )
+        else:
+            from linux_runtime import inspect
+
+            metadata = inspect(build.tools / "lib/libfixture.so", self.args.target)
+            self.assertEqual(
+                (metadata.identity, metadata.rpaths), ("libfixture.so", ("29=$ORIGIN",))
+            )
+
     def test_build_refuses_existing_output_before_reading_sources(self):
         self.args.output.mkdir()
         (self.args.output / "keep").write_text("untouched")
@@ -178,7 +214,12 @@ class NativeBuildTests(unittest.TestCase):
         else:
             self.assertEqual(
                 shlex.split(build.environment["LDFLAGS"]),
-                [f"-L{build.prefix / 'lib'}", f"-Wl,-rpath,{build.prefix / 'lib'}"],
+                [
+                    f"-L{build.prefix / 'lib'}",
+                    "-Wl,-rpath,$ORIGIN:$ORIGIN/.."
+                    if build.args.target.endswith("unknown-linux-gnu")
+                    else f"-Wl,-rpath,{build.prefix / 'lib'}",
+                ],
             )
 
     def test_windows_paths_use_cygpath_and_propagate_failure(self):

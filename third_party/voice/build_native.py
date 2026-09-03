@@ -130,7 +130,14 @@ class NativeBuild:
         if args.target.endswith("apple-darwin"):
             self.environment["MACOSX_DEPLOYMENT_TARGET"] = args.deployment_target
             self.cmake_platform = [
-                f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.deployment_target}"
+                f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.deployment_target}",
+                "-DCMAKE_INSTALL_NAME_DIR=@rpath",
+                "-DCMAKE_INSTALL_RPATH=@loader_path",
+            ]
+        elif not self.windows:
+            self.cmake_platform = [
+                "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON",
+                "-DCMAKE_INSTALL_RPATH=$ORIGIN",
             ]
         self.record = {
             "target": args.target,
@@ -223,6 +230,8 @@ class NativeBuild:
             if self.windows
             else [f"-L{self.prefix / 'lib'}", f"-Wl,-rpath,{self.prefix / 'lib'}"]
         )
+        if self.args.target.endswith("unknown-linux-gnu"):
+            link[-1] = "-Wl,-rpath,$ORIGIN:$ORIGIN/.."
         self.environment.update(
             {"CFLAGS": include, "CXXFLAGS": include, "LDFLAGS": quote(link)}
         )

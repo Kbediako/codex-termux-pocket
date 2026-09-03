@@ -123,14 +123,15 @@ impl App {
             Ok(())
         }
 
+        let mut local_settings = crate::local_settings::LocalSettings::from(&config);
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
         emit_project_config_warnings(&app_event_tx, &config);
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
-            config.tui_notifications.method,
-            config.tui_notifications.condition,
+            local_settings.tui.notification_settings.method,
+            local_settings.tui.notification_settings.condition,
         );
 
         let harness_overrides =
@@ -145,6 +146,11 @@ impl App {
                 Err(err) => return shutdown_on_startup_error(app_server, err).await,
             },
         };
+        tracing::debug!(
+            has_platform_family = app_server.app_server_platform_family().is_some(),
+            has_platform_os = app_server.app_server_platform_os().is_some(),
+            "connected app-server platform"
+        );
         let bootstrap_ms = bootstrap.duration.as_millis();
         if matches!(
             &session_selection,
@@ -171,6 +177,7 @@ impl App {
         let exit_info = handle_model_migration_prompt_if_needed(
             tui,
             &mut config,
+            &local_settings,
             model.as_str(),
             &app_event_tx,
             &available_models,
@@ -226,8 +233,9 @@ impl App {
             serde_json::from_value(serde_json::json!("cli"))
                 .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
         );
-        if config
-            .tui_status_line
+        if local_settings
+            .tui
+            .status_line
             .as_ref()
             .is_some_and(|cmd| !cmd.is_empty())
         {
@@ -283,7 +291,7 @@ impl App {
                         .run_until(
                             tui,
                             prepare_startup_tooltip_override(
-                                &mut config,
+                                &mut local_settings,
                                 &available_models,
                                 is_first_run,
                             ),
@@ -295,6 +303,7 @@ impl App {
                     }
                 };
                 let init = crate::chatwidget::ChatWidgetInit {
+                    local_settings: local_settings.clone(),
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
@@ -307,6 +316,7 @@ impl App {
                     ),
                     enhanced_keys_supported,
                     has_chatgpt_account,
+                    requires_openai_auth,
                     has_codex_backend_auth,
                     model_catalog: model_catalog.clone(),
                     feedback: feedback.clone(),
@@ -339,6 +349,7 @@ impl App {
                     .run_until(
                         tui,
                         app_server.resume_thread(
+                            &local_settings,
                             config.clone(),
                             target_session.thread_id,
                             model_settings,
@@ -366,6 +377,7 @@ impl App {
                     return Ok(cancel_session_start(app_server).await);
                 };
                 let init = crate::chatwidget::ChatWidgetInit {
+                    local_settings: local_settings.clone(),
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
@@ -378,6 +390,7 @@ impl App {
                     ),
                     enhanced_keys_supported,
                     has_chatgpt_account,
+                    requires_openai_auth,
                     has_codex_backend_auth,
                     model_catalog: model_catalog.clone(),
                     feedback: feedback.clone(),
@@ -403,7 +416,11 @@ impl App {
                 let forked = match startup_draft
                     .run_until(
                         tui,
-                        app_server.fork_thread(config.clone(), target_session.thread_id),
+                        app_server.fork_thread(
+                            &local_settings,
+                            config.clone(),
+                            target_session.thread_id,
+                        ),
                     )
                     .await
                 {
@@ -427,6 +444,7 @@ impl App {
                     return Ok(cancel_session_start(app_server).await);
                 };
                 let init = crate::chatwidget::ChatWidgetInit {
+                    local_settings: local_settings.clone(),
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
@@ -439,6 +457,7 @@ impl App {
                     ),
                     enhanced_keys_supported,
                     has_chatgpt_account,
+                    requires_openai_auth,
                     has_codex_backend_auth,
                     model_catalog: model_catalog.clone(),
                     feedback: feedback.clone(),
@@ -467,13 +486,14 @@ impl App {
             .maybe_prompt_windows_sandbox_enable(should_prompt_windows_sandbox_nux_at_startup);
 
         let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
-        let runtime_keymap = RuntimeKeymap::from_config(&config.tui_keymap).map_err(|err| {
-            color_eyre::eyre::eyre!(
-                "Invalid `tui.keymap` configuration: {err}\n\
+        let runtime_keymap =
+            RuntimeKeymap::from_config(&local_settings.tui.keymap).map_err(|err| {
+                color_eyre::eyre::eyre!(
+                    "Invalid `tui.keymap` configuration: {err}\n\
 Fix the config and retry.\n\
 See the Codex keymap documentation for supported actions and examples."
-            )
-        })?;
+                )
+            })?;
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
@@ -484,6 +504,7 @@ See the Codex keymap documentation for supported actions and examples."
             chat_widget,
             workspace_command_runner: Some(workspace_command_runner),
             config,
+            local_settings,
             launch_cwd,
             runtime_working_directory_override: None,
             state_db,
@@ -601,7 +622,7 @@ See the Codex keymap documentation for supported actions and examples."
                 != WindowsSandboxLevel::Disabled
                 && managed_filesystem_sandbox_is_restricted(&startup_permission_profile)
                 && !app
-                    .config
+                    .local_settings
                     .notices
                     .hide_world_writable_warning
                     .unwrap_or(false);
@@ -722,6 +743,7 @@ See the Codex keymap documentation for supported actions and examples."
                     reconnect = Some(Box::pin(reconnect::reconnect(
                         app.app_server_target.clone(),
                         app.config.clone(),
+                        app.local_settings.clone(),
                         app.current_displayed_thread_id(),
                         app_server.remote_cwd_override().map(Path::to_path_buf),
                         app_server.thread_tool_transport(),

@@ -40,6 +40,7 @@ impl App {
             collaboration_mode: Some(mode.clone()),
             service_tier: service_tier_resolution::service_tier_update_for_core(
                 self.chat_widget.config_ref(),
+                &self.local_settings.notices,
                 &target.model,
                 &self.model_catalog.try_list_models().unwrap_or_default(),
             ),

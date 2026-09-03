@@ -726,6 +726,30 @@ async fn review_guardian_mcp_elicitation(
     };
     let step_settings = turn_context.current_settings.load_full();
 
+    // Full Access skips inference, not the active-turn and cancellation checks.
+    if turn_context.environments.has_full_access(
+        turn_context.approval_policy(),
+        &turn_context
+            .config
+            .permissions
+            .effective_permission_profile(),
+    ) && matches!(
+        &request.elicitation,
+        Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
+            requested_schema, ..
+        }) if requested_schema.properties.is_empty()
+    ) {
+        let decision = if cancellation_token.is_cancelled() {
+            ReviewDecision::Abort
+        } else {
+            ReviewDecision::Approved
+        };
+        return Ok(Some(mcp_elicitation_response_from_guardian_decision(
+            decision,
+            turn_context.model_info(),
+        )));
+    }
+
     // The invocation identifies the tool event, but a nested elicitation can
     // review a different action and connector than the enclosing JavaScript.
     let originating_call_id = if is_node_repl_backed_server(&request.server_name)

@@ -184,6 +184,8 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let model_catalog = test_model_catalog(&cfg);
     let common = ChatWidgetInit {
+        requires_openai_auth: cfg.model_provider.requires_openai_auth,
+        local_settings: crate::local_settings::LocalSettings::from(&cfg),
         config: cfg,
         frame_requester,
         app_event_tx,
@@ -771,6 +773,7 @@ pub(super) fn replay_agent_message(
             phase: Some(MessagePhase::FinalAnswer),
             memory_citation: None,
             delivery: None,
+            questions: None,
         },
         "turn-1".to_string(),
         replay_kind,
@@ -924,6 +927,7 @@ pub(super) fn complete_assistant_message(
                 phase,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
         }),
         /*replay_kind*/ None,

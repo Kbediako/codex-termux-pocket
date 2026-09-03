@@ -148,6 +148,7 @@ mod keymap;
 mod keymap_setup;
 mod line_truncation;
 pub(crate) mod live_wrap;
+mod local_settings;
 pub use live_wrap::RowBuilder;
 mod local_chatgpt_auth;
 mod managed_new_thread_defaults;
@@ -804,7 +805,8 @@ async fn resolve_startup_resume_or_fork_cwd(
     }) else {
         return Ok(ResolveCwdOutcome::Continue(None));
     };
-    let resume_cwd_mode = effective_resume_cwd_mode(config.tui_resume_cwd, cwd_override);
+    let local_settings = crate::local_settings::LocalSettings::from(config);
+    let resume_cwd_mode = effective_resume_cwd_mode(local_settings.tui.resume_cwd, cwd_override);
     if uses_remote_workspace_or_environment
         && cwd_override.is_none()
         && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
@@ -1122,7 +1124,7 @@ async fn run_ratatui_app(
     let startup_model_provider = initial_config.model_provider_id.clone();
     let (login_status, mut startup_account) = if workload_identity_selected {
         (LoginStatus::AuthMode(AuthMode::Chatgpt), None)
-    } else if initial_config.model_provider.requires_openai_auth {
+    } else {
         let Some(active_app_server) = app_server.as_mut() else {
             unreachable!("app server should exist when auth is required");
         };
@@ -1140,11 +1142,16 @@ async fn run_ratatui_app(
                 return Err(err.into());
             }
         }
-    } else {
-        (LoginStatus::NotAuthenticated, None)
     };
-    let should_show_onboarding =
-        should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
+    // Workload identity bypasses interactive login; every other provider uses account/read.
+    let requires_openai_auth = startup_account
+        .as_ref()
+        .is_some_and(|account| account.requires_openai_auth);
+    let should_show_onboarding = should_show_onboarding(
+        login_status,
+        requires_openai_auth,
+        should_show_trust_screen_flag,
+    );
 
     let config = if should_show_onboarding {
         if let Err(err) = startup_draft.flush_pending_events(&mut tui).await {
@@ -1153,9 +1160,13 @@ async fn run_ratatui_app(
         }
         // Authentication can change while any interactive onboarding screen is open.
         startup_account = None;
-        let show_login_screen = should_show_login_screen(login_status, &initial_config);
-        let bedrock_setup_enabled =
-            should_show_bedrock_setup_wizard(login_status, &initial_config, &app_server_target);
+        let show_login_screen = should_show_login_screen(login_status, requires_openai_auth);
+        let bedrock_setup_enabled = should_show_bedrock_setup_wizard(
+            login_status,
+            requires_openai_auth,
+            &initial_config,
+            &app_server_target,
+        );
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
@@ -1347,6 +1358,7 @@ async fn run_ratatui_app(
             match resume_picker::run_fork_picker_with_app_server(
                 &mut tui,
                 &config,
+                &crate::local_settings::LocalSettings::from(&config),
                 cli.fork_show_all,
                 app_server,
             )
@@ -1441,6 +1453,7 @@ async fn run_ratatui_app(
         match resume_picker::run_resume_picker_with_app_server(
             &mut tui,
             &config,
+            &crate::local_settings::LocalSettings::from(&config),
             cli.resume_show_all,
             cli.resume_include_non_interactive,
             app_server,
@@ -1569,11 +1582,12 @@ async fn run_ratatui_app(
     };
     startup_draft.apply_config(&config);
 
+    let local_settings = crate::local_settings::LocalSettings::from(&config);
     // Configure syntax highlighting theme from the final config — onboarding
     // and resume/fork can both reload config with a different tui_theme, so
     // this must happen after the last possible reload.
     if let Some(w) = crate::render::highlight::set_theme_override(
-        config.tui_theme.clone(),
+        local_settings.tui.theme.clone(),
         find_codex_home().ok().map(AbsolutePathBuf::into_path_buf),
     ) {
         config.startup_warnings.push(w);
@@ -1608,7 +1622,8 @@ async fn run_ratatui_app(
     } = cli;
     let images = shared.into_inner().images;
 
-    let use_alt_screen = determine_alt_screen_mode(no_alt_screen, config.tui_alternate_screen);
+    let use_alt_screen =
+        determine_alt_screen_mode(no_alt_screen, local_settings.tui.alternate_screen);
     tui.set_alt_screen_enabled(use_alt_screen);
     if config.model_provider_id != startup_model_provider {
         startup_account = None;
@@ -1923,20 +1938,20 @@ fn should_show_trust_screen(config: &Config) -> bool {
 
 fn should_show_onboarding(
     login_status: LoginStatus,
-    config: &Config,
+    requires_openai_auth: bool,
     show_trust_screen: bool,
 ) -> bool {
     if show_trust_screen {
         return true;
     }
 
-    should_show_login_screen(login_status, config)
+    should_show_login_screen(login_status, requires_openai_auth)
 }
 
-fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
+fn should_show_login_screen(login_status: LoginStatus, requires_openai_auth: bool) -> bool {
     // Only show the login screen for providers that actually require OpenAI auth
     // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
-    if !config.model_provider.requires_openai_auth {
+    if !requires_openai_auth {
         return false;
     }
 
@@ -1945,11 +1960,12 @@ fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool 
 
 fn should_show_bedrock_setup_wizard(
     login_status: LoginStatus,
+    requires_openai_auth: bool,
     config: &Config,
     app_server_target: &AppServerTarget,
 ) -> bool {
     matches!(app_server_target, AppServerTarget::Embedded)
-        && should_show_login_screen(login_status, config)
+        && should_show_login_screen(login_status, requires_openai_auth)
         && config.features.enabled(Feature::BedrockSetupWizard)
         && config.model_provider_id == "openai"
         && config
@@ -1983,6 +1999,43 @@ mod tests {
             .codex_home(temp_dir.path().to_path_buf())
             .build()
             .await
+    }
+
+    #[tokio::test]
+    async fn server_account_requirement_controls_login_screen() -> color_eyre::Result<()> {
+        for requires_openai_auth in [false, true] {
+            let home = TempDir::new()?;
+            std::fs::write(
+                home.path().join("config.toml"),
+                format!(
+                    r#"
+model_provider = "test-provider"
+[model_providers.test-provider]
+name = "Test provider"
+base_url = "http://example.test/v1"
+wire_api = "responses"
+requires_openai_auth = {requires_openai_auth}
+"#
+                ),
+            )?;
+            let server_config = build_config(&home).await?;
+            let mut server = AppServerSession::new(
+                AppServerClient::InProcess(start_test_embedded_app_server(server_config).await?),
+                ThreadParamsMode::Embedded,
+            );
+            let (login_status, account) = get_login_status(&mut server).await?;
+            assert_eq!(account.requires_openai_auth, requires_openai_auth);
+            assert_eq!(
+                should_show_login_screen(login_status, account.requires_openai_auth),
+                requires_openai_auth
+            );
+            assert!(!should_show_login_screen(
+                LoginStatus::AuthMode(AuthMode::Chatgpt),
+                account.requires_openai_auth
+            ));
+            server.shutdown().await?;
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2053,7 +2106,12 @@ mod tests {
             let config = build_config(&codex_home).await?;
 
             assert_eq!(
-                should_show_bedrock_setup_wizard(login_status, &config, &target),
+                should_show_bedrock_setup_wizard(
+                    login_status,
+                    /*requires_openai_auth*/ true,
+                    &config,
+                    &target
+                ),
                 expected,
                 "{label}"
             );
@@ -2348,13 +2406,22 @@ mod tests {
                 CwdPromptAction::Resume => {
                     app_server
                         .resume_thread(
+                            &crate::local_settings::LocalSettings::from(&final_config),
                             final_config,
                             thread_id,
                             app_server_session::ResumeModelSettings::RestoreFromThread,
                         )
                         .await?
                 }
-                CwdPromptAction::Fork => app_server.fork_thread(final_config, thread_id).await?,
+                CwdPromptAction::Fork => {
+                    app_server
+                        .fork_thread(
+                            &crate::local_settings::LocalSettings::from(&final_config),
+                            final_config,
+                            thread_id,
+                        )
+                        .await?
+                }
             };
 
             assert!(!session_resume::cwds_differ(
@@ -3246,6 +3313,7 @@ mod tests {
             let thread_id = ThreadId::from_string(&thread_id)?;
             let started = app_server
                 .resume_thread(
+                    &crate::local_settings::LocalSettings::from(&config),
                     config.clone(),
                     thread_id,
                     app_server_session::ResumeModelSettings::RestoreFromThread,

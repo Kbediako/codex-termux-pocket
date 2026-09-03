@@ -204,6 +204,8 @@ pub enum Feature {
     EnableMcpApps,
     /// Enable MCP protocol version 2026-07-28 support.
     Mcp20260728,
+    /// Let RMCP coordinate OAuth refresh through the configured credential store.
+    McpOAuthRefreshCoordination,
     /// Removed compatibility flag for the legacy Apps MCP path override.
     AppsMcpPathOverride,
     /// Removed compatibility flag retained as a no-op now that tool_search is always enabled.
@@ -1248,6 +1250,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Mcp20260728,
         key: "mcp_2026_07_28",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpOAuthRefreshCoordination,
+        key: "mcp_oauth_refresh_coordination",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

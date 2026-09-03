@@ -11,13 +11,20 @@ use super::disconnect::serve_reconnect_requests;
 
 #[tokio::test]
 async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> Result<()> {
-    for (recovered_queue, edit_offline) in [(true, false), (false, false), (true, true)] {
+    for (recovered_queue, edit_offline, resume_error_code) in [
+        (true, false, -32603),
+        (false, false, -32603),
+        (true, true, -32603),
+        (true, false, -32600),
+        (false, false, -32600),
+        (true, true, -32600),
+    ] {
         let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
         let id = ThreadId::new();
         let cwd = app.config.cwd.clone();
         app.config.model = Some("gpt-test".into());
         // Avoid platform-specific path widths in the mode-preservation snapshot.
-        app.config.tui_status_line = Some(vec!["model-with-reasoning".into()]);
+        app.local_settings.tui.status_line = Some(vec!["model-with-reasoning".into()]);
         app.config
             .permissions
             .set_permission_profile(PermissionProfile::read_only())?;
@@ -79,7 +86,13 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             for attempt in 0..2 {
                 let (stream, _) = listener.accept().await?;
                 methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| std::future::ready(match request.method.as_str() {
-                    "thread/resume" if attempt == 0 => Some(json!({"error": {"code": -32603, "message": "temporarily unavailable"}})),
+                    "thread/resume" if attempt == 0 => Some(json!({"error": {"code": resume_error_code, "message":
+                        if resume_error_code == -32600 {
+                            format!("thread {id} is closing; retry thread/resume after the thread is closed")
+                        } else {
+                            "temporarily unavailable".into()
+                        }
+                    }})),
                     "thread/resume" => {
                         let params = request.params.as_ref().unwrap();
                         assert_eq!(params["threadId"], id.to_string());
@@ -187,6 +200,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         let connected = reconnect(
             app.app_server_target.clone(),
             app.config.clone(),
+            app.local_settings.clone(),
             Some(id),
             /*remote_cwd*/ None,
             transport,
@@ -201,6 +215,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         app.finish_reconnect(&mut tui, &mut session, &mut events, connected)
             .await?;
         assert!(!app.reconnect.offline);
+        assert!(!app.thread_unavailable(id));
         assert_eq!(app.last_subagent_backfill_attempt, None);
         assert!(
             app.rate_limit_refresh_state
@@ -292,6 +307,13 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         assert_eq!(
             methods
                 .iter()
+                .filter(|method| *method == "thread/resume")
+                .count(),
+            2
+        );
+        assert_eq!(
+            methods
+                .iter()
                 .filter(|method| *method == "turn/start")
                 .count(),
             usize::from(!recovered_queue)
@@ -315,6 +337,7 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
             reconnect(
                 app.app_server_target.clone(),
                 app.config.clone(),
+                app.local_settings.clone(),
                 id,
                 /*remote_cwd*/ None,
                 crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
@@ -366,6 +389,7 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
                 endpoint: endpoint.clone(),
             },
             app.config.clone(),
+            app.local_settings.clone(),
             Some(id),
             /*remote_cwd*/ None,
             crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,

@@ -50,6 +50,7 @@ impl AppServerSession {
 
     pub(crate) async fn resume_thread(
         &mut self,
+        local_settings: &crate::local_settings::LocalSettings,
         config: Config,
         thread_id: ThreadId,
         model_settings: ResumeModelSettings,
@@ -138,6 +139,7 @@ impl AppServerSession {
             response.turns_backwards_cursor.clone(),
             response.items_backwards_cursor.clone(),
             Some(&config),
+            Some(local_settings),
             HistoryHydrationScope::Initial,
         )
         .await?;

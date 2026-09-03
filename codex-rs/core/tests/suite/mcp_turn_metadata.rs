@@ -9,6 +9,7 @@ use codex_core::config::Config;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
+use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -56,6 +57,8 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use test_case::test_case;
 use wiremock::Mock;
 use wiremock::Request;
@@ -63,6 +66,177 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_session_approval_is_scoped_to_tool_link_id() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&server).await?;
+    let has_link_selector = Arc::new(Mutex::new(true));
+    let lists_link_selector = Arc::clone(&has_link_selector);
+    Mock::given(method("POST"))
+        .and(path_regex("^/api/codex/ps/mcp/?$"))
+        .and(body_partial_json(json!({ "method": "tools/list" })))
+        .respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).expect("valid tools/list");
+            let mut tool = json!({
+                "name": "calendar_create_event",
+                "description": "Create a calendar event.",
+                "annotations": { "readOnlyHint": false },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "starts_at": { "type": "string" }
+                    },
+                    "required": ["title", "starts_at"]
+                },
+                "_meta": {
+                    "connector_id": "calendar",
+                    "connector_name": "Calendar",
+                    "_codex_apps": {
+                        "resource_uri": "connector://calendar/tools/calendar_create_event",
+                        "contains_mcp_source": true,
+                        "connector_id": "calendar"
+                    }
+                }
+            });
+            if *lists_link_selector.lock().unwrap() {
+                // The catalog account stays fixed while each call selects its account.
+                tool["_meta"]["link_id"] = json!("link_a");
+                tool["_meta"]["_codex_apps"]["requires_explicit_link_id"] = json!(true);
+                tool["inputSchema"]["properties"]["link_id"] = json!({ "type": "string" });
+                tool["inputSchema"]["required"] = json!(["title", "starts_at", "link_id"]);
+            }
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": { "tools": [tool] }
+            }))
+        })
+        .with_priority(/*priority*/ 1)
+        .mount(&server)
+        .await;
+
+    let cases = [
+        (Some("link_a"), true),
+        (Some("link_b"), true),
+        (None, true),
+        (Some("link_a"), false),
+    ];
+    let responses = mount_sse_sequence(
+        &server,
+        cases
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (selected_link_id, _))| {
+                let call_id = format!("calendar-call-{index}");
+                let mut calendar_args = json!({
+                    "title": "Lunch",
+                    "starts_at": "2026-03-10T12:00:00Z"
+                });
+                if let Some(selected_link_id) = selected_link_id {
+                    calendar_args["link_id"] = json!(selected_link_id);
+                }
+                [
+                    sse(vec![
+                        ev_response_created(&call_id),
+                        ev_function_call_with_namespace(
+                            &call_id,
+                            SEARCH_CALENDAR_NAMESPACE,
+                            SEARCH_CALENDAR_CREATE_TOOL,
+                            &calendar_args.to_string(),
+                        ),
+                        ev_completed(&call_id),
+                    ]),
+                    sse(vec![
+                        ev_response_created("resp-done"),
+                        ev_assistant_message("msg-done", "done"),
+                        ev_completed("resp-done"),
+                    ]),
+                ]
+            })
+            .collect(),
+    )
+    .await;
+    let test = search_capable_apps_builder(apps_server.chatgpt_base_url)
+        .with_config(move |config| {
+            set_calendar_approval_mode(config, AppToolApproval::Auto);
+            config.approvals_reviewer = ApprovalsReviewer::User;
+            config
+                .features
+                .enable(Feature::ToolCallMcpElicitation)
+                .expect("test config should allow feature update");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    for (index, (selected_link_id, expects_prompt)) in cases.into_iter().enumerate() {
+        *has_link_selector.lock().unwrap() = selected_link_id.is_some();
+        // Reconnect to publish the account selector or legacy metadata without a link.
+        test.codex.submit(Op::RefreshMcpServers).await?;
+        submit_user_turn(
+            &test,
+            "Use [$calendar](app://calendar) to create a calendar event.",
+            AskForApproval::OnRequest,
+            PermissionProfile::Disabled,
+            /*collaboration_mode*/ None,
+        )
+        .await?;
+        let event = wait_for_event(&test.codex, |event| {
+            matches!(
+                event,
+                EventMsg::ElicitationRequest(_) | EventMsg::TurnComplete(_)
+            )
+        })
+        .await;
+        assert_eq!(
+            matches!(event, EventMsg::ElicitationRequest(_)),
+            expects_prompt,
+            "unexpected approval for call {index} with link {selected_link_id:?}"
+        );
+        if let EventMsg::ElicitationRequest(request) = event {
+            test.codex
+                .submit(Op::ResolveElicitation {
+                    server_name: request.server_name,
+                    request_id: request.id,
+                    decision: ElicitationAction::Accept,
+                    content: None,
+                    meta: Some(json!({ "persist": "session" })),
+                })
+                .await?;
+            wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::TurnComplete(_))
+            })
+            .await;
+        }
+    }
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), cases.len() * 2);
+    for (index, request) in requests.iter().skip(1).step_by(2).enumerate() {
+        let call_id = format!("calendar-call-{index}");
+        let output = request
+            .function_call_output_text(&call_id)
+            .expect("MCP tool output");
+        let (_, result) = output.split_once("\nOutput:\n").expect("MCP output header");
+        let result: Value = serde_json::from_str(result)?;
+        let mut expected_result = json!({
+            "_codex_apps": {
+                "call_id": call_id,
+                "connector_id": "calendar",
+                "contains_mcp_source": true,
+                "resource_uri": "connector://calendar/tools/calendar_create_event"
+            }
+        });
+        if cases[index].0.is_some() {
+            expected_result["_codex_apps"]["requires_explicit_link_id"] = json!(true);
+        }
+        assert_eq!(result, expected_result);
+    }
+    Ok(())
+}
 
 fn set_calendar_approval_mode(config: &mut Config, approval_mode: AppToolApproval) {
     let approval_mode = match approval_mode {
@@ -525,10 +699,11 @@ approvals_reviewer = "auto_review"
     Ok(())
 }
 
-#[test_case("approve", "prompt", None, false, true; "work_link_requires_prompt")]
-#[test_case("prompt", "approve", None, false, false; "work_link_skips_prompt")]
-#[test_case("approve", "approve", Some("selected_calendar_link"), true, true; "required_selector_uses_selected_link")]
-#[test_case("prompt", "prompt", Some("selected_calendar_link"), false, true; "ignores_non_selector_link_argument")]
+#[test_case("approve", "prompt", None, false, true, false; "work_link_requires_prompt")]
+#[test_case("prompt", "approve", None, false, false, false; "work_link_skips_prompt")]
+#[test_case("approve", "approve", Some("selected_calendar_link"), true, true, false; "required_selector_uses_selected_link")]
+#[test_case("approve", "approve", Some("implicit_link::calendar"), true, true, true; "required_selector_uses_implicit_link")]
+#[test_case("prompt", "prompt", Some("selected_calendar_link"), false, true, false; "ignores_non_selector_link_argument")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apps_link_policy_controls_elicitation(
     connector_mode: &str,
@@ -536,6 +711,7 @@ async fn apps_link_policy_controls_elicitation(
     selected_link_id: Option<&'static str>,
     requires_explicit_link_id: bool,
     expected_prompt: bool,
+    expected_link_is_implicit: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -564,7 +740,7 @@ default_tools_approval_mode = "{link_mode}"
         };
         apps_config.push_str(&format!(
             r#"
-[apps.calendar.links.{selected_link_id}]
+[apps.calendar.links."{selected_link_id}"]
 default_tools_approval_mode = "{selected_link_mode}"
 "#
         ));
@@ -669,6 +845,11 @@ default_tools_approval_mode = "{selected_link_mode}"
     )
     .await?;
 
+    let expected_link_id = if requires_explicit_link_id {
+        selected_link_id
+    } else {
+        Some(LINK_ID)
+    };
     let mut completed_links = Vec::new();
     let mut record_link = |event: &EventMsg| {
         if let EventMsg::ItemCompleted(event) = event
@@ -691,6 +872,19 @@ default_tools_approval_mode = "{selected_link_mode}"
         expected_prompt
     );
     if let EventMsg::ElicitationRequest(request) = event {
+        let ElicitationRequest::Form {
+            meta: Some(meta), ..
+        } = &request.request
+        else {
+            panic!("expected a native MCP tool approval with metadata");
+        };
+        assert_eq!(
+            (
+                meta.get("link_id").and_then(Value::as_str),
+                meta.get("link_is_implicit").and_then(Value::as_bool),
+            ),
+            (expected_link_id, Some(expected_link_is_implicit)),
+        );
         test.codex
             .submit(Op::ResolveElicitation {
                 server_name: request.server_name,
@@ -711,11 +905,6 @@ default_tools_approval_mode = "{selected_link_mode}"
         recorded_apps_tool_call_by_call_id(&server, call_id).await["params"]["arguments"],
         calendar_args
     );
-    let expected_link_id = if requires_explicit_link_id {
-        selected_link_id
-    } else {
-        Some(LINK_ID)
-    };
     assert_eq!(completed_links, vec![expected_link_id.map(str::to_string)]);
     Ok(())
 }

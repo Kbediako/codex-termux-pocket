@@ -376,6 +376,7 @@ impl App {
 
         let (session, turns, live_attached) = match app_server
             .resume_thread(
+                &self.local_settings,
                 self.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
@@ -411,6 +412,7 @@ impl App {
                         /*turn_cursor*/ None,
                         /*item_cursor*/ None,
                         Some(&self.config),
+                        Some(&self.local_settings),
                         crate::app_server_session::HistoryHydrationScope::Initial,
                     )
                     .await
@@ -1086,7 +1088,7 @@ impl App {
             return Ok(AppRunControl::Continue);
         }
 
-        let mut resume_config = match self
+        let (mut resume_config, local_settings) = match self
             .resume_config_for_target(tui, app_server, &target_session)
             .await
         {
@@ -1106,6 +1108,7 @@ impl App {
         }
         match app_server
             .resume_thread(
+                &local_settings,
                 resume_config.clone(),
                 target_session.thread_id,
                 self.resume_model_settings(),
@@ -1115,10 +1118,11 @@ impl App {
             Ok(resumed) => {
                 let resumed_thread_id = resumed.session.thread_id;
                 self.shutdown_current_thread(app_server).await;
+                self.local_settings = local_settings;
                 self.config = resume_config;
                 tui.set_notification_settings(
-                    self.config.tui_notifications.method,
-                    self.config.tui_notifications.condition,
+                    self.local_settings.tui.notification_settings.method,
+                    self.local_settings.tui.notification_settings.condition,
                 );
                 self.file_search
                     .update_search_dir(self.config.cwd.to_path_buf());

@@ -800,6 +800,9 @@ mod tests {
             .history
             .record_local_submission(HistoryEntry::new("git status".to_string()));
         composer.set_vim_enabled(/*enabled*/ true);
+        let mut keymap = crate::keymap::RuntimeKeymap::defaults();
+        keymap.vim_normal.redo.clear();
+        composer.set_keymap_bindings(&keymap);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         for ch in ['g', 'i', 't'] {

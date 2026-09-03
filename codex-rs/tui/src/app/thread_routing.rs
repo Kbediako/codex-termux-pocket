@@ -482,8 +482,8 @@ impl App {
     /// Persist prompt text in the local cross-session message history.
     pub(super) fn append_message_history_entry(&self, thread_id: ThreadId, text: String) {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         tokio::spawn(async move {
             if let Err(err) =
@@ -506,8 +506,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -540,8 +540,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -1417,6 +1417,7 @@ impl App {
 
         match app_server
             .resume_thread(
+                &self.local_settings,
                 self.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::PreserveExistingThread,

@@ -44,7 +44,12 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
     app_server.remember_thread_history_mode(thread_id, history_mode);
     let next_request_id = app_server.next_request_id;
     let resumed = app_server
-        .resume_thread(config, thread_id, ResumeModelSettings::RestoreFromThread)
+        .resume_thread(
+            &crate::local_settings::LocalSettings::from(&config),
+            config,
+            thread_id,
+            ResumeModelSettings::RestoreFromThread,
+        )
         .await?;
 
     assert_eq!(app_server.next_request_id, next_request_id + 2);
@@ -95,6 +100,7 @@ async fn background_migration_disables_cached_legacy_resume_shortcut() -> Result
         let next_request_id = app_server.next_request_id;
         let legacy = app_server
             .resume_thread(
+                &crate::local_settings::LocalSettings::from(resume_config),
                 resume_config.clone(),
                 legacy_thread_id,
                 ResumeModelSettings::RestoreFromThread,
@@ -108,6 +114,7 @@ async fn background_migration_disables_cached_legacy_resume_shortcut() -> Result
 
         let resumed = app_server
             .resume_thread(
+                &crate::local_settings::LocalSettings::from(resume_config),
                 resume_config.clone(),
                 thread_id,
                 ResumeModelSettings::RestoreFromThread,
@@ -152,7 +159,12 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
     let next_request_id = app_server.next_request_id;
 
     let resumed = app_server
-        .resume_thread(config, thread_id, ResumeModelSettings::RestoreFromThread)
+        .resume_thread(
+            &crate::local_settings::LocalSettings::from(&config),
+            config,
+            thread_id,
+            ResumeModelSettings::RestoreFromThread,
+        )
         .await?;
 
     assert_eq!(app_server.next_request_id, next_request_id + 3);
@@ -190,6 +202,7 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
 
     let resumed = app_server
         .resume_thread(
+            &crate::local_settings::LocalSettings::from(&config),
             config.clone(),
             thread_id,
             ResumeModelSettings::RestoreFromThread,
@@ -211,6 +224,7 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
     assert!(
         app_server
             .resume_thread(
+                &crate::local_settings::LocalSettings::from(&config),
                 config,
                 missing_thread_id,
                 ResumeModelSettings::RestoreFromThread

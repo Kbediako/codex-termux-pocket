@@ -1096,16 +1096,17 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
             ..
         }
     )));
-    assert!(matches!(
-        history.data.last(),
-        Some(ThreadTimelineEntry::Realtime {
+    // A background handoff can append timeline entries after realtime closes.
+    assert!(history.data.iter().any(|entry| matches!(
+        entry,
+        ThreadTimelineEntry::Realtime {
             item: ThreadRealtimeItem {
                 content: ThreadRealtimeItemContent::RealtimeSessionClosed { .. },
                 ..
             },
             ..
-        })
-    ));
+        }
+    )));
 
     let connections = realtime_server.connections();
     assert_eq!(connections.len(), 1);

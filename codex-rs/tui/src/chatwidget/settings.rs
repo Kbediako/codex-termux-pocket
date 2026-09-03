@@ -123,12 +123,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
-        self.config.notices.hide_world_writable_warning = Some(acknowledged);
+        self.local_settings.notices.hide_world_writable_warning = Some(acknowledged);
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn world_writable_warning_hidden(&self) -> bool {
-        self.config
+        self.local_settings
             .notices
             .hide_world_writable_warning
             .unwrap_or(false)
@@ -256,7 +256,7 @@ impl ChatWidget {
 
     /// Set the syntax theme override in the widget's config copy.
     pub(crate) fn set_tui_theme(&mut self, theme: Option<String>) {
-        self.config.tui_theme = theme;
+        self.local_settings.tui.theme = theme;
     }
 
     /// Set the model in the widget's config copy and stored collaboration mode.

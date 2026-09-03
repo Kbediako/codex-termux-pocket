@@ -191,6 +191,7 @@ pub(crate) fn new_status_output_with_rate_limits(
 ) -> CompositeHistoryCell {
     new_status_output_with_rate_limits_handle(
         config,
+        config.model_provider.requires_openai_auth,
         /*runtime_model_provider_base_url*/ None,
         /*remote_connection*/ None,
         account_display,
@@ -214,6 +215,7 @@ pub(crate) fn new_status_output_with_rate_limits(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
+    requires_openai_auth: bool,
     runtime_model_provider_base_url: Option<&str>,
     remote_connection: Option<&RemoteConnectionStatus>,
     account_display: Option<&StatusAccountDisplay>,
@@ -234,6 +236,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let (card, handle) = StatusHistoryCell::new(
         config,
+        requires_openai_auth,
         runtime_model_provider_base_url,
         remote_connection,
         account_display,
@@ -262,6 +265,7 @@ impl StatusHistoryCell {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: &Config,
+        requires_openai_auth: bool,
         runtime_model_provider_base_url: Option<&str>,
         remote_connection: Option<&RemoteConnectionStatus>,
         account_display: Option<&StatusAccountDisplay>,
@@ -333,7 +337,7 @@ impl StatusHistoryCell {
             workspace_root_suffix.as_deref(),
         );
         let model_provider = format_model_provider(config, runtime_model_provider_base_url);
-        let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
+        let show_chatgpt_usage_link = requires_openai_auth;
         let account = compose_account_display(account_display);
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());

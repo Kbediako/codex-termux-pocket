@@ -53,6 +53,7 @@ fn evaluator_reuses_one_snapshot_across_tools() {
                         "events/create".to_string(),
                         AppToolRequirementToml {
                             approval_mode: Some(AppToolApproval::Approve),
+                            ..Default::default()
                         },
                     )]),
                 }),
@@ -937,6 +938,7 @@ fn app_tool_requirements(
                         tool_name.to_string(),
                         AppToolRequirementToml {
                             approval_mode: Some(approval_mode),
+                            ..Default::default()
                         },
                     )]),
                 }),

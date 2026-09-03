@@ -1473,6 +1473,8 @@ impl TurnRequestProcessor {
         };
 
         if let Some(mut thread) = stored_thread {
+            let config_snapshot = review_thread.config_snapshot().await;
+            apply_live_model_settings(&mut thread, &config_snapshot);
             thread.session_id = review_thread.session_configured().session_id.to_string();
             self.thread_watch_manager
                 .upsert_thread_silently(&thread.id)

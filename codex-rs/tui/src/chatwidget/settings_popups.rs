@@ -9,7 +9,7 @@ impl ChatWidget {
     pub(super) fn open_theme_picker(&mut self) {
         let codex_home = codex_utils_home_dir::find_codex_home().ok();
         let params = crate::theme_picker::build_theme_picker_params(
-            self.config.tui_theme.as_deref(),
+            self.local_settings.tui.theme.as_deref(),
             codex_home.as_deref(),
             self.last_rendered_width.get(),
         );

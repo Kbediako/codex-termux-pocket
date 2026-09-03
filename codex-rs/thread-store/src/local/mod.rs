@@ -1043,6 +1043,7 @@ mod tests {
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 })),
                 RolloutItem::ResponseItem(
                     ResponseItem::FunctionCallOutput {

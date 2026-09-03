@@ -83,7 +83,7 @@ impl ChatWidget {
             draft.last_composer_activity_at,
             draft.startup_local_history,
         );
-        if startup_has_content && self.config.tui_vim_mode_default {
+        if startup_has_content && self.local_settings.tui.vim_mode_default {
             self.bottom_pane.enable_vim_in_insert_mode();
         }
     }

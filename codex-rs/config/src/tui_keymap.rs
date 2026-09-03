@@ -217,6 +217,8 @@ pub struct TuiVimNormalKeymap {
     pub open_line_below: Option<KeybindingsSpec>,
     /// Open a new line above and enter insert mode (`O`).
     pub open_line_above: Option<KeybindingsSpec>,
+    /// Enter replace mode and overwrite characters under the cursor (`R`).
+    pub enter_replace_mode: Option<KeybindingsSpec>,
     /// Move cursor left (`h`).
     pub move_left: Option<KeybindingsSpec>,
     /// Move cursor right (`l`).
@@ -271,6 +273,8 @@ pub struct TuiVimNormalKeymap {
     pub start_change_operator: Option<KeybindingsSpec>,
     /// Undo the last complete edit (`u`).
     pub undo: Option<KeybindingsSpec>,
+    /// Redo the last undone edit (`ctrl-r`).
+    pub redo: Option<KeybindingsSpec>,
     /// Cancel a pending operator and return to normal mode.
     pub cancel_operator: Option<KeybindingsSpec>,
 }

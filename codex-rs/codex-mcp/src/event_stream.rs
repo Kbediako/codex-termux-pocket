@@ -12,6 +12,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rmcp_client::McpOAuthRefreshMode;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationCapability;
 use serde_json::Map;
@@ -31,6 +32,7 @@ pub(crate) struct EventStreamConnectionSettings {
     pub server: EffectiveMcpServer,
     pub store_mode: OAuthCredentialsStoreMode,
     pub keyring_backend_kind: AuthKeyringBackendKind,
+    pub oauth_refresh_mode: McpOAuthRefreshMode,
     pub runtime_context: McpRuntimeContext,
     pub resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
     pub auth_provider: Option<SharedAuthProvider>,
@@ -81,6 +83,7 @@ impl McpEventStreamOpener {
                     connection.server.clone(),
                     connection.store_mode,
                     connection.keyring_backend_kind,
+                    connection.oauth_refresh_mode,
                     connection.runtime_context.clone(),
                     connection.resolved_environment.clone(),
                     connection.auth_provider.clone(),

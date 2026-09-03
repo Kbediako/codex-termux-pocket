@@ -41,6 +41,7 @@ export type { AppsListResponse } from "./AppsListResponse";
 export type { AppsReadParams } from "./AppsReadParams";
 export type { AppsReadResponse } from "./AppsReadResponse";
 export type { AskForApproval } from "./AskForApproval";
+export type { AsyncUserInputQuestion } from "./AsyncUserInputQuestion";
 export type { AttestationGenerateParams } from "./AttestationGenerateParams";
 export type { AttestationGenerateResponse } from "./AttestationGenerateResponse";
 export type { AuthRecoveryNotification } from "./AuthRecoveryNotification";

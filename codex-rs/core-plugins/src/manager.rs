@@ -58,6 +58,7 @@ use crate::marketplace::list_marketplaces_with_home;
 use crate::marketplace::plugin_interface_with_marketplace_category;
 use crate::marketplace_policy::MarketplacePolicy;
 use crate::marketplace_policy::configured_plugins_from_stack;
+use crate::marketplace_upgrade::ConfigLayerReload;
 use crate::marketplace_upgrade::ConfiguredMarketplaceUpgradeError;
 use crate::marketplace_upgrade::ConfiguredMarketplaceUpgradeOutcome;
 use crate::marketplace_upgrade::upgrade_configured_git_marketplaces_with_mode;
@@ -2734,6 +2735,7 @@ impl PluginsManager {
     pub fn maybe_start_plugin_startup_tasks_for_config(
         self: &Arc<Self>,
         config: &PluginsConfigInput,
+        reload_config: ConfigLayerReload,
         on_effective_plugins_changed: Option<EffectivePluginsChangedCallback>,
     ) {
         if config.plugins_enabled {
@@ -2765,6 +2767,7 @@ impl PluginsManager {
                             &config,
                             /*marketplace_name*/ None,
                             PluginGitMode::Automatic,
+                            &reload_config,
                         );
                         match outcome {
                             Ok(outcome) => {
@@ -2860,11 +2863,13 @@ impl PluginsManager {
         &self,
         config: &PluginsConfigInput,
         marketplace_name: Option<&str>,
+        reload_config: &ConfigLayerReload,
     ) -> Result<ConfiguredMarketplaceUpgradeOutcome, String> {
         self.upgrade_configured_marketplaces_for_config_with_mode(
             config,
             marketplace_name,
             PluginGitMode::Manual,
+            reload_config,
         )
     }
 
@@ -2874,12 +2879,14 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         marketplace_name: Option<&str>,
         mode: PluginGitMode,
+        reload_config: &ConfigLayerReload,
     ) -> Result<ConfiguredMarketplaceUpgradeOutcome, String> {
         let mut outcome = upgrade_configured_git_marketplaces_with_mode(
             self.codex_home.as_path(),
             &config.config_layer_stack,
             marketplace_name,
             mode,
+            reload_config,
         );
         if let Some(marketplace_name) = marketplace_name
             && outcome.selected_marketplaces.is_empty()

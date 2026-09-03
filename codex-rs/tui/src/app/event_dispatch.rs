@@ -251,6 +251,7 @@ impl App {
                 match crate::resume_picker::run_resume_picker_from_existing_session_with_app_server(
                     tui,
                     &self.config,
+                    &self.local_settings,
                     /*show_all*/ false,
                     /*include_non_interactive*/ false,
                     picker_app_server,
@@ -361,7 +362,7 @@ impl App {
                     fork_config.model = Some(self.chat_widget.current_model().to_string());
                     fork_config.model_reasoning_effort =
                         self.chat_widget.current_reasoning_effort();
-                    match app_server.fork_thread(fork_config, thread_id).await {
+                    match app_server.fork_thread(&self.local_settings, fork_config, thread_id).await {
                         Ok(mut forked) => {
                             let name_error = if let Some(name) = name {
                                 match app_server
@@ -514,8 +515,7 @@ impl App {
                             let before_turn_id = before_turn_id
                                 .or_else(|| turns.first().map(|turn| turn.id.clone()));
                             app_server
-                                .fork_thread_at(
-                                    config.clone(),
+                                .fork_thread_at(&self.local_settings, config.clone(),
                                     thread_id,
                                     /*last_turn_id*/ None,
                                     before_turn_id,
@@ -2433,7 +2433,8 @@ impl App {
                     .await;
             }
             AppEvent::PersistWorldWritableWarningAcknowledged => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                self.local_settings.notices.hide_world_writable_warning = Some(true);
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .set_hide_world_writable_warning(/*acknowledged*/ true)
                     .apply()
                     .await
@@ -2448,7 +2449,8 @@ impl App {
                 }
             }
             AppEvent::PersistRateLimitSwitchPromptHidden => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                self.local_settings.notices.hide_rate_limit_model_nudge = Some(true);
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .set_hide_rate_limit_model_nudge(/*acknowledged*/ true)
                     .apply()
                     .await
@@ -2491,7 +2493,7 @@ impl App {
                 from_model,
                 to_model,
             } => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .record_model_migration_seen(from_model.as_str(), to_model.as_str())
                     .apply()
                     .await
@@ -2836,14 +2838,14 @@ impl App {
                 let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
                 let colors_edit =
                     crate::legacy_core::config::edit::status_line_use_colors_edit(use_theme_colors);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([items_edit, colors_edit])
                     .apply()
                     .await;
                 match apply_result {
                     Ok(()) => {
-                        self.config.tui_status_line = Some(ids.clone());
-                        self.config.tui_status_line_use_colors = use_theme_colors;
+                        self.local_settings.tui.status_line = Some(ids.clone());
+                        self.local_settings.tui.status_line_use_colors = use_theme_colors;
                         self.chat_widget.setup_status_line(items, use_theme_colors);
                     }
                     Err(err) => {
@@ -2877,13 +2879,13 @@ impl App {
             AppEvent::TerminalTitleSetup { items } => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let edit = crate::legacy_core::config::edit::terminal_title_items_edit(&ids);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
                     .apply()
                     .await;
                 match apply_result {
                     Ok(()) => {
-                        self.config.tui_terminal_title = Some(ids.clone());
+                        self.local_settings.tui.terminal_title = Some(ids.clone());
                         self.chat_widget.setup_terminal_title(items);
                     }
                     Err(err) => {
@@ -2903,7 +2905,7 @@ impl App {
             }
             AppEvent::SyntaxThemeSelected { name } => {
                 let edit = crate::legacy_core::config::edit::syntax_theme_edit(&name);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
                     .apply()
                     .await;
@@ -2915,7 +2917,7 @@ impl App {
                         // navigating, the runtime theme must still be applied.
                         if let Some(theme) = crate::render::highlight::resolve_theme_by_name(
                             &name,
-                            Some(&self.config.codex_home),
+                            Some(&self.local_settings.codex_home),
                         ) {
                             crate::render::highlight::set_syntax_theme(theme);
                         }
@@ -3050,7 +3052,7 @@ impl App {
         intent: crate::app_event::KeymapEditIntent,
     ) {
         let outcome = match crate::keymap_setup::keymap_with_edit(
-            &self.config.tui_keymap,
+            &self.local_settings.tui.keymap,
             &self.keymap,
             &context,
             &action,
@@ -3088,14 +3090,14 @@ impl App {
 
         let edit =
             crate::legacy_core::config::edit::keymap_bindings_edit(&context, &action, &bindings);
-        match ConfigEditsBuilder::for_config(&self.config)
+        match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
             .with_edits([edit])
             .apply()
             .await
         {
             Ok(()) => {
                 self.cancel_pending_key_chord();
-                self.config.tui_keymap = keymap_config.clone();
+                self.local_settings.tui.keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget
                     .apply_keymap_update(keymap_config, &runtime_keymap);
@@ -3121,7 +3123,7 @@ impl App {
 
     async fn apply_keymap_clear(&mut self, context: String, action: String) {
         let keymap_config = match crate::keymap_setup::keymap_without_custom_binding(
-            &self.config.tui_keymap,
+            &self.local_settings.tui.keymap,
             &context,
             &action,
         ) {
@@ -3142,14 +3144,14 @@ impl App {
         };
 
         let edit = crate::legacy_core::config::edit::keymap_binding_clear_edit(&context, &action);
-        match ConfigEditsBuilder::for_config(&self.config)
+        match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
             .with_edits([edit])
             .apply()
             .await
         {
             Ok(()) => {
                 self.cancel_pending_key_chord();
-                self.config.tui_keymap = keymap_config.clone();
+                self.local_settings.tui.keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget
                     .apply_keymap_update(keymap_config, &runtime_keymap);

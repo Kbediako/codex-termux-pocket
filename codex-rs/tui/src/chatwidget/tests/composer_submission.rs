@@ -1243,7 +1243,7 @@ async fn startup_draft_handoff_keeps_vim_insert_mode_for_nonempty_drafts() {
         let startup_draft = startup_chat.bottom_pane.composer_draft_snapshot();
 
         let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-        chat.config.tui_vim_mode_default = true;
+        chat.local_settings.tui.vim_mode_default = true;
         chat.bottom_pane.set_vim_enabled(/*enabled*/ true);
         chat.restore_startup_draft(startup_draft);
         chat.bottom_pane

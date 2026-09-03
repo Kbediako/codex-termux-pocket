@@ -911,6 +911,7 @@ fn custom_servers_support_session_and_persistent_approval() {
     let expected = McpToolApprovalKey {
         server: "custom_server".to_string(),
         connector_id: None,
+        link_id: None,
         tool_name: "run_action".to_string(),
     };
 
@@ -935,16 +936,18 @@ fn codex_apps_connectors_support_persistent_approval() {
         tool: "calendar/list_events".to_string(),
         arguments: None,
     };
-    let metadata = approval_metadata(
+    let mut metadata = approval_metadata(
         Some("calendar"),
         Some("Calendar"),
         /*connector_description*/ None,
         /*tool_title*/ None,
         /*tool_description*/ None,
     );
+    metadata.link_id = Some("link_a".to_string());
     let expected = McpToolApprovalKey {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
         connector_id: Some("calendar".to_string()),
+        link_id: Some("link_a".to_string()),
         tool_name: "calendar/list_events".to_string(),
     };
 
@@ -2339,6 +2342,7 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config() {
     let key = McpToolApprovalKey {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
         connector_id: Some("calendar".to_string()),
+        link_id: None,
         tool_name: "calendar/list_events".to_string(),
     };
 
@@ -2389,6 +2393,7 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config_for_custom_serve
     let key = McpToolApprovalKey {
         server: "docs".to_string(),
         connector_id: None,
+        link_id: None,
         tool_name: "search".to_string(),
     };
 
@@ -2445,6 +2450,7 @@ enabled = true
     let key = McpToolApprovalKey {
         server: "sample".to_string(),
         connector_id: None,
+        link_id: None,
         tool_name: "search".to_string(),
     };
 
@@ -2501,6 +2507,7 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
     let key = McpToolApprovalKey {
         server: "docs".to_string(),
         connector_id: None,
+        link_id: None,
         tool_name: "search".to_string(),
     };
 

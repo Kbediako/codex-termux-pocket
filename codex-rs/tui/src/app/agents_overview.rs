@@ -336,7 +336,7 @@ impl App {
                 target_thread.status,
                 codex_app_server_protocol::ThreadStatus::NotLoaded
             );
-            let mut resume_config = if unloaded {
+            let (mut resume_config, local_settings) = if unloaded {
                 let target_session = SessionTarget {
                     path: target_thread.path.clone(),
                     thread_id: root_thread_id,
@@ -404,7 +404,12 @@ impl App {
                 }
             };
             let resumed = match app_server
-                .resume_thread(resume_config.clone(), root_thread_id, resume_model_settings)
+                .resume_thread(
+                    &local_settings,
+                    resume_config.clone(),
+                    root_thread_id,
+                    resume_model_settings,
+                )
                 .await
             {
                 Ok(resumed) => resumed,
@@ -455,10 +460,11 @@ impl App {
                         && profile.turn_override
                             == RuntimePermissionProfileTurnOverride::LegacySandbox
                 });
+            self.local_settings = local_settings;
             self.config = resume_config;
             tui.set_notification_settings(
-                self.config.tui_notifications.method,
-                self.config.tui_notifications.condition,
+                self.local_settings.tui.notification_settings.method,
+                self.local_settings.tui.notification_settings.condition,
             );
             self.file_search
                 .update_search_dir(self.config.cwd.to_path_buf());

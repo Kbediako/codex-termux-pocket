@@ -95,6 +95,7 @@ impl ChatWidget {
                 phase,
                 memory_citation,
                 delivery,
+                questions,
                 ..
             } => {
                 self.on_agent_message_item_completed(
@@ -120,6 +121,7 @@ impl ChatWidget {
                             }
                         }),
                         delivery,
+                        questions,
                     },
                     &turn_id,
                     from_replay,

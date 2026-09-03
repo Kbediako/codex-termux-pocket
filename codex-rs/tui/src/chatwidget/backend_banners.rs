@@ -23,7 +23,7 @@ impl ChatWidget {
     pub(crate) fn backend_banner_fallback(&self) -> Option<ModelPreset> {
         let banner = self.backend_banner_state.banner.as_ref()?;
         if !self.has_chatgpt_account
-            || !self.config.model_provider.requires_openai_auth
+            || !self.requires_openai_auth
             || banner.blocked_model_slug.as_deref() != Some(self.current_model())
         {
             return None;

@@ -215,7 +215,7 @@ impl ChatWidget {
 
         self.set_status_line(status_line_from_segments(
             segments,
-            self.config.tui_status_line_use_colors,
+            self.local_settings.tui.status_line_use_colors,
         ));
         let hyperlink_url = selections
             .status_line_items
@@ -358,7 +358,7 @@ impl ChatWidget {
     }
 
     fn action_required_terminal_title_prefix_at(&self, now: Instant) -> &'static str {
-        if !self.config.animations {
+        if !self.local_settings.tui.animations {
             return TERMINAL_TITLE_ACTION_REQUIRED_PREFIX;
         }
 
@@ -385,7 +385,7 @@ impl ChatWidget {
         &self,
         selections: &StatusSurfaceSelections,
     ) -> Option<Duration> {
-        if self.config.animations
+        if self.local_settings.tui.animations
             && self.terminal_title_shows_action_required_with_selections(selections)
         {
             return Some(TERMINAL_TITLE_ACTION_REQUIRED_INTERVAL);
@@ -423,12 +423,16 @@ impl ChatWidget {
     }
 
     pub(super) fn configured_status_line_items(&self) -> Vec<String> {
-        self.config.tui_status_line.clone().unwrap_or_else(|| {
-            DEFAULT_STATUS_LINE_ITEMS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
+        self.local_settings
+            .tui
+            .status_line
+            .clone()
+            .unwrap_or_else(|| {
+                DEFAULT_STATUS_LINE_ITEMS
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
     }
 
     /// Parses configured terminal-title ids into known items and collects unknown ids.
@@ -440,12 +444,16 @@ impl ChatWidget {
 
     /// Returns the configured terminal-title ids, or the default ordering when unset.
     pub(super) fn configured_terminal_title_items(&self) -> Vec<String> {
-        self.config.tui_terminal_title.clone().unwrap_or_else(|| {
-            DEFAULT_TERMINAL_TITLE_ITEMS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
+        self.local_settings
+            .tui
+            .terminal_title
+            .clone()
+            .unwrap_or_else(|| {
+                DEFAULT_TERMINAL_TITLE_ITEMS
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
     }
 
     fn status_line_cwd(&self) -> &Path {
@@ -960,7 +968,7 @@ impl ChatWidget {
     }
 
     pub(super) fn terminal_title_spinner_text_at(&self, now: Instant) -> Option<String> {
-        if !self.config.animations {
+        if !self.local_settings.tui.animations {
             return None;
         }
 
@@ -979,11 +987,15 @@ impl ChatWidget {
     }
 
     fn terminal_title_uses_activity(&self) -> bool {
-        self.config.tui_terminal_title.as_ref().is_none_or(|items| {
-            items
-                .iter()
-                .any(|item| item == "activity" || item == "spinner")
-        })
+        self.local_settings
+            .tui
+            .terminal_title
+            .as_ref()
+            .is_none_or(|items| {
+                items
+                    .iter()
+                    .any(|item| item == "activity" || item == "spinner")
+            })
     }
 
     fn terminal_title_has_active_progress(&self) -> bool {
@@ -995,20 +1007,20 @@ impl ChatWidget {
     }
 
     pub(super) fn should_animate_terminal_title_spinner(&self) -> bool {
-        self.config.animations
+        self.local_settings.tui.animations
             && self.terminal_title_uses_activity()
             && self.terminal_title_has_active_progress()
     }
 
     pub(super) fn should_animate_terminal_title_action_required(&self) -> bool {
-        self.config.animations && self.terminal_title_shows_action_required()
+        self.local_settings.tui.animations && self.terminal_title_shows_action_required()
     }
 
     fn should_animate_terminal_title_spinner_with_selections(
         &self,
         selections: &StatusSurfaceSelections,
     ) -> bool {
-        self.config.animations
+        self.local_settings.tui.animations
             && selections
                 .terminal_title_items
                 .contains(&TerminalTitleItem::Spinner)

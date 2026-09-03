@@ -563,6 +563,47 @@ fn intersect_permission_profiles_preserves_deny_across_case_variant_grant() {
 }
 
 #[test]
+fn intersect_permission_profiles_preserves_denies_for_unresolved_tmpdir() {
+    let cwd = PathUri::parse("file:///workspace").expect("cwd URI");
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: None,
+        temporary_directories: None,
+    };
+    let write = FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Tmpdir,
+        },
+        FileSystemAccessMode::Write,
+    );
+    let deny = FileSystemSandboxEntry::new(
+        PathUri::parse("file:///tmp/private").expect("deny").into(),
+        FileSystemAccessMode::Deny,
+    );
+    let profile = |entries| PermissionProfile {
+        file_system: Some(FileSystemPermissions {
+            entries,
+            glob_scan_max_depth: None,
+        }),
+        ..Default::default()
+    };
+    let grant = profile(vec![write.clone()]);
+    let grant_with_deny = profile(vec![write, deny]);
+
+    for (requested, granted) in [
+        (grant_with_deny.clone(), grant.clone()),
+        (grant, grant_with_deny.clone()),
+        (grant_with_deny.clone(), grant_with_deny.clone()),
+    ] {
+        assert_eq!(
+            intersect_permission_profiles_with_context(requested, granted, &context),
+            grant_with_deny
+        );
+    }
+}
+
+#[test]
 fn intersect_permission_profiles_preserves_rooted_first_segment_glob_deny() {
     use FileSystemAccessMode::Deny;
     use FileSystemAccessMode::Write;

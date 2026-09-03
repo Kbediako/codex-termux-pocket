@@ -13,12 +13,14 @@ impl ChatWidget {
     ) -> Self {
         let ChatWidgetInit {
             config,
+            local_settings,
             frame_requester,
             app_event_tx,
             workspace_command_runner,
             initial_user_message,
             enhanced_keys_supported,
             has_chatgpt_account,
+            requires_openai_auth,
             has_codex_backend_auth,
             model_catalog,
             feedback,
@@ -65,11 +67,12 @@ impl ChatWidget {
         let current_cwd = Some(config.cwd.to_path_buf());
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
             &config,
+            &local_settings.notices,
             &header_model,
             &model_catalog.try_list_models().unwrap_or_default(),
         );
         let current_terminal_info = terminal_info();
-        let runtime_keymap = RuntimeKeymap::from_config(&config.tui_keymap).ok();
+        let runtime_keymap = RuntimeKeymap::from_config(&local_settings.tui.keymap).ok();
         let default_keymap = RuntimeKeymap::defaults();
         let copy_last_response_binding = runtime_keymap
             .as_ref()
@@ -88,7 +91,7 @@ impl ChatWidget {
             codex_http_client::ClientRouteClass::Other,
         );
         pets::start_configured_pet_load_if_needed(
-            &config,
+            &local_settings,
             /*ambient_pet_missing*/ true,
             frame_requester.clone(),
             app_event_tx.clone(),
@@ -104,19 +107,21 @@ impl ChatWidget {
                 has_input_focus: true,
                 enhanced_keys_supported,
                 placeholder_text: placeholder.clone(),
-                disable_paste_burst: config.disable_paste_burst,
-                animations_enabled: config.animations,
+                disable_paste_burst: local_settings.tui.disable_paste_burst.unwrap_or(false),
+                animations_enabled: local_settings.tui.animations,
                 skills: None,
             }),
             transcript: TranscriptState::new(active_cell),
-            raw_output_mode: config.tui_raw_output_mode,
+            raw_output_mode: local_settings.tui.raw_output_mode,
             config,
+            local_settings,
             effective_service_tier,
             skills_all: Vec::new(),
             skills_initial_state: None,
             current_collaboration_mode,
             active_collaboration_mask,
             has_chatgpt_account,
+            requires_openai_auth,
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
@@ -265,7 +270,7 @@ impl ChatWidget {
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);
         }
-        if widget.config.tui_vim_mode_default {
+        if widget.local_settings.tui.vim_mode_default {
             widget.bottom_pane.enable_vim_in_insert_mode();
         } else {
             widget.bottom_pane.set_vim_enabled(/*enabled*/ false);

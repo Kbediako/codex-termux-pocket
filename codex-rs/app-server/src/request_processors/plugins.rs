@@ -680,8 +680,11 @@ impl PluginRequestProcessor {
             match codex_core_plugins::remote::fetch_openai_curated_remote_collection_marketplace(
                 &remote_plugin_service_config,
                 auth.as_ref(),
+                /*catalog_cache_root*/ None,
+                RemotePluginCatalogCacheMode::ForceRefetch,
             )
             .await
+            .map(|outcome| outcome.marketplace)
             {
                 Ok(Some(remote_marketplace)) => {
                     data.push(remote_marketplace_to_info(remote_marketplace));

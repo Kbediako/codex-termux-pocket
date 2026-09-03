@@ -5313,8 +5313,14 @@ source = "{remote_repo_url}"
 
     let manager = test_plugins_manager(tmp.path().to_path_buf());
     let config = load_config(tmp.path(), tmp.path()).await;
+    let reload_stack = config.config_layer_stack.clone();
+    let reload_config: ConfigLayerReload = Arc::new(move || Ok(reload_stack.clone()));
     let initial_upgrade = manager
-        .upgrade_configured_marketplaces_for_config(&config, /*marketplace_name*/ None)
+        .upgrade_configured_marketplaces_for_config(
+            &config,
+            /*marketplace_name*/ None,
+            &reload_config,
+        )
         .expect("initial marketplace install should succeed");
     assert_eq!(initial_upgrade.errors, Vec::new());
     assert_eq!(initial_upgrade.upgraded_roots.len(), 1);
@@ -5350,7 +5356,7 @@ source = "{remote_repo_url}"
     run_git(&remote_repo, &["add", "."]);
     run_git(&remote_repo, &["commit", "-m", "update plugin"]);
     let upgrade = manager
-        .upgrade_configured_marketplaces_for_config(&config, Some("debug"))
+        .upgrade_configured_marketplaces_for_config(&config, Some("debug"), &reload_config)
         .expect("marketplace upgrade should succeed");
     assert_eq!(upgrade.errors, Vec::new());
     assert_eq!(upgrade.upgraded_roots.len(), 1);

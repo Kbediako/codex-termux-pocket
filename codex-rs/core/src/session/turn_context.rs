@@ -1035,7 +1035,9 @@ impl Session {
                 .single_local_environment_cwd()
                 .is_some()
         {
-            turn_context.turn_metadata_state.spawn_git_enrichment_task();
+            turn_context
+                .turn_metadata_state
+                .spawn_git_enrichment_task(Arc::clone(&self.services.git_root_discovery));
         }
         turn_context
     }

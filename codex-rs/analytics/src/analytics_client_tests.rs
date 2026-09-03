@@ -254,6 +254,8 @@ fn sample_thread_with_metadata(
         project_id: None,
         history_mode: Default::default(),
         model_provider: "openai".to_string(),
+        model: None,
+        reasoning_effort: None,
         created_at: 1,
         updated_at: 2,
         recency_at: Some(2),
@@ -480,6 +482,7 @@ fn sample_turn_resolved_config(thread_id: &str, turn_id: &str) -> TurnResolvedCo
         service_tier: None,
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: ApprovalsReviewer::AutoReview,
+        guardian_v2_enabled: false,
         sandbox_network_access: true,
         collaboration_mode: ModeKind::Plan,
         personality: None,
@@ -4674,6 +4677,7 @@ fn turn_event_serializes_expected_shape() {
             service_tier: "flex".to_string(),
             approval_policy: "on-request".to_string(),
             approvals_reviewer: "auto_review".to_string(),
+            guardian_v2_enabled: true,
             sandbox_network_access: true,
             collaboration_mode: Some("plan"),
             personality: Some("pragmatic".to_string()),
@@ -4761,6 +4765,7 @@ fn turn_event_serializes_expected_shape() {
                 "service_tier": "flex",
                 "approval_policy": "on-request",
                 "approvals_reviewer": "auto_review",
+                "guardian_v2_enabled": true,
                 "sandbox_network_access": true,
                 "collaboration_mode": "plan",
                 "personality": "pragmatic",
@@ -5114,6 +5119,7 @@ async fn turn_lifecycle_emits_turn_event() {
         })
     );
     assert!(payload["event_params"].get("product_client_id").is_none());
+    assert_eq!(payload["event_params"]["guardian_v2_enabled"], json!(false));
     assert_eq!(payload["event_params"]["ephemeral"], json!(false));
     assert_eq!(payload["event_params"]["workspace_kind"], json!(null));
     assert_eq!(payload["event_params"]["num_input_images"], json!(1));
