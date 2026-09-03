@@ -172,3 +172,4 @@ subject	release: restore permanent release-channel auditor	security-critical	Res
 subject	release: restore permanent Fork CI topology	tooling	Restores the permanent Fork CI inventory before selecting the alpha.4 runtime source.
 subject	release: request validated Termux 0.153.0-alpha.4 publication	tooling	Records the five successful exact-source alpha.4 release gates.
 subject	termux: promote termux-v0.153.0-alpha.4-223220fd66	tooling	Promotes the anonymously verified alpha.4 updater manifest.
+subject	ci: stage exact alpha.6 integration	tooling	Temporary staging-branch job, ExecPlan, and helper used to integrate the exact official alpha.6 source; removed before selecting the release source.
