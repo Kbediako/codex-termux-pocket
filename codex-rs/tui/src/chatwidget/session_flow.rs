@@ -9,6 +9,8 @@ impl ChatWidget {
         display: SessionConfiguredDisplay,
         fork_parent_title: Option<String>,
     ) {
+        self.invalidate_permission_discovery();
+        self.permission_profiles_menu_opened = false;
         self.transcript.reset_copy_history();
         let history_metadata = session.message_history.unwrap_or_default();
         self.bottom_pane.set_history_metadata(
@@ -26,6 +28,8 @@ impl ChatWidget {
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
             self.backend_banner_notice_model = None;
+            self.automatic_model_switch_state =
+                backend_banners::AutomaticModelSwitchState::default();
             self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
@@ -114,6 +118,19 @@ impl ChatWidget {
             .set_active_reasoning_effort_baseline(effort.as_ref());
         self.refresh_model_display();
         self.refresh_status_surfaces();
+        if previous_thread_id != self.thread_id
+            && self.should_prefetch_rate_limits()
+            && (self.current_model() == crate::model_catalog::LUNA_RESERVE_MODEL
+                || self.backend_banner_fallback().is_some())
+        {
+            // Reconcile this task with retained account state before sending its initial/queued
+            // prompt. Do not wait for the next usage poll after /new, /resume or a thread switch.
+            self.hold_rate_limit_recovery();
+            self.app_event_tx
+                .send(AppEvent::ApplyBackendBannerFallback {
+                    thread_id: session.thread_id,
+                });
+        }
         self.sync_service_tier_commands();
         self.sync_personality_command_enabled();
         self.sync_plugins_command_enabled();

@@ -231,6 +231,7 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
     RolloutItem::Compacted(CompactedItem {
         message: "checkpoint".to_string(),
         replacement_history: Some(replacement_history.into_iter().map(Into::into).collect()),
+        retained_context: None,
         guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
@@ -258,7 +259,7 @@ fn read_rollout(path: &Path) -> Vec<RolloutLine> {
     fs::read_to_string(path)
         .expect("read migrated rollout")
         .lines()
-        .map(|line| serde_json::from_str(line).expect("parse migrated rollout"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse migrated rollout"))
         .collect()
 }
 
@@ -1076,6 +1077,23 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         turns: vec!["keep-before-compaction".to_string()],
         current_turn_id: Some("keep-before-compaction".to_string()),
     });
+    let answer_event = serde_json::from_value(serde_json::json!({
+        "type": "verified_answer", "turn_id": "keep-before-compaction", "call_id": "ask-1",
+        "questions": [{"question": "Publish?", "answer": "Only privately."}]
+    }))
+    .expect("verified answer fixture");
+    let wake_answer_event = serde_json::from_value(serde_json::json!({
+        "type": "verified_answer", "turn_id": "empty-answer-turn", "call_id": "ask-2",
+        "questions": [{"question": "Continue?", "answer": "Keep it private."}]
+    }))
+    .expect("empty-turn answer fixture");
+    checkpoint.retained_context = Some(Default::default());
+    let context = checkpoint
+        .retained_context
+        .as_mut()
+        .expect("retained context");
+    context.record(&answer_event);
+    context.record(&wake_answer_event);
     let path = write_rollout(
         home.path(),
         thread_id,
@@ -1083,7 +1101,11 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         vec![
             started("keep-before-compaction"),
             user_message("old question"),
+            RolloutItem::RetainedContext(answer_event),
             completed("keep-before-compaction"),
+            started("empty-answer-turn"),
+            RolloutItem::RetainedContext(wake_answer_event),
+            completed("empty-answer-turn"),
             RolloutItem::Compacted(checkpoint),
             started("remove-after-compaction"),
             user_message("new question"),
@@ -1113,7 +1135,13 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         .await
         .expect("read rollback-through-compaction turns");
     assert_eq!(turns.turns.len(), 1);
-    let checkpoint = read_rollout(&path)
+    let migrated = read_rollout(&path);
+    assert!(
+        !migrated
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
+    );
+    let checkpoint = migrated
         .into_iter()
         .find_map(|line| match line.item {
             RolloutItem::Compacted(item) => Some(item),
@@ -1122,6 +1150,87 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         .expect("retained compaction");
     assert_eq!(checkpoint.replacement_history, Some(Vec::new()));
     assert_eq!(checkpoint.mcp_resource_origins, None);
+    assert_eq!(
+        checkpoint
+            .retained_context
+            .expect("retained context checkpoint")
+            .verified_answers()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn migration_preserves_answers_before_a_rolled_back_steer() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let mut items = vec![started("shared-turn")];
+    let mut answers = Vec::new();
+    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![
+        input_response_message("user", "before-steer"),
+        input_response_message("user", "after-steer"),
+    ]) else {
+        unreachable!()
+    };
+    checkpoint.retained_context = Some(Default::default());
+    for call_id in ["before-steer", "after-steer"] {
+        items.push(user_message(call_id));
+        let mut call: ResponseItem = serde_json::from_value(json!({
+            "type": "function_call", "call_id": call_id,
+            "name": "request_user_input", "arguments": "{}"
+        }))
+        .expect("request_user_input call");
+        call.set_turn_id_if_missing("shared-turn");
+        items.push(rollout_response_item(call));
+        let answer: codex_rollout::RetainedContextEvent = serde_json::from_value(json!({
+            "type": "verified_answer", "turn_id": "shared-turn", "call_id": call_id,
+            "questions": [{"question": "Publish?", "answer": "Only privately."}]
+        }))
+        .expect("verified answer");
+        checkpoint
+            .retained_context
+            .as_mut()
+            .expect("retained context")
+            .record(&answer);
+        answers.push(answer);
+    }
+    // Delayed delivery must use the original call boundary, not the turn's latest steer.
+    items.extend(answers.iter().cloned().map(RolloutItem::RetainedContext));
+    items.push(completed("shared-turn"));
+    items.push(RolloutItem::Compacted(checkpoint));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, items);
+    let store = indexed_store(home.path()).await;
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollback of a steer");
+    let migrated = read_rollout(&path);
+    let events = migrated
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::RetainedContext(event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events, answers[..1]);
+    let checkpoint = migrated
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.retained_context.as_ref(),
+            _ => None,
+        })
+        .expect("retained checkpoint");
+    assert_eq!(
+        checkpoint
+            .verified_answers()
+            .cloned()
+            .map(codex_rollout::RetainedContextEvent::VerifiedAnswer)
+            .collect::<Vec<_>>(),
+        answers[..1]
+    );
 }
 
 #[tokio::test]
@@ -1410,6 +1519,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             RolloutItem::Compacted(CompactedItem {
                 message: "superseded checkpoint".repeat(1024),
                 replacement_history: Some(Vec::new()),
+                retained_context: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
@@ -1433,6 +1543,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                     }
                     .into(),
                 ]),
+                retained_context: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(2),

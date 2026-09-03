@@ -74,6 +74,7 @@ mod git_enrichment;
 mod guardian_authorization;
 mod guardian_history;
 mod guardian_mcp_elicitation;
+mod guardian_retained_context;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]

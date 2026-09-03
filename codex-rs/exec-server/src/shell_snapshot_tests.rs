@@ -15,7 +15,8 @@ use super::MAX_SNAPSHOT_ATTEMPTS;
 use super::SNAPSHOT_RETRY_BACKOFF;
 use super::ShellSnapshotCache;
 use super::parse_snapshot;
-use crate::process_sandbox::prepare_exec_request;
+use crate::process_sandbox::prepare_exec_request_with_telemetry;
+use crate::process_telemetry::ProcessTelemetry;
 use crate::protocol::ExecEnvPolicy;
 use crate::protocol::ExecParams;
 use crate::protocol::ProcessId;
@@ -40,6 +41,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
     let profile = home.path().join(".bashrc");
     std::fs::write(&profile, "printf x >> \"$HOME/captures\"\nexit 7\n")?;
     let params = ExecParams {
+        metadata: Default::default(),
         process_id: ProcessId::from("snapshot-retry"),
         argv: vec![
             "/bin/bash".to_string(),
@@ -89,21 +91,23 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
                 "printf x >> \"$HOME/captures\"\nprofile_helper() { printf recovered; }\n",
             )?;
         }
-        let mut prepared = prepare_exec_request(
+        let mut prepared = prepare_exec_request_with_telemetry(
             &params,
             params.env.clone(),
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &ProcessTelemetry::default(),
         )
         .await
         .expect("prepare capture");
-        let mut concurrent = prepare_exec_request(
+        let mut concurrent = prepare_exec_request_with_telemetry(
             &params,
             params.env.clone(),
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &ProcessTelemetry::default(),
         )
         .await
         .expect("prepare concurrent capture");

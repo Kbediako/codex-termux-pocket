@@ -1567,7 +1567,7 @@ async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
     tokio::task::spawn_blocking(move || {
         let reader = codex_rollout::open_rollout_seekable_reader(&path).ok()?;
         let mut scanner = codex_rollout::ReverseJsonlScanner::new(reader).ok()?;
-        while let Some(outcome) = scanner.scan_next::<RolloutLine>().ok()? {
+        while let Some(outcome) = scanner.scan_next_rollout_line().ok()? {
             if let codex_rollout::ScanOutcome::Parsed(RolloutLine {
                 item: RolloutItem::TurnContext(item),
                 ..
@@ -1604,6 +1604,7 @@ async fn resolve_resume_thread_id(
                 ClientRequest::ThreadList {
                     request_id: RequestId::Integer(0),
                     params: ThreadListParams {
+                        originators: None,
                         cursor,
                         limit: Some(100),
                         sort_key: Some(ThreadSortKey::UpdatedAt),
@@ -1689,6 +1690,7 @@ async fn resolve_resume_thread_id(
             ClientRequest::ThreadList {
                 request_id: RequestId::Integer(0),
                 params: ThreadListParams {
+                    originators: None,
                     cursor,
                     limit: Some(100),
                     sort_key: Some(ThreadSortKey::UpdatedAt),

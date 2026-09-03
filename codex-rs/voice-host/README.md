@@ -24,5 +24,16 @@ an existing validated package into a fresh output and adds the helper. Supply
 Linux MUSL apps require same-architecture GNU helpers; other targets must match.
 The package version must end in `+<build-commit>`. The manifest records declared
 build provenance and file hashes, not authentication or binary architecture proof.
-Native loading, media/privacy controls and actual audio proof remain subsequent
-integration stages; this assembler does not add native runtime libraries.
+Add `--runtime <prepared-runtime>` to include the platform preparer's selected
+libraries and `runtime.json` beside the helper. The assembler checks the target,
+pinned source manifest, plugin list, relative paths and file hashes, then checks
+the copied hashes again. It preserves `lib/` and `plugins/` on macOS, `lib/` and
+`lib/gstreamer-1.0/` on Linux, and the shared `bin/` on Windows. Unlisted files are
+not copied. The package manifest records every included runtime file and the
+unchanged runtime receipt.
+Omitting `--runtime` retains helper-only assembly.
+
+This accepts a development runtime receipt, not an authenticated release. It
+does not repeat native loader inspection or establish trust in the build inputs.
+The helper still does not load these files; native loading, media/privacy controls,
+linking against the prepared SDK and actual audio proof remain integration stages.

@@ -18,6 +18,19 @@ impl ChatWidget {
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
     ) -> bool {
+        // Follow-up input and background activity must not obscure compaction.
+        // Retry errors still get their own status until the next notification.
+        let (header, details, details_max_lines) = if self.status_state.compaction.is_some()
+            && self.status_state.retry_status_header.is_none()
+        {
+            (
+                compaction::COMPACTION_HEADER.to_string(),
+                Some(compaction::COMPACTION_DETAILS.to_string()),
+                STATUS_DETAILS_DEFAULT_MAX_LINES,
+            )
+        } else {
+            (header, details, details_max_lines)
+        };
         let details = details
             .filter(|details| !details.is_empty())
             .map(|details| {

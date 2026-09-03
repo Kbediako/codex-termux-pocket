@@ -87,22 +87,21 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_experimental_popup(&mut self) {
-        let features: Vec<ExperimentalFeatureItem> = FEATURES
-            .iter()
-            .filter_map(|spec| {
-                let name = spec.stage.experimental_menu_name()?;
-                let description = spec.stage.experimental_menu_description()?;
-                Some(ExperimentalFeatureItem {
-                    feature: spec.id,
-                    name: name.to_string(),
-                    description: description.to_string(),
-                    enabled: self.config.features.enabled(spec.id),
-                })
-            })
-            .collect();
-
+        let Some(thread_id) = self.thread_id() else {
+            self.add_info_message(
+                "Experimental features are unavailable until startup completes.".to_string(),
+                /*hint*/ None,
+            );
+            return;
+        };
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        self.app_event_tx.send(AppEvent::FetchExperimentalFeatures {
+            thread_id,
+            response_tx,
+        });
         let view = ExperimentalFeaturesView::new(
-            features,
+            Vec::new(),
+            Some(response_rx),
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
         );

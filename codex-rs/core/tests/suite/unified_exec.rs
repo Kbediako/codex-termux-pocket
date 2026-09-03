@@ -376,6 +376,10 @@ async fn exec_command_uses_installed_environment_shell_policy_with_explicit_over
             r#set: HashMap::from([
                 ("KEEP".to_string(), "preserved".to_string()),
                 ("DROP".to_string(), "filtered".to_string()),
+                (
+                    "CODEX_VERSION".to_string(),
+                    "configured-version".to_string(),
+                ),
             ]),
             ..Default::default()
         };
@@ -428,10 +432,10 @@ async fn exec_command_uses_installed_environment_shell_policy_with_explicit_over
     let call_id = "exec-command-environment-shell-policy";
     let command = match core_test_support::test_target_os() {
         core_test_support::TestTargetOs::Linux | core_test_support::TestTargetOs::MacOs => {
-            r#"printf '%s:%s:%s' "$KEEP" "${DROP:-missing}" "${OWNER_ONLY:-missing}""#
+            r#"printf '%s:%s:%s:%s' "$KEEP" "${DROP:-missing}" "${OWNER_ONLY:-missing}" "$CODEX_VERSION""#
         }
         core_test_support::TestTargetOs::Windows => {
-            r#"if (Test-Path Env:DROP) { $drop = $env:DROP } else { $drop = 'missing' }; if (Test-Path Env:OWNER_ONLY) { $owner = $env:OWNER_ONLY } else { $owner = 'missing' }; Write-Output "${env:KEEP}:${drop}:${owner}""#
+            r#"if (Test-Path Env:DROP) { $drop = $env:DROP } else { $drop = 'missing' }; if (Test-Path Env:OWNER_ONLY) { $owner = $env:OWNER_ONLY } else { $owner = 'missing' }; Write-Output "${env:KEEP}:${drop}:${owner}:${env:CODEX_VERSION}""#
         }
     };
     let arguments = json!({
@@ -462,7 +466,10 @@ async fn exec_command_uses_installed_environment_shell_policy_with_explicit_over
         )
         .await?;
     let output = parse_unified_exec_output(&harness.function_call_stdout(call_id).await)?;
-    assert_eq!(output.output.trim(), "preserved:missing:missing");
+    assert_eq!(
+        output.output.trim(),
+        concat!("preserved:missing:missing:", env!("CARGO_PKG_VERSION")),
+    );
     Ok(())
 }
 

@@ -214,6 +214,7 @@ async fn accepted_websocket_reconnect_recovers_running_process_and_output() -> R
         async move {
             backend
                 .start(ExecParams {
+                    metadata: Default::default(),
                     process_id,
                     argv: vec!["test-command".to_string()],
                     cwd: PathUri::parse("file:///workspace")?,

@@ -29,6 +29,7 @@ use tempfile::TempDir;
 
 fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThread {
     StoredThread {
+        originator: None,
         thread_id: ThreadId::new(),
         extra_config: None,
         rollout_path: Some(PathBuf::from("/tmp/rollout.jsonl")),

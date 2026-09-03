@@ -60,6 +60,9 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                if replay_kind.is_none() {
+                    self.clear_misalignment_for_new_turn(&notification.turn.id);
+                }
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
@@ -70,7 +73,7 @@ impl ChatWidget {
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
             ServerNotification::ItemStarted(notification) => {
-                self.handle_item_started_notification(notification, replay_kind.is_some());
+                self.handle_item_started_notification(notification, replay_kind);
             }
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
@@ -136,10 +139,20 @@ impl ChatWidget {
                         notification.turn_id.clone(),
                         notification.error.message.clone(),
                     ));
-                    self.handle_non_retry_error(
-                        notification.error.message,
-                        notification.error.codex_error_info,
-                    );
+                    if !from_replay
+                        && notification.error.codex_error_info
+                            == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation)
+                    {
+                        self.on_misalignment_error(
+                            Some(notification.turn_id),
+                            notification.error.misalignment,
+                        );
+                    } else {
+                        self.handle_non_retry_error(
+                            notification.error.message,
+                            notification.error.codex_error_info,
+                        );
+                    }
                 }
             }
             ServerNotification::SkillsChanged(_) => {
@@ -330,7 +343,13 @@ impl ChatWidget {
             }
             TurnStatus::Failed => {
                 if let Some(error) = notification.turn.error {
-                    if self.last_non_retry_error.as_ref()
+                    if replay_kind.is_none()
+                        && error.codex_error_info
+                            == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation)
+                    {
+                        self.on_misalignment_error(Some(notification.turn.id), error.misalignment);
+                        self.last_non_retry_error = None;
+                    } else if self.last_non_retry_error.as_ref()
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
                     {
                         self.last_non_retry_error = None;
@@ -352,9 +371,24 @@ impl ChatWidget {
     fn handle_item_started_notification(
         &mut self,
         notification: ItemStartedNotification,
-        from_replay: bool,
+        replay_kind: Option<ReplayKind>,
     ) {
         match notification.item {
+            ThreadItem::ContextCompaction { id }
+                if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) =>
+            {
+                // Buffered starts reconstruct an in-flight compaction when switching tasks.
+                let elapsed = if replay_kind == Some(ReplayKind::ThreadSnapshot) {
+                    let elapsed_ms = chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_sub(notification.started_at_ms)
+                        .max(0);
+                    Duration::from_millis(elapsed_ms as u64)
+                } else {
+                    Duration::ZERO
+                };
+                self.on_context_compaction_started(id, elapsed);
+            }
             item @ ThreadItem::CommandExecution { .. } => self.on_command_execution_started(item),
             ThreadItem::FileChange { id: _, changes, .. } => {
                 self.on_patch_apply_begin(file_update_changes_to_display(changes));
@@ -387,7 +421,7 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
-            ThreadItem::EnteredReviewMode { review, .. } if !from_replay => {
+            ThreadItem::EnteredReviewMode { review, .. } if replay_kind.is_none() => {
                 self.enter_review_mode_with_hint(review, /*from_replay*/ false);
             }
             _ => {}

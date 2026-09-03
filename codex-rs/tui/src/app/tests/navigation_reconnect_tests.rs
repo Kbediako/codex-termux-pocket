@@ -128,6 +128,9 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             .map(|thread| Ok((ThreadId::from_string(&thread.id)?, Some(thread.clone()))))
             .collect::<Result<HashMap<_, _>>>()?;
         app.agents_overview.threads = stale_threads.clone();
+        app.agents_overview
+            .last_messages
+            .insert(selected, "Pre-disconnect answer".into());
         app.agents_overview.initialized = overview_initialized;
         let view = app.agents_overview_view(
             stale.clone(),
@@ -139,8 +142,20 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         );
         app.agents_overview.visible_thread_ids = view.thread_ids();
         app.chat_widget.show_bottom_pane_view(Box::new(view));
-        app.agents_overview.view_state.lock().unwrap().input = "Keep this task draft".into();
+        if previous_thread.is_some() {
+            app.agents_overview.view_state.lock().unwrap().input = "Keep this task draft".into();
+        } else {
+            app.chat_widget.handle_paste("Keep this task draft".into());
+        }
         app.agents_overview.view_state.lock().unwrap().renaming = previous_thread.is_some();
+        let draft = |app: &App| {
+            let state = app.agents_overview.view_state.lock().unwrap();
+            if previous_thread.is_some() {
+                state.input.clone()
+            } else {
+                state.composer.as_ref().unwrap().current_text_with_pending()
+            }
+        };
         let stale_request = Uuid::new_v4();
         app.agents_overview.request_id = Some(stale_request);
         app.agents_overview.refresh_pending = true;
@@ -236,6 +251,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         let disconnected = session.next_event().await.unwrap();
         app.handle_app_server_event(&session, disconnected).await;
         assert!(app.reconnect.offline);
+        assert!(app.agents_overview.last_messages.is_empty());
         assert!(refresh.await.unwrap_err().is_cancelled());
         assert_eq!(
             (
@@ -248,6 +264,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             &session,
             stale_request,
             Ok(AgentsOverviewThreadRefresh {
+                last_messages: HashMap::new(),
                 threads: HashMap::new(),
                 recent_seed_complete: false,
             }),
@@ -262,10 +279,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         .await?;
         app.handle_tui_event(&mut tui, &mut session, TuiEvent::Paste("!".into()))
             .await?;
-        assert_eq!(
-            app.agents_overview.view_state.lock().unwrap().input,
-            "Keep this task draft!"
-        );
+        assert_eq!(draft(&app), "Keep this task draft!");
         if previous_thread.is_none() {
             assert_snapshot!(
                 "daemon_command_center_reconnecting",
@@ -335,7 +349,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         assert!(!app.agents_overview.visible_thread_ids.contains(&vanished));
         assert!(app.agents_overview.visible_thread_ids.contains(&added));
         assert_eq!(
-            app.agents_overview.view_state.lock().unwrap().input,
+            draft(&app),
             if previous_thread.is_some() {
                 ""
             } else {
@@ -372,6 +386,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             &session,
             stale_request,
             Ok(AgentsOverviewThreadRefresh {
+                last_messages: HashMap::new(),
                 threads: stale_threads,
                 recent_seed_complete: true,
             }),
@@ -379,6 +394,14 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         assert!(!app.agents_overview.visible_thread_ids.contains(&vanished));
 
         if let Some(id) = previous_thread {
+            app.handle_tui_event(
+                &mut tui,
+                &mut session,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            )
+            .await?;
+
+            assert!(app.chat_widget.has_active_view());
             app.handle_tui_event(
                 &mut tui,
                 &mut session,

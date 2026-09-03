@@ -35,6 +35,7 @@ filegroup(
         "build_native.py",
         "linux_runtime.py",
         "macos_runtime.py",
+        "package_runtime.py",
         "runtime.py",
         "windows_runtime.py",
         ":source_inputs",

@@ -66,7 +66,8 @@ async fn oauth_mode_refresh_replaces_the_live_connection(
         "synthetic-access-token",
         "synthetic-refresh-token",
         OAuthCredentialExpiry::Valid,
-    )?;
+    )
+    .await?;
     let fixture = test_codex()
         .with_home(home)
         .with_config(move |config| {

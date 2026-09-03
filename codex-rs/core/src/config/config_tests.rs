@@ -248,6 +248,43 @@ async fn load_config_applies_optional_mcp_startup_grace() -> std::io::Result<()>
 }
 
 #[tokio::test]
+async fn load_config_resolves_thread_unload_delay() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    for (toml, seconds) in [
+        ("", 60),
+        ("thread_unload_delay_secs = 0", 0),
+        ("thread_unload_delay_secs = 1800", 1800),
+    ] {
+        let config = Config::load_from_base_config_with_overrides(
+            toml::from_str(toml)?,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+        assert_eq!(config.thread_unload_delay, Duration::from_secs(seconds));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_thread_unload_delay_overflow() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            thread_unload_delay_secs: Some(u64::MAX),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("idle timeout must fit in a monotonic deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(error.to_string(), "thread_unload_delay_secs is too large");
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_toml_parsing() {
     let history_with_persistence = r#"
 [history]
@@ -670,7 +707,11 @@ async fn load_config_resolves_token_budget_config() -> std::io::Result<()> {
     for (config_toml, expected) in [
         (
             "[features]\ntoken_budget = true\n",
-            TokenBudgetConfig::default(),
+            Some(TokenBudgetConfig::default()),
+        ),
+        (
+            "features.context_management.experimental_mode = true\n",
+            None,
         ),
         (
             r#"
@@ -683,14 +724,14 @@ guidance_message = "Preserve important state before compaction."
 auto_compact_fallback_prompt = "  Write notes immediately.  "
 auto_compact_fallback_buffer_tokens = 8000
 "#,
-            TokenBudgetConfig {
+            Some(TokenBudgetConfig {
                 use_history_notes_extension: true,
                 reminder_threshold_tokens: Some(16_000),
                 reminder_message_template: "Custom reminder: {n_remaining} tokens.".to_string(),
                 guidance_message: Some("Preserve important state before compaction.".to_string()),
                 auto_compact_fallback_prompt: Some("Write notes immediately.".to_string()),
                 auto_compact_fallback_buffer_tokens: Some(8_000),
-            },
+            }),
         ),
     ] {
         let codex_home = tempdir()?;
@@ -702,8 +743,14 @@ auto_compact_fallback_buffer_tokens = 8000
         )
         .await?;
 
-        assert!(config.features.enabled(Feature::TokenBudget));
-        assert_eq!(config.token_budget, Some(expected));
+        assert_eq!(
+            config.features.enabled(Feature::TokenBudget),
+            expected.is_some()
+        );
+        if expected.is_none() {
+            assert!(config.features.enabled(Feature::ContextManagement));
+        }
+        assert_eq!(config.token_budget, expected);
     }
     Ok(())
 }
@@ -9924,6 +9971,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         default_permissions: None,
         remote_sandbox_config: None,
         allowed_web_search_modes: Some(vec![codex_config::WebSearchModeRequirement::Cached]),
+        application: None,
         allow_managed_hooks_only: None,
         allow_appshots: None,
         allow_remote_control: None,

@@ -1,3 +1,5 @@
+use codex_history::RetainedContext;
+
 use codex_protocol::models::ResponseItem;
 
 /// Read-only conversation-history snapshot supplied by the extension host.
@@ -14,6 +16,11 @@ pub trait ConversationHistorySnapshot: Send + Sync {
 
     /// Returns the snapshot's response items in conversation order.
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_>;
+
+    /// Host-owned retained facts captured atomically with the parent model window.
+    fn retained_context(&self) -> Option<&RetainedContext> {
+        None
+    }
 
     /// Original review evidence retained across parent compaction, in conversation order.
     /// Hosts without separate retention provide their current history.

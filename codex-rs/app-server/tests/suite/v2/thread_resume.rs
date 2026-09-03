@@ -196,6 +196,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
         &RolloutItem::Compacted(CompactedItem {
             message: "compacted history".to_string(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),

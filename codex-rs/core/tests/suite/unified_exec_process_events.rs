@@ -969,6 +969,13 @@ timeout = 900
     let exec_server_result = timeout(cleanup_timeout, exec_server)
         .await
         .context("fake exec-server should observe process cleanup")??;
+    assert_eq!(
+        exec_server_result.process_start["params"]["metadata"],
+        json!({
+            "threadId": test.session_configured.thread_id,
+            "toolCallId": CALL_ID,
+        }),
+    );
     if foreign_cwd {
         let params = &exec_server_result.process_start["params"];
         assert_eq!(params["cwd"], "file:///C:/workspace");

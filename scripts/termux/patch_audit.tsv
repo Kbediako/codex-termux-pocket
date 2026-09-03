@@ -189,3 +189,4 @@ subject	release: request validated Termux 0.153.0-alpha.6 publication	tooling	Re
 subject	termux: promote termux-v0.153.0-alpha.6-81a44b14f9	tooling	Promotes the independently verified public alpha.6 updater manifest after publication.
 subject	ci: stage exact alpha.1 integration	tooling	Temporary staging-branch job, ExecPlan, and helper used to integrate the exact official 0.154.0-alpha.1 source; removed before selecting the release source.
 subject	ci: trigger exact alpha.1 integration	tooling	Triggers the isolated exact-alpha integration job after its reviewed workflow and helper exist on the staging branch; removed from the clean source by squashing.
+subject	termux: update to 0.154.0-alpha.1	runtime-critical	Merges the exact official 0.154.0-alpha.1 source and preserves the maintained Android and Termux runtime patch stack.

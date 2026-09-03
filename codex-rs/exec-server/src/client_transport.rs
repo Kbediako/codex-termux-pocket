@@ -187,9 +187,7 @@ impl ExecServerClient {
                             .to_string(),
                     )
                 })?;
-            provisioning_result.map_err(|message| {
-                ExecServerError::Disconnected(format!("environment unavailable: {message}"))
-            })?;
+            provisioning_result.map_err(ExecServerError::ProvisioningFailed)?;
         }
 
         let (websocket_url, connect_timeout, initialize_timeout) = match transport_params {

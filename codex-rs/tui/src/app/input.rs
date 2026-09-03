@@ -22,7 +22,7 @@ impl App {
         ) {
             crate::keymap::KeyChordMatch::PassThrough => {
                 if was_pending && !self.key_chord_matcher.is_pending() {
-                    self.chat_widget.set_footer_hint_override(/*items*/ None);
+                    self.set_key_chord_hint_override(/*items*/ None);
                 }
                 Some(key_event)
             }
@@ -30,7 +30,7 @@ impl App {
                 if self.backtrack.primed {
                     self.reset_backtrack_state();
                 }
-                self.chat_widget.set_footer_hint_override(Some(vec![
+                self.set_key_chord_hint_override(Some(vec![
                     (
                         format!("{} …", prefix.display_label()),
                         "waiting for next key".to_string(),
@@ -42,11 +42,11 @@ impl App {
                 None
             }
             crate::keymap::KeyChordMatch::Completed(dispatch_event) => {
-                self.chat_widget.set_footer_hint_override(/*items*/ None);
+                self.set_key_chord_hint_override(/*items*/ None);
                 Some(dispatch_event)
             }
             crate::keymap::KeyChordMatch::Cancelled => {
-                self.chat_widget.set_footer_hint_override(/*items*/ None);
+                self.set_key_chord_hint_override(/*items*/ None);
                 None
             }
             crate::keymap::KeyChordMatch::Ignored => None,
@@ -59,14 +59,23 @@ impl App {
             .key_chord_matcher
             .expire(contexts, tokio::time::Instant::now())
         {
-            self.chat_widget.set_footer_hint_override(/*items*/ None);
+            self.set_key_chord_hint_override(/*items*/ None);
         }
     }
 
     pub(super) fn cancel_pending_key_chord(&mut self) {
         if self.key_chord_matcher.cancel() {
-            self.chat_widget.set_footer_hint_override(/*items*/ None);
+            self.set_key_chord_hint_override(/*items*/ None);
         }
+    }
+
+    fn set_key_chord_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .key_chord_hint = items.clone();
+        self.chat_widget.set_footer_hint_override(items);
     }
 
     fn active_keymap_contexts(&self) -> crate::keymap::KeymapContextSet {

@@ -213,7 +213,10 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
         "allow_remote_control = false\n",
     )?;
     let managed_config_path = codex_home.path().join("managed_config.toml");
-    let socket_path = codex_home.path().join("app-server.sock");
+    let socket_path = codex_home
+        .path()
+        .join("app-server-control")
+        .join("app-server.sock");
     let transport =
         AppServerTransport::from_listen_url(&format!("unix://{}", socket_path.display()))?;
     let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());

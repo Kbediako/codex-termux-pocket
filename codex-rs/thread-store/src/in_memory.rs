@@ -1033,6 +1033,7 @@ fn stored_thread_from_state(
         });
 
     Ok(StoredThread {
+        originator: (!created.originator.is_empty()).then(|| created.originator.clone()),
         thread_id,
         extra_config: created.extra_config.clone(),
         rollout_path: metadata

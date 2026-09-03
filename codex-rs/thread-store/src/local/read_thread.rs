@@ -349,6 +349,11 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
         .unwrap_or(metadata.history_mode);
     let name = thread_name_from_metadata(store, &metadata, history_mode).await;
     let mut thread = stored_thread_from_state_metadata(store, metadata, parent_thread_id);
+    thread.originator = thread.originator.or_else(|| {
+        session_meta
+            .map(|meta| meta.originator)
+            .filter(|originator| !originator.is_empty())
+    });
     thread.forked_from_id = forked_from_id;
     thread.history_mode = history_mode;
     thread.name = name;
@@ -397,6 +402,7 @@ pub(super) fn stored_thread_from_state_metadata(
         project_id: metadata.project_id,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
+        originator: metadata.originator,
         source: parse_session_source(&metadata.source),
         history_mode: metadata.history_mode,
         thread_source: metadata.thread_source,
@@ -496,6 +502,7 @@ fn stored_thread_from_meta_line(
         project_id: None,
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
+        originator: (!meta_line.meta.originator.is_empty()).then_some(meta_line.meta.originator),
         source: meta_line.meta.source,
         history_mode: meta_line.meta.history_mode,
         thread_source: meta_line.meta.thread_source,
@@ -916,6 +923,7 @@ mod tests {
                     thread.first_user_message.as_deref(),
                     thread.model_provider.as_str(),
                     thread.model.as_deref(),
+                    thread.originator.as_deref(),
                 ),
                 (
                     Some("Canonical SQLite name"),
@@ -923,6 +931,7 @@ mod tests {
                     Some("Canonical SQLite first user message"),
                     "Canonical SQLite provider",
                     Some("Canonical SQLite model"),
+                    Some("test_originator"),
                 )
             );
         }
@@ -1193,7 +1202,7 @@ mod tests {
         std::fs::create_dir_all(&day_dir).expect("sessions dir");
         let rollout_path = day_dir.join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"));
         let mut file = std::fs::File::create(&rollout_path).expect("session file");
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "timestamp": "2025-01-03T12-00-00",
             "type": "session_meta",
             "payload": {
@@ -1248,9 +1257,28 @@ mod tests {
         assert_eq!(thread.model_provider, "sqlite-provider");
         assert_eq!(thread.cwd, home.path().join("workspace"));
         assert_eq!(thread.cli_version, "sqlite-cli");
+        assert_eq!(thread.originator.as_deref(), Some("test_originator"));
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 1);
+
+        for (sqlite_originator, rollout_originator, expected_originator) in [
+            (
+                Some("saved_client"),
+                "test_originator",
+                Some("saved_client"),
+            ),
+            (None, "", None),
+        ] {
+            meta["payload"]["originator"] = serde_json::json!(rollout_originator);
+            std::fs::write(&metadata.rollout_path, format!("{meta}\n"))
+                .expect("write session meta");
+            metadata.originator = sqlite_originator.map(str::to_owned);
+            let thread = stored_thread_from_sqlite_metadata(&store, metadata.clone())
+                .await
+                .expect("read SQLite and session metadata");
+            assert_eq!(thread.originator.as_deref(), expected_originator);
+        }
     }
 
     #[tokio::test]

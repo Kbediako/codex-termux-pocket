@@ -217,11 +217,28 @@ async fn shutdown_signal() -> IoResult<ShutdownSignal> {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        tokio::signal::ctrl_c()
-            .await
-            .map(|_| ShutdownSignal::Forceable)
+        let console_signal = async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                // A detached daemon has no console; keep its local control path active.
+                std::future::pending::<()>().await;
+            }
+        };
+        let daemon_signal = async {
+            let result = codex_app_server_transport::daemon_shutdown_signal().await;
+            // The processor retries listener errors; the updater instead needs
+            // immediate errors from its nonblocking shutdown probe.
+            if result.is_err() {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            result
+        };
+        tokio::select! {
+            _ = console_signal => Ok(ShutdownSignal::Forceable),
+            result = daemon_signal =>
+                result.map(|_| ShutdownSignal::Forceable),
+        }
     }
 }
 

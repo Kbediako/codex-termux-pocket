@@ -424,7 +424,9 @@ async fn removing_remote_thread_omits_disconnect_guidance() -> Result<()> {
         app.chat_widget.handle_thread_session(resumed.session);
         let mut tui = crate::tui::test_support::make_test_tui()?;
         let archived = matches!(&event, AppEvent::ArchiveCurrentThread);
-        let AppRunControl::Exit(reason) = app.handle_event(&mut tui, &mut server, event).await?
+        // Keep the large dispatcher future off the Windows test thread's stack.
+        let AppRunControl::Exit(reason) =
+            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?
         else {
             panic!("removing the current thread must exit");
         };
@@ -1162,14 +1164,15 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     assert_eq!(list_requests[0]["sourceKinds"], serde_json::Value::Null);
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.handle_event(
+    // Box each dispatcher await so this test does not retain its large future inline.
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolCallCompleted {
             request_id,
             response,
         },
-    )
+    ))
     .await?;
     let completed = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
         loop {
@@ -1321,7 +1324,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
         panic!("expected background task registration before its first turn: {registration:?}")
     };
     assert!(recorded_params(&requests, "turn/start").is_empty());
-    app.handle_event(
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolThreadStarted {
@@ -1329,7 +1332,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             task_tools_available,
             registered,
         },
-    )
+    ))
     .await?;
     assert!(
         app.agents_overview
@@ -1409,7 +1412,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     };
     assert_eq!(continued_thread_id, creation_source);
     assert_eq!(recorded_params(&requests, "turn/start").len(), 1);
-    app.handle_event(
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolThreadStarted {
@@ -1417,7 +1420,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             task_tools_available,
             registered,
         },
-    )
+    ))
     .await?;
     let AppEvent::DynamicToolCallCompleted { response, .. } =
         tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
@@ -1766,13 +1769,14 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.handle_event(
+    // Keep the large dispatcher future off the Windows test thread's stack.
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::ExportTranscript {
             destination: TranscriptExportDestination::File(export_path.clone()),
         },
-    )
+    ))
     .await?;
     assert!(app.chat_widget.queued_user_message_texts().is_empty());
     let markdown = std::fs::read_to_string(export_path)?;
@@ -1810,7 +1814,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
             .await?
             .ok_or_else(|| color_eyre::eyre::eyre!("history event channel closed"))?;
         if matches!(event, AppEvent::OlderThreadHistoryLoaded { .. }) {
-            app.handle_event(&mut tui, &mut app_server, event).await?;
+            Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
         }
     }
 
@@ -2231,7 +2235,8 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
             None => panic!("scrollback refill request channel closed"),
         }
     };
-    app.handle_event(&mut tui, &mut app_server, request).await?;
+    // Keep the large dispatcher future off the Windows test thread's stack.
+    Box::pin(app.handle_event(&mut tui, &mut app_server, request)).await?;
     let loaded = loop {
         match app_event_rx.recv().await {
             Some(event @ AppEvent::OlderThreadHistoryLoaded { .. }) => break event,
@@ -2239,7 +2244,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
             None => panic!("older history page channel closed"),
         }
     };
-    app.handle_event(&mut tui, &mut app_server, loaded).await?;
+    Box::pin(app.handle_event(&mut tui, &mut app_server, loaded)).await?;
 
     assert!(app.overlay.is_none());
     assert!(app.transcript_cells.len() > initial_cell_count);
@@ -3358,8 +3363,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     };
                     threads.push(discovered);
                 }
-                app.handle_event(&mut tui, &mut app_server, completion)
-                    .await?;
+                Box::pin(app.handle_event(&mut tui, &mut app_server, completion)).await?;
                 assert_eq!(
                     app.agent_navigation
                         .ordered_threads()

@@ -818,7 +818,8 @@ pub(crate) fn is_retryable_recovery_error(error: &ExecServerError) -> bool {
     is_transport_closed_error(error)
         || matches!(
             error,
-            ExecServerError::WebSocketConnectTimeout { .. }
+            ExecServerError::ProvisioningFailed(_)
+                | ExecServerError::WebSocketConnectTimeout { .. }
                 | ExecServerError::WebSocketConnect { .. }
                 | ExecServerError::InitializeTimedOut { .. }
         )

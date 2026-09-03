@@ -45,6 +45,8 @@ pub(super) struct ThreadEventStore {
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
+    // Lifecycle identity must survive bounded replay-buffer eviction.
+    pub(super) latest_turn_id: Option<String>,
     pub(super) pending_interrupt_turn_id: Option<String>,
     pub(super) input_state: Option<ThreadInputState>,
     pub(super) capacity: usize,
@@ -74,6 +76,7 @@ impl ThreadEventStore {
             buffer: VecDeque::new(),
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
+            latest_turn_id: None,
             pending_interrupt_turn_id: None,
             input_state: None,
             capacity,
@@ -113,7 +116,13 @@ impl ThreadEventStore {
             .rev()
             .find(|turn| matches!(turn.status, TurnStatus::InProgress))
             .map(|turn| turn.id.clone());
+        self.latest_turn_id = turns.last().map(|turn| turn.id.clone());
         self.turns = turns;
+    }
+
+    pub(super) fn set_active_turn_id(&mut self, turn_id: String) {
+        self.latest_turn_id = Some(turn_id.clone());
+        self.active_turn_id = Some(turn_id);
     }
 
     pub(super) fn push_notification(&mut self, notification: ServerNotification) {
@@ -129,9 +138,12 @@ impl ThreadEventStore {
             .note_server_notification(notification.as_ref());
         match notification.as_ref() {
             ServerNotification::TurnStarted(turn) => {
-                self.active_turn_id = Some(turn.turn.id.clone());
+                self.set_active_turn_id(turn.turn.id.clone());
             }
             ServerNotification::TurnCompleted(turn) => {
+                if self.active_turn_id.is_none() {
+                    self.latest_turn_id = Some(turn.turn.id.clone());
+                }
                 if matches!(turn.turn.status, TurnStatus::Completed) {
                     self.recap_progress.completed_turns += 1;
                 }
@@ -141,6 +153,14 @@ impl ThreadEventStore {
                 if self.pending_interrupt_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
                     self.pending_interrupt_turn_id = None;
                 }
+            }
+            ServerNotification::Error(n)
+                if self.active_turn_id.is_none()
+                    && !n.will_retry
+                    && n.error.codex_error_info
+                        == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation) =>
+            {
+                self.latest_turn_id = Some(n.turn_id.clone());
             }
             ServerNotification::ThreadClosed(_) => {
                 self.active_turn_id = None;
@@ -207,7 +227,7 @@ impl ThreadEventStore {
     }
 
     pub(super) fn snapshot(&self) -> ThreadEventSnapshot {
-        ThreadEventSnapshot {
+        let mut snapshot = ThreadEventSnapshot {
             session: self.session.clone(),
             turns: self.turns.clone(),
             // Thread switches replay buffered events into a rebuilt ChatWidget. Only replay
@@ -226,7 +246,11 @@ impl ThreadEventStore {
                 .cloned()
                 .collect(),
             input_state: self.input_state.clone(),
+        };
+        if let Some(latest_turn_id) = &self.latest_turn_id {
+            replay_filter::omit_resolved_misalignment_errors(&mut snapshot, latest_turn_id);
         }
+        snapshot
     }
 
     pub(super) fn recap_progress(&self) -> recap::RecapProgress {

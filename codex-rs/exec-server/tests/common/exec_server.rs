@@ -33,7 +33,6 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct ExecServerHarness {
     codex_home: TempDir,
-    _helper_paths: TestCodexHelperPaths,
     child: Child,
     websocket_url: String,
     websocket: tokio_tungstenite::WebSocketStream<
@@ -89,31 +88,34 @@ where
     V: AsRef<std::ffi::OsStr>,
 {
     let helper_paths = test_codex_helper_paths()?;
-    let codex_home = TempDir::new()?;
     let mut child = Command::new(&helper_paths.codex_exe);
     child.args(["exec-server", "--listen", "ws://127.0.0.1:0"]);
     child.args(args);
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::inherit());
-    child.kill_on_drop(true);
-    child.env("CODEX_HOME", codex_home.path());
     child.envs(env);
-    let mut child = child.spawn()?;
-
-    let websocket_url = read_listen_url_from_stdout(&mut child).await?;
-    let (websocket, _) = connect_websocket_when_ready(&websocket_url).await?;
-    Ok(ExecServerHarness {
-        codex_home,
-        _helper_paths: helper_paths,
-        child,
-        websocket_url,
-        websocket,
-        next_request_id: 1,
-    })
+    ExecServerHarness::start(child).await
 }
 
 impl ExecServerHarness {
+    pub(crate) async fn start(mut command: Command) -> anyhow::Result<Self> {
+        let codex_home = TempDir::new()?;
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::inherit());
+        command.kill_on_drop(true);
+        command.env("CODEX_HOME", codex_home.path());
+        let mut child = command.spawn()?;
+
+        let websocket_url = read_listen_url_from_stdout(&mut child).await?;
+        let (websocket, _) = connect_websocket_when_ready(&websocket_url).await?;
+        Ok(Self {
+            codex_home,
+            child,
+            websocket_url,
+            websocket,
+            next_request_id: 1,
+        })
+    }
+
     pub(crate) fn codex_home(&self) -> &std::path::Path {
         self.codex_home.path()
     }

@@ -53,6 +53,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             /*developer_instructions*/ None,
         );
         let expected_submitted_mode = expected_mode.clone();
+        assert!(!app.model_catalog.collaboration_modes.is_empty());
         if edit_offline {
             app.chat_widget
                 .restore_user_message_to_composer("unacknowledged prompt".into());
@@ -259,6 +260,13 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         assert_eq!(
             app.chat_widget.effective_collaboration_mode(),
             expected_mode
+        );
+        assert!(app.model_catalog.collaboration_modes.is_empty());
+        assert!(
+            app.chat_widget
+                .model_catalog()
+                .collaboration_modes
+                .is_empty()
         );
         assert_eq!(
             app.chat_widget.composer_text_with_pending(),

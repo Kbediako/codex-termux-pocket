@@ -6,6 +6,27 @@ use std::time::Instant;
 use codex_otel::MetricsClient;
 use tracing::warn;
 
+/// Registry-issued identity captured from the executor's authenticated relay connection.
+pub(crate) struct ExecutorRegistration {
+    pub(crate) environment_id: String,
+    pub(crate) executor_registration_id: String,
+}
+
+impl ExecutorRegistration {
+    pub(crate) fn new(environment_id: String, executor_registration_id: String) -> Option<Self> {
+        if [&environment_id, &executor_registration_id]
+            .iter()
+            .any(|id| id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+        {
+            return None;
+        }
+        Some(Self {
+            environment_id,
+            executor_registration_id,
+        })
+    }
+}
+
 const CONNECTIONS_ACTIVE_METRIC: &str = "exec_server_connections_active";
 const CONNECTIONS_ACTIVE_DESCRIPTION: &str = "Number of active exec-server connections.";
 const CONNECTIONS_TOTAL_METRIC: &str = "exec_server_connections_total";

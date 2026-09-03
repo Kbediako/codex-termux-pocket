@@ -12,7 +12,6 @@ use codex_extension_items::ExtensionItem;
 use codex_extension_items::sleep::SleepItem;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
@@ -721,7 +720,7 @@ async fn any_new_input_interrupts_sleep() {
         .expect("read rollout");
     let persisted_sleep_items = rollout
         .lines()
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
         .filter_map(|line| match line.item {
             RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match event.item {
                 TurnItem::Extension(ExtensionItem::Sleep(item)) => Some(item),

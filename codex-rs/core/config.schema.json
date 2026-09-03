@@ -699,6 +699,9 @@
             "content_item_kinds": {
               "type": "boolean"
             },
+            "context_management": {
+              "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
+            },
             "current_time_reminder": {
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
@@ -1041,6 +1044,9 @@
             "web_search_request": {
               "type": "boolean"
             },
+            "windows_sandbox_service": {
+              "type": "boolean"
+            },
             "workspace_dependencies": {
               "type": "boolean"
             },
@@ -1135,6 +1141,16 @@
             }
           ],
           "default": null
+        }
+      },
+      "type": "object"
+    },
+    "ContextManagementConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "experimental_mode": {
+          "description": "Enables experimental context management.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1249,6 +1265,16 @@
         },
         {
           "$ref": "#/definitions/CodeModeHostConfigToml"
+        }
+      ]
+    },
+    "FeatureToml_for_ContextManagementConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/ContextManagementConfigToml"
         }
       ]
     },
@@ -3832,6 +3858,7 @@
             "agents": {
               "new_task": null,
               "rename": null,
+              "resume": null,
               "search": null,
               "stop": null,
               "toggle_grouping": null
@@ -4137,6 +4164,14 @@
             }
           ],
           "description": "Rename the selected task."
+        },
+        "resume": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open the session resume picker."
         },
         "search": {
           "allOf": [
@@ -4605,6 +4640,7 @@
           "default": {
             "new_task": null,
             "rename": null,
+            "resume": null,
             "search": null,
             "stop": null,
             "toggle_grouping": null
@@ -6011,6 +6047,9 @@
         "content_item_kinds": {
           "type": "boolean"
         },
+        "context_management": {
+          "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
+        },
         "current_time_reminder": {
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
         },
@@ -6351,6 +6390,9 @@
           "type": "boolean"
         },
         "web_search_request": {
+          "type": "boolean"
+        },
+        "windows_sandbox_service": {
           "type": "boolean"
         },
         "workspace_dependencies": {
@@ -6770,6 +6812,12 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "thread_unload_delay_secs": {
+      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

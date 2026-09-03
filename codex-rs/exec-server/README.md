@@ -157,6 +157,7 @@ Response:
   "sessionId": "00000000-0000-4000-8000-000000000001",
   "environmentInfo": {
     "shell": { "name": "bash", "path": "/bin/bash" },
+    "executorVersion": "1.2.3-alpha.4",
     "cwd": "file:///workspace"
   }
 }
@@ -164,6 +165,8 @@ Response:
 
 `environmentInfo` contains the same executor metadata returned by
 `environment/info`, so clients can use it without a second request.
+
+`executorVersion` is the executor's package release version, or `0.0.0` when unknown.
 
 Rust clients cache this metadata for the client's lifetime, including session
 resumption. If initialization omits it, the first metadata request fetches and

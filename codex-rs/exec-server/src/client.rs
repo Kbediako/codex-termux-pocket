@@ -129,6 +129,9 @@ use codex_http_client::HttpClientFactory;
 pub(crate) mod accepted;
 pub(crate) mod http_client;
 mod network_policy_audit;
+#[cfg(test)]
+#[path = "../tests/unit/client_provisioning_tests.rs"]
+mod provisioning_tests;
 #[path = "client_recovery.rs"]
 mod recovery;
 #[path = "client_refresh.rs"]
@@ -426,6 +429,13 @@ impl LazyRemoteExecServerClient {
     }
 
     pub(crate) async fn status(&self) -> crate::EnvironmentObservedStatus {
+        if let Some(ExecServerTransportParams::Deferred(deferred)) = &self.transport_params
+            && let Some(Err(error)) = deferred.readiness.borrow().as_ref()
+        {
+            return crate::EnvironmentObservedStatus::Disconnected {
+                error: ExecServerError::ProvisioningFailed(error.clone()).to_string(),
+            };
+        }
         // Fail-fast lookup preserves the non-mutating contract: never start or recover a client.
         let client = match self.fail_fast().get().await {
             Ok(client) => client,
@@ -498,23 +508,34 @@ impl LazyRemoteExecServerClient {
     }
 
     async fn initial_client(&self) -> Result<ExecServerClient, ExecServerError> {
-        if self.can_reconnect()
+        let result = if self.can_reconnect()
             && (self.startup.cancelled.is_cancelled()
                 || self.startup.result.get().is_some_and(|result| {
                     result
                         .as_ref()
                         .is_err_and(|error| recovery::is_retryable_recovery_error(error))
-                }))
+                })) {
+            Box::pin(self.reconnect()).await
+        } else {
+            self.startup
+                .result
+                .get_or_init(|| self.connect_once(&self.startup))
+                .await
+                .clone()
+                .map_err(ExecServerError::ConnectionAttempt)
+        };
+        // Ready may arrive before an older attempt publishes its provisioning failure.
+        if let Err(ExecServerError::ConnectionAttempt(error)) = &result
+            && matches!(error.as_ref(), ExecServerError::ProvisioningFailed(_))
+            && matches!(
+                &self.transport_params,
+                Some(ExecServerTransportParams::Deferred(deferred))
+                    if matches!(*deferred.readiness.borrow(), Some(Ok(())))
+            )
         {
             return Box::pin(self.reconnect()).await;
         }
-
-        self.startup
-            .result
-            .get_or_init(|| self.connect_once(&self.startup))
-            .await
-            .clone()
-            .map_err(ExecServerError::ConnectionAttempt)
+        result
     }
 
     async fn reconnect(&self) -> Result<ExecServerClient, ExecServerError> {
@@ -618,6 +639,8 @@ pub enum ExecServerError {
     Closed,
     #[error("{0}")]
     Disconnected(String),
+    #[error("environment unavailable: {0}")]
+    ProvisioningFailed(String),
     #[error("failed to serialize or deserialize exec-server JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("HTTP request failed: {0}")]
@@ -1871,6 +1894,7 @@ mod tests {
         let session = client
             .start_process(
                 ExecParams {
+                    metadata: Default::default(),
                     process_id: process_id.clone(),
                     argv: vec!["true".to_string()],
                     cwd: PathUri::from_host_native_path(std::env::current_dir().expect("cwd"))
@@ -2428,6 +2452,10 @@ mod tests {
     }
 
     #[test_case::test_case(Some(EnvironmentInfo::local()); "from_initialize")]
+    #[test_case::test_case(Some(EnvironmentInfo {
+        executor_version: "1.2.3-alpha.4".to_string(),
+        ..EnvironmentInfo::local()
+    }); "with_executor_version")]
     #[test_case::test_case(None; "legacy_server")]
     #[tokio::test]
     async fn environment_info_is_cached(

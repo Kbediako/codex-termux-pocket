@@ -16,6 +16,7 @@ use codex_exec_server_protocol::JSONRPCNotification;
 use codex_exec_server_protocol::JSONRPCRequest;
 use codex_exec_server_protocol::JSONRPCResponse;
 use codex_exec_server_protocol::RequestId;
+use codex_protocol::protocol::W3cTraceContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -209,13 +210,25 @@ where
         F: Fn(Arc<S>, P) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<R, JSONRPCErrorError>> + Send + 'static,
     {
+        self.request_with_trace(method, move |state, params, _trace| handler(state, params));
+    }
+
+    /// Supplies the incoming W3C carrier to handlers that need it without requiring a trace exporter.
+    pub(crate) fn request_with_trace<P, R, F, Fut>(&mut self, method: &'static str, handler: F)
+    where
+        P: DeserializeOwned + Send + 'static,
+        R: Serialize + Send + 'static,
+        F: Fn(Arc<S>, P, Option<W3cTraceContext>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R, JSONRPCErrorError>> + Send + 'static,
+    {
         self.request_routes.insert(
             method,
             Box::new(move |state, request| {
+                let trace = request.trace;
                 let request_id = request.id;
                 let params = request.params;
                 let response =
-                    decode_request_params::<P>(params).map(|params| handler(state, params));
+                    decode_request_params::<P>(params).map(|params| handler(state, params, trace));
                 Box::pin(async move {
                     let response = match response {
                         Ok(response) => response.await,

@@ -110,6 +110,7 @@ impl PendingGuardianReviewStatus {
 
 #[derive(Debug)]
 pub(super) struct StatusState {
+    pub(super) compaction: Option<super::compaction::ActiveCompaction>,
     pub(super) current_status: StatusIndicatorState,
     pub(super) pending_guardian_review_status: PendingGuardianReviewStatus,
     pub(super) terminal_title_status_kind: TerminalTitleStatusKind,
@@ -120,6 +121,7 @@ pub(super) struct StatusState {
 impl Default for StatusState {
     fn default() -> Self {
         Self {
+            compaction: None,
             current_status: StatusIndicatorState::working(),
             pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             terminal_title_status_kind: TerminalTitleStatusKind::Working,

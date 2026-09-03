@@ -739,6 +739,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         ("workspace_kind".to_string(), "projectless".to_string()),
         ("source".to_string(), "client-source".to_string()),
         ("model".to_string(), "client-supplied".to_string()),
+        ("codex_version".to_string(), "client-supplied".to_string()),
         (
             "reasoning_effort".to_string(),
             "client-supplied".to_string(),
@@ -932,6 +933,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         .current_meta_value_for_mcp_request(test_mcp_turn_metadata_context())
         .expect("turn metadata should be present");
     assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(meta["codex_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
     assert!(meta.get(LEGACY_CODE_MODE_TOOL_NAMES_KEY).is_none());
     assert!(meta.get(TOOL_NAMESPACES_INFO_KEY).is_none());

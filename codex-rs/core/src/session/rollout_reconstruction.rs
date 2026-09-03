@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) retained_context: codex_history::RetainedContext,
     pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
@@ -300,6 +301,7 @@ impl Session {
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
+                | RolloutItem::RetainedContext(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
@@ -343,6 +345,9 @@ impl Session {
         {
             history.replace_annotated(items.clone());
             history.restore_guardian_history(checkpoint.compacted.guardian_history.as_ref());
+            if let Some(retained) = &checkpoint.compacted.retained_context {
+                history.restore_retained_context(retained);
+            }
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
         // design should keep this same replay shape, but drive it from a resumable reverse source
@@ -350,6 +355,9 @@ impl Session {
         let rollout_suffix = base_compaction.map_or(rollout_items, |checkpoint| checkpoint.suffix);
         for item in rollout_suffix {
             match item {
+                RolloutItem::RetainedContext(event) => {
+                    history.record_retained_context(event);
+                }
                 RolloutItem::ResponseItem(response_item) => {
                     history.record_annotated_items(
                         std::slice::from_ref(response_item),
@@ -385,7 +393,9 @@ impl Session {
                             &user_messages,
                             &compacted.message,
                         );
+                        let retained_context = history.retained_context().clone();
                         history.replace_annotated(rebuilt);
+                        history.restore_retained_context(&retained_context);
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -437,6 +447,7 @@ impl Session {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::RetainedContext(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => {
                     unreachable!("only world-state replay items are collected")
@@ -451,6 +462,7 @@ impl Session {
             id: None,
         });
         RolloutReconstruction {
+            retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),
             previous_turn_settings,

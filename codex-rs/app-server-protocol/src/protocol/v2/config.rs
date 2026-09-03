@@ -1,3 +1,4 @@
+use super::ApplicationRequirements;
 use super::ApprovalsReviewer;
 use super::AskForApproval;
 use super::BrowserUseConfig;
@@ -432,6 +433,8 @@ pub struct ConfigRequirements {
     pub enforce_residency: Option<ResidencyRequirement>,
     #[experimental("configRequirements/read.network")]
     pub network: Option<NetworkRequirements>,
+    #[experimental("configRequirements/read.application")]
+    pub application: Option<ApplicationRequirements>,
     pub auto_review: Option<AutoReviewRequirements>,
     pub models: Option<ModelsRequirements>,
     #[schemars(with = "Option<String>")]

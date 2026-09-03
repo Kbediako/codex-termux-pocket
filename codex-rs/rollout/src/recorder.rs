@@ -1282,6 +1282,7 @@ async fn fill_missing_thread_item_metadata_from_state_db(
 
 fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadItem) {
     let ThreadItem {
+        originator,
         path: _state_path,
         thread_id: _state_thread_id,
         first_user_message,
@@ -1305,6 +1306,10 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         updated_at,
         recency_at,
     } = state_item;
+
+    if item.originator.is_none() {
+        item.originator = originator;
+    }
 
     if item.first_user_message.is_none() {
         item.first_user_message = first_user_message;
@@ -2024,6 +2029,7 @@ fn thread_item_from_state_metadata(
     parent_thread_id: Option<ThreadId>,
 ) -> ThreadItem {
     ThreadItem {
+        originator: item.originator,
         path: item.rollout_path,
         thread_id: Some(item.id),
         first_user_message: item.first_user_message,
@@ -2099,6 +2105,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::TokenUsageRecord(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         })

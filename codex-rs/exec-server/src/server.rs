@@ -3,9 +3,14 @@ mod handler;
 mod process_handler;
 mod processor;
 mod registry;
+mod release_version;
 mod request_dispatcher;
 mod session_registry;
 mod transport;
+
+#[cfg(all(test, unix))]
+#[path = "server/process_otel_tests.rs"]
+mod process_otel_tests;
 
 pub(crate) use handler::ExecServerHandler;
 pub(crate) use processor::ConnectionProcessor;

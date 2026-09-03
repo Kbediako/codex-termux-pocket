@@ -266,7 +266,7 @@ impl SessionHeaderHistoryCell {
     ) -> Self {
         Self {
             version,
-            model,
+            model: crate::model_catalog::model_display_name(&model).to_string(),
             model_style,
             reasoning_effort,
             show_fast_status,

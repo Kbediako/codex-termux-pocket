@@ -1,5 +1,6 @@
-//! Model history and bounded original evidence for approval review.
-//! Compaction replaces only model history; replay restores retained evidence and rollback trims it.
+//! Parent model history and bounded host-owned context facts.
+//! Compaction replaces only the model window. Snapshots include retained facts atomically;
+//! checkpoint replay and source-call rollback share their live lifecycle.
 
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
@@ -22,6 +23,8 @@ use codex_guardian_context::TranscriptHistory;
 use codex_history::CodexHarnessMetadata;
 use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
+use codex_history::RetainedContext;
+use codex_history::RetainedContextEvent;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -56,6 +59,8 @@ pub(crate) struct ContextManager {
     items: Arc<Vec<ResponseItemEnvelope>>,
     /// Starts at the first compaction; ordinary history snapshots need no second payload copy.
     review_history: Option<TranscriptHistory>,
+    /// Host facts independent of the model window; snapshots share immutable state.
+    retained_context: Arc<RetainedContext>,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
     /// Monotonic user-input/reset revision, independent of compaction's history generation.
@@ -79,6 +84,7 @@ pub(crate) struct ContextManager {
 struct SharedConversationHistory {
     items: Arc<Vec<ResponseItemEnvelope>>,
     review_history: Option<TranscriptHistory>,
+    retained_context: Arc<RetainedContext>,
     history_version: u64,
     user_message_revision: u64,
 }
@@ -89,6 +95,10 @@ pub(crate) enum HistoryReplacement {
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
+    fn retained_context(&self) -> Option<&RetainedContext> {
+        Some(&self.retained_context)
+    }
+
     fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         match &self.review_history {
             Some(history) => history.items(),
@@ -131,6 +141,7 @@ impl ContextManager {
         Self {
             items: Arc::new(Vec::new()),
             review_history: None,
+            retained_context: Arc::default(),
             history_version: 0,
             user_message_revision: 0,
             token_info: TokenUsageInfo::new_or_append(
@@ -145,9 +156,26 @@ impl ContextManager {
         Arc::new(SharedConversationHistory {
             items: Arc::clone(&self.items),
             review_history: self.review_history.clone(),
+            retained_context: Arc::clone(&self.retained_context),
             history_version: self.history_version,
             user_message_revision: self.user_message_revision,
         })
+    }
+
+    pub(crate) fn retained_context(&self) -> &RetainedContext {
+        &self.retained_context
+    }
+
+    pub(crate) fn record_retained_context(&mut self, event: &RetainedContextEvent) -> bool {
+        if !Arc::make_mut(&mut self.retained_context).record(event) {
+            return false;
+        }
+        self.user_message_revision = self.user_message_revision.saturating_add(1);
+        true
+    }
+
+    pub(crate) fn restore_retained_context(&mut self, checkpoint: &RetainedContext) {
+        Arc::make_mut(&mut self.retained_context).restore(checkpoint);
     }
 
     pub(crate) fn guardian_history_checkpoint(&self) -> Option<GuardianHistoryCheckpoint> {
@@ -250,7 +278,7 @@ impl ContextManager {
     {
         for (item, metadata) in items {
             let item = item.deref();
-            if !is_api_message(item) {
+            if !is_api_message(item, metadata) {
                 continue;
             }
 
@@ -379,6 +407,7 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
             review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
@@ -432,7 +461,9 @@ impl ContextManager {
         let snapshot = self.items.clone();
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
+            let retained_context = Arc::clone(&self.retained_context);
             self.replace_annotated(Arc::unwrap_or_clone(snapshot));
+            self.retained_context = retained_context;
             return;
         };
 
@@ -478,7 +509,25 @@ impl ContextManager {
             });
         }
 
+        let mut retained_context = Arc::clone(&self.retained_context);
+        let removed_turns = snapshot[cut_idx..]
+            .iter()
+            .filter_map(|item| item.turn_id())
+            .collect::<Vec<_>>();
+        Arc::make_mut(&mut retained_context).retain_answers(|answer| {
+            // A steer creates an instruction boundary, not a new turn ID. Replay exposes
+            // the original calls from rolled-back checkpoints, so prefer the exact source.
+            if let Some(source_index) = snapshot.iter().rposition(|item| {
+                item.turn_id() == Some(answer.turn_id.as_str())
+                    && matches!(&item.item, ResponseItem::FunctionCall { call_id, .. }
+                        if call_id == &answer.call_id)
+            }) {
+                return source_index < cut_idx;
+            }
+            !removed_turns.contains(&answer.turn_id.as_str())
+        });
         self.replace_annotated(retained_items);
+        self.retained_context = retained_context;
         self.review_history = review_history;
     }
 
@@ -628,12 +677,13 @@ impl ContextManager {
     }
 }
 
-/// API messages include every non-system item (user/assistant messages, reasoning,
-/// tool calls, tool outputs, shell calls, web-search calls, and image-generation
-/// calls).
-fn is_api_message(message: &ResponseItem) -> bool {
+/// Configuration updates require harness provenance; raw system messages are never retained.
+fn is_api_message(message: &ResponseItem, metadata: Option<&CodexHarnessMetadata>) -> bool {
     match message {
         ResponseItem::Message { role, .. } => role.as_str() != "system",
+        ResponseItem::ConfigurationUpdate { .. } => {
+            metadata.is_some_and(|metadata| metadata.harness_authored_configuration)
+        }
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::FunctionCallOutput { .. }
@@ -962,7 +1012,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger { .. } => false,
+        ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::ToolSearchOutput { .. }

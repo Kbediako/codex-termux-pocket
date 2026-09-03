@@ -778,6 +778,7 @@ pub(crate) struct CodexPluginMeasurementEventParams {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
     pub(crate) item_id: String,
+    pub(crate) originator: String,
     pub(crate) plugin_id: String,
     pub(crate) execution_id: String,
     pub(crate) operation: String,

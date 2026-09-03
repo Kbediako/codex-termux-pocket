@@ -38,7 +38,7 @@ impl App {
             && app_server.remote_cwd_override().is_none()
             && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
         {
-            self.chat_widget.add_error_message(
+            self.add_session_picker_error(
                 "`tui.resume_cwd = \"current\"` requires `--cd` when using a remote workspace"
                     .to_string(),
             );
@@ -64,7 +64,7 @@ impl App {
             .await;
             match outcome {
                 Err(err) => {
-                    self.chat_widget.add_error_message(format!(
+                    self.add_session_picker_error(format!(
                         "Failed to determine working directory for resume: {err}"
                     ));
                     return Err(AppRunControl::Continue);
@@ -91,7 +91,7 @@ impl App {
         {
             Ok(cfg) => cfg,
             Err(err) => {
-                self.chat_widget.add_error_message(format!(
+                self.add_session_picker_error(format!(
                     "Failed to rebuild configuration for resume: {err}"
                 ));
                 return Err(AppRunControl::Continue);

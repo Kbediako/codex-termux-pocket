@@ -36,14 +36,9 @@ pub(super) async fn reconnect(
     presentation: ReconnectPresentation,
 ) -> Result<Reconnected> {
     let mode = target.thread_params_mode();
-    let endpoint = match target {
-        AppServerTarget::Remote { endpoint } | AppServerTarget::LocalDaemon { endpoint } => {
-            endpoint
-        }
-        AppServerTarget::Embedded => {
-            color_eyre::eyre::bail!("in-process sessions have no connection to restore")
-        }
-    };
+    if matches!(target, AppServerTarget::Embedded) {
+        color_eyre::eyre::bail!("in-process sessions have no connection to restore");
+    }
     if let ThreadToolTransport::Mcp(server) = &task_tools {
         server.suspend();
     }
@@ -58,7 +53,7 @@ pub(super) async fn reconnect(
     for delay in [0, 1, 2, 4, 8] {
         let attempt = async {
             tokio::time::sleep(Duration::from_secs(delay)).await;
-            let client = crate::connect_remote_app_server(endpoint.clone()).await?;
+            let client = crate::app_server_connection::connect(&target).await?;
             let mut session = AppServerSession::new(client, mode)
                 .with_startup_config(&config)
                 .with_remote_cwd_override(remote_cwd.clone())
@@ -191,6 +186,8 @@ impl App {
             self.agents_overview.request_id = None;
             self.agents_overview.refresh_pending = false;
             self.agents_overview.refresh_notifications.clear();
+            self.agents_overview.activity.clear();
+            self.agents_overview.last_messages.clear();
             self.reconnect.presentation = if self
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
@@ -258,7 +255,10 @@ impl App {
         )));
         self.file_search =
             FileSearchManager::new(self.config.cwd.to_path_buf(), self.app_event_tx.clone());
-        self.model_catalog = Arc::new(ModelCatalog::new(bootstrap.available_models));
+        self.model_catalog = Arc::new(
+            ModelCatalog::new(bootstrap.available_models)
+                .with_collaboration_modes(bootstrap.collaboration_modes),
+        );
         self.pending_app_server_requests.clear();
         self.pending_primary_events.clear();
         self.pending_plugin_enabled_writes.clear();

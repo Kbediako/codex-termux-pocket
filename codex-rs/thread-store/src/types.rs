@@ -569,6 +569,9 @@ pub struct ThreadOccurrenceSearchPage {
 /// Store-owned thread metadata used by list/read/resume responses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredThread {
+    /// Originator recorded at creation, if available from the backing store.
+    #[serde(default)]
+    pub originator: Option<String>,
     /// Thread id.
     pub thread_id: ThreadId,
     /// Optional extra configuration fields for the thread.
@@ -687,7 +690,7 @@ impl GitInfoPatch {
 
 /// Patch for thread metadata.
 ///
-/// Every field is literal: `None` leaves that field unchanged, while `Some`
+/// Unless noted otherwise, `None` leaves a field unchanged, while `Some`
 /// applies the supplied value. Fields whose value may itself be cleared use an
 /// inner `Option`, where `Some(None)` clears the field.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -724,6 +727,8 @@ pub struct ThreadMetadataPatch {
     pub advance_recency_at: Option<DateTime<Utc>>,
     /// Session source.
     pub source: Option<SessionSource>,
+    /// Recorded creation-time originator. Only fills a missing stored value.
+    pub originator: Option<String>,
     /// Optional analytics source classification.
     #[serde(
         default,
@@ -817,6 +822,9 @@ impl ThreadMetadataPatch {
         if next.source.is_some() {
             self.source = next.source;
         }
+        if next.originator.is_some() {
+            self.originator = next.originator;
+        }
         if next.thread_source.is_some() {
             self.thread_source = next.thread_source;
         }
@@ -872,6 +880,7 @@ impl ThreadMetadataPatch {
             && self.updated_at.is_none()
             && self.advance_recency_at.is_none()
             && self.source.is_none()
+            && self.originator.is_none()
             && self.thread_source.is_none()
             && self.agent_nickname.is_none()
             && self.agent_role.is_none()

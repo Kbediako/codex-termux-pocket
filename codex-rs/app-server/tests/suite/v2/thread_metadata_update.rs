@@ -85,6 +85,7 @@ async fn thread_section_move_pins_before_first_turn() -> Result<()> {
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(move_id)).await??;
 
     let list_params = ThreadListParams {
+        originators: None,
         cursor: None,
         limit: Some(100),
         sort_key: None,
@@ -261,6 +262,7 @@ async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() 
     }
 
     let list_params = ThreadListParams {
+        originators: None,
         cursor: None,
         limit: Some(1),
         sort_key: Some(ThreadSortKey::RecencyAt),
@@ -452,6 +454,7 @@ async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_res
     }
 
     let list_params = ThreadListParams {
+        originators: None,
         cursor: None,
         limit: Some(10),
         sort_key: Some(ThreadSortKey::SectionPosition),

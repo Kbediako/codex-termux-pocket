@@ -4,20 +4,17 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::time::Duration;
 
-use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use codex_install_context::CodexPackageLayout;
 use codex_utils_pty::ProcessHandle;
 use codex_utils_pty::SpawnedProcess;
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use crate::MAX_FRAME_BYTES;
 use crate::Message;
-use crate::decode_frame;
 use crate::encode_frame;
+use crate::message_reader::MessageReader;
 
 const DEADLINE: Duration = Duration::from_secs(/*secs*/ 5);
 
@@ -25,7 +22,7 @@ const DEADLINE: Duration = Duration::from_secs(/*secs*/ 5);
 /// A successful handshake establishes compatibility only, not an active audio session.
 pub struct VoiceHost {
     process: ProcessHandle,
-    output: mpsc::Receiver<Vec<u8>>,
+    output: MessageReader,
     exit: oneshot::Receiver<i32>,
 }
 
@@ -60,7 +57,7 @@ impl VoiceHost {
         drop(stderr_rx); // Drain and discard diagnostics rather than logging untyped child output.
         let mut host = Self {
             process: session,
-            output: stdout_rx,
+            output: MessageReader::new(stdout_rx),
             exit: exit_rx,
         };
         host.exchange(
@@ -92,23 +89,9 @@ impl VoiceHost {
                 .send(encode_frame(&request)?)
                 .await
                 .map_err(|_| anyhow::anyhow!("voice helper input closed"))?;
-            let mut frame = Vec::new();
-            loop {
-                let chunk = self
-                    .output
-                    .recv()
-                    .await
-                    .context("voice helper output closed")?;
-                ensure!(
-                    frame.len() + chunk.len() <= MAX_FRAME_BYTES + 4,
-                    "voice helper output exceeds limit"
-                );
-                frame.extend(chunk);
-                if let Some(response) = decode_frame(&frame)? {
-                    ensure!(response == expected, "unexpected voice helper response");
-                    return Ok(());
-                }
-            }
+            let response = self.output.next().await?;
+            ensure!(response == expected, "unexpected voice helper response");
+            Ok(())
         })
         .await?
     }

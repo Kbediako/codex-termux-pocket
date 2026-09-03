@@ -386,6 +386,7 @@ impl ListKeymap {
 /// Task-management shortcuts specific to the shared agents dashboard.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentsKeymap {
+    pub(crate) resume: Vec<KeyBinding>,
     pub(crate) search: Vec<KeyBinding>,
     pub(crate) new_task: Vec<KeyBinding>,
     pub(crate) rename: Vec<KeyBinding>,
@@ -1198,7 +1199,20 @@ impl RuntimeKeymap {
             chord_hints: Arc::clone(&chords),
         };
 
+        let resume_default_is_shadowed = keymap.agents.resume.is_none()
+            && (configured_context_alias_is_used(&keymap.agents, "ctrl-o")
+                || configured_context_alias_is_used(&keymap.list, "ctrl-o")
+                || chords.bindings.iter().any(|binding| {
+                    binding.action.context.overlaps(KeymapContext::Agents)
+                        && binding.chord.prefix.parts()
+                            == key_hint::ctrl(KeyCode::Char('o')).parts()
+                }));
         let mut agents = AgentsKeymap {
+            resume: if resume_default_is_shadowed {
+                Vec::new()
+            } else {
+                resolve_local!(keymap, defaults, agents, resume)
+            },
             search: resolve_local!(keymap, defaults, agents, search),
             new_task: resolve_local!(keymap, defaults, agents, new_task),
             rename: resolve_local!(keymap, defaults, agents, rename),
@@ -1334,6 +1348,7 @@ impl RuntimeKeymap {
         };
 
         for (configured, bindings) in [
+            (keymap.agents.resume.as_ref(), &mut agents.resume),
             (keymap.agents.search.as_ref(), &mut agents.search),
             (keymap.agents.new_task.as_ref(), &mut agents.new_task),
             (keymap.agents.rename.as_ref(), &mut agents.rename),
@@ -1693,6 +1708,7 @@ impl RuntimeKeymap {
                 chord_hints: Arc::default(),
             },
             agents: AgentsKeymap {
+                resume: default_bindings![ctrl(KeyCode::Char('o'))],
                 search: default_bindings![ctrl(KeyCode::Char('f'))],
                 new_task: default_bindings![ctrl(KeyCode::Char('n'))],
                 rename: default_bindings![ctrl(KeyCode::Char('r'))],
@@ -3310,6 +3326,7 @@ mod tests {
         keymap.global.open_agents = Some(one("f12"));
         keymap.agents.search = Some(one("f6"));
         keymap.agents.new_task = Some(one("f7"));
+        keymap.agents.resume = Some(one("f5"));
         keymap.agents.rename = Some(one("f9"));
         keymap.agents.stop = Some(one("f10"));
         keymap.agents.toggle_grouping = Some(one("f8"));
@@ -3320,6 +3337,7 @@ mod tests {
                 runtime.app.open_agents,
                 runtime.agents.search,
                 runtime.agents.new_task,
+                runtime.agents.resume,
                 runtime.agents.rename,
                 runtime.agents.stop,
                 runtime.agents.toggle_grouping,
@@ -3328,11 +3346,16 @@ mod tests {
                 vec![key_hint::plain(KeyCode::F(12))],
                 vec![key_hint::plain(KeyCode::F(6))],
                 vec![key_hint::plain(KeyCode::F(7))],
+                vec![key_hint::plain(KeyCode::F(5))],
                 vec![key_hint::plain(KeyCode::F(9))],
                 vec![key_hint::plain(KeyCode::F(10))],
                 vec![key_hint::plain(KeyCode::F(8))],
             )
         );
+
+        keymap.agents.resume = Some(one("f6"));
+        expect_conflict(&keymap, "resume", "search");
+        keymap.agents.resume = Some(one("f5"));
 
         keymap.agents.toggle_grouping = Some(one("right"));
         let runtime = RuntimeKeymap::from_config(&keymap).expect("runtime keymap");
@@ -3426,6 +3449,20 @@ mod tests {
                 .expect_err("backspace is reserved for task input")
                 .contains("backspace")
         );
+    }
+
+    #[test]
+    fn agents_resume_default_yields_to_existing_custom_shortcuts() {
+        for binding in ["ctrl-o", "ctrl-o f6"] {
+            let mut keymap = TuiKeymap::default();
+            keymap.agents.search = Some(one(binding));
+            let runtime =
+                RuntimeKeymap::from_config(&keymap).expect("existing keymap remains valid");
+            assert!(runtime.agents.resume.is_empty());
+
+            keymap.agents.resume = Some(one("ctrl-o"));
+            assert!(RuntimeKeymap::from_config(&keymap).is_err());
+        }
     }
 
     #[test]

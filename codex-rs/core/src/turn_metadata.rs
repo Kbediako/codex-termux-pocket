@@ -45,6 +45,7 @@ use codex_utils_git_discovery::GitRootDiscovery;
 const MEMORY_GIT_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 const MODEL_KEY: &str = "model";
+const CODEX_VERSION_KEY: &str = "codex_version";
 const REASONING_EFFORT_KEY: &str = "reasoning_effort";
 const USER_INPUT_REQUESTED_DURING_TURN_KEY: &str = "user_input_requested_during_turn";
 const WORKSPACE_KIND_KEY: &str = "workspace_kind";
@@ -245,6 +246,10 @@ impl TurnMetadataState {
         metadata.insert(
             MODEL_KEY.to_string(),
             Value::String(context.model.to_string()),
+        );
+        metadata.insert(
+            CODEX_VERSION_KEY.to_string(),
+            Value::String(env!("CARGO_PKG_VERSION").to_string()),
         );
         match context.reasoning_effort {
             Some(reasoning_effort) => {

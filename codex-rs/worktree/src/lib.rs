@@ -6,6 +6,7 @@ mod settings;
 use crate::git::GitOperation;
 use crate::git::git_output;
 use crate::git::git_path;
+use crate::git::git_path_from_bytes;
 use crate::git::git_stdout;
 use crate::paths::allocate_worktree_root;
 use crate::paths::remove_empty_bucket;
@@ -14,6 +15,7 @@ use anyhow::Result;
 use anyhow::bail;
 use serde::Serialize;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -160,6 +162,112 @@ impl WorktreeManager {
             head_sha,
             branch: None,
         })
+    }
+
+    pub fn list(&self, source_cwd: &Path) -> Result<Vec<ManagedWorktree>> {
+        let source_cwd = dunce::canonicalize(source_cwd)
+            .with_context(|| format!("cannot resolve {}", source_cwd.display()))?;
+        let source_root = repository_root(&source_cwd)?;
+        let relative_cwd = source_cwd
+            .strip_prefix(&source_root)
+            .context("working directory is outside the repository root")?;
+        let managed_root =
+            dunce::canonicalize(&self.settings.root).unwrap_or_else(|_| self.settings.root.clone());
+        let source_common_dir = resolve_git_path(&source_root, "--git-common-dir")?;
+        let output = git_output(
+            &source_cwd,
+            GitOperation::Metadata,
+            ["worktree", "list", "--porcelain", "-z"],
+        )?;
+        let fields = output
+            .stdout
+            .split(|byte| *byte == b'\0')
+            .collect::<Vec<_>>();
+        let mut worktrees = Vec::new();
+
+        for entry in fields.split(|field| field.is_empty()) {
+            let mut root = None;
+            let mut head_sha = None;
+            let mut branch = None;
+
+            for field in entry {
+                if let Some(path) = field.strip_prefix(b"worktree ") {
+                    root = Some(git_path_from_bytes(path)?);
+                } else if let Some(head) = field.strip_prefix(b"HEAD ") {
+                    head_sha = Some(
+                        std::str::from_utf8(head)
+                            .context("worktree HEAD is not valid UTF-8")?
+                            .to_owned(),
+                    );
+                } else if let Some(name) = field.strip_prefix(b"branch ") {
+                    branch = Some(name.strip_prefix(b"refs/heads/").unwrap_or(name));
+                }
+            }
+
+            let Some(root) = root else {
+                continue;
+            };
+            let Some(bucket) = root.parent() else {
+                continue;
+            };
+            // Keep aliases from changing which registration supplies the metadata.
+            if ![root.as_path(), bucket].into_iter().all(|path| {
+                fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+            }) {
+                continue;
+            }
+            let canonical_root = dunce::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            let linked_git_file = fs::symlink_metadata(canonical_root.join(".git"))
+                .is_ok_and(|metadata| metadata.file_type().is_file());
+            if !has_managed_layout(&managed_root, &canonical_root) || !linked_git_file {
+                continue;
+            }
+            if linked_worktree_common_dir(&canonical_root).ok().as_ref() != Some(&source_common_dir)
+            {
+                continue;
+            }
+            // A different linked checkout can occupy a stale registration's path.
+            // Require its administration directory to point back to this checkout.
+            let Ok(git_dir) = resolve_git_path(&canonical_root, "--git-dir") else {
+                continue;
+            };
+            let Ok(backlink) = fs::read(git_dir.join("gitdir")) else {
+                continue;
+            };
+            let backlink = backlink.strip_suffix(b"\n").unwrap_or(&backlink);
+            #[cfg(windows)]
+            let backlink = backlink.strip_suffix(b"\r").unwrap_or(backlink);
+            let Ok(backlink) = git_path_from_bytes(backlink) else {
+                continue;
+            };
+            let Ok(backlink) = dunce::canonicalize(git_dir.join(backlink)) else {
+                continue;
+            };
+            let Ok(git_file) = dunce::canonicalize(canonical_root.join(".git")) else {
+                continue;
+            };
+            if backlink != git_file {
+                continue;
+            }
+            let cwd = root.join(relative_cwd);
+            if !is_safe_worktree_cwd(&canonical_root, &cwd) {
+                continue;
+            }
+
+            let head_sha = head_sha
+                .with_context(|| format!("managed worktree {} has no HEAD", root.display()))?;
+            worktrees.push(ManagedWorktree {
+                cwd,
+                root,
+                source_root: source_root.clone(),
+                source_cwd: source_cwd.clone(),
+                head_sha,
+                branch: branch.and_then(|name| std::str::from_utf8(name).ok().map(str::to_owned)),
+            });
+        }
+
+        worktrees.sort_by(|left, right| left.root.cmp(&right.root));
+        Ok(worktrees)
     }
 
     pub fn bind_thread(&self, checkout: &Path, thread_id: &str) -> Result<()> {

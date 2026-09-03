@@ -176,6 +176,7 @@ pub(super) fn stored_thread_from_rollout_item(
         project_id: item.project_id,
         cwd: item.cwd.unwrap_or_default(),
         cli_version: item.cli_version.unwrap_or_default(),
+        originator: item.originator,
         source,
         history_mode: item.history_mode,
         thread_source: None,

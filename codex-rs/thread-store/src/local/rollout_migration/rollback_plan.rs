@@ -5,6 +5,7 @@
 //! surviving turn after a newer turn has started. This planner keeps compact per-record ownership
 //! metadata for SQLite visibility, then combines it with `rollback_replay`'s cold-resume answer
 //! before the writer makes its second streaming pass.
+//! Retained answers follow their source calls, not later steers sharing the same turn ID.
 
 use std::collections::HashMap;
 
@@ -86,6 +87,7 @@ pub(super) struct RollbackPlanner {
     pending_user_response: Option<PendingUserResponse>,
     pending_delivery_boundary: Option<usize>,
     turn_boundaries: HashMap<String, usize>,
+    call_boundaries: HashMap<(String, String), Option<usize>>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
 }
@@ -102,6 +104,7 @@ impl RollbackPlanner {
             pending_user_response: None,
             pending_delivery_boundary: None,
             turn_boundaries: HashMap::new(),
+            call_boundaries: HashMap::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
         }
@@ -151,6 +154,14 @@ impl RollbackPlanner {
                     // previous turn. Keep that fallback owner so rollback drops it when there is
                     // no later turn to attach it to.
                     self.pending_context_records.push(index);
+                }
+                if let ResponseItem::FunctionCall { call_id, .. } = &response.item
+                    && let Some(turn_id) = response.turn_id().or(self.active_turn_id.as_deref())
+                {
+                    self.call_boundaries.insert(
+                        (turn_id.to_owned(), call_id.clone()),
+                        self.record_boundaries[index],
+                    );
                 }
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -223,6 +234,20 @@ impl RollbackPlanner {
                 self.assign_targeted_record(index, Some(record.turn_id.as_str()));
             }
             RolloutItem::WorldState(_) | RolloutItem::RealtimeItem(_) => {}
+            RolloutItem::RetainedContext(codex_rollout::RetainedContextEvent::VerifiedAnswer(
+                answer,
+            )) => {
+                let source = (answer.turn_id.clone(), answer.call_id.clone());
+                // A late answer still belongs to its call's instruction boundary, even
+                // if the same running turn has since received another user steer.
+                if let Some(boundary) = self.call_boundaries.get(&source) {
+                    self.record_boundaries[index] = *boundary;
+                } else {
+                    self.assign_targeted_record(index, Some(&answer.turn_id));
+                }
+                self.call_boundaries
+                    .insert(source, self.record_boundaries[index]);
+            }
             RolloutItem::SecurityRiskScore(_) => self.record_boundaries[index] = None,
         }
 
@@ -235,12 +260,31 @@ impl RollbackPlanner {
             boundary_alive,
             compactions,
             model_replay,
+            turn_boundaries,
+            call_boundaries,
             ..
         } = self;
         let replay_anchor = model_replay.finish().empty_replacement_history_compaction;
+        let removed_turns = turn_boundaries
+            .iter()
+            .filter(|(_, boundary)| !boundary_alive[**boundary])
+            .map(|(turn_id, _)| turn_id.as_str())
+            .collect::<Vec<_>>();
         let compacted_items = compactions
             .into_iter()
             .filter_map(|mut frame| {
+                // Migration removes rollback markers. Checkpoints must therefore carry
+                // the same surviving facts as their standalone source events.
+                if let Some(context) = &mut frame.item.retained_context {
+                    context.retain_answers(|answer| {
+                        call_boundaries
+                            .get(&(answer.turn_id.clone(), answer.call_id.clone()))
+                            .map_or_else(
+                                || !removed_turns.contains(&answer.turn_id.as_str()),
+                                |boundary| boundary.is_none_or(|boundary| boundary_alive[boundary]),
+                            )
+                    });
+                }
                 if Some(frame.record_index) == replay_anchor {
                     frame.item.replacement_history = Some(Vec::new());
                     frame.item.mcp_resource_origins = None;

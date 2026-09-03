@@ -350,11 +350,12 @@ pub(super) async fn start_app_server_for_session_command(
     } else {
         None
     };
-    let app_server_target = super::app_server_target_for_launch(
+    let mut app_server_target = super::app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
         workload_identity_selected,
+        std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     )?;
     let remote_cwd_override = cli
         .cwd
@@ -446,11 +447,11 @@ pub(super) async fn start_app_server_for_session_command(
             .build(Some(local_runtime_paths), config.http_client_factory())
             .wrap_err("failed to initialize environment manager")?,
     );
-    let state_db = super::init_state_db_for_app_server_target(&config, &app_server_target)
+    let mut state_db = super::init_state_db_for_app_server_target(&config, &app_server_target)
         .await
         .wrap_err("failed to initialize state database")?;
     let app_server = super::start_app_server(
-        &app_server_target,
+        &mut app_server_target,
         arg0_paths,
         config,
         cli_kv_overrides,
@@ -459,7 +460,7 @@ pub(super) async fn start_app_server_for_session_command(
         cloud_config_bundle,
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
-        state_db,
+        &mut state_db,
         environment_manager,
     )
     .await?;

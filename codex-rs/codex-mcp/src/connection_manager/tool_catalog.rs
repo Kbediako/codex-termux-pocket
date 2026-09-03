@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -170,6 +171,7 @@ impl McpConnectionSet {
         config: Arc<crate::McpConfig>,
         plugins_available: bool,
         required_servers: &[String],
+        required_plugins: &HashSet<String>,
     ) -> McpBinding {
         let revision = self.tool_catalog_revision.read().await;
         let mut listed_tools = Vec::new();
@@ -190,10 +192,13 @@ impl McpConnectionSet {
                 let has_cached_tools = cached_tools.is_some();
                 let must_wait_for_startup = (required
                     && (!view.connection.startup_is_dormant() || !has_cached_tools))
-                    || self.is_selected_plugin_mcp_server(server_name)
                     || required_servers
                         .iter()
                         .any(|required| required == server_name)
+                    || (self.is_selected_plugin_mcp_server(server_name)
+                        && self
+                            .plugin_id_for_mcp_server_name(server_name)
+                            .is_some_and(|plugin_id| required_plugins.contains(plugin_id)))
                     || (server_name == CODEX_APPS_MCP_SERVER_NAME && !has_cached_tools);
                 if !must_wait_for_startup && has_cached_tools {
                     return (server_name, view, cached_tools);

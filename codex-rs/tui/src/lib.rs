@@ -104,6 +104,7 @@ mod app_event;
 mod app_event_sender;
 mod app_info;
 mod app_server_approval_conversions;
+mod app_server_connection;
 mod app_server_session;
 mod approval_events;
 mod ascii_animation;
@@ -118,6 +119,8 @@ mod collaboration_modes;
 mod color;
 mod config_update;
 pub(crate) mod custom_terminal;
+mod experimental_features;
+mod permission_discovery;
 mod pets;
 pub use custom_terminal::Terminal;
 mod auto_review_denials;
@@ -249,7 +252,6 @@ pub use public_widgets::composer_input::ComposerInput;
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
 
-#[cfg(unix)]
 const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
 
@@ -444,16 +446,28 @@ async fn connect_remote_app_server(
     Ok(AppServerClient::Remote(app_server))
 }
 
-#[cfg(unix)]
 async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<AbsolutePathBuf> {
     let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home).ok()?;
+    #[cfg(windows)]
+    let (validated_path, _directory) =
+        codex_uds::validate_private_socket_path(socket_path.as_path()).ok()?;
+    #[cfg(windows)]
+    let validated_path = AbsolutePathBuf::from_absolute_path_checked(validated_path).ok()?;
+    #[cfg(windows)]
+    let probe_path = validated_path.as_path();
+    #[cfg(not(windows))]
+    let probe_path = socket_path.as_path();
     match tokio::time::timeout(
         AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path.as_path()),
+        codex_uds::UnixStream::connect(probe_path),
     )
     .await
     {
-        Ok(Ok(_stream)) => Some(socket_path),
+        Ok(Ok(_stream)) => {
+            #[cfg(windows)]
+            _stream.ensure_non_elevated_peer().ok()?;
+            Some(socket_path)
+        }
         Ok(Err(err)) => {
             tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
             None
@@ -469,14 +483,9 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
     }
 }
 
-#[cfg(not(unix))]
-async fn maybe_probe_default_daemon_socket(_codex_home: &Path) -> Option<AbsolutePathBuf> {
-    None
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn start_app_server(
-    target: &AppServerTarget,
+    target: &mut AppServerTarget,
     arg0_paths: Arg0DispatchPaths,
     config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
@@ -485,28 +494,39 @@ async fn start_app_server(
     cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
-    state_db: Option<StateDbHandle>,
+    state_db: &mut Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerClient> {
-    match target {
-        AppServerTarget::Embedded => start_embedded_app_server(
-            arg0_paths,
-            config,
-            cli_kv_overrides,
-            loader_overrides,
-            strict_config,
-            cloud_config_bundle,
-            feedback,
-            log_db,
-            state_db,
-            environment_manager,
-        )
-        .await
-        .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+    let connection = if matches!(target, AppServerTarget::Embedded) {
+        None
+    } else {
+        Some(app_server_connection::connect(target).await)
+    };
+    if let Some(connection) = connection {
+        match connection {
+            Ok(app_server) => return Ok(app_server),
+            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
+                tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
+                *target = AppServerTarget::Embedded;
+                *state_db = init_state_db_for_app_server_target(&config, target).await?;
+            }
+            Err(err) => return Err(err),
         }
     }
+    start_embedded_app_server(
+        arg0_paths,
+        config,
+        cli_kv_overrides,
+        loader_overrides,
+        strict_config,
+        cloud_config_bundle,
+        feedback,
+        log_db,
+        state_db.clone(),
+        environment_manager,
+    )
+    .await
+    .map(AppServerClient::InProcess)
 }
 
 pub(crate) async fn start_app_server_for_picker(
@@ -515,8 +535,10 @@ pub(crate) async fn start_app_server_for_picker(
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerSession> {
+    let mut target = target.clone();
+    let mut state_db = state_db;
     let app_server = start_app_server(
-        target,
+        &mut target,
         Arg0DispatchPaths::default(),
         config.clone(),
         Vec::new(),
@@ -525,7 +547,7 @@ pub(crate) async fn start_app_server_for_picker(
         CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
-        state_db,
+        &mut state_db,
         environment_manager,
     )
     .await?;
@@ -733,6 +755,7 @@ fn latest_session_lookup_params(
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
     ThreadListParams {
+        originators: None,
         cursor: None,
         limit: Some(1),
         sort_key: Some(AppServerThreadSortKey::UpdatedAt),
@@ -864,6 +887,7 @@ fn app_server_target_for_launch(
     default_daemon_socket: Option<AbsolutePathBuf>,
     can_reuse_implicit_local_daemon: bool,
     workload_identity_selected: bool,
+    exec_server_url: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<AppServerTarget> {
     if workload_identity_selected {
         if explicit_remote_endpoint.is_some() {
@@ -876,7 +900,8 @@ fn app_server_target_for_launch(
     }
     Ok(match explicit_remote_endpoint {
         Some(endpoint) => AppServerTarget::Remote { endpoint },
-        None if can_reuse_implicit_local_daemon => {
+        // A shared daemon cannot adopt this invocation's executor selection.
+        None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
             default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
                 AppServerTarget::LocalDaemon {
                     endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
@@ -970,7 +995,7 @@ async fn run_ratatui_app(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    app_server_target: AppServerTarget,
+    mut app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
     manually_selected_oss_provider: Option<String>,
@@ -979,7 +1004,7 @@ async fn run_ratatui_app(
     mut cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
-    state_db: Option<StateDbHandle>,
+    mut state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
@@ -1032,7 +1057,7 @@ async fn run_ratatui_app(
         .run_until(
             &mut tui,
             start_app_server(
-                &app_server_target,
+                &mut app_server_target,
                 arg0_paths.clone(),
                 initial_config.clone(),
                 cli_kv_overrides.clone(),
@@ -1041,7 +1066,7 @@ async fn run_ratatui_app(
                 cloud_config_bundle.clone(),
                 feedback.clone(),
                 log_db.clone(),
-                state_db.clone(),
+                &mut state_db,
                 environment_manager.clone(),
             ),
         )
@@ -1639,7 +1664,7 @@ async fn run_ratatui_app(
             .run_until(
                 &mut tui,
                 start_app_server(
-                    &app_server_target,
+                    &mut app_server_target,
                     arg0_paths,
                     config.clone(),
                     cli_kv_overrides.clone(),
@@ -1648,7 +1673,7 @@ async fn run_ratatui_app(
                     cloud_config_bundle.clone(),
                     feedback.clone(),
                     log_db.clone(),
-                    state_db.clone(),
+                    &mut state_db,
                     environment_manager.clone(),
                 ),
             )
@@ -1977,6 +2002,10 @@ fn should_show_bedrock_setup_wizard(
             .auth_config()
             .is_login_method_allowed(ForcedLoginMethod::Api)
 }
+
+#[cfg(test)]
+#[path = "daemon_startup_tests.rs"]
+mod daemon_startup_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2624,18 +2653,48 @@ requires_openai_auth = {requires_openai_auth}
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
         let socket_path =
             codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
-        std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
-        let _listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        #[cfg(windows)]
+        {
+            let parent = socket_path.as_path().parent().expect("socket parent");
+            std::fs::create_dir_all(parent)?;
+            let listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
+            assert!(
+                maybe_probe_default_daemon_socket(codex_home.path())
+                    .await
+                    .is_none()
+            );
+            drop(listener);
+            std::fs::remove_dir_all(parent)?;
+        }
+        codex_uds::prepare_private_socket_directory(
+            socket_path.as_path().parent().expect("socket parent"),
+        )
+        .await?;
+        let _listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
 
+        let expected = Some(socket_path);
+        #[cfg(windows)]
+        let expected = {
+            // Existing Windows CI may run elevated; an elevated listener must
+            // never be selected implicitly, even when its directory is private.
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"])
+                .output()?;
+            assert!(output.status.success());
+            match String::from_utf8(output.stdout)?.trim() {
+                "True" => None,
+                "False" => expected,
+                other => panic!("unexpected elevation result: {other}"),
+            }
+        };
         assert_eq!(
             maybe_probe_default_daemon_socket(codex_home.path()).await,
-            Some(socket_path)
+            expected
         );
         Ok(())
     }
@@ -2649,6 +2708,7 @@ requires_openai_auth = {requires_openai_auth}
             Some(socket_path.clone()),
             /*can_reuse_implicit_local_daemon*/ true,
             /*workload_identity_selected*/ false,
+            /*exec_server_url*/ None,
         )?;
 
         assert_eq!(
@@ -2663,6 +2723,24 @@ requires_openai_auth = {requires_openai_auth}
     }
 
     #[test]
+    fn app_server_target_for_launch_preserves_executor_selection() -> color_eyre::Result<()> {
+        let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
+        for executor in ["none", "ws://127.0.0.1:4501"] {
+            assert_eq!(
+                app_server_target_for_launch(
+                    /*explicit_remote_endpoint*/ None,
+                    Some(socket_path.clone()),
+                    /*can_reuse_implicit_local_daemon*/ true,
+                    /*workload_identity_selected*/ false,
+                    Some(std::ffi::OsStr::new(executor)),
+                )?,
+                AppServerTarget::Embedded,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn app_server_target_for_launch_prefers_explicit_remote_endpoint() -> color_eyre::Result<()> {
         let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
             socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
@@ -2672,6 +2750,7 @@ requires_openai_auth = {requires_openai_auth}
             Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
+            Some(std::ffi::OsStr::new("none")),
         )?;
 
         assert_eq!(
@@ -2694,6 +2773,7 @@ requires_openai_auth = {requires_openai_auth}
             Some(socket_path),
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
+            /*exec_server_url*/ None,
         )?;
 
         assert_eq!(target, AppServerTarget::Embedded);
@@ -2709,6 +2789,7 @@ requires_openai_auth = {requires_openai_auth}
                 Some(default_socket),
                 /*can_reuse_implicit_local_daemon*/ true,
                 /*workload_identity_selected*/ true,
+                /*exec_server_url*/ None,
             )?,
             AppServerTarget::Embedded
         );
@@ -2721,6 +2802,7 @@ requires_openai_auth = {requires_openai_auth}
             /*default_daemon_socket*/ None,
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ true,
+            /*exec_server_url*/ None,
         )
         .expect_err("remote hosts must own workload identity");
         assert_eq!(

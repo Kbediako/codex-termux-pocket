@@ -38,7 +38,6 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::RolloutItem;
-use codex_rollout::RolloutLine;
 use codex_rollout::read_session_meta_line;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -108,7 +107,7 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
     let inherited_revert_cutoff =
         std::fs::read_to_string(parent.path.as_ref().expect("parent rollout"))?
             .lines()
-            .map(serde_json::from_str::<RolloutLine>)
+            .map(codex_rollout::parse_rollout_line)
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .find_map(|line| match line.item {

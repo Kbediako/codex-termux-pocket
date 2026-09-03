@@ -743,7 +743,7 @@ impl FileSystemSandboxPolicy {
     /// entry for the same target wins under the normal precedence rules, so a
     /// shadowed `read` entry must not downgrade the policy out of full-disk
     /// write mode.
-    fn has_write_narrowing_entries(&self) -> bool {
+    fn has_write_narrowing_entries(&self, convention: PathConvention) -> bool {
         matches!(self.kind, FileSystemSandboxKind::Restricted)
             && self.entries.iter().any(|entry| {
                 if entry.access.can_write() {
@@ -751,15 +751,21 @@ impl FileSystemSandboxPolicy {
                 }
 
                 match &entry.path {
-                    FileSystemPath::Path { .. } => !self.has_same_target_write_override(entry),
+                    FileSystemPath::Path { .. } => {
+                        !self.has_same_target_write_override(entry, convention)
+                    }
                     FileSystemPath::GlobPattern { .. } => true,
                     FileSystemPath::Special { value } => match value {
                         FileSystemSpecialPath::Root => entry.access == FileSystemAccessMode::Deny,
-                        FileSystemSpecialPath::SlashTmp if !cfg!(unix) => false,
+                        FileSystemSpecialPath::SlashTmp
+                            if convention == PathConvention::Windows =>
+                        {
+                            false
+                        }
                         FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. } => {
                             false
                         }
-                        _ => !self.has_same_target_write_override(entry),
+                        _ => !self.has_same_target_write_override(entry, convention),
                     },
                 }
             })
@@ -767,11 +773,15 @@ impl FileSystemSandboxPolicy {
 
     /// Returns true when a higher-priority `write` entry targets the same
     /// location as `entry`, so `entry` cannot narrow effective write access.
-    fn has_same_target_write_override(&self, entry: &FileSystemSandboxEntry) -> bool {
+    fn has_same_target_write_override(
+        &self,
+        entry: &FileSystemSandboxEntry,
+        convention: PathConvention,
+    ) -> bool {
         self.entries.iter().any(|candidate| {
             candidate.access.can_write()
                 && candidate.access > entry.access
-                && file_system_paths_share_target(&candidate.path, &entry.path)
+                && file_system_paths_share_target(&candidate.path, &entry.path, convention)
         })
     }
 
@@ -880,14 +890,29 @@ impl FileSystemSandboxPolicy {
         }
     }
 
-    /// Returns true when filesystem writes are unrestricted.
+    /// Returns true when filesystem writes are unrestricted on this host.
     pub fn has_full_disk_write_access(&self) -> bool {
+        self.has_full_disk_write_access_for_convention(Some(PathConvention::native()))
+    }
+
+    /// Returns true when filesystem writes are unrestricted for the selected executor.
+    pub fn has_full_disk_write_access_with_context(
+        &self,
+        context: &FileSystemSandboxPolicyContext<'_>,
+    ) -> bool {
+        self.has_full_disk_write_access_for_convention(context.cwd.infer_path_convention())
+    }
+
+    fn has_full_disk_write_access_for_convention(
+        &self,
+        convention: Option<PathConvention>,
+    ) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => true,
-            FileSystemSandboxKind::Restricted => {
+            FileSystemSandboxKind::Restricted => convention.is_some_and(|convention| {
                 self.has_root_access(FileSystemAccessMode::can_write)
-                    && !self.has_write_narrowing_entries()
-            }
+                    && !self.has_write_narrowing_entries(convention)
+            }),
         }
     }
 
@@ -967,11 +992,16 @@ impl FileSystemSandboxPolicy {
             .unwrap_or(FileSystemAccessMode::Deny)
     }
 
-    fn can_write_path(&self, path: &PathUri, context: &FileSystemSandboxPolicyContext<'_>) -> bool {
+    pub fn can_write_path(
+        &self,
+        path: &PathUri,
+        context: &FileSystemSandboxPolicyContext<'_>,
+    ) -> bool {
         if !self.resolve_access(path, context).can_write() {
             return false;
         }
-        self.has_full_disk_write_access() || self.metadata_write_denial(path, context).is_none()
+        self.has_full_disk_write_access_with_context(context)
+            || self.metadata_write_denial(path, context).is_none()
     }
 
     fn metadata_write_denial(
@@ -1453,13 +1483,23 @@ impl FileSystemSandboxPolicy {
     /// do not currently exist (including `/tmp`). Do not use this result to authorize
     /// filesystem access or replace the resolution needed for sandbox enforcement.
     pub fn has_configured_writable_roots_with_cwd(&self, cwd: &Path) -> bool {
-        !self.has_full_disk_write_access()
-            && with_local_policy_context(cwd, cwd, |_, context| {
-                self.resolved_entries(context)
-                    .into_iter()
-                    .any(|(path, access)| access.can_write() && self.can_write_path(&path, context))
-            })
-            .unwrap_or(false)
+        with_local_policy_context(cwd, cwd, |_, context| {
+            self.has_configured_writable_roots(context)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Reports configured writable roots for executor-context diagnostics, excluding
+    /// full-disk policies and without inspecting the filesystem.
+    pub fn has_configured_writable_roots(
+        &self,
+        context: &FileSystemSandboxPolicyContext<'_>,
+    ) -> bool {
+        !self.has_full_disk_write_access_with_context(context)
+            && self
+                .resolved_entries(context)
+                .into_iter()
+                .any(|(path, access)| access.can_write() && self.can_write_path(&path, context))
     }
 
     /// Returns writable roots without following attacker-mutable path components.
@@ -1979,7 +2019,11 @@ fn local_temporary_directories() -> Vec<PathUri> {
 /// This is intentionally narrower than full path resolution: it only answers
 /// the "can one entry shadow another at the same specificity?" question used
 /// by `has_write_narrowing_entries`.
-fn file_system_paths_share_target(left: &FileSystemPath, right: &FileSystemPath) -> bool {
+fn file_system_paths_share_target(
+    left: &FileSystemPath,
+    right: &FileSystemPath,
+    convention: PathConvention,
+) -> bool {
     match (left, right) {
         (FileSystemPath::Path { path: left }, FileSystemPath::Path { path: right }) => {
             left == right
@@ -1988,9 +2032,10 @@ fn file_system_paths_share_target(left: &FileSystemPath, right: &FileSystemPath)
             special_paths_share_target(left, right)
         }
         (FileSystemPath::Path { path }, FileSystemPath::Special { value })
-        | (FileSystemPath::Special { value }, FileSystemPath::Path { path }) => path
-            .to_abs_path()
-            .is_ok_and(|path| special_path_matches_absolute_path(value, &path)),
+        | (FileSystemPath::Special { value }, FileSystemPath::Path { path }) => {
+            path.infer_path_convention() == Some(convention)
+                && special_path_matches_path_uri(value, path)
+        }
         (
             FileSystemPath::GlobPattern { pattern: left },
             FileSystemPath::GlobPattern { pattern: right },
@@ -2025,18 +2070,19 @@ fn special_paths_share_target(left: &FileSystemSpecialPath, right: &FileSystemSp
     }
 }
 
-/// Matches cwd-independent special paths against absolute `Path` entries when
+/// Matches cwd-independent special paths against `PathUri` entries when
 /// they name the same location.
 ///
 /// We intentionally only fold the special paths whose concrete meaning is
 /// stable without a cwd, such as `/` and `/tmp`.
-fn special_path_matches_absolute_path(
-    value: &FileSystemSpecialPath,
-    path: &AbsolutePathBuf,
-) -> bool {
+fn special_path_matches_path_uri(value: &FileSystemSpecialPath, path: &PathUri) -> bool {
     match value {
-        FileSystemSpecialPath::Root => path.as_path().parent().is_none(),
-        FileSystemSpecialPath::SlashTmp => path.as_path() == Path::new("/tmp"),
+        FileSystemSpecialPath::Root => path.lexical_depth().is_some() && path.parent().is_none(),
+        FileSystemSpecialPath::SlashTmp => {
+            path.infer_path_convention() == Some(PathConvention::Posix)
+                && path.lexical_depth() == Some(1)
+                && path.basename().as_deref() == Some("tmp")
+        }
         _ => false,
     }
 }
@@ -2329,7 +2375,7 @@ fn append_default_read_only_entry_if_no_explicit_rule(
 ) {
     if entries
         .iter()
-        .any(|entry| file_system_paths_share_target(&entry.path, &path))
+        .any(|entry| file_system_paths_share_target(&entry.path, &path, PathConvention::native()))
     {
         return;
     }
@@ -2509,6 +2555,12 @@ mod tests {
             FileSystemSandboxPolicy::read_only(),
             FileSystemSandboxPolicy::unrestricted(),
             FileSystemSandboxPolicy::external_sandbox(),
+            FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Write,
+            )]),
             FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
                 writable_root.clone().into(),
                 FileSystemAccessMode::Write,

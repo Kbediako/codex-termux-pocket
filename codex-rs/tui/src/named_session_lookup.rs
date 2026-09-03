@@ -274,6 +274,7 @@ impl<'a> NamedSessionCandidates<'a> {
             };
             let response = app_server
                 .thread_list(ThreadListParams {
+                    originators: None,
                     cursor: self.cursor.clone(),
                     limit: Some(100),
                     sort_key: Some(sort_key),

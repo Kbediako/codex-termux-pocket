@@ -1069,6 +1069,7 @@ impl ThreadRequestProcessor {
             thread_list_state_permit: self.thread_list_state_permit.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
+            thread_unload_delay: self.config.thread_unload_delay,
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
         }
@@ -1200,6 +1201,7 @@ impl ThreadRequestProcessor {
             thread_list_state_permit: self.thread_list_state_permit.clone(),
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
+            thread_unload_delay: self.config.thread_unload_delay,
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
         };
@@ -1992,7 +1994,7 @@ impl ThreadRequestProcessor {
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
             thread.session_id = loaded_thread.session_configured().session_id.to_string();
             let config_snapshot = loaded_thread.config_snapshot().await;
-            apply_live_model_settings(&mut thread, &config_snapshot);
+            apply_live_thread_settings(&mut thread, &config_snapshot);
         }
         self.attach_thread_name(thread_uuid, &mut thread).await;
         thread.status = resolve_thread_status(
@@ -2047,6 +2049,10 @@ impl ThreadRequestProcessor {
         let (mut thread, _) =
             thread_from_stored_thread(stored_thread, fallback_provider.as_str(), &self.config.cwd);
 
+        if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_id).await {
+            let config_snapshot = loaded_thread.config_snapshot().await;
+            apply_live_thread_settings(&mut thread, &config_snapshot);
+        }
         thread.status = resolve_thread_status(
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
@@ -2507,6 +2513,7 @@ impl ThreadRequestProcessor {
             sort_direction,
             model_providers,
             source_kinds,
+            originators,
             archived,
             section_id,
             project_id,
@@ -2516,6 +2523,14 @@ impl ThreadRequestProcessor {
             parent_thread_id,
             ancestor_thread_id,
         } = params;
+        if originators
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        {
+            return Err(invalid_params(
+                "originator filtering is not supported by the local app-server",
+            ));
+        }
         if project_id.is_some() && !self.thread_store.supports_projects() {
             return Err(unsupported_thread_store_operation("projects"));
         }
@@ -2983,7 +2998,7 @@ impl ThreadRequestProcessor {
         } else {
             fallback_thread
         };
-        apply_live_model_settings(&mut thread, &config_snapshot);
+        apply_live_thread_settings(&mut thread, &config_snapshot);
         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
             .await?;
         Ok(thread)
@@ -4282,7 +4297,7 @@ impl ThreadRequestProcessor {
             );
             thread_summary.session_id = existing_thread.session_configured().session_id.to_string();
             thread_summary.thread_source = config_snapshot.thread_source.clone().map(Into::into);
-            apply_live_model_settings(&mut thread_summary, &config_snapshot);
+            apply_live_thread_settings(&mut thread_summary, &config_snapshot);
             thread_summary.can_accept_direct_input = Some(can_accept_direct_input(
                 existing_thread.multi_agent_version(),
                 &config_snapshot.session_source,
@@ -4647,7 +4662,7 @@ impl ThreadRequestProcessor {
             )),
         };
         let mut thread = thread?;
-        apply_live_model_settings(&mut thread, &config_snapshot);
+        apply_live_thread_settings(&mut thread, &config_snapshot);
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
@@ -5145,7 +5160,7 @@ impl ThreadRequestProcessor {
         ));
         thread.session_id = session_configured.session_id.to_string();
         thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
-        apply_live_model_settings(&mut thread, &config_snapshot);
+        apply_live_thread_settings(&mut thread, &config_snapshot);
         if thread.path.is_none() {
             thread.project_id = inherited_project_id.clone();
         }
@@ -5906,6 +5921,7 @@ pub(crate) fn thread_from_stored_thread(
     let thread_id = thread.thread_id.to_string();
     let thread = Thread {
         id: thread_id.clone(),
+        environments: None,
         extra: None,
         session_id: thread_id,
         forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
@@ -5941,6 +5957,7 @@ pub(crate) fn thread_from_stored_thread(
         path,
         cwd,
         cli_version: thread.cli_version,
+        originator: thread.originator,
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
         source: source.into(),
@@ -6094,6 +6111,13 @@ fn build_thread_from_snapshot(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Thread {
         id: thread_id.to_string(),
+        environments: Some(
+            config_snapshot
+                .environment_selections()
+                .iter()
+                .map(Into::into)
+                .collect(),
+        ),
         extra: None,
         session_id,
         forked_from_id: None,
@@ -6114,6 +6138,8 @@ fn build_thread_from_snapshot(
         path,
         cwd: config_snapshot.cwd().clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        originator: (!config_snapshot.originator.is_empty())
+            .then(|| config_snapshot.originator.clone()),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),

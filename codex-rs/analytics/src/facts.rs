@@ -604,6 +604,7 @@ pub struct PluginMeasurementsInput {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    pub originator: String,
     pub plugin_id: String,
     pub execution_id: String,
     pub operation: String,

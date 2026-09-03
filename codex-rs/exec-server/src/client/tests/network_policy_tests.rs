@@ -266,6 +266,7 @@ async fn abandoned_process_start_unregisters_and_cleans_up() {
     let start_process_id = process_id.clone();
     let start = tokio::spawn(async move {
         let params = ExecParams {
+            metadata: Default::default(),
             process_id: start_process_id,
             argv: vec!["true".to_string()],
             cwd: PathUri::from_host_native_path(std::env::current_dir().expect("cwd"))

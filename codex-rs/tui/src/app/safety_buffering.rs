@@ -41,10 +41,6 @@ impl App {
             return;
         }
         if !self.chat_widget.can_retry_safety_buffered_turn(&turn_id) {
-            self.app_event_tx.send(AppEvent::UpdateModel(model));
-            self.app_event_tx.send(AppEvent::UpdateReasoningEffort(Some(
-                ReasoningEffortConfig::Low,
-            )));
             return;
         }
 

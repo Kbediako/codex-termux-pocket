@@ -11,7 +11,7 @@ impl ChatWidget {
         request: ServerRequest,
         replay_kind: Option<ReplayKind>,
     ) {
-        if self.misalignment_policy_violation {
+        if self.has_misalignment_policy_violation() {
             return;
         }
 
