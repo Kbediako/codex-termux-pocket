@@ -6,7 +6,9 @@ run-name: Fork CI · ${{ github.event_name }} · ${{ github.ref_name }}
 on:
   pull_request: {}
   push:
-    branches: [main]
+    branches:
+      - main
+      - automation/alpha1541-integration
   workflow_dispatch:
 
 permissions:
@@ -18,6 +20,8 @@ concurrency:
 
 jobs:
   validate:
+    if: >-
+      ${{ github.ref != 'refs/heads/automation/alpha1541-integration' }}
     name: Termux fork checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -89,3 +93,49 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  alpha1541-integrate:
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.ref == 'refs/heads/automation/alpha1541-integration'
+          && github.event.head_commit.message == 'ci: trigger exact alpha.1 integration' }}
+    name: Integrate exact 0.154.0-alpha.1 source
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout isolated staging branch with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: automation/alpha1541-integration
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up repository CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Simulate the Termux bash path for hosted helper tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data/data/com.termux/files/usr/bin
+          sudo ln -sfn /usr/bin/bash /data/data/com.termux/files/usr/bin/bash
+
+      - name: Integrate and validate the exact peeled upstream commit
+        shell: bash
+        run: bash .github/scripts/alpha1541-integrate.sh
+
+      - name: Upload complete integration evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: alpha1541-integration-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/alpha1541-integration-evidence
+          if-no-files-found: warn
+          retention-days: 7

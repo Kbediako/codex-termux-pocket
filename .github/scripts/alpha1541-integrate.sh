@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly BASE_MAIN_SHA="349ddba31e77bd91a3d58fd90f696cf068f1d57f"
+readonly STAGING_BRANCH="automation/alpha1541-integration"
+readonly SETUP_SUBJECT="ci: stage exact alpha.1 integration"
+readonly TRIGGER_SUBJECT="ci: trigger exact alpha.1 integration"
+readonly UPSTREAM_TAG="rust-v0.154.0-alpha.1"
+readonly UPSTREAM_TAG_OBJECT="93476d33b171c61f08dd44141520d8e7afe6acf1"
+readonly UPSTREAM_COMMIT="042534ec1ab2f79c2997e779347d5383832ecb2e"
+readonly PACKAGE_VERSION="0.154.0-alpha.1"
+readonly PREVIOUS_VERSION="0.153.0-alpha.6"
+readonly MERGE_SUBJECT="termux: update to 0.154.0-alpha.1"
+readonly EXEC_PLAN=".release-engineering/alpha1541-execplan.md"
+readonly EVIDENCE_DIR="${RUNNER_TEMP:?RUNNER_TEMP is required}/alpha1541-integration-evidence"
+
+phase="initializing"
+mkdir -p "$EVIDENCE_DIR"
+
+workspace_version() {
+  awk '
+    /^\[workspace\.package\]$/ { in_package=1; next }
+    /^\[/ && in_package { exit }
+    in_package && /^version[[:space:]]*=/ {
+      value=$0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  '
+}
+
+collect_diagnostics() {
+  set +e
+  printf 'phase=%s\n' "$phase" >"$EVIDENCE_DIR/phase.env"
+  printf 'head=%s\n' "$(git rev-parse HEAD 2>/dev/null || true)" >>"$EVIDENCE_DIR/phase.env"
+  printf 'branch=%s\n' "$(git branch --show-current 2>/dev/null || true)" >>"$EVIDENCE_DIR/phase.env"
+  git status --short >"$EVIDENCE_DIR/status.txt" 2>&1
+  git diff --name-only --diff-filter=U >"$EVIDENCE_DIR/conflicts.txt" 2>&1
+  git diff --cc >"$EVIDENCE_DIR/combined.diff" 2>&1
+  git diff >"$EVIDENCE_DIR/worktree.diff" 2>&1
+  git diff --cached >"$EVIDENCE_DIR/index.diff" 2>&1
+  git log --oneline --decorate -50 >"$EVIDENCE_DIR/recent-log.txt" 2>&1
+  git rev-list --parents -n 12 HEAD >"$EVIDENCE_DIR/recent-parents.txt" 2>&1
+  git remote -v >"$EVIDENCE_DIR/remotes.txt" 2>&1
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    safe="$(printf '%s' "$path" | tr '/ ' '__')"
+    for stage in 1 2 3; do
+      git show ":${stage}:${path}" >"$EVIDENCE_DIR/${safe}.stage${stage}" 2>/dev/null || true
+    done
+  done <"$EVIDENCE_DIR/conflicts.txt"
+}
+
+print_conflict_evidence() {
+  set +e
+  echo "::group::Conflicted paths"
+  cat "$EVIDENCE_DIR/conflicts.txt" || true
+  echo "::endgroup::"
+  echo "::group::Combined conflict diff"
+  cat "$EVIDENCE_DIR/combined.diff" || true
+  echo "::endgroup::"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    safe="$(printf '%s' "$path" | tr '/ ' '__')"
+    for stage in 1 2 3; do
+      echo "::group::${path} index stage $stage"
+      cat "$EVIDENCE_DIR/${safe}.stage${stage}" 2>/dev/null || true
+      echo "::endgroup::"
+    done
+  done <"$EVIDENCE_DIR/conflicts.txt"
+}
+
+resolve_reviewed_version_conflict() {
+  local path="codex-rs/Cargo.toml"
+  local base_version ours_version theirs_version
+  local -a conflicts=()
+
+  mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+  [[ "${#conflicts[@]}" -eq 1 ]]
+  [[ "${conflicts[0]}" == "$path" ]]
+
+  base_version="$(git show ":1:${path}" | workspace_version)"
+  ours_version="$(git show ":2:${path}" | workspace_version)"
+  theirs_version="$(git show ":3:${path}" | workspace_version)"
+  [[ "$base_version" == "0.0.0" ]]
+  [[ "$ours_version" == "$PREVIOUS_VERSION" ]]
+  [[ "$theirs_version" == "$PACKAGE_VERSION" ]]
+
+  python3 - "$path" "$PREVIOUS_VERSION" "$PACKAGE_VERSION" "$UPSTREAM_COMMIT" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+previous = sys.argv[2]
+target = sys.argv[3]
+upstream = sys.argv[4]
+text = path.read_text(encoding="utf-8")
+block = (
+    "<<<<<<< HEAD\n"
+    f'version = "{previous}"\n'
+    "=======\n"
+    f'version = "{target}"\n'
+    f">>>>>>> {upstream}\n"
+)
+if text.count(block) != 1:
+    raise SystemExit("reviewed workspace-version conflict block was not present exactly once")
+updated = text.replace(block, f'version = "{target}"\n', 1)
+for marker in ("<<<<<<<", "=======", ">>>>>>>"):
+    if marker in updated:
+        raise SystemExit(f"unresolved conflict marker remains: {marker}")
+path.write_text(updated, encoding="utf-8")
+PY
+
+  [[ "$(workspace_version <"$path")" == "$PACKAGE_VERSION" ]]
+  git add "$path"
+  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+}
+
+on_error() {
+  local rc=$?
+  local line="${BASH_LINENO[0]:-unknown}"
+  set +e
+  collect_diagnostics
+  printf 'line=%s\nexit=%s\n' "$line" "$rc" >>"$EVIDENCE_DIR/phase.env"
+  echo "::error::alpha.1 integration failed in phase $phase at line $line with exit $rc"
+  exit "$rc"
+}
+trap on_error ERR
+
+append_patch_audit() {
+  local subject="$1"
+  local classification="$2"
+  local reason="$3"
+  local audit="scripts/termux/patch_audit.tsv"
+  if awk -F '\t' -v subject="$subject" '
+    $1 == "subject" && $2 == subject { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$audit"; then
+    return 0
+  fi
+  printf 'subject\t%s\t%s\t%s\n' "$subject" "$classification" "$reason" >>"$audit"
+}
+
+phase="configuring-clean-staging-checkout"
+git config user.name "Kbediako"
+git config user.email "70529246+Kbediako@users.noreply.github.com"
+git fetch --force origin main "+refs/heads/${STAGING_BRANCH}:refs/remotes/origin/${STAGING_BRANCH}"
+remote_main="$(git rev-parse refs/remotes/origin/main)"
+remote_staging="$(git rev-parse "refs/remotes/origin/${STAGING_BRANCH}")"
+[[ "$remote_main" == "$BASE_MAIN_SHA" ]] || {
+  echo "::error::protected main moved before integration: $remote_main != $BASE_MAIN_SHA"
+  exit 1
+}
+git checkout -B alpha1541-work "$remote_staging"
+[[ -z "$(git status --porcelain)" ]]
+git merge-base --is-ancestor "$BASE_MAIN_SHA" HEAD
+[[ "$(git show -s --format=%s HEAD)" == "$TRIGGER_SUBJECT" ]]
+
+phase="squashing-and-classifying-staging-controls"
+append_patch_audit "$SETUP_SUBJECT" tooling "Temporary staging-branch job, ExecPlan, and helper used to integrate the exact official 0.154.0-alpha.1 source; removed before selecting the release source."
+append_patch_audit "$TRIGGER_SUBJECT" tooling "Triggers the isolated exact-alpha integration job after its reviewed workflow and helper exist on the staging branch; removed from the clean source by squashing."
+git reset --soft "$BASE_MAIN_SHA"
+git add -A
+git commit -m "$SETUP_SUBJECT"
+setup_commit="$(git rev-parse HEAD)"
+git push "--force-with-lease=refs/heads/${STAGING_BRANCH}:${remote_staging}" origin "HEAD:refs/heads/${STAGING_BRANCH}"
+[[ "$(git ls-remote origin "refs/heads/${STAGING_BRANCH}" | awk '{print $1}')" == "$setup_commit" ]]
+[[ "$(git ls-remote origin refs/heads/main | awk '{print $1}')" == "$BASE_MAIN_SHA" ]]
+
+phase="fetching-and-peeling-exact-upstream-tag"
+if git remote get-url upstream >/dev/null 2>&1; then
+  git remote set-url upstream https://github.com/openai/codex.git
+else
+  git remote add upstream https://github.com/openai/codex.git
+fi
+git fetch --force --no-tags upstream "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+[[ "$(git cat-file -t "refs/tags/${UPSTREAM_TAG}")" == "tag" ]]
+[[ "$(git rev-parse "refs/tags/${UPSTREAM_TAG}")" == "$UPSTREAM_TAG_OBJECT" ]]
+peeled="$(git rev-parse "refs/tags/${UPSTREAM_TAG}^{}")"
+[[ "$peeled" == "$UPSTREAM_COMMIT" ]]
+actual_version="$(git show "${UPSTREAM_COMMIT}:codex-rs/Cargo.toml" | workspace_version)"
+[[ "$actual_version" == "$PACKAGE_VERSION" ]]
+printf 'upstream_tag=%s\nupstream_tag_object=%s\nupstream_commit=%s\npackage_version=%s\n' "$UPSTREAM_TAG" "$UPSTREAM_TAG_OBJECT" "$UPSTREAM_COMMIT" "$PACKAGE_VERSION" >"$EVIDENCE_DIR/upstream.env"
+
+phase="merging-exact-upstream-source"
+if git merge --no-ff --no-commit "$UPSTREAM_COMMIT"; then
+  :
+else
+  phase="resolving-reviewed-workspace-version-conflict"
+  collect_diagnostics
+  print_conflict_evidence
+  set -e
+  resolve_reviewed_version_conflict
+fi
+[[ -z "$(git diff --name-only --diff-filter=U)" ]]
+
+phase="classifying-integration-merge"
+append_patch_audit "$MERGE_SUBJECT" runtime-critical "Merges the exact official 0.154.0-alpha.1 source and preserves the maintained Android and Termux runtime patch stack."
+
+phase="refreshing-locked-dependency-graphs"
+if ! (cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null); then
+  echo "Locked Cargo metadata is stale after the exact alpha.1 merge; refreshing Cargo.lock."
+  (cd codex-rs && cargo metadata --format-version=1 >/dev/null)
+fi
+(cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
+just bazel-lock-update
+(cd codex-rs && cargo metadata --locked --format-version=1 >/dev/null)
+
+phase="running-supported-pre-source-validation"
+ruby <<'RUBY'
+require "yaml"
+Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+  YAML.safe_load(File.read(path), aliases: true)
+end
+RUBY
+while IFS= read -r file; do
+  bash -n "$file"
+done < <(git grep -Il '^#!.*bash' --)
+PREFIX=/data/data/com.termux/files/usr TERMUX_APK_RELEASE=F_DROID bash scripts/termux/tests/run-tests
+python3 .github/scripts/termux_release_control.py self-test
+(cd codex-rs && cargo fmt --all)
+(cd codex-rs && cargo fmt --all -- --check)
+git diff --check
+
+phase="committing-exact-upstream-merge"
+git add -A
+git commit -m "$MERGE_SUBJECT"
+merge_commit="$(git rev-parse HEAD)"
+git merge-base --is-ancestor "$UPSTREAM_COMMIT" "$merge_commit"
+read -r -a parents <<<"$(git rev-list --parents -n 1 "$merge_commit")"
+[[ "${#parents[@]}" -eq 3 ]]
+[[ "${parents[2]}" == "$UPSTREAM_COMMIT" ]]
+{
+  printf 'setup_commit=%s\n' "$setup_commit"
+  printf 'merge_commit=%s\n' "$merge_commit"
+  printf 'second_parent=%s\n' "${parents[2]}"
+} >>"$EVIDENCE_DIR/upstream.env"
+
+phase="publishing-reviewed-merge-to-staging"
+git push "--force-with-lease=refs/heads/${STAGING_BRANCH}:${setup_commit}" origin "HEAD:refs/heads/${STAGING_BRANCH}"
+remote_after="$(git ls-remote origin "refs/heads/${STAGING_BRANCH}" | awk '{print $1}')"
+[[ "$remote_after" == "$merge_commit" ]]
+[[ "$(git ls-remote origin refs/heads/main | awk '{print $1}')" == "$BASE_MAIN_SHA" ]]
+
+{
+  echo "### Exact upstream alpha.1 integration"
+  echo
+  echo "- Upstream tag: \`${UPSTREAM_TAG}\`"
+  echo "- Annotated tag object: \`${UPSTREAM_TAG_OBJECT}\`"
+  echo "- Peeled upstream commit: \`${UPSTREAM_COMMIT}\`"
+  echo "- Audited staging commit: \`${setup_commit}\`"
+  echo "- Integration commit: \`${merge_commit}\`"
+  echo "- Merge second parent: \`${parents[2]}\`"
+  echo "- Protected main remained unchanged: \`${BASE_MAIN_SHA}\`"
+  echo "- Next boundary: connected-tool cleanup and exact-source selection"
+} >>"$GITHUB_STEP_SUMMARY"
+
+echo "Integrated $UPSTREAM_TAG as $merge_commit on $STAGING_BRANCH; main remains unchanged."
