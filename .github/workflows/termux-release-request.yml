@@ -9,12 +9,14 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/termux-release-request.yml"
       - "scripts/termux/release-publication.env"
   workflow_dispatch:
 
 permissions:
-  actions: read
+  actions: write
   contents: write
+  issues: write
   id-token: write
   attestations: write
   artifact-metadata: write
@@ -27,7 +29,7 @@ jobs:
   publish-validated-runtime:
     name: Publish complete immutable release as Latest
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 240
 
     steps:
       - name: Checkout immutable release controls
@@ -122,3 +124,324 @@ jobs:
           python3 .github/scripts/termux_release_control.py promote
           --manifest dist/release-manifest.env
           --receipt "${{ runner.temp }}/termux-release-audit-receipt.json"
+
+      - name: Classify the workflow-created promotion commit on final main
+        id: final
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git"
+
+          final_main=""
+          for attempt in $(seq 1 90); do
+            git fetch --force origin main
+            candidate="$(git rev-parse refs/remotes/origin/main)"
+            remote_manifest="$(
+              gh api "repos/$repo/contents/scripts/termux/release-manifest.env?ref=$candidate" \
+                --jq '.content' | tr -d '\n' | base64 --decode
+            )"
+            if grep -Fqx "release_tag=$RELEASE_TAG" <<<"$remote_manifest" && \
+               grep -Fqx "head_sha=$SOURCE_SHA" <<<"$remote_manifest"; then
+              final_main="$candidate"
+              break
+            fi
+            sleep 2
+          done
+          [[ -n "$final_main" ]]
+
+          git switch --force-create promoted-main "$final_main"
+          audit="scripts/termux/patch_audit.tsv"
+          sed -i '/^subject\ttermux: promote termux-v.*-<source>\t/d' "$audit"
+          promotion_subject="termux: promote $RELEASE_TAG"
+          if ! awk -F '\t' -v subject="$promotion_subject" '
+            $1 == "subject" && $2 == subject { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' "$audit"; then
+            printf 'subject\t%s\ttooling\tPromotes the anonymously verified updater manifest for the exact published release.\n' \
+              "$promotion_subject" >>"$audit"
+          fi
+          classifier_subject="termux: classify promoted release commit"
+          if ! awk -F '\t' -v subject="$classifier_subject" '
+            $1 == "subject" && $2 == subject { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' "$audit"; then
+            printf 'subject\t%s\ttooling\tRecords the exact workflow-created promotion subject before final-main governance checks.\n' \
+              "$classifier_subject" >>"$audit"
+          fi
+
+          git diff --check
+          if ! git diff --quiet -- "$audit"; then
+            git add "$audit"
+            git commit -m "$classifier_subject"
+            git push origin HEAD:main
+            final_main="$(git rev-parse HEAD)"
+          fi
+
+          [[ "$(gh api "repos/$repo/branches/main" --jq '.commit.sha')" == "$final_main" ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" "$final_main"
+          python3 .github/scripts/validate-termux-workflow-topology.py
+          python3 .github/scripts/termux_release_control.py self-test
+          grep -Fqx "release_tag=$RELEASE_TAG" scripts/termux/release-manifest.env
+          grep -Fqx "head_sha=$SOURCE_SHA" scripts/termux/release-manifest.env
+          printf 'final_main=%s\n' "$final_main" >>"$GITHUB_OUTPUT"
+
+      - name: Dispatch every permanent post-promotion check on final main
+        id: post
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINAL_MAIN: ${{ steps.final.outputs.final_main }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          workflows=(
+            termux-release-channel.yml
+            termux-governance.yml
+            termux-control-plane.yml
+            blocking-ci.yml
+          )
+          keys=(
+            release_channel_run_id
+            governance_run_id
+            post_control_run_id
+            post_fork_ci_run_id
+          )
+          declare -a before_ids run_ids
+
+          for index in "${!workflows[@]}"; do
+            workflow="${workflows[$index]}"
+            path=".github/workflows/$workflow"
+            [[ "$(gh api "repos/$repo/branches/main" --jq '.commit.sha')" == "$FINAL_MAIN" ]]
+            before_ids[$index]="$(
+              gh api "repos/$repo/actions/workflows/$workflow/runs?event=workflow_dispatch&per_page=100" \
+                --jq '[.workflow_runs[].id] | max // 0'
+            )"
+            gh workflow run "$workflow" --repo "$repo" --ref main
+          done
+
+          for index in "${!workflows[@]}"; do
+            workflow="${workflows[$index]}"
+            path=".github/workflows/$workflow"
+            before="${before_ids[$index]}"
+            run_id=""
+            for attempt in $(seq 1 90); do
+              runs_json="$(
+                gh api "repos/$repo/actions/workflows/$workflow/runs?event=workflow_dispatch&per_page=100"
+              )"
+              run_id="$(
+                jq -r --arg path "$path" --arg sha "$FINAL_MAIN" --argjson before "$before" '
+                  [.workflow_runs[]
+                    | select(.path == $path and .event == "workflow_dispatch" and .head_sha == $sha and .id > $before)]
+                  | sort_by(.id) | last | .id // empty
+                ' <<<"$runs_json"
+              )"
+              [[ -n "$run_id" ]] && break
+              sleep 2
+            done
+            [[ -n "$run_id" ]]
+            run_ids[$index]="$run_id"
+            printf '%s=%s\n' "${keys[$index]}" "$run_id" >>"$GITHUB_OUTPUT"
+          done
+
+          for attempt in $(seq 1 360); do
+            all_complete=true
+            for index in "${!run_ids[@]}"; do
+              run_id="${run_ids[$index]}"
+              run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+              [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$FINAL_MAIN" ]]
+              [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/${workflows[$index]}" ]]
+              status="$(jq -r '.status' <<<"$run_json")"
+              conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+              if [[ "$status" == "completed" ]]; then
+                [[ "$conclusion" == "success" ]]
+              else
+                all_complete=false
+              fi
+            done
+            [[ "$all_complete" == "true" ]] && break
+            sleep 10
+          done
+
+          for index in "${!run_ids[@]}"; do
+            run_id="${run_ids[$index]}"
+            run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+            [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$FINAL_MAIN" ]]
+            [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]]
+            [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]]
+          done
+          [[ "$(gh api "repos/$repo/branches/main" --jq '.commit.sha')" == "$FINAL_MAIN" ]]
+
+      - name: Prove final definition of done and close the maintenance tracker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.request.outputs.maintenance_issue }}
+          UPSTREAM_TAG: ${{ steps.request.outputs.upstream_tag }}
+          UPSTREAM_TAG_OBJECT: ${{ steps.request.outputs.upstream_tag_object }}
+          UPSTREAM_COMMIT: ${{ steps.request.outputs.upstream_commit }}
+          PACKAGE_VERSION: ${{ steps.request.outputs.expected_package_version }}
+          MERGE_COMMIT: ${{ steps.request.outputs.merge_commit }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+          FINAL_MAIN: ${{ steps.final.outputs.final_main }}
+          RELEASE_CHANNEL_RUN_ID: ${{ steps.post.outputs.release_channel_run_id }}
+          GOVERNANCE_RUN_ID: ${{ steps.post.outputs.governance_run_id }}
+          POST_CONTROL_RUN_ID: ${{ steps.post.outputs.post_control_run_id }}
+          POST_FORK_CI_RUN_ID: ${{ steps.post.outputs.post_fork_ci_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]
+
+          CODEX_TERMUX_RELEASE_MANIFEST=dist/release-manifest.env \
+            python3 .github/scripts/audit-termux-public-channel.py
+
+          [[ "$(gh api "repos/$repo/branches/main" --jq '.commit.sha')" == "$FINAL_MAIN" ]]
+          latest_json="$(gh api "repos/$repo/releases/latest")"
+          [[ "$(jq -r '.tag_name' <<<"$latest_json")" == "$RELEASE_TAG" ]]
+          [[ "$(jq -r '.target_commitish' <<<"$latest_json")" == "$SOURCE_SHA" ]]
+          [[ "$(jq -r '.draft' <<<"$latest_json")" == "false" ]]
+          [[ "$(jq -r '.prerelease' <<<"$latest_json")" == "false" ]]
+          [[ "$(jq -r '[.assets[].name] | sort | join("\n")' <<<"$latest_json")" == $'SHA256SUMS\ncodex-termux-aarch64-unknown-linux-musl.tar.gz\ncodex-termux-sbom.spdx.json\nmetadata.env\nrelease-manifest.env' ]]
+
+          tag_sha="$(gh api "repos/$repo/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          [[ "$tag_sha" == "$SOURCE_SHA" ]]
+
+          branches_json="$(gh api --paginate "repos/$repo/branches?per_page=100")"
+          [[ "$(jq -s '[.[][] | .name] | sort | join("\n")' <<<"$branches_json")" == "main" ]]
+
+          workflows_json="$(gh api "repos/$repo/contents/.github/workflows?ref=$FINAL_MAIN")"
+          expected_workflows=$'README.md\nblocking-ci.yml\ntermux-android-emulator.yml\ntermux-control-plane.yml\ntermux-governance.yml\ntermux-linux-sandbox.yml\ntermux-mobile-artifact.yml\ntermux-release-channel.yml\ntermux-release-request.yml'
+          [[ "$(jq -r '[.[].name] | sort | join("\n")' <<<"$workflows_json")" == "$expected_workflows" ]]
+
+          tree_sha="$(gh api "repos/$repo/commits/$FINAL_MAIN" --jq '.commit.tree.sha')"
+          tree_json="$(gh api "repos/$repo/git/trees/$tree_sha?recursive=1")"
+          if jq -e '
+            [.tree[].path
+              | select(
+                  contains("latest-alpha-release") or
+                  contains("release-engineer") or
+                  contains("temporary-main-release-finalizer") or
+                  startswith(".release-engineering/") or
+                  startswith(".release-audit/") or
+                  startswith(".release-proof/") or
+                  . == ".github/workflows/termux-governance-audit.yml"
+                )] | length > 0
+          ' <<<"$tree_json" >/dev/null; then
+            echo "::error::Temporary release orchestration remains on final main."
+            jq -r '.tree[].path' <<<"$tree_json" | grep -E 'latest-alpha-release|release-engineer|temporary-main-release-finalizer|^\.release-(engineering|audit|proof)/|termux-governance-audit' || true
+            exit 1
+          fi
+
+          in_progress_json="$(gh api "repos/$repo/actions/runs?status=in_progress&per_page=100")"
+          unexpected_in_progress="$(
+            jq -r --argjson current "$GITHUB_RUN_ID" '
+              [.workflow_runs[] | select(.id != $current) | .id] | length
+            ' <<<"$in_progress_json"
+          )"
+          [[ "$unexpected_in_progress" == "0" ]]
+
+          for prefix in release-audit- rp-; do
+            labels_json="$(gh api --paginate "repos/$repo/labels?per_page=100")"
+            while IFS= read -r label; do
+              [[ -n "$label" ]] || continue
+              encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$label")"
+              gh api --method DELETE "repos/$repo/labels/$encoded" >/dev/null
+            done < <(jq -rs --arg prefix "$prefix" '[.[][] | select(.name | startswith($prefix)) | .name] | .[]' <<<"$labels_json")
+          done
+
+          assets="$(
+            jq -r '.assets[] | "- `\(.name)` — \(.size) bytes — `\(.digest)`"' <<<"$latest_json"
+          )"
+          body="$RUNNER_TEMP/final-maintenance-evidence.md"
+          cat >"$body" <<EOF
+state=completed
+detail=published-and-independently-verified
+upstream_tag=$UPSTREAM_TAG
+upstream_tag_object=$UPSTREAM_TAG_OBJECT
+upstream_commit=$UPSTREAM_COMMIT
+package_version=$PACKAGE_VERSION
+merge_commit=$MERGE_COMMIT
+source_sha=$SOURCE_SHA
+release_tag=$RELEASE_TAG
+fork_ci_run_id=${{ steps.request.outputs.fork_ci_run_id }}
+control_run_id=${{ steps.request.outputs.control_run_id }}
+sandbox_run_id=${{ steps.request.outputs.sandbox_run_id }}
+artifact_run_id=${{ steps.request.outputs.artifact_run_id }}
+android_run_id=${{ steps.request.outputs.android_run_id }}
+release_run_id=$GITHUB_RUN_ID
+post_fork_ci_run_id=$POST_FORK_CI_RUN_ID
+post_control_run_id=$POST_CONTROL_RUN_ID
+release_channel_run_id=$RELEASE_CHANNEL_RUN_ID
+governance_run_id=$GOVERNANCE_RUN_ID
+final_main_sha=$FINAL_MAIN
+
+## Final result
+
+Codex Termux $PACKAGE_VERSION was integrated from the newest official OpenAI Codex Rust alpha, validated from one exact fork source, published as one complete five-asset GitHub Latest release, anonymously verified, promoted to the updater channel, and independently re-audited on final cleaned main.
+
+## Upstream and source identity
+
+- Annotated upstream tag: `$UPSTREAM_TAG`
+- Annotated tag object: `$UPSTREAM_TAG_OBJECT`
+- Recursively peeled OpenAI commit: `$UPSTREAM_COMMIT`
+- Two-parent integration merge and exact runtime source: `$SOURCE_SHA`
+- Final cleaned main: `$FINAL_MAIN`
+- Live ancestry verification: passed
+
+## Exact-source gates
+
+- Fork CI: `${{ steps.request.outputs.fork_ci_run_id }}` — success
+- Control-plane: `${{ steps.request.outputs.control_run_id }}` — success
+- Linux sandbox x64 and ARM64: `${{ steps.request.outputs.sandbox_run_id }}` — success
+- Production ARM64 artifact: `${{ steps.request.outputs.artifact_run_id }}` — success and retained
+- Native Android/Termux: `${{ steps.request.outputs.android_run_id }}` — fixture and real app success
+
+## Atomic public release
+
+- Publisher run: `$GITHUB_RUN_ID` — success
+- Release ID: `$(jq -r '.id' <<<"$latest_json")`
+- Release name: `$(jq -r '.name' <<<"$latest_json")`
+- `target_commitish`: `$SOURCE_SHA`
+- `/releases/latest`: verified
+- Tag ref: resolves to `$SOURCE_SHA`
+- Anonymous downloads, strict checksums, metadata, safe archive, runtime checksums, SPDX source identity, API digests and sizes, and publisher attestations: verified
+
+$assets
+
+## Permanent post-promotion verification
+
+- Release-channel: `$RELEASE_CHANNEL_RUN_ID` — success
+- Governance: `$GOVERNANCE_RUN_ID` — success
+- Control-plane: `$POST_CONTROL_RUN_ID` — success
+- Fork CI: `$POST_FORK_CI_RUN_ID` — success
+
+## Cleanup
+
+- Final workflow inventory: the documented permanent eight workflows only
+- Final branch inventory: `main` only
+- Temporary bootstrap scripts, startup hooks, workflows, jobs, branches, labels, and release orchestration paths: absent
+- No unexpected Actions run remains in progress
+
+## Historical ghost run
+
+Historical queued run `32212182486` remains recorded honestly under the runbook exception. Its deleted and disabled temporary workflow identity is absent from final main, no current workflow can dispatch or call it, and it has no surviving release or repository-write path.
+EOF
+
+          gh api --method PATCH "repos/$repo/issues/$ISSUE_NUMBER" \
+            -F "body=@$body" -f state=closed -f state_reason=completed >/dev/null
+
+          open_same_title="$(
+            gh api --paginate "repos/$repo/issues?state=open&per_page=100" |
+              jq -sr --arg title "Maintenance: update Codex Termux to $PACKAGE_VERSION" '
+                [.[][] | select((.pull_request | not) and .title == $title) | .number] | length
+              '
+          )"
+          [[ "$open_same_title" == "0" ]]
