@@ -185,3 +185,5 @@ subject	release: merge exact 0.153.0-alpha.6 source	runtime-critical	Merges the 
 subject	ci: add alpha.6 release repair worker	tooling	Adds the one-time fail-closed repair worker removed before source selection.
 subject	ci: stage alpha.6 release repair	tooling	Adds the one-time repair workflow removed before source selection.
 subject	release: repair alpha.6 publication controls	security-critical	Restores the permanent publisher, authenticates public API metadata reads, preserves anonymous asset downloads, and removes disposable orchestration.
+subject	release: request validated Termux 0.153.0-alpha.6 publication	tooling	Records the five successful exact-source alpha.6 release gates consumed by the permanent publisher.
+subject	termux: promote termux-v0.153.0-alpha.6-81a44b14f9	tooling	Promotes the independently verified public alpha.6 updater manifest after publication.
