@@ -362,6 +362,7 @@ struct SessionPickerRunOptions {
 pub async fn run_resume_picker_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -370,6 +371,7 @@ pub async fn run_resume_picker_with_app_server(
     run_resume_picker_with_launch_context(
         tui,
         config,
+        local_settings,
         show_all,
         include_non_interactive,
         app_server,
@@ -379,9 +381,14 @@ pub async fn run_resume_picker_with_app_server(
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keep local preferences separate while the legacy Config parameter is still required"
+)]
 pub async fn run_resume_picker_from_existing_session_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -391,6 +398,7 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
     run_resume_picker_with_launch_context(
         tui,
         config,
+        local_settings,
         show_all,
         include_non_interactive,
         app_server,
@@ -400,9 +408,14 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keep local preferences separate while the legacy Config parameter is still required"
+)]
 async fn run_resume_picker_with_launch_context(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -419,7 +432,7 @@ async fn run_resume_picker_with_launch_context(
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
-    let runtime_keymap = picker_runtime_keymap(config)?;
+    let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         show_all,
         filter_cwd: cwd_filter,
@@ -427,9 +440,11 @@ async fn run_resume_picker_with_launch_context(
         action: SessionPickerAction::Resume,
         launch_context,
         provider_filter,
-        initial_density: SessionListDensity::from(config.tui_session_picker_view),
+        initial_density: SessionListDensity::from(
+            local_settings.tui.session_picker_view.unwrap_or_default(),
+        ),
         view_persistence: Some(SessionPickerViewPersistence {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: local_settings.codex_home.to_path_buf(),
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
@@ -459,6 +474,7 @@ async fn run_resume_picker_with_launch_context(
 pub async fn run_fork_picker_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     app_server: AppServerSession,
 ) -> Result<SessionSelection> {
@@ -473,7 +489,7 @@ pub async fn run_fork_picker_with_app_server(
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
-    let runtime_keymap = picker_runtime_keymap(config)?;
+    let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         show_all,
         filter_cwd: cwd_filter,
@@ -481,9 +497,11 @@ pub async fn run_fork_picker_with_app_server(
         action: SessionPickerAction::Fork,
         launch_context: SessionPickerLaunchContext::Startup,
         provider_filter,
-        initial_density: SessionListDensity::from(config.tui_session_picker_view),
+        initial_density: SessionListDensity::from(
+            local_settings.tui.session_picker_view.unwrap_or_default(),
+        ),
         view_persistence: Some(SessionPickerViewPersistence {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: local_settings.codex_home.to_path_buf(),
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
@@ -630,8 +648,8 @@ fn picker_provider_filter(config: &Config, uses_remote_workspace: bool) -> Provi
     }
 }
 
-fn picker_runtime_keymap(config: &Config) -> Result<RuntimeKeymap> {
-    RuntimeKeymap::from_config(&config.tui_keymap)
+fn picker_runtime_keymap(config: &crate::local_settings::LocalSettings) -> Result<RuntimeKeymap> {
+    RuntimeKeymap::from_config(&config.tui.keymap)
         .map_err(|err| color_eyre::eyre::eyre!("invalid keymap configuration: {err}"))
 }
 
@@ -6260,6 +6278,8 @@ session_picker_view = "dense"
             project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6302,6 +6322,8 @@ session_picker_view = "dense"
             project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6334,6 +6356,7 @@ session_picker_view = "dense"
                         phase: None,
                         memory_citation: None,
                         delivery: None,
+                        questions: None,
                     },
                     ThreadItem::Plan {
                         id: String::from("plan-1"),
@@ -6383,6 +6406,8 @@ session_picker_view = "dense"
             project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6456,6 +6481,8 @@ session_picker_view = "dense"
             project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),

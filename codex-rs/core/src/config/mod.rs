@@ -124,6 +124,7 @@ use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_rmcp_client::McpOAuthRefreshMode;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -1739,6 +1740,11 @@ impl Config {
             apps_mcp_product_sku: self.apps_mcp_product_sku.clone(),
             codex_home: self.codex_home.to_path_buf(),
             mcp_oauth_credentials_store_mode: self.mcp_oauth_credentials_store_mode,
+            oauth_refresh_mode: if self.features.enabled(Feature::McpOAuthRefreshCoordination) {
+                McpOAuthRefreshMode::Coordinated
+            } else {
+                McpOAuthRefreshMode::Legacy
+            },
             auth_keyring_backend_kind: self.auth_keyring_backend_kind(),
             mcp_oauth_callback_port: self.mcp_oauth_callback_port,
             mcp_oauth_callback_url: self.mcp_oauth_callback_url.clone(),

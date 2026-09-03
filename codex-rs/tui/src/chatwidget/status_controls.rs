@@ -40,15 +40,16 @@ impl ChatWidget {
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
         );
-        let title_uses_status = self
-            .config
-            .tui_terminal_title
-            .as_ref()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item == "run-state" || item == "status")
-            });
+        let title_uses_status =
+            self.local_settings
+                .tui
+                .terminal_title
+                .as_ref()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item == "run-state" || item == "status")
+                });
         if title_uses_status {
             self.refresh_status_surfaces();
         }
@@ -115,19 +116,20 @@ impl ChatWidget {
             "status line setup confirmed with items: {items:#?}, use_theme_colors: {use_theme_colors}"
         );
         let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
-        self.config.tui_status_line = Some(ids);
-        self.config.tui_status_line_use_colors = use_theme_colors;
+        self.local_settings.tui.status_line = Some(ids);
+        self.local_settings.tui.status_line_use_colors = use_theme_colors;
         self.refresh_status_line();
     }
 
     /// Applies a temporary terminal-title selection while the setup UI is open.
     pub(crate) fn preview_terminal_title(&mut self, items: Vec<TerminalTitleItem>) {
         if self.terminal_title_setup_original_items.is_none() {
-            self.terminal_title_setup_original_items = Some(self.config.tui_terminal_title.clone());
+            self.terminal_title_setup_original_items =
+                Some(self.local_settings.tui.terminal_title.clone());
         }
 
         let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
-        self.config.tui_terminal_title = Some(ids);
+        self.local_settings.tui.terminal_title = Some(ids);
         self.refresh_terminal_title();
     }
 
@@ -138,7 +140,7 @@ impl ChatWidget {
             return;
         };
 
-        self.config.tui_terminal_title = original_items;
+        self.local_settings.tui.terminal_title = original_items;
         self.refresh_terminal_title();
     }
 
@@ -156,7 +158,7 @@ impl ChatWidget {
         tracing::info!("terminal title setup confirmed with items: {items:#?}");
         let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
         self.terminal_title_setup_original_items = None;
-        self.config.tui_terminal_title = Some(ids);
+        self.local_settings.tui.terminal_title = Some(ids);
         self.refresh_terminal_title();
     }
 
@@ -227,6 +229,7 @@ impl ChatWidget {
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
+            self.requires_openai_auth,
             self.runtime_model_provider_base_url.as_deref(),
             self.remote_connection.as_ref(),
             self.status_account_display.as_ref(),
@@ -301,7 +304,7 @@ impl ChatWidget {
         let configured_status_line_items = self.configured_status_line_items();
         let view = StatusLineSetupView::new(
             Some(configured_status_line_items.as_slice()),
-            self.config.tui_status_line_use_colors,
+            self.local_settings.tui.status_line_use_colors,
             self.status_surface_preview_data(),
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
@@ -311,7 +314,8 @@ impl ChatWidget {
 
     pub(super) fn open_terminal_title_setup(&mut self) {
         let configured_terminal_title_items = self.configured_terminal_title_items();
-        self.terminal_title_setup_original_items = Some(self.config.tui_terminal_title.clone());
+        self.terminal_title_setup_original_items =
+            Some(self.local_settings.tui.terminal_title.clone());
         let view = TerminalTitleSetupView::new(
             Some(configured_terminal_title_items.as_slice()),
             self.terminal_title_preview_data(),

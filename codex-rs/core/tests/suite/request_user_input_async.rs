@@ -4,6 +4,7 @@ use codex_core::TurnInputRequest;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::AsyncUserInputQuestion;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -112,26 +113,40 @@ async fn persistent_async_message_guidance_follows_tool_availability(
             .as_array()
             .expect("request tools")
             .iter()
-            .any(|tool| tool["name"] == "send_user_message_async"),
+            .any(|tool| tool["name"] == "request_user_input_async"),
         expect_tool_guidance,
     );
 
     Ok(())
 }
 
-#[test_case(None; "fallback_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: None }); "missing_tool")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage::default()) }); "missing_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".to_string()) }) }); "catalog_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some(String::new()) }) }); "empty_description")]
+#[test_case(None, "send_user_message_async"; "fallback_description")]
+#[test_case(None, "request_user_input_async"; "current_catalog_name")]
+#[test_case(Some(ToolMessages { send_user_message_async: None }), "send_user_message_async"; "missing_tool")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage::default()) }), "send_user_message_async"; "missing_description")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".to_string()) }) }), "send_user_message_async"; "catalog_description")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some(String::new()) }) }), "send_user_message_async"; "empty_description")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn send_user_message_async_emits_item_and_does_not_end_the_turn(
+async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
     tool_messages: Option<ToolMessages>,
+    catalog_tool_name: &'static str,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CALL_ID: &str = "async-message-call";
-    const MESSAGE: &str = "Still investigating.";
+    const TITLE: &str = "Which environment should I use?";
+    const MESSAGE: &str =
+        "Which environment should I use?\n- Staging\n- Production\n\nWhat deadline should I use?";
+    let questions = vec![
+        AsyncUserInputQuestion {
+            title: TITLE.to_string(),
+            options: Some(vec!["Staging".to_string(), "Production".to_string()]),
+        },
+        AsyncUserInputQuestion {
+            title: "What deadline should I use?".to_string(),
+            options: None,
+        },
+    ];
 
     let server = start_mock_server().await;
     let responses = mount_sse_sequence(
@@ -142,8 +157,12 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn(
                 ev_function_call_with_namespace(
                     CALL_ID,
                     "functions",
-                    "send_user_message_async",
-                    &json!({ "message": MESSAGE }).to_string(),
+                    "request_user_input_async",
+                    &json!({ "questions": [
+                        {"title": TITLE, "options": ["Staging", "Production"]},
+                        {"title": "What deadline should I use?"}
+                    ] })
+                    .to_string(),
                 ),
                 ev_completed("resp-1"),
             ]),
@@ -160,15 +179,18 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn(
         .and_then(|tools| tools.send_user_message_async.as_ref())
         .and_then(|tool| tool.description.as_deref())
         .unwrap_or(
-            "Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message.\nOnly use this tool to ask for missing information, preferences, constraints, clarification, or approval. The message should be concise, easy to read and understand, and at the right level of abstraction that is appropriate for the user and task at hand.",
+            "Ask the user one or more questions during ongoing work. Use this tool only to request missing information, preferences, constraints, clarification, or approval. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message. Keep questions concise, self-contained, and easy to understand, using a level of detail appropriate to the user and task. The UI always allows a free-text answer, including when suggested options are provided. A preselected option is not submitted automatically.",
         )
         .to_string();
     let test = test_codex()
         .with_model_info_override("gpt-5.2", move |model| {
             model.tool_mode = Some(ToolMode::CodeModeOnly);
+            model.experimental_supported_tools.retain(|tool| {
+                tool != "send_user_message_async" && tool != "request_user_input_async"
+            });
             model
                 .experimental_supported_tools
-                .push("send_user_message_async".to_string());
+                .push(catalog_tool_name.to_string());
             model
                 .model_messages
                 .as_mut()
@@ -208,6 +230,7 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn(
             phase: Some(MessagePhase::FinalAnswer),
             memory_citation: None,
             delivery: Some(AgentMessageDelivery::Async),
+            questions: Some(questions),
         })?
     );
 
@@ -238,27 +261,100 @@ async fn send_user_message_async_emits_item_and_does_not_end_the_turn(
     assert_eq!(requests.len(), 2);
     for request in &requests {
         let body = request.body_json();
-        let tool = body["tools"]
-            .as_array()
-            .expect("request tools")
+        let tools = body["tools"].as_array().expect("request tools");
+        let tool = tools
             .iter()
-            .find(|tool| tool["type"] == "function" && tool["name"] == "send_user_message_async")
+            .find(|tool| tool["type"] == "function" && tool["name"] == "request_user_input_async")
             .expect("the async message tool should be directly visible to the model");
         assert_eq!(tool["description"], expected_description);
+        assert_eq!(tool["strict"], false);
+        assert_eq!(tool["parameters"]["required"], json!(["questions"]));
+        assert_eq!(tool["parameters"]["additionalProperties"], false);
+        let schema = &tool["parameters"]["properties"]["questions"];
+        assert_eq!(schema["minItems"], 1);
+        assert_eq!(schema["items"]["required"], json!(["title"]));
+        assert_eq!(schema["items"]["additionalProperties"], false);
+        assert_eq!(schema["items"]["properties"]["options"]["minItems"], 1);
+        assert_eq!(
+            schema["items"]["properties"]["options"]["items"]["type"],
+            "string"
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool["name"] != "send_user_message_async")
+        );
     }
     assert_eq!(
         requests[1].function_call_output_text(CALL_ID),
         Some(r#"{"accepted":true}"#.to_string())
     );
     let has_synthetic_assistant_message = requests[1].input().into_iter().any(|item| {
-        item["type"] == "message"
-            && item["role"] == "assistant"
-            && item.to_string().contains(MESSAGE)
+        item["type"] == "message" && item["role"] == "assistant" && item.to_string().contains(TITLE)
     });
     assert!(
         !has_synthetic_assistant_message,
         "the user-visible item should not inject a synthetic assistant message into model context"
     );
 
+    Ok(())
+}
+
+#[test_case(json!({"questions": []}), "questions must not be empty"; "no_questions")]
+#[test_case(json!({"questions": [{"title": " "}]}), "question titles must not be empty"; "blank_title")]
+#[test_case(json!({"questions": [{"title": "Which?", "options": []}]}), "options must contain at least one non-empty answer"; "empty_options")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_async_questions_do_not_emit_an_item(
+    arguments: serde_json::Value,
+    expected_error: &str,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call_with_namespace(
+                    "invalid",
+                    "functions",
+                    "request_user_input_async",
+                    &arguments.to_string(),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.2", |model| {
+            model.tool_mode = Some(ToolMode::CodeModeOnly);
+            model
+                .experimental_supported_tools
+                .push("request_user_input_async".to_string());
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Get clarification.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(test.codex.as_ref(), |event| {
+        let item = match event {
+            EventMsg::ItemStarted(event) => Some(&event.item),
+            EventMsg::ItemCompleted(event) => Some(&event.item),
+            _ => None,
+        };
+        assert!(!matches!(item, Some(TurnItem::AgentMessage(message)) if message.delivery == Some(AgentMessageDelivery::Async)));
+        matches!(event, EventMsg::TurnComplete(_))
+    }).await;
+    assert_eq!(
+        responses.requests()[1].function_call_output_text("invalid"),
+        Some(expected_error.to_string())
+    );
     Ok(())
 }

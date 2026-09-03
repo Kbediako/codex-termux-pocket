@@ -222,6 +222,7 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     }));
     assert!(state.observe(&completed).items.is_empty());
 
@@ -298,6 +299,7 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     }));
     assert!(state.observe(&completed).items.is_empty());
 }

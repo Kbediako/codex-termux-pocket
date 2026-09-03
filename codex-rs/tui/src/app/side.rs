@@ -702,7 +702,7 @@ impl App {
 
         let fork_config = self.side_fork_config();
         match app_server
-            .fork_side_thread(fork_config, parent_thread_id)
+            .fork_side_thread(&self.local_settings, fork_config, parent_thread_id)
             .await
         {
             Ok(forked) => {

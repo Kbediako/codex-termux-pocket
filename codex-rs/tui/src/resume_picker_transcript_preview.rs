@@ -77,6 +77,7 @@ pub(crate) async fn load_transcript_preview(
                     /*turn_cursor*/ None,
                     /*item_cursor*/ None,
                     /*config*/ None,
+                    /*local_settings*/ None,
                     HistoryHydrationScope::Initial,
                 )
                 .await

@@ -74,6 +74,12 @@ must still match the real native target. Native pkgconf relocates libffi's POSIX
 prefix metadata; CI rejects residual Cygwin paths. These are build prerequisites,
 not shipped runtime components or evidence of working voice.
 
+CMake libraries use relative install runpaths (`$ORIGIN` on Linux and
+`@loader_path` on Mac), with `@rpath` install names on Mac. Linux Meson links
+use `$ORIGIN:$ORIGIN/..`, matching libraries in `lib/` and plugins in
+`lib/gstreamer-1.0/`. Mac Meson and libffi still need packaging-time fixups;
+these options do not make every Mac library relocatable at installation.
+
 Outputs are under `prefix/`, build tools under `tools/`, and logs beside them.
 `build-state.json` records completed commands and failures; `built.json` exists
 only when every build/install command succeeds. Failed builds retain their logs
@@ -86,3 +92,58 @@ may remain external; runtime closure inspection must verify that independently.
 `//third_party/voice:build_inputs` exposes the recipe and source inputs to Bazel.
 Neither this filegroup nor a successful prefix build proves final Cargo/Bazel
 linkage, safe private runtime loading, or an installed voice-capable Codex package.
+
+## Private macOS runtime projection
+
+`macos_runtime.py --prefix <extracted-prefix> --receipts <native-ci-receipts>
+--target <macOS-triple> --output <fresh-directory>` verifies the native receipt,
+source manifest, per-file digests and Mach-O architecture before projecting the
+seven explicit plugins and their declared library dependencies. It removes SDK
+aliases and build-machine runpaths, rewrites private imports relative to each
+loader, and regenerates only development ad-hoc signatures. Inputs are untouched.
+The output must be new and outside the input directories; failures remove only
+that new output. `runtime.json` records source and transformed file identities.
+Xcode's `xcrun llvm-objdump` inspects Mach-O headers and load commands; the
+preparer reads its output and enforces the package dependency policy rather than
+decoding binary structures itself. `install_name_tool` still rewrites paths.
+`runtime.py` owns shared receipt checks, dependency selection, verified copying,
+and cleanup; each platform owns its binary format and loader changes. Output
+containment uses filesystem identity, and copied bytes are checked again before
+transformation so input changes cannot silently invalidate the source receipt.
+
+This is a development-only payload, not a signed distribution package or proof of
+audio behavior. Dynamic-only dependencies, native helper linkage, LGPL notices,
+production signing/notarization, Windows/Linux loading and security approval remain
+separate requirements. No microphone, device, plugin scanner or backend is started
+by projection. Run its native relocation tests on macOS with Python 3.12 or newer.
+
+## Private GNU Linux runtime preparation
+
+`linux_runtime.py` takes the same prefix, receipts, target and output arguments.
+It reads bounded ELF64 headers, segments and dynamic tables directly and accepts
+x64/ARM64 GNU Linux libraries. The shared Python coordinator selects the seven
+plugins and their declared dependencies without changing their bytes. The native
+build must have emitted package-relative runpaths; older absolute paths are
+rejected with a rebuild instruction. Output preserves `lib/gstreamer-1.0/` so
+those relative paths remain valid. Loader audit/filter dependencies and
+path-bearing imports are rejected. Native tests require Python 3.12, a C compiler
+and `patchelf`; the latter constructs malformed inputs and is not needed during
+preparation or shipped in the runtime. The output is development-only, uses the
+host glibc, and does not establish musl or minimum-glibc support, dynamic-only
+dependency closure, helper loading policy or working voice.
+
+## Private Windows runtime preparation
+
+`windows_runtime.py` takes the same arguments for x64/ARM64 MSVC build prefixes.
+MSVC's existing `dumpbin` reads PE headers, dependencies and exports; the Python
+adapter applies package policy without walking binary structures.
+It checks bounded PE32+ import tables, uses case-insensitive DLL identities, and
+copies the seven plugins and their declared dependencies into one private `bin/`
+directory without changing DLL bytes. Delayed imports, managed DLLs and forwarded
+exports are unsupported and rejected. Native tests require MSVC and Python 3.12;
+they load the moved DLLs using only the DLL directory and System32 search flags.
+This development payload expects the Windows Universal CRT and the matching
+Microsoft Visual C++ runtime (`VCRUNTIME140.dll`) already installed. The latter
+is not a guaranteed OS component. Release redistribution/licensing, Authenticode
+policy and actual helper loading remain separate requirements; this script does
+not install or redistribute Microsoft runtime files or enable voice.

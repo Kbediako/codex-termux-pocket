@@ -677,6 +677,7 @@ async fn session_info_uses_availability_nux_tooltip_override() {
     let config = test_config().await;
     let cell = new_session_info(
         &config,
+        &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,
@@ -699,6 +700,7 @@ async fn session_info_availability_nux_tooltip_snapshot() {
     config.cwd = test_path_buf("/tmp/project").abs();
     let cell = new_session_info(
         &config,
+        &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,
@@ -716,6 +718,7 @@ async fn session_info_first_event_suppresses_tooltips_and_nux() {
     let config = test_config().await;
     let cell = new_session_info(
         &config,
+        &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ true,
@@ -735,6 +738,7 @@ async fn session_info_hides_tooltips_when_disabled() {
     config.show_tooltips = false;
     let cell = new_session_info(
         &config,
+        &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,

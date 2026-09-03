@@ -11,9 +11,9 @@ Users of `Kbediako/codex-termux-pocket` should receive a GitHub Latest Termux ru
 - [x] (2026-09-03 02:21 UTC) Read the release runbook, root and scoped agent instructions, maintainer guide, workflow strategy, native safety boundary, and `PLANS.md`.
 - [x] (2026-09-03 02:21 UTC) Inventory live main, releases, branches, PRs, issues, workflows, rulesets, and Actions state.
 - [x] (2026-09-03 02:21 UTC) Resolve `rust-v0.153.0-alpha.6`, annotated tag object `22a9fdf5f01d606eff192aacb93bc3107688450f`, peeled commit `e8b3253fed5aeef7e914441bc3b73b3b0a718b51`, and workspace package version `0.153.0-alpha.6`.
-- [ ] Create one audited staging commit containing this plan, the integration helper, and the temporary `blocking-ci.yml` job.
-- [ ] Merge the peeled upstream commit, stopping on any conflict and capturing all index stages before a resolution is considered.
-- [ ] Refresh locked Cargo and Bazel dependency graphs and run supported hosted validation.
+- [x] (2026-09-03) Created one audited staging commit containing this plan, the integration helper, the temporary `blocking-ci.yml` job, and its patch classification.
+- [x] (2026-09-03) Captured the complete sole `codex-rs/Cargo.toml` conflict and resolved only its reviewed workspace-version block from alpha.4 to the official alpha.6 value.
+- [x] (2026-09-03) Refreshed locked Cargo and Bazel dependency graphs as required and passed supported hosted pre-source validation.
 - [ ] Remove this plan, the helper, and the temporary job; classify retained subjects; prove upstream ancestry; select one clean `source_sha`.
 - [ ] Run exact-source Fork CI, control-plane, Linux x64 and ARM64 sandbox, production ARM64 artifact, and native Android/Termux gates.
 - [ ] Submit the permanent publication request only after every gate and retained artifact are live-successful and exact.
@@ -27,6 +27,9 @@ Users of `Kbediako/codex-termux-pocket` should receive a GitHub Latest Termux ru
   Evidence: the upstream matching-ref inventory contains alpha.1 through alpha.6, and the `rust-v0.154` prefix is empty.
 - Observation: historical queued run `32212182486` remains visible from a deleted temporary workflow identity.
   Evidence: live Actions state reports no current in-progress run and only that 19 August ghost. The runbook allows it only while its file/identity/write path remain absent and non-raceable.
+
+- Observation: the exact alpha.6 merge had one conflict only, in the `[workspace.package]` version line of `codex-rs/Cargo.toml`; index stage 1 was `0.0.0`, the fork side was `0.153.0-alpha.4`, and upstream was `0.153.0-alpha.6`.
+  Evidence: failed integration run 33707625806 and retained artifact 9875788825 captured the combined diff and all three index stages before the fail-closed retry encoded the resolution.
 
 ## Decision Log
 
@@ -42,7 +45,7 @@ Users of `Kbediako/codex-termux-pocket` should receive a GitHub Latest Termux ru
 
 ## Outcomes & Retrospective
 
-Pending. This section will be updated during integration and the file will be removed only after its evidence has been copied into issue #103 and the clean source is selected.
+The exact alpha.6 commit was integrated after one evidence-reviewed version conflict and passed hosted pre-source validation. Cleanup and exact-source selection remain; this file must be removed before release gate evidence is accepted.
 
 ## Context and Orientation
 

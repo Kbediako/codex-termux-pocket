@@ -121,14 +121,14 @@ fn should_use_deterministic_process_ids() -> bool {
     cfg!(test) || deterministic_process_ids_forced_for_tests()
 }
 
-fn apply_unified_exec_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
+pub(super) fn apply_unified_exec_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
     for (key, value) in UNIFIED_EXEC_ENV {
         env.insert(key.to_string(), value.to_string());
     }
     env
 }
 
-fn exec_env_policy_from_shell_policy(
+pub(super) fn exec_env_policy_from_shell_policy(
     policy: &ShellEnvironmentPolicy,
 ) -> codex_exec_server::ExecEnvPolicy {
     let mut exclude = policy

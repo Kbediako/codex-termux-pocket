@@ -148,12 +148,19 @@ enum RemoteClientCommand {
     },
 }
 
+#[derive(Default)]
+struct RemoteServerMetadata {
+    server_version: Option<String>,
+    codex_home: Option<String>,
+    platform_family: Option<String>,
+    platform_os: Option<String>,
+}
+
 pub struct RemoteAppServerClient {
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
     pending_events: VecDeque<AppServerEvent>,
-    server_version: Option<String>,
-    codex_home: Option<String>,
+    metadata: RemoteServerMetadata,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -185,11 +192,19 @@ impl RemoteAppServerClient {
     }
 
     pub fn server_version(&self) -> Option<&str> {
-        self.server_version.as_deref()
+        self.metadata.server_version.as_deref()
     }
 
     pub fn codex_home(&self) -> Option<&str> {
-        self.codex_home.as_deref()
+        self.metadata.codex_home.as_deref()
+    }
+
+    pub fn platform_family(&self) -> Option<&str> {
+        self.metadata.platform_family.as_deref()
+    }
+
+    pub fn platform_os(&self) -> Option<&str> {
+        self.metadata.platform_os.as_deref()
     }
 
     async fn connect_with_stream<S>(
@@ -202,7 +217,7 @@ impl RemoteAppServerClient {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let mut stream = stream;
-        let (pending_events, server_version, codex_home) = initialize_remote_connection(
+        let (pending_events, metadata) = initialize_remote_connection(
             &mut stream,
             &endpoint,
             initialize_params,
@@ -478,8 +493,7 @@ impl RemoteAppServerClient {
             command_tx,
             event_rx,
             pending_events: pending_events.into(),
-            server_version,
-            codex_home,
+            metadata,
             worker_handle,
         })
     }
@@ -604,8 +618,7 @@ impl RemoteAppServerClient {
             command_tx,
             event_rx,
             pending_events: _pending_events,
-            server_version: _server_version,
-            codex_home: _codex_home,
+            metadata: _,
             worker_handle,
         } = self;
         let mut worker_handle = worker_handle;
@@ -800,14 +813,13 @@ async fn initialize_remote_connection<S>(
     endpoint: &str,
     params: InitializeParams,
     initialize_timeout: Duration,
-) -> IoResult<(Vec<AppServerEvent>, Option<String>, Option<String>)>
+) -> IoResult<(Vec<AppServerEvent>, RemoteServerMetadata)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let initialize_request_id = RequestId::String("initialize".to_string());
     let mut pending_events = Vec::new();
-    let mut server_version = None;
-    let mut codex_home = None;
+    let mut metadata = RemoteServerMetadata::default();
     write_jsonrpc_message(
         stream,
         JSONRPCMessage::Request(jsonrpc_request_from_client_request(
@@ -831,7 +843,7 @@ where
                     })?;
                     match message {
                         JSONRPCMessage::Response(response) if response.id == initialize_request_id => {
-                            server_version = response
+                            metadata.server_version = response
                                 .result
                                 .get("userAgent")
                                 .and_then(serde_json::Value::as_str)
@@ -839,12 +851,16 @@ where
                                     let (_, rest) = user_agent.split_once('/')?;
                                     rest.split_whitespace().next().map(str::to_string)
                                 });
-                            codex_home = response
+                            metadata.codex_home = response
                                 .result
                                 .get("codexHome")
                                 .and_then(serde_json::Value::as_str)
                                 .filter(|codex_home| !codex_home.is_empty())
                                 .map(str::to_string);
+                            metadata.platform_family = response.result.get("platformFamily")
+                                .and_then(serde_json::Value::as_str).map(str::to_string);
+                            metadata.platform_os = response.result.get("platformOs")
+                                .and_then(serde_json::Value::as_str).map(str::to_string);
                             break Ok(());
                         }
                         JSONRPCMessage::Error(error) if error.id == initialize_request_id => {
@@ -937,7 +953,7 @@ where
     )
     .await?;
 
-    Ok((pending_events, server_version, codex_home))
+    Ok((pending_events, metadata))
 }
 
 fn app_server_event_from_notification(notification: JSONRPCNotification) -> Option<AppServerEvent> {
@@ -1027,8 +1043,7 @@ mod tests {
             command_tx,
             event_rx,
             pending_events: VecDeque::new(),
-            server_version: None,
-            codex_home: None,
+            metadata: RemoteServerMetadata::default(),
             worker_handle,
         };
 

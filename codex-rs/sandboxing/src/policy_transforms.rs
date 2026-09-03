@@ -411,7 +411,7 @@ fn deny_entry_constrains_accepted_grant(
                 return true;
             }
             let Some(grant_path) = resolve_permission_path(&entry.path, context) else {
-                return false;
+                return true;
             };
             match &deny_entry.path {
                 FileSystemPath::GlobPattern { pattern } => {

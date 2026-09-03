@@ -231,6 +231,7 @@ impl McpConnectionSet {
         } = input;
         let store_mode = config.mcp_oauth_credentials_store_mode;
         let keyring_backend_kind = config.auth_keyring_backend_kind;
+        let oauth_refresh_mode = config.oauth_refresh_mode;
         let codex_home = config.codex_home.clone();
         let prefix_mcp_tool_names = config.prefix_mcp_tool_names;
         let non_prefixed_mcp_tool_servers = config.non_prefixed_mcp_tool_servers.clone();
@@ -362,6 +363,7 @@ impl McpConnectionSet {
                     server: server.clone(),
                     store_mode,
                     keyring_backend_kind,
+                    oauth_refresh_mode,
                     runtime_context: runtime_context.clone(),
                     resolved_environment: resolved_environment.clone(),
                     auth_provider: runtime_auth_provider.clone(),
@@ -377,6 +379,7 @@ impl McpConnectionSet {
                 host_plugin_root,
                 store_mode,
                 keyring_backend_kind,
+                oauth_refresh_mode,
                 &resolved_environment,
                 &runtime_context,
                 runtime_auth_provider.as_ref(),
@@ -539,6 +542,7 @@ impl McpConnectionSet {
                 server,
                 store_mode,
                 keyring_backend_kind,
+                oauth_refresh_mode,
                 cancel_token.clone(),
                 tx_event.clone(),
                 elicitation_requests.clone(),

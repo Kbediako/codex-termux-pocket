@@ -242,6 +242,10 @@ impl ToolOutput for PostToolUseFeedbackOutput {
     fn code_mode_result(&self, payload: &ToolPayload) -> Value {
         self.original.code_mode_result(payload)
     }
+
+    fn tool_result_sources(&self) -> Option<codex_protocol::models::ToolResultSources> {
+        self.original.tool_result_sources()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -47,6 +47,7 @@ pub use info::get_head_commit_hash;
 pub use info::git_diff_to_remote;
 pub use info::local_git_branches;
 pub use info::recent_commits;
+pub use operations::git_config_override_env;
 pub use platform::create_symlink;
 pub use status::get_has_changes_in_repo;
 pub use trust::resolve_root_git_project_for_trust;

@@ -29,7 +29,7 @@ impl ChatWidget {
     #[cfg(target_os = "windows")]
     pub(crate) fn world_writable_warning_details(&self) -> Option<(Vec<String>, usize, bool)> {
         if self
-            .config
+            .local_settings
             .notices
             .hide_world_writable_warning
             .unwrap_or(false)

@@ -1,8 +1,10 @@
-//! Bounded Vim undo history for the complete composer-owned draft.
+//! Bounded Vim undo/redo history for the complete composer-owned draft.
 //!
 //! A textarea does not own pending paste payloads, image attachments, or mention targets. Keeping
 //! edit transactions here lets one snapshot restore those values together with visible text. Keys
 //! and direct composer-owned changes share the same bounded transaction state.
+//! Committed snapshots share a byte budget. One pending edit snapshot has its own matching cap,
+//! so canceled commands cannot evict committed history.
 
 use std::collections::VecDeque;
 
@@ -18,6 +20,7 @@ const MAX_VIM_UNDO_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Default)]
 pub(super) struct VimHistory {
     undo: VecDeque<ComposerDraft>,
+    redo: VecDeque<ComposerDraft>,
     pending: Option<ComposerDraft>,
 }
 
@@ -48,28 +51,46 @@ impl VimHistory {
             || self
                 .undo
                 .iter()
-                .chain(self.pending.iter())
+                .chain(self.redo.iter())
                 .map(ComposerDraft::vim_history_bytes)
                 .sum::<usize>()
                 > MAX_VIM_UNDO_BYTES
         {
-            self.undo.pop_front();
+            if self.undo.pop_front().is_none() {
+                self.redo.pop_front();
+            }
         }
     }
 }
 
 impl ChatComposer {
-    /// Apply undo only before normal-mode commands begin.
+    /// Consume undo and redo before normal-mode commands, even when their history is empty.
     pub(super) fn handle_vim_history_key(&mut self, event: KeyEvent) -> bool {
         if !self.draft.textarea.is_vim_normal_mode()
             || self.draft.textarea.is_vim_operator_pending()
             || self.popups.active()
-            || !self.vim_normal_keymap.undo.is_pressed(event)
         {
             return false;
         }
 
-        if let Some(snapshot) = self.vim_history.undo.pop_back() {
+        let redo = self.vim_normal_keymap.redo.is_pressed(event);
+        let undo = self.vim_normal_keymap.undo.is_pressed(event);
+        if !undo && !redo {
+            return false;
+        }
+
+        let snapshot = if redo {
+            self.vim_history.redo.pop_back()
+        } else {
+            self.vim_history.undo.pop_back()
+        };
+        if let Some(snapshot) = snapshot {
+            let current = self.snapshot_draft();
+            if redo {
+                self.vim_history.undo.push_back(current);
+            } else {
+                self.vim_history.redo.push_back(current);
+            }
             let history = std::mem::take(&mut self.vim_history);
             let mut vim_state = VimPersistentState::default();
             self.draft
@@ -188,6 +209,7 @@ impl ChatComposer {
             return;
         }
 
+        self.vim_history.redo.clear();
         self.vim_history.undo.push_back(snapshot);
         self.vim_history.trim();
     }

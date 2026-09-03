@@ -92,7 +92,8 @@ impl App {
         {
             return;
         }
-        let keymap = match RuntimeKeymap::from_config(&config.tui_keymap) {
+        let local_settings = crate::local_settings::LocalSettings::from(&config);
+        let keymap = match RuntimeKeymap::from_config(&local_settings.tui.keymap) {
             Ok(keymap) => keymap,
             Err(error) => return self.chat_widget.add_error_message(error),
         };
@@ -144,6 +145,7 @@ impl App {
         let transitioned = if has_rollout {
             app_server
                 .fork_thread_at(
+                    &local_settings,
                     config.clone(),
                     thread_id,
                     /*last_turn_id*/ None,
@@ -191,10 +193,11 @@ impl App {
                 tracing::warn!("failed to unsubscribe tracked thread {tracked_id}: {error}");
             }
         }
+        self.local_settings = local_settings;
         self.config = config;
         self.file_search
             .update_search_dir(self.config.cwd.to_path_buf());
-        let notify = &self.config.tui_notifications;
+        let notify = &self.local_settings.tui.notification_settings;
         tui.set_notification_settings(notify.method, notify.condition);
         if let Err(error) = tui.clear_ambient_pet_image() {
             tracing::warn!(%error, "failed to clear ambient pet image");

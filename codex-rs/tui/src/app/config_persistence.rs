@@ -238,6 +238,13 @@ impl App {
             .rebuild_config_for_cwd(self.chat_widget.config_ref().cwd.to_path_buf())
             .await?;
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
+        self.local_settings = crate::local_settings::LocalSettings::from(&config);
+        // Other preferences have runtime caches and are adopted when the widget is replaced.
+        self.chat_widget
+            .local_settings
+            .tui
+            .terminal_resize_reflow_max_rows =
+            self.local_settings.tui.terminal_resize_reflow_max_rows;
         self.config = config;
         self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
@@ -279,9 +286,12 @@ impl App {
         &mut self,
         current_cwd: &Path,
         resume_cwd: PathBuf,
-    ) -> Result<Config> {
+    ) -> Result<(Config, crate::local_settings::LocalSettings)> {
         match self.rebuild_config_for_cwd(resume_cwd.clone()).await {
-            Ok(config) => Ok(config),
+            Ok(config) => {
+                let local_settings = crate::local_settings::LocalSettings::from(&config);
+                Ok((config, local_settings))
+            }
             Err(err) => {
                 if crate::session_resume::cwds_differ(current_cwd, &resume_cwd) {
                     Err(err)
@@ -292,7 +302,7 @@ impl App {
                         cwd = %resume_cwd_display,
                         "failed to rebuild config for same-cwd resume; using current in-memory config"
                     );
-                    Ok(self.config.clone())
+                    Ok((self.config.clone(), self.local_settings.clone()))
                 }
             }
         }
@@ -877,26 +887,28 @@ impl App {
     }
 
     pub(super) fn sync_tui_theme_selection(&mut self, name: String) {
-        self.config.tui_theme = Some(name.clone());
+        self.local_settings.tui.theme = Some(name.clone());
         self.chat_widget.set_tui_theme(Some(name));
     }
 
     #[cfg(test)]
     pub(super) fn sync_tui_pet_selection(&mut self, pet: String) {
-        self.config.tui_pet = Some(pet.clone());
+        self.local_settings.tui.pet = Some(pet.clone());
         self.chat_widget.set_tui_pet(Some(pet));
     }
 
     pub(super) fn sync_tui_pet_disabled(&mut self) {
         let pet = crate::pets::DISABLED_PET_ID.to_string();
-        self.config.tui_pet = Some(pet.clone());
+        self.local_settings.tui.pet = Some(pet.clone());
         self.chat_widget.set_tui_pet(Some(pet));
     }
 
     pub(super) fn restore_runtime_theme_from_config(&self) {
-        if let Some(name) = self.config.tui_theme.as_deref()
-            && let Some(theme) =
-                crate::render::highlight::resolve_theme_by_name(name, Some(&self.config.codex_home))
+        if let Some(name) = self.local_settings.tui.theme.as_deref()
+            && let Some(theme) = crate::render::highlight::resolve_theme_by_name(
+                name,
+                Some(&self.local_settings.codex_home),
+            )
         {
             crate::render::highlight::set_syntax_theme(theme);
             return;
@@ -905,7 +917,7 @@ impl App {
         let auto_theme_name = crate::render::highlight::adaptive_default_theme_name();
         if let Some(theme) = crate::render::highlight::resolve_theme_by_name(
             auto_theme_name,
-            Some(&self.config.codex_home),
+            Some(&self.local_settings.codex_home),
         ) {
             crate::render::highlight::set_syntax_theme(theme);
         }
@@ -1625,6 +1637,8 @@ enabled = false
     #[tokio::test]
     async fn refresh_in_memory_config_from_disk_updates_resize_reflow_config() -> Result<()> {
         let mut app = make_test_app().await;
+        let mut expected_widget_settings = app.chat_widget.local_settings.clone();
+        expected_widget_settings.tui.terminal_resize_reflow_max_rows = Some(9000);
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         std::fs::write(
@@ -1632,15 +1646,18 @@ enabled = false
             r#"
 [tui]
 terminal_resize_reflow_max_rows = 9000
+theme = "dracula"
 "#,
         )?;
 
         app.refresh_in_memory_config_from_disk().await?;
 
         assert_eq!(
-            app.config.terminal_resize_reflow.max_rows,
+            app.local_settings.terminal_resize_reflow().max_rows,
             crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(9000)
         );
+        assert_eq!(app.local_settings.tui.theme.as_deref(), Some("dracula"));
+        assert_eq!(app.chat_widget.local_settings, expected_widget_settings);
         Ok(())
     }
 
@@ -1688,6 +1705,7 @@ terminal_resize_reflow_max_rows = 9000
     async fn rebuild_config_for_resume_or_fallback_uses_current_config_on_same_cwd_error()
     -> Result<()> {
         let mut app = make_test_app().await;
+        app.sync_tui_theme_selection("dracula".to_string());
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         std::fs::write(codex_home.path().join("config.toml"), "[broken")?;
@@ -1698,7 +1716,7 @@ terminal_resize_reflow_max_rows = 9000
             .rebuild_config_for_resume_or_fallback(&current_cwd, current_cwd.to_path_buf())
             .await?;
 
-        assert_eq!(resume_config, current_config);
+        assert_eq!(resume_config, (current_config, app.local_settings.clone()));
         Ok(())
     }
 
@@ -1726,11 +1744,31 @@ terminal_resize_reflow_max_rows = 9000
 
         app.sync_tui_theme_selection("dracula".to_string());
 
-        assert_eq!(app.config.tui_theme.as_deref(), Some("dracula"));
+        assert_eq!(app.local_settings.tui.theme.as_deref(), Some("dracula"));
         assert_eq!(
-            app.chat_widget.config_ref().tui_theme.as_deref(),
+            app.chat_widget.local_settings.tui.theme.as_deref(),
             Some("dracula")
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_preserves_live_local_settings_and_server_auth_requirement() -> Result<()> {
+        let mut app = make_test_app().await;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        app.sync_tui_theme_selection("dracula".to_string());
+        app.chat_widget.requires_openai_auth = false;
+        let mut legacy_config = app.config.clone();
+        legacy_config.tui_theme = Some("nord".to_string());
+        legacy_config.model_provider.requires_openai_auth = true;
+        let init = app.chatwidget_init_for_forked_or_resumed_thread(
+            &mut tui,
+            legacy_config,
+            /*initial_user_message*/ None,
+        );
+        let replacement = ChatWidget::new_with_app_event(init);
+        assert_eq!(replacement.local_settings, app.local_settings);
+        assert!(!replacement.requires_openai_auth);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1739,9 +1777,9 @@ terminal_resize_reflow_max_rows = 9000
 
         app.sync_tui_pet_selection("chefito".to_string());
 
-        assert_eq!(app.config.tui_pet.as_deref(), Some("chefito"));
+        assert_eq!(app.local_settings.tui.pet.as_deref(), Some("chefito"));
         assert_eq!(
-            app.chat_widget.config_ref().tui_pet.as_deref(),
+            app.chat_widget.local_settings.tui.pet.as_deref(),
             Some("chefito")
         );
     }
@@ -1753,11 +1791,11 @@ terminal_resize_reflow_max_rows = 9000
         app.sync_tui_pet_disabled();
 
         assert_eq!(
-            app.config.tui_pet.as_deref(),
+            app.local_settings.tui.pet.as_deref(),
             Some(crate::pets::DISABLED_PET_ID)
         );
         assert_eq!(
-            app.chat_widget.config_ref().tui_pet.as_deref(),
+            app.chat_widget.local_settings.tui.pet.as_deref(),
             Some(crate::pets::DISABLED_PET_ID)
         );
     }

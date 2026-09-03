@@ -32,6 +32,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
+use codex_utils_git_discovery::GitRootDiscovery;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -249,6 +250,13 @@ impl SessionConfiguration {
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
             permission_profile: self.effective_permission_profile(&environment_selections),
+            full_access: codex_protocol::protocol::has_full_access(
+                self.step_settings.approval_policy.value(),
+                &self.permission_profile(),
+                environment_selections
+                    .iter()
+                    .map(|environment| &environment.config),
+            ),
             active_permission_profile: permission_profile.active_permission_profile(),
             environments: TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
@@ -636,6 +644,7 @@ impl Session {
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
+        git_root_discovery: Arc<GitRootDiscovery>,
         model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
@@ -1411,6 +1420,7 @@ impl Session {
                 .with_legacy_custom_ca_fallback(),
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
+                git_root_discovery,
                 tool_approvals: Mutex::new(ApprovalStore::default()),
                 guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
                 runtime_handle: tokio::runtime::Handle::current(),

@@ -142,7 +142,13 @@ async fn wait_for_git_enrichment(state: &TurnMetadataState) -> Value {
 async fn detached_memory_responses_metadata_omits_turn_identity() {
     let (_temp_dir, repo_path) = create_clean_git_repo("repo-東京").await;
 
+    let thread_manager = crate::ThreadManager::with_models_provider_for_tests(
+        codex_login::CodexAuth::from_api_key("test"),
+        crate::config::test_config().await.model_provider,
+    );
+
     let header = detached_memory_responses_metadata(
+        &thread_manager,
         String::new(),
         String::new(),
         String::new(),
@@ -195,7 +201,13 @@ async fn detached_memory_responses_metadata_omits_empty_workspace_metadata() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
 
+    let thread_manager = crate::ThreadManager::with_models_provider_for_tests(
+        codex_login::CodexAuth::from_api_key("test"),
+        crate::config::test_config().await.model_provider,
+    );
+
     let header = detached_memory_responses_metadata(
+        &thread_manager,
         String::new(),
         String::new(),
         String::new(),
@@ -218,6 +230,21 @@ async fn detached_memory_responses_metadata_omits_empty_workspace_metadata() {
             "thread_source": "memory_consolidation",
         })
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_workspaces_times_out_pending_git_discovery() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let cwd = temp_dir.path().abs();
+
+    let workspaces = tokio::time::timeout(
+        Duration::from_secs(2),
+        memory_workspaces(&cwd, std::future::pending()),
+    )
+    .await
+    .expect("memory metadata should stop waiting for Git discovery");
+
+    assert!(workspaces.is_empty());
 }
 
 #[test]
@@ -1105,7 +1132,7 @@ async fn turn_metadata_state_preserves_subagent_parent_after_git_enrichment() {
         &model_info_from_slug("gpt-5.4"),
     ));
 
-    state.spawn_git_enrichment_task();
+    state.spawn_git_enrichment_task(Arc::default());
     let json = wait_for_git_enrichment(&state).await;
 
     assert!(json.get("forked_from_thread_id").is_none());
@@ -1145,20 +1172,23 @@ async fn turn_metadata_state_coalesces_concurrent_git_enrichment() {
         /*auto_review_enabled*/ false,
         &model_info_from_slug("gpt-5.4"),
     ));
+    let git_root_discovery = Arc::default();
     let barrier = Arc::new(tokio::sync::Barrier::new(8));
     let tasks = (0..8)
         .map(|_| {
             let state = Arc::clone(&state);
             let barrier = Arc::clone(&barrier);
+            let git_root_discovery = Arc::clone(&git_root_discovery);
             tokio::spawn(async move {
                 barrier.wait().await;
-                state.spawn_git_enrichment_task();
+                state.spawn_git_enrichment_task(git_root_discovery);
                 state
                     .enrichment_task
                     .lock()
                     .expect("enrichment task lock")
                     .as_ref()
                     .expect("enrichment task")
+                    .abort_handle()
                     .id()
             })
         })
@@ -1181,6 +1211,82 @@ async fn turn_metadata_state_coalesces_concurrent_git_enrichment() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_turn_metadata_aborts_unused_git_enrichment() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let state = Arc::new(TurnMetadataState::new(
+        "session-a".to_string(),
+        "thread-a".to_string(),
+        /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
+        &SessionSource::Exec,
+        /*thread_source*/ None,
+        "turn-a".to_string(),
+        temp_dir.path().abs(),
+        &PermissionProfile::read_only(),
+        WindowsSandboxLevel::Disabled,
+        /*enforce_managed_network*/ false,
+        /*auto_review_enabled*/ false,
+        &model_info_from_slug("gpt-5.4"),
+    ));
+    let weak_state = Arc::downgrade(&state);
+    state.spawn_git_enrichment_task(Arc::default());
+    let task = state
+        .enrichment_task
+        .lock()
+        .expect("enrichment task lock")
+        .as_ref()
+        .expect("enrichment task")
+        .abort_handle();
+
+    // Drop the history-only context before its task can run. A strong task-owned
+    // reference would retain the metadata even after every caller has left.
+    drop(state);
+    assert!(weak_state.upgrade().is_none());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping turn metadata should abort its enrichment task");
+}
+
+#[tokio::test]
+async fn git_enrichment_discovers_the_repository_when_it_starts() {
+    let (workspace, repo_path) = create_clean_git_repo("repo").await;
+    let saved_git = workspace.path().join("saved-git");
+    std::fs::rename(repo_path.join(".git"), &saved_git).expect("move Git metadata");
+    let state = Arc::new(TurnMetadataState::new(
+        "session-a".to_string(),
+        "thread-a".to_string(),
+        /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
+        &SessionSource::Exec,
+        /*thread_source*/ None,
+        "turn-a".to_string(),
+        repo_path.clone(),
+        &PermissionProfile::read_only(),
+        WindowsSandboxLevel::Disabled,
+        /*enforce_managed_network*/ false,
+        /*auto_review_enabled*/ false,
+        &model_info_from_slug("gpt-5.4"),
+    ));
+    std::fs::rename(saved_git, repo_path.join(".git")).expect("restore Git metadata");
+
+    state.spawn_git_enrichment_task(Arc::default());
+    let metadata = wait_for_git_enrichment(&state).await;
+    assert_eq!(
+        metadata["workspaces"]
+            .as_object()
+            .expect("workspace metadata")
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![&repo_path.to_string_lossy().into_owned()],
+    );
+}
+
 #[tokio::test]
 async fn turn_metadata_state_git_enrichment_cancellation_is_retryable_and_errors_stay_empty() {
     let (_temp_dir, repo_path) = create_clean_git_repo("repo").await;
@@ -1200,7 +1306,8 @@ async fn turn_metadata_state_git_enrichment_cancellation_is_retryable_and_errors
         /*auto_review_enabled*/ false,
         &model_info_from_slug("gpt-5.4"),
     ));
-    state.spawn_git_enrichment_task();
+    let git_root_discovery = Arc::default();
+    state.spawn_git_enrichment_task(Arc::clone(&git_root_discovery));
     state.cancel_git_enrichment_task();
     assert!(
         state
@@ -1214,7 +1321,7 @@ async fn turn_metadata_state_git_enrichment_cancellation_is_retryable_and_errors
         .expect("cancelled git enrichment should unblock waiters");
     assert!(state.current_workspaces().is_empty());
 
-    state.spawn_git_enrichment_task();
+    state.spawn_git_enrichment_task(git_root_discovery);
     let json = wait_for_git_enrichment(&state).await;
     assert_eq!(
         json["workspaces"].as_object().map(serde_json::Map::len),
@@ -1243,7 +1350,7 @@ async fn turn_metadata_state_git_enrichment_cancellation_is_retryable_and_errors
         /*auto_review_enabled*/ false,
         &model_info_from_slug("gpt-5.4"),
     ));
-    invalid_state.spawn_git_enrichment_task();
+    invalid_state.spawn_git_enrichment_task(Arc::default());
     tokio::time::timeout(
         Duration::from_secs(2),
         invalid_state.wait_for_git_enrichment(),

@@ -536,8 +536,9 @@ pub(crate) struct App {
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
     workspace_command_runner: Option<WorkspaceCommandRunner>,
-    /// Config is stored here so we can recreate ChatWidgets as needed.
+    /// Legacy bootstrap and server-setting inputs; local preferences live in `local_settings`.
     pub(crate) config: Config,
+    pub(crate) local_settings: crate::local_settings::LocalSettings,
     launch_cwd: PathBuf,
     /// Resume anchor selected by `/cd`; ordinary resumes retain the immutable launch cwd.
     runtime_working_directory_override: Option<PathBuf>,
@@ -779,6 +780,7 @@ impl App {
         initial_user_message: Option<crate::chatwidget::UserMessage>,
     ) -> crate::chatwidget::ChatWidgetInit {
         crate::chatwidget::ChatWidgetInit {
+            local_settings: self.local_settings.clone(),
             config: cfg,
             frame_requester: tui.frame_requester(),
             app_event_tx: self.app_event_tx.clone(),
@@ -786,6 +788,7 @@ impl App {
             initial_user_message,
             enhanced_keys_supported: self.enhanced_keys_supported,
             has_chatgpt_account: self.chat_widget.has_chatgpt_account(),
+            requires_openai_auth: self.chat_widget.requires_openai_auth,
             has_codex_backend_auth: self.chat_widget.has_codex_backend_auth(),
             model_catalog: self.model_catalog.clone(),
             feedback: self.feedback.clone(),

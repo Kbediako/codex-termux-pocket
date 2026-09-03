@@ -31,6 +31,7 @@ use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::ConnectionOrigin;
 use crate::transport::ConnectionState;
@@ -122,6 +123,7 @@ mod models_refresh_worker;
 mod notification_media;
 mod otel_reloader;
 mod outgoing_message;
+mod plugin_config_reload;
 mod request_processors;
 mod request_serialization;
 mod server_request_error;
@@ -524,6 +526,7 @@ pub async fn run_main_with_transport_options(
         }
     };
     let mut config_warnings = Vec::new();
+    let mut plugin_startup_config = PluginStartupConfig::Current;
     let config = match config_manager
         .load_latest_config(/*fallback_cwd*/ None)
         .await
@@ -539,6 +542,7 @@ pub async fn run_main_with_transport_options(
 
             let message = config_warning_from_error("Invalid configuration; using defaults.", &err);
             config_warnings.push(message);
+            plugin_startup_config = PluginStartupConfig::Defaults;
             config_manager.load_default_config().await.map_err(|e| {
                 std::io::Error::new(
                     ErrorKind::InvalidData,
@@ -917,7 +921,11 @@ pub async fn run_main_with_transport_options(
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            plugin_startup_tasks: matches!(
+                runtime_options.plugin_startup_tasks,
+                PluginStartupTasks::Start
+            )
+            .then_some(plugin_startup_config),
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

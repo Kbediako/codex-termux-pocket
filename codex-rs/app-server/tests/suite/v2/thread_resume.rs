@@ -3836,6 +3836,7 @@ async fn thread_resume_token_usage_replay_ignores_stale_interrupted_tail_turn() 
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }))?,
         })
         .to_string(),
@@ -3923,6 +3924,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }))?,
         })
         .to_string(),
@@ -4233,6 +4235,7 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }))?,
         })
         .to_string(),

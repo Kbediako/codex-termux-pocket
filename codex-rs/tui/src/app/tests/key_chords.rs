@@ -116,6 +116,30 @@ async fn completed_global_chord_reuses_the_existing_action_handler() -> Result<(
 }
 
 #[tokio::test]
+async fn completed_global_chords_toggle_output_and_request_external_editor() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    let config = toml::from_str(
+        "[global]\ntoggle_raw_output = [\"ctrl-x r\"]\nopen_external_editor = [\"ctrl-x e\"]",
+    )?;
+    app.keymap = RuntimeKeymap::from_config(&config).expect("valid global chords");
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+
+    for key in [ctrl('x'), KeyCode::Char('r').into()] {
+        press(&mut app, &mut tui, &mut app_server, key).await?;
+    }
+    assert!(app.chat_widget.raw_output_mode());
+
+    for key in [ctrl('x'), KeyCode::Char('e').into()] {
+        press(&mut app, &mut tui, &mut app_server, key).await?;
+    }
+    assert_eq!(
+        app.chat_widget.external_editor_state(),
+        super::ExternalEditorState::Requested
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn wrong_second_stroke_passes_through_but_escape_is_consumed() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
 

@@ -1,5 +1,6 @@
 //! Guardian review decides whether an `on-request` approval should be granted
 //! automatically instead of shown to the user.
+//! Full Access (`never` approvals with a disabled sandbox) approves without review.
 //!
 //! High-level approach:
 //! 1. Reconstruct a compact transcript that preserves user intent plus the most

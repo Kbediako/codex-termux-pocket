@@ -733,6 +733,7 @@ async fn status_snapshot_shows_active_user_defined_profile() {
 async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_link() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
     config.model_provider_id = "amazon-bedrock".to_string();
     config.model_provider =
         ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
@@ -750,8 +751,10 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
     let runtime_base_url = "https://bedrock-mantle.eu-west-1.api.aws/openai/v1";
 
+    config.model_provider.requires_openai_auth = true;
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
+        /*requires_openai_auth*/ false,
         Some(runtime_base_url),
         /*remote_connection*/ None,
         test_status_account_display().as_ref(),
@@ -769,30 +772,20 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         "<none>".to_string(),
         /*refreshing_rate_limits*/ false,
     );
-    let rendered = render_lines(&composite.display_lines(/*width*/ 120)).join("\n");
-
-    assert!(
-        rendered.contains(&format!("Amazon Bedrock - {runtime_base_url}")),
-        "expected /status to render runtime Bedrock URL, got: {rendered}"
-    );
-    assert!(
-        !rendered.contains("bedrock-mantle.us-east-1"),
-        "expected /status to ignore configured Bedrock base URL, got: {rendered}"
-    );
-    assert!(
-        !rendered.contains("https://chatgpt.com/codex/settings/usage"),
-        "expected /status to hide ChatGPT usage link for Bedrock, got: {rendered}"
-    );
+    let rendered =
+        sanitize_directory(render_lines(&composite.display_lines(/*width*/ 120))).join("\n");
+    assert_snapshot!("status_server_auth_not_required", rendered);
 
     config.model_provider_id = "openai-proxy".to_string();
     config.model_provider = ModelProviderInfo {
         name: "OpenAI Proxy".to_string(),
         base_url: Some("https://openai-proxy.example/v1".to_string()),
-        requires_openai_auth: true,
+        requires_openai_auth: false,
         ..ModelProviderInfo::default()
     };
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
+        /*requires_openai_auth*/ true,
         /*runtime_model_provider_base_url*/ None,
         /*remote_connection*/ None,
         test_status_account_display().as_ref(),
@@ -810,12 +803,9 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
         "<none>".to_string(),
         /*refreshing_rate_limits*/ false,
     );
-    let rendered = render_lines(&composite.display_lines(/*width*/ 120)).join("\n");
-
-    assert!(
-        rendered.contains("https://chatgpt.com/codex/settings/usage"),
-        "expected /status to show ChatGPT usage link for OpenAI-auth proxy, got: {rendered}"
-    );
+    let rendered =
+        sanitize_directory(render_lines(&composite.display_lines(/*width*/ 120))).join("\n");
+    assert_snapshot!("status_server_auth_required", rendered);
 
     let wide_destinations: Vec<String> = composite
         .display_hyperlink_lines(/*width*/ 120)
@@ -1639,6 +1629,7 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
     let token_info = token_info_for(&model_slug, &config, &usage);
     let (composite, _) = new_status_output_with_rate_limits_handle(
         &config,
+        /*requires_openai_auth*/ true,
         /*runtime_model_provider_base_url*/ None,
         Some(&remote_connection),
         account_display.as_ref(),
@@ -1748,6 +1739,7 @@ async fn transcript_overlay_remeasures_status_after_rate_limit_refresh() {
 
     let (status, handle) = new_status_output_with_rate_limits_handle(
         &config,
+        /*requires_openai_auth*/ true,
         /*runtime_model_provider_base_url*/ None,
         /*remote_connection*/ None,
         /*account_display*/ None,

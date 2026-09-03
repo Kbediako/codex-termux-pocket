@@ -1,5 +1,6 @@
 //! Shared configuration and working-directory resolution for ordinary and overview cold resumes.
 //! Keeps CLI/runtime cwd precedence, remote-workspace checks, and interactive prompts aligned.
+//! Carries local preferences alongside the resolved configuration for session replacement.
 
 use super::*;
 use codex_config::types::ResumeCwdMode;
@@ -10,7 +11,7 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &AppServerSession,
         target_session: &SessionTarget,
-    ) -> std::result::Result<Config, AppRunControl> {
+    ) -> std::result::Result<(Config, crate::local_settings::LocalSettings), AppRunControl> {
         self.refresh_in_memory_config_from_disk_best_effort("resuming a thread")
             .await;
         let cwd_override = self
@@ -19,7 +20,7 @@ impl App {
             .or(self.harness_overrides.cwd.as_deref())
             .or_else(|| app_server.remote_cwd_override());
         let resume_cwd_mode = crate::session_resume::effective_resume_cwd_mode(
-            self.config.tui_resume_cwd,
+            self.local_settings.tui.resume_cwd,
             cwd_override,
         );
         let remembered_current_cwd = cwd_override.unwrap_or(self.launch_cwd.as_path());

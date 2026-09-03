@@ -105,6 +105,7 @@ impl App {
                         /*turn_cursor*/ None,
                         /*item_cursor*/ None,
                         /*config*/ None,
+                        /*local_settings*/ None,
                         crate::app_server_session::HistoryHydrationScope::Initial,
                     )
                     .await?;
@@ -176,6 +177,7 @@ impl App {
         self.config = retry_config.clone();
         let started = app_server
             .fork_thread_at(
+                &self.local_settings,
                 retry_config,
                 thread_id,
                 /*last_turn_id*/ None,

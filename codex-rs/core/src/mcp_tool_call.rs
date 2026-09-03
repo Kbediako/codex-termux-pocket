@@ -1178,6 +1178,7 @@ impl Session {
 const MCP_TOOL_OPENAI_OUTPUT_TEMPLATE_META_KEY: &str = "openai/outputTemplate";
 const MCP_TOOL_UI_RESOURCE_URI_META_KEY: &str = "ui/resourceUri";
 const MCP_TOOL_LINK_ID_META_KEY: &str = "link_id";
+const MCP_TOOL_LINK_IS_IMPLICIT_META_KEY: &str = "link_is_implicit";
 const MCP_TOOL_PLUGIN_ID_META_KEY: &str = "plugin_id";
 const MCP_TOOL_ITEM_ID_META_KEY: &str = "itemId";
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
@@ -1373,6 +1374,7 @@ const MCP_TOOL_APPROVAL_CANCEL: &str = "Cancel";
 struct McpToolApprovalKey {
     server: String,
     connector_id: Option<String>,
+    link_id: Option<String>,
     tool_name: String,
 }
 
@@ -1566,10 +1568,14 @@ pub(crate) async fn request_mcp_tool_user_approval(
             .map(|rendered_template| rendered_template.question.as_str()),
     );
     if tool_call_mcp_elicitation_enabled {
+        let link_id = sess
+            .mcp_tool_approval_metadata(&turn_context.sub_id, id)
+            .await
+            .and_then(|(_, metadata)| metadata.link_id);
         let metadata = McpToolApprovalMetadata {
             annotations: None,
             connector_id: connector_id.clone(),
-            link_id: None,
+            link_id,
             connector_name: connector_name.clone(),
             connector_description: connector_description.clone(),
             connected_account_email: connected_account_email.clone(),
@@ -1636,6 +1642,7 @@ fn session_mcp_tool_approval_key(
     Some(McpToolApprovalKey {
         server: invocation.server.clone(),
         connector_id,
+        link_id: metadata.and_then(|metadata| metadata.link_id.clone()),
         tool_name: invocation.tool.clone(),
     })
 }
@@ -1914,6 +1921,17 @@ fn build_mcp_tool_approval_elicitation_meta(
                 meta.insert(
                     MCP_TOOL_APPROVAL_CONNECTOR_ID_KEY.to_string(),
                     serde_json::Value::String(connector_id.to_string()),
+                );
+            }
+            if let Some(link_id) = metadata.link_id.as_ref() {
+                meta.insert(
+                    MCP_TOOL_LINK_ID_META_KEY.to_string(),
+                    serde_json::Value::String(link_id.clone()),
+                );
+                // Match the Codex Apps service's reserved implicit-link ID prefix.
+                meta.insert(
+                    MCP_TOOL_LINK_IS_IMPLICIT_META_KEY.to_string(),
+                    serde_json::Value::Bool(link_id.starts_with("implicit_link::")),
                 );
             }
             if let Some(connector_name) = metadata.connector_name.as_ref() {

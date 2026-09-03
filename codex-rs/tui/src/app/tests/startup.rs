@@ -945,6 +945,8 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             project_id: None,
             history_mode: Default::default(),
             model_provider: "notification-provider".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -1205,6 +1207,7 @@ async fn owned_subagent_approval_before_thread_started_is_preserved() -> Result<
     )?;
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             child_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,

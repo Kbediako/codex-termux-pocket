@@ -822,6 +822,9 @@
             "mcp_2026_07_28": {
               "type": "boolean"
             },
+            "mcp_oauth_refresh_coordination": {
+              "type": "boolean"
+            },
             "memories": {
               "type": "boolean"
             },
@@ -3924,6 +3927,7 @@
               "delete_char": null,
               "delete_to_line_end": null,
               "enter_insert": null,
+              "enter_replace_mode": null,
               "find_backward": null,
               "find_forward": null,
               "insert_line_start": null,
@@ -3941,6 +3945,7 @@
               "open_line_above": null,
               "open_line_below": null,
               "paste_after": null,
+              "redo": null,
               "repeat_last_change": null,
               "replace_char": null,
               "start_change_operator": null,
@@ -4751,6 +4756,7 @@
             "delete_char": null,
             "delete_to_line_end": null,
             "enter_insert": null,
+            "enter_replace_mode": null,
             "find_backward": null,
             "find_forward": null,
             "insert_line_start": null,
@@ -4768,6 +4774,7 @@
             "open_line_above": null,
             "open_line_below": null,
             "paste_after": null,
+            "redo": null,
             "repeat_last_change": null,
             "replace_char": null,
             "start_change_operator": null,
@@ -5095,6 +5102,14 @@
           ],
           "description": "Enter insert mode at cursor (`i`)."
         },
+        "enter_replace_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Enter replace mode and overwrite characters under the cursor (`R`)."
+        },
         "find_backward": {
           "allOf": [
             {
@@ -5230,6 +5245,14 @@
             }
           ],
           "description": "Paste after cursor (`p`)."
+        },
+        "redo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Redo the last undone edit (`ctrl-r`)."
         },
         "repeat_last_change": {
           "allOf": [
@@ -6109,6 +6132,9 @@
           "type": "boolean"
         },
         "mcp_2026_07_28": {
+          "type": "boolean"
+        },
+        "mcp_oauth_refresh_coordination": {
           "type": "boolean"
         },
         "memories": {

@@ -411,6 +411,7 @@ async fn removing_remote_thread_omits_disconnect_guidance() -> Result<()> {
         .await?;
         let resumed = server
             .resume_thread(
+                &app.local_settings,
                 app.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -549,6 +550,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         .await?;
     let resumed = restarted_app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             target_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -557,7 +559,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     assert!(resumed.task_tools_available);
     assert!(restarted_app_server.task_tools_available(target_id));
     let forked = restarted_app_server
-        .fork_thread(app.config.clone(), target_id)
+        .fork_thread(&app.local_settings, app.config.clone(), target_id)
         .await?;
     assert!(forked.task_tools_available);
     assert!(restarted_app_server.task_tools_available(forked.session.thread_id));
@@ -738,6 +740,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     )?;
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             delegation_source,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -752,6 +755,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     );
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             delegation_source,
             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
@@ -765,7 +769,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         starts[0]["config"]["mcp_servers.codex_tui"]
     );
     app_server
-        .fork_thread(app.config.clone(), delegation_source)
+        .fork_thread(&app.local_settings, app.config.clone(), delegation_source)
         .await?;
     let forked = recorded_params(&requests, "thread/fork")
         .pop()
@@ -1245,6 +1249,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     )?;
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             creation_source,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1467,7 +1472,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
 #[tokio::test]
 async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(100);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(100);
     let thread_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2026-01-02T00-00-00",
@@ -1515,6 +1520,7 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         })
     }));
     items.extend([
@@ -1562,6 +1568,7 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1665,7 +1672,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(2);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(2);
     let thread_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2026-01-02T00-00-00",
@@ -1704,6 +1711,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }),
             started_at_ms: None,
             completed_at_ms: 0,
@@ -1732,6 +1740,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1856,13 +1865,14 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     let started = app_server.start_thread(&app.config).await?;
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             legacy_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
         )
         .await?;
     let forked = app_server
-        .fork_thread(app.config.clone(), legacy_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), legacy_thread_id)
         .await?;
 
     assert_ne!(started.session.thread_id, legacy_thread_id);
@@ -1979,6 +1989,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         LegacyHistoryRequest::Resume => {
             let resumed = app_server
                 .resume_thread(
+                    &app.local_settings,
                     app.config.clone(),
                     legacy_thread_id,
                     crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1989,7 +2000,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         }
         LegacyHistoryRequest::Fork => {
             let forked = app_server
-                .fork_thread(app.config.clone(), legacy_thread_id)
+                .fork_thread(&app.local_settings, app.config.clone(), legacy_thread_id)
                 .await?;
             assert_ne!(forked.session.thread_id, legacy_thread_id);
             "thread/fork"
@@ -2043,6 +2054,7 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
 
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             parent_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2051,7 +2063,7 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
     assert_eq!(started.session.thread_id, parent_thread_id);
 
     let forked = app_server
-        .fork_thread(app.config.clone(), parent_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), parent_thread_id)
         .await?;
 
     assert_ne!(forked.session.thread_id, parent_thread_id);
@@ -2068,7 +2080,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(8);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(8);
     let thread_id = create_history_rollout(
         &app.config,
         ThreadHistoryMode::Paginated,
@@ -2102,6 +2114,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }),
             started_at_ms: None,
             completed_at_ms: 0,
@@ -2130,6 +2143,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2146,6 +2160,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         /*index*/ 0,
         Arc::new(crate::history_cell::new_session_info(
             &app.config,
+            &app.local_settings,
             started.session.model.as_str(),
             &started.session,
             /*is_first_event*/ false,
@@ -2158,7 +2173,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         .await?;
     app.transcript_cells = initial_cells;
     app.scrollback_has_older_history = app_server.has_older_history(thread_id);
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(32);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(32);
     let initial_cell_count = app.transcript_cells.len();
     let initial_page_requests = recorded_params(&requests, "thread/items/list").len();
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -2267,6 +2282,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     app_server.remember_thread_history_mode(paginated_thread_id, ThreadHistoryMode::Legacy);
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             paginated_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2286,12 +2302,16 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     .await?;
     assert!(!cells.is_empty());
     app_server
-        .fork_thread(app.config.clone(), paginated_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), paginated_thread_id)
         .await?;
     let mut side_config = app.config.clone();
     side_config.ephemeral = true;
     app_server
-        .fork_side_thread(side_config, paginated_thread_id)
+        .fork_side_thread(
+            &crate::local_settings::LocalSettings::from(&side_config),
+            side_config,
+            paginated_thread_id,
+        )
         .await?;
 
     let paginated_reads = recorded_params(&requests, "thread/read");
@@ -2628,6 +2648,7 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
 
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             child_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -3065,7 +3086,7 @@ fn fresh_session_applies_requested_name() -> Result<()> {
 
 #[test]
 fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     std::thread::Builder::new()
         .name("tui-session-lifecycle-requests".to_string())
@@ -3129,6 +3150,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 .await?;
                 let root = app_server
                     .resume_thread(
+                        &app.local_settings,
                         app.config.clone(),
                         root_thread_id,
                         app.resume_model_settings(),
@@ -3138,6 +3160,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     .await?;
                 app_server
                     .resume_thread(
+                        &app.local_settings,
                         app.config.clone(),
                         child_thread_id,
                         app.resume_model_settings(),
