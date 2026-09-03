@@ -174,3 +174,14 @@ subject	release: request validated Termux 0.153.0-alpha.4 publication	tooling	Re
 subject	termux: promote termux-v0.153.0-alpha.4-223220fd66	tooling	Promotes the anonymously verified alpha.4 updater manifest.
 subject	ci: stage exact alpha.6 integration	tooling	Temporary staging-branch job, ExecPlan, and helper used to integrate the exact official alpha.6 source; removed before selecting the release source.
 subject	termux: update to 0.153.0-alpha.6	runtime-critical	Merges the exact official 0.153.0-alpha.6 source and preserves the maintained Android and Termux runtime patch stack.
+subject	placeholder	tooling	Accidental connector placeholder commit; its file is removed before exact-source validation.
+subject	ci: prepare latest-alpha release takeover	tooling	Disposable connected-maintainer bootstrap; removed before exact-source validation.
+subject	ci: stage latest-alpha release transaction	tooling	Disposable release-transaction placeholder; removed before exact-source validation.
+subject	ci: add latest-alpha release driver	tooling	Disposable orchestration driver; removed before exact-source validation.
+subject	ci: add latest-alpha Python bootstrap	tooling	Disposable Python startup hook; removed before exact-source validation.
+subject	release: make publisher orchestrate exact checks	security-critical	Attempted release-control orchestration change; replaced by the reviewed compact permanent publisher before source selection.
+subject	docs: track alpha.6 release repair	docs	Living repair ExecPlan; removed before exact-source validation.
+subject	release: merge exact 0.153.0-alpha.6 source	runtime-critical	Merges the cleaned exact alpha.6 integration into the maintained branch while preserving upstream ancestry.
+subject	ci: add alpha.6 release repair worker	tooling	Adds the one-time fail-closed repair worker removed before source selection.
+subject	ci: stage alpha.6 release repair	tooling	Adds the one-time repair workflow removed before source selection.
+subject	release: repair alpha.6 publication controls	security-critical	Restores the permanent publisher, authenticates public API metadata reads, preserves anonymous asset downloads, and removes disposable orchestration.

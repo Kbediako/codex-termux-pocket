@@ -243,10 +243,10 @@ def public_release_ready(repo: str, tag: str) -> tuple[dict[str, Any], dict[str,
     for attempt in range(1, 13):
         release = request_json(
             api_url(repo, f"/releases/tags/{encoded}"),
-            authenticated=False,
+            authenticated=True,
             attempts=3,
         )
-        latest = request_json(api_url(repo, "/releases/latest"), authenticated=False, attempts=3)
+        latest = request_json(api_url(repo, "/releases/latest"), authenticated=True, attempts=3)
         try:
             assets = release_assets_by_name(release)
             complete = set(assets) == set(RELEASE_ASSETS)
@@ -270,7 +270,7 @@ def public_release_ready(repo: str, tag: str) -> tuple[dict[str, Any], dict[str,
 
 def peel_tag_ref(repo: str, tag: str) -> str:
     encoded = urllib.parse.quote(tag, safe="")
-    ref = request_json(api_url(repo, f"/git/ref/tags/{encoded}"), authenticated=False, attempts=4)
+    ref = request_json(api_url(repo, f"/git/ref/tags/{encoded}"), authenticated=True, attempts=4)
     obj = ref.get("object")
     for _ in range(8):
         if not isinstance(obj, dict):
@@ -282,7 +282,7 @@ def peel_tag_ref(repo: str, tag: str) -> str:
             return sha
         if obj.get("type") != "tag" or not isinstance(obj.get("url"), str):
             fail("release tag does not resolve to a commit")
-        tag_object = request_json(obj["url"], authenticated=False, attempts=4)
+        tag_object = request_json(obj["url"], authenticated=True, attempts=4)
         obj = tag_object.get("object")
     fail("release tag contains an unexpectedly deep tag-object chain")
 

@@ -158,7 +158,7 @@ def audit_public_release(
     release, latest = public_release_ready(repo, tag)
     assets = validate_release_object(release, tag=tag, source_sha=source_sha, require_public=True)
     if latest.get("id") != release.get("id"):
-        fail("anonymous /releases/latest does not resolve to the audited release")
+        fail("public /releases/latest does not resolve to the audited release")
 
     with tempfile.TemporaryDirectory(prefix="termux-public-release-") as temp_name:
         public_dir = Path(temp_name)
@@ -233,7 +233,7 @@ def audit_public_release(
             "",
             f"- Release: `{tag}`",
             f"- Runtime source and tag ref: `{source_sha}`",
-            "- `/releases/latest`: `verified anonymously`",
+            "- `/releases/latest`: `verified against public release metadata`",
             "- Asset set, bytes, API digests, and sizes: `verified (5/5)`",
             "- SHA256SUMS, metadata, archive contents, and runtime checksums: `verified`",
             "- SPDX package/source identity: `verified`",
@@ -266,10 +266,10 @@ def validate_receipt_live(receipt: dict[str, Any], manifest_path: Path) -> None:
         fail("audit receipt release identity is malformed")
     release = request_json(
         api_url(repo, f"/releases/{release_id}"),
-        authenticated=False,
+        authenticated=True,
         attempts=4,
     )
-    latest = request_json(api_url(repo, "/releases/latest"), authenticated=False, attempts=4)
+    latest = request_json(api_url(repo, "/releases/latest"), authenticated=True, attempts=4)
     assets = validate_release_object(release, tag=tag, source_sha=source_sha, require_public=True)
     if latest.get("id") != release_id or latest.get("tag_name") != tag:
         fail("GitHub Latest changed after the anonymous audit")
