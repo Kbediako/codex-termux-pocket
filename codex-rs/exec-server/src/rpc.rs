@@ -543,6 +543,22 @@ impl RpcClient {
         P: Serialize,
         T: DeserializeOwned,
     {
+        self.call_untraced(method, params).await
+    }
+
+    /// Send one request without creating the standard request span.
+    ///
+    /// Callers use this only when they install a more precise request span
+    /// around the same wire operation.
+    pub(crate) async fn call_untraced<P, T>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<T, RpcCallError>
+    where
+        P: Serialize,
+        T: DeserializeOwned,
+    {
         let _call_slot = self.acquire_regular_call_slot()?;
         self.call_inner(method, params, RpcCallTimeout::None).await
     }

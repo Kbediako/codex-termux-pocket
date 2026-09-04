@@ -127,7 +127,11 @@ impl App {
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
-        emit_project_config_warnings(&app_event_tx, &config);
+        if let Some(message) = project_config_warning(&config) {
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                history_cell::StartupWarningsCell::new(vec![message]),
+            )));
+        }
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
             local_settings.tui.notification_settings.method,

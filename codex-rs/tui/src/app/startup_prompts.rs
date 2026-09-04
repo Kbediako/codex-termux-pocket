@@ -17,6 +17,8 @@ struct SkillLoadWarningKey {
 #[derive(Debug, Default)]
 pub(super) struct SkillLoadWarningState {
     active: HashSet<SkillLoadWarningKey>,
+    // Both session attachment and the background startup fetch can finish the initial load.
+    pub(super) startup_complete: bool,
 }
 
 impl SkillLoadWarningState {
@@ -45,28 +47,24 @@ impl SkillLoadWarningState {
     }
 }
 
-pub(super) fn emit_skill_load_warnings(app_event_tx: &AppEventSender, errors: &[SkillErrorInfo]) {
+pub(super) fn skill_load_warning_messages(errors: &[SkillErrorInfo]) -> Vec<String> {
     if errors.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let error_count = errors.len();
-    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-        crate::history_cell::new_warning_event(format!(
-            "Skipped loading {error_count} skill(s) due to invalid SKILL.md files."
-        )),
-    )));
-
-    for error in errors {
-        let path = error.path.display();
-        let message = error.message.as_str();
-        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-            crate::history_cell::new_warning_event(format!("{path}: {message}")),
-        )));
-    }
+    let mut messages = vec![format!(
+        "Skipped loading {error_count} skill(s) due to invalid SKILL.md files."
+    )];
+    messages.extend(
+        errors
+            .iter()
+            .map(|error| format!("{}: {}", error.path.display(), error.message)),
+    );
+    messages
 }
 
-pub(super) fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) {
+pub(super) fn project_config_warning(config: &Config) -> Option<String> {
     let mut disabled_folders = Vec::new();
 
     for layer in config.config_layer_stack.all_layers_low_to_high() {
@@ -83,7 +81,7 @@ pub(super) fn emit_project_config_warnings(app_event_tx: &AppEventSender, config
     }
 
     if disabled_folders.is_empty() {
-        return;
+        return None;
     }
 
     let mut message = concat!(
@@ -97,9 +95,7 @@ pub(super) fn emit_project_config_warnings(app_event_tx: &AppEventSender, config
         message.push_str(&format!("       {reason}\n"));
     }
 
-    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-        history_cell::new_warning_event(message),
-    )));
+    Some(message)
 }
 
 pub(super) fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &Config) {
@@ -110,7 +106,7 @@ pub(super) fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &
     };
 
     app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-        history_cell::new_warning_event(message),
+        history_cell::StartupWarningsCell::new(vec![message]),
     )));
 }
 
@@ -424,7 +420,11 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx);
 
-        emit_skill_load_warnings(&app_event_tx, errors);
+        for message in skill_load_warning_messages(errors) {
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                history_cell::new_warning_event(message),
+            )));
+        }
 
         let mut rendered = Vec::new();
         while let Ok(AppEvent::InsertHistoryCell(cell)) = rx.try_recv() {

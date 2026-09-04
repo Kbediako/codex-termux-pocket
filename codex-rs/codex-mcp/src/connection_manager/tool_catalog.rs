@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -83,9 +84,14 @@ impl McpConnectionSet {
     }
 
     /// Returns all tools with model-visible names normalized.
-    #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.servers.len()))]
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
+        self.list_tools_with_errors().await.0
+    }
+
+    #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.servers.len()))]
+    pub(crate) async fn list_tools_with_errors(&self) -> (Vec<ToolInfo>, HashMap<String, String>) {
         let mut tools = Vec::new();
+        let mut errors = HashMap::new();
         let mut available_server_count = 0;
         let mut unavailable_server_count = 0;
         let server_results = join_all(self.servers.iter().map(|(server_name, view)| async move {
@@ -105,7 +111,7 @@ impl McpConnectionSet {
                 match catalog_override {
                     Some(tools) => {
                         let tools = filter_tools(tools, &view.tool_filter);
-                        Some(prepare_codex_apps_tools_for_model(
+                        Ok(prepare_codex_apps_tools_for_model(
                             tools,
                             &self.tool_plugin_provenance,
                         ))
@@ -120,32 +126,34 @@ impl McpConnectionSet {
                 startup_complete
             ))
             .await;
-            match server_tools {
-                Some(server_tools) => Some(
-                    server_tools
-                        .into_iter()
-                        .map(|tool| Self::with_server_metadata(tool, &view.metadata))
-                        .collect::<Vec<_>>(),
-                ),
-                None => {
+            let result = match server_tools {
+                Ok(server_tools) => Ok(server_tools
+                    .into_iter()
+                    .map(|tool| Self::with_server_metadata(tool, &view.metadata))
+                    .collect::<Vec<_>>()),
+                Err(error) => {
                     trace!(
                         server_name = %server_name,
                         has_cached_tools,
                         startup_complete,
                         "MCP server tools unavailable while building tool list"
                     );
-                    None
+                    Err(error)
                 }
-            }
+            };
+            (server_name, result)
         }))
         .await;
-        for server_tools in server_results {
+        for (server_name, server_tools) in server_results {
             match server_tools {
-                Some(server_tools) => {
+                Ok(server_tools) => {
                     available_server_count += 1;
                     tools.extend(server_tools);
                 }
-                None => unavailable_server_count += 1,
+                Err(error) => {
+                    unavailable_server_count += 1;
+                    errors.insert(server_name.clone(), error.to_string());
+                }
             }
         }
         let tools = normalize_tools_for_model_with_prefix(
@@ -159,7 +167,7 @@ impl McpConnectionSet {
             tool_count = tools.len(),
             "built MCP tool list"
         );
-        tools
+        (tools, errors)
     }
 
     #[expect(

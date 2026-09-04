@@ -1,3 +1,5 @@
+mod connect_options;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +50,8 @@ use tracing::instrument::WithSubscriber;
 
 #[path = "environment/accepted.rs"]
 mod accepted;
+
+pub use connect_options::RemoteEnvironmentOptions;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
@@ -466,13 +470,30 @@ impl EnvironmentManager {
         exec_server_url: String,
         connect_timeout: Option<std::time::Duration>,
     ) -> Result<(), ExecServerError> {
-        validate_environment_id(&environment_id)?;
-        let exec_server_url = validate_remote_exec_server_url(exec_server_url)?;
-        let environment = Arc::new(Environment::remote_with_transport(
-            ExecServerTransportParams::websocket_url(
+        self.upsert_environment_with_options(
+            environment_id,
+            RemoteEnvironmentOptions {
                 exec_server_url,
-                connect_timeout.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT),
-            ),
+                connect_timeout,
+                http_headers: HashMap::new(),
+            },
+        )
+    }
+
+    /// Adds or replaces a direct environment with trusted host-owned connection options.
+    ///
+    /// Invalid headers and WebSocket-controlled handshake headers are rejected
+    /// before the environment is registered. Valid headers are retained for
+    /// automatic reconnects without changing existing URL-only environment APIs.
+    pub fn upsert_environment_with_options(
+        &self,
+        environment_id: String,
+        options: RemoteEnvironmentOptions,
+    ) -> Result<(), ExecServerError> {
+        validate_environment_id(&environment_id)?;
+        let transport = options.into_transport_params()?;
+        let environment = Arc::new(Environment::remote_with_transport(
+            transport,
             self.local_runtime_paths.clone(),
             self.http_client_factory.clone(),
         ));
@@ -589,18 +610,6 @@ fn validate_environment_id(environment_id: &str) -> Result<(), ExecServerError> 
         )));
     }
     Ok(())
-}
-
-fn validate_remote_exec_server_url(exec_server_url: String) -> Result<String, ExecServerError> {
-    let (exec_server_url, disabled) = normalize_exec_server_url(Some(exec_server_url));
-    if disabled {
-        return Err(ExecServerError::Protocol(
-            "remote environment cannot use disabled exec-server url".to_string(),
-        ));
-    }
-    exec_server_url.ok_or_else(|| {
-        ExecServerError::Protocol("remote environment requires an exec-server url".to_string())
-    })
 }
 
 fn noise_environment_config_from_env()

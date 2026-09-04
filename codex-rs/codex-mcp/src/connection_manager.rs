@@ -171,10 +171,10 @@ impl McpServerView {
     async fn listed_tools(
         &self,
         tool_plugin_provenance: &ToolPluginProvenance,
-    ) -> Option<Vec<ToolInfo>> {
+    ) -> Result<Vec<ToolInfo>, StartupOutcomeError> {
         let tools = self.connection.client.listed_tools().await?;
         let tools = filter_tools(tools, &self.tool_filter);
-        Some(if self.connection.client.is_codex_apps_mcp_server {
+        Ok(if self.connection.client.is_codex_apps_mcp_server {
             prepare_codex_apps_tools_for_model(tools, tool_plugin_provenance)
         } else {
             prepare_regular_mcp_tools_for_model(tools, tool_plugin_provenance)

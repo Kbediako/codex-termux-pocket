@@ -35,6 +35,11 @@ pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
 pub use truncation::truncate_text;
 
+mod verified_answers;
+pub use verified_answers::RenderedVerifiedAnswers;
+pub use verified_answers::render_verified_answer;
+pub use verified_answers::render_verified_answers;
+
 mod authorization;
 mod composition;
 mod entry;
@@ -85,7 +90,7 @@ pub struct SectionInput<'a> {
     pub transcript: &'a ConversationTranscriptConfig,
     /// Bounded root evidence resolved by the host; empty when not applicable.
     pub root_conversation: &'a [GuardianRootMessage],
-    /// Bounded, role-labeled answers verified and matched to history by the host.
+    /// Bounded, role-labeled answers selected from the host-owned context snapshot.
     pub trusted_user_answers: &'a [String],
 }
 

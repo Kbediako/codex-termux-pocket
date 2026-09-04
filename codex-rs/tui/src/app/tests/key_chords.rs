@@ -158,6 +158,317 @@ async fn wrong_second_stroke_passes_through_but_escape_is_consumed() -> Result<(
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_recovers_vim_escape_before_normal_commands() -> Result<()> {
+    for (key, expected) in [
+        (KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT), "ab"),
+        (
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            "ab",
+        ),
+        (KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT), "abc"),
+    ] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        app.chat_widget.toggle_vim_mode_and_notify();
+        app.chat_widget.insert_str("abc");
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char('i').into(),
+        )
+        .await?;
+
+        press(&mut app, &mut tui, &mut app_server, key).await?;
+
+        assert_eq!(app.chat_widget.composer_text_with_pending(), expected);
+        assert!(
+            !app.chat_widget
+                .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_preserves_default_and_configured_editor_alt_bindings() -> Result<()> {
+    for (key, expected) in [
+        ('b', "!abc def"),
+        ('f', "abc! def"),
+        ('d', "! def"),
+        ('k', "!"),
+    ] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        if key == 'k' {
+            let mut config = TuiKeymap::default();
+            config.editor.kill_line_end =
+                Some(KeybindingsSpec::One(KeybindingSpec("alt-k".to_string())));
+            let runtime = RuntimeKeymap::from_config(&config)
+                .map_err(|error| color_eyre::eyre::eyre!(error))?;
+            app.chat_widget.apply_keymap_update(config, &runtime);
+            app.keymap = runtime;
+        }
+        app.chat_widget.toggle_vim_mode_and_notify();
+        app.chat_widget.insert_str("abc def");
+        let insert = KeyCode::Char('i').into();
+        press(&mut app, &mut tui, &mut app_server, insert).await?;
+        press(&mut app, &mut tui, &mut app_server, ctrl('a')).await?;
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT),
+        )
+        .await?;
+
+        assert!(
+            app.chat_widget
+                .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+        app.chat_widget.insert_str("!");
+        assert_eq!(app.chat_widget.composer_text_with_pending(), expected);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_preserves_active_global_alt_shortcuts() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("abc");
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('i').into(),
+    )
+    .await?;
+
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+    )
+    .await?;
+
+    assert!(app.chat_widget.raw_output_mode());
+    assert!(
+        app.chat_widget
+            .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_preserves_configured_composer_alt_shortcuts() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    let mut config = TuiKeymap::default();
+    config.composer.history_search_previous =
+        Some(KeybindingsSpec::One(KeybindingSpec("alt-q".to_string())));
+    let runtime =
+        RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+    app.chat_widget.apply_keymap_update(config, &runtime);
+    app.keymap = runtime;
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("abc");
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('i').into(),
+    )
+    .await?;
+
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+    )
+    .await?;
+
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("reverse-i-search:"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_preserves_active_alt_chords() -> Result<()> {
+    for (binding, prefix, completion) in [
+        (
+            "alt-q r",
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+            KeyCode::Char('r').into(),
+        ),
+        (
+            "ctrl-x alt-h",
+            ctrl('x'),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT),
+        ),
+    ] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        let mut config = TuiKeymap::default();
+        config.global.toggle_raw_output =
+            Some(KeybindingsSpec::One(KeybindingSpec(binding.to_string())));
+        let runtime =
+            RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+        app.chat_widget.apply_keymap_update(config, &runtime);
+        app.keymap = runtime;
+        app.chat_widget.toggle_vim_mode_and_notify();
+        app.chat_widget.insert_str("abc");
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char('i').into(),
+        )
+        .await?;
+
+        press(&mut app, &mut tui, &mut app_server, prefix).await?;
+        assert!(app.key_chord_matcher.is_pending());
+        press(&mut app, &mut tui, &mut app_server, completion).await?;
+
+        assert!(app.chat_widget.raw_output_mode());
+        assert!(!app.key_chord_matcher.is_pending());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_terminal_preserves_image_paste_without_reading_clipboard() -> Result<()> {
+    for mode in ['i', 'R'] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        app.chat_widget.toggle_vim_mode_and_notify();
+        app.chat_widget.insert_str("abc");
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char(mode).into(),
+        )
+        .await?;
+        for key in [
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('V'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        ] {
+            assert!(!app.should_recover_vim_insert_escape(key));
+        }
+        assert!(app.should_recover_vim_insert_escape(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::ALT,
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn legacy_terminal_preserves_agent_shortcuts_without_editor_word_bindings() -> Result<()> {
+    for mode in ['i', 'R'] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        let mut config = TuiKeymap::default();
+        config.editor.move_word_left = Some(KeybindingsSpec::Many(vec![]));
+        config.editor.move_word_right = Some(KeybindingsSpec::Many(vec![]));
+        let runtime =
+            RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+        app.chat_widget.apply_keymap_update(config, &runtime);
+        app.keymap = runtime;
+        app.chat_widget.toggle_vim_mode_and_notify();
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char(mode).into(),
+        )
+        .await?;
+
+        for key in ['b', 'f'] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
+            assert!(!app.should_recover_vim_insert_escape(event));
+        }
+        app.chat_widget.insert_str("abc");
+        for key in ['b', 'f'] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
+            assert!(app.should_recover_vim_insert_escape(event));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn vim_escape_recovery_preserves_enhanced_terminals_and_altgr() -> Result<()> {
+    for (enhanced_keys_supported, modifiers) in [
+        (true, KeyModifiers::ALT),
+        (false, KeyModifiers::ALT | KeyModifiers::CONTROL),
+    ] {
+        let (mut app, mut tui, mut app_server) = chord_app().await?;
+        app.enhanced_keys_supported = enhanced_keys_supported;
+        app.chat_widget.toggle_vim_mode_and_notify();
+        app.chat_widget.insert_str("abc");
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char('i').into(),
+        )
+        .await?;
+
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyEvent::new(KeyCode::Char('x'), modifiers),
+        )
+        .await?;
+
+        assert!(
+            app.chat_widget
+                .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovered_vim_escape_cancels_a_pending_key_chord_first() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("abc");
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('i').into(),
+    )
+    .await?;
+    press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
+    assert!(app.key_chord_matcher.is_pending());
+
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+    )
+    .await?;
+
+    assert!(!app.key_chord_matcher.is_pending());
+    press(&mut app, &mut tui, &mut app_server, KeyCode::Left.into()).await?;
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "abcx");
+    assert!(
+        app.chat_widget
+            .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn physical_dispatch_band_events_are_dropped() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;

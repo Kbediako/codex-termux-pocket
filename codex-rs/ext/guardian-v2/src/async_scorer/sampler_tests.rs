@@ -39,6 +39,7 @@ use super::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use super::INITIAL_WEBSOCKET_CONNECTIONS;
 use super::LunaSampler;
 use super::LunaSamplerConfig;
+use super::LunaSamplerError;
 use super::LunaSamplingRequest;
 use super::MAX_SAMPLING_RETRIES;
 use super::MAX_WEBSOCKET_CONNECTIONS;
@@ -570,7 +571,20 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
         request.parent_compaction_hash = parent_hash.map(str::to_owned);
         request.trusted_review_evidence = vec!["trusted review".to_owned()];
 
-        assert_eq!(sampler.sample(request).await?, "low");
+        let result = sampler.sample(request).await;
+        if !should_reuse {
+            assert!(matches!(
+                result,
+                Err(LunaSamplerError::IncompatibleCompaction)
+            ));
+            assert!(server.connections().iter().all(Vec::is_empty));
+            assert_eq!(
+                sampler.sample(sample_request("uncompacted-turn")).await?,
+                "low"
+            );
+            continue;
+        }
+        assert_eq!(result?, "low");
 
         let request = server
             .wait_for_request(
@@ -582,31 +596,20 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
         let input = request["input"].as_array().expect("input items");
         assert_eq!(input[0]["type"], "additional_tools");
         assert_eq!(input[1]["role"], "developer");
-        if should_reuse {
-            assert_eq!(input.len(), 5);
-            assert_eq!(input[2], serde_json::to_value(&parent_compaction)?);
-            assert_eq!(input[3]["role"], "developer");
-            assert_eq!(input[3]["content"][1]["text"], "trusted review");
-            assert_eq!(input[4]["role"], "user");
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[2], serde_json::to_value(&parent_compaction)?);
+        assert_eq!(input[3]["role"], "developer");
+        assert_eq!(input[3]["content"][1]["text"], "trusted review");
+        assert_eq!(input[4]["role"], "user");
 
-            let mut switched_request = sample_request("turn-2");
-            switched_request.parent_compaction = Some(parent_compaction);
-            switched_request.parent_compaction_hash = Some("incompatible".to_owned());
-            assert_eq!(sampler.sample(switched_request).await?, "low");
-            let switched_request = server
-                .wait_for_request(
-                    /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
-                    /*request_index*/ 1,
-                )
-                .await
-                .body_json();
-            assert_eq!(switched_request["input"][2]["role"], "user");
-        } else {
-            assert_eq!(input.len(), 4);
-            assert_eq!(input[2]["role"], "developer");
-            assert_eq!(input[2]["content"][1]["text"], "trusted review");
-            assert_eq!(input[3]["role"], "user");
-        }
+        let mut switched_request = sample_request("turn-2");
+        switched_request.parent_compaction = Some(parent_compaction);
+        switched_request.parent_compaction_hash = Some("incompatible".to_owned());
+        assert!(matches!(
+            sampler.sample(switched_request).await,
+            Err(LunaSamplerError::IncompatibleCompaction)
+        ));
+        assert_eq!(server.connections().iter().map(Vec::len).sum::<usize>(), 1);
     }
 
     Ok(())

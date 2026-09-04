@@ -40,6 +40,8 @@ mod safety_buffering;
 mod session_lifecycle_requests;
 mod session_summary;
 mod startup;
+#[path = "tests/startup_warnings_tests.rs"]
+mod startup_warnings_tests;
 #[path = "tests/stream_animation_tests.rs"]
 mod stream_animation_tests;
 #[path = "tests/thread_usage.rs"]
@@ -278,6 +280,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
 
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
+            tools_error: None,
             name: "docs".to_string(),
             runtime_status: None,
             plugin_id: None,
@@ -4846,7 +4849,9 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
     let mut rendered_cells = Vec::new();
     while let Ok(event) = app_event_rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
-            rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+            rendered_cells.push(lines_to_single_string(
+                &cell.transcript_lines(/*width*/ 120),
+            ));
         }
     }
     let rendered = rendered_cells.join("\n");
@@ -4963,12 +4968,24 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
         app.handle_thread_event_now(event);
     }
 
+    let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
     let mut rendered_cells = Vec::new();
     while let Ok(event) = app_event_rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
-            rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+            rendered_cells.push(lines_to_single_string(
+                &cell.transcript_lines(/*width*/ 120),
+            ));
+            app.insert_history_cell(&mut tui, cell);
         }
     }
+    let inline = app
+        .transcript_cells
+        .iter()
+        .flat_map(|cell| cell.display_lines(/*width*/ 120))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inline.contains("1 MCP startup issue"));
     let rendered = rendered_cells.join("\n");
     assert!(app.chat_widget.side_conversation_active());
     assert_eq!(rendered.matches("sentry is not logged in").count(), 1);

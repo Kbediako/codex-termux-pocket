@@ -451,11 +451,22 @@ impl SandboxManager {
                             .to_string(),
                     ));
                 }
-                (
-                    os_argv_to_strings(argv),
-                    None,
-                    Some(pending_sandboxed_request?),
-                )
+                let pending = pending_sandboxed_request?;
+                if let Some(metrics) = codex_otel::global() {
+                    let _ = metrics.counter(
+                        "codex.windows_sandbox.private_desktop",
+                        /*inc*/ 1,
+                        &[(
+                            "enabled",
+                            if windows_sandbox_private_desktop {
+                                "true"
+                            } else {
+                                "false"
+                            },
+                        )],
+                    );
+                }
+                (os_argv_to_strings(argv), None, Some(pending))
             }
             #[cfg(not(target_os = "windows"))]
             SandboxType::WindowsRestrictedToken => (
@@ -686,11 +697,13 @@ fn compatibility_workspace_write_policy(
         .and_then(|tmpdir| {
             AbsolutePathBuf::from_absolute_path(std::path::PathBuf::from(tmpdir)).ok()
         })
-        .is_some_and(|tmpdir| file_system_policy.can_write_path_with_cwd(tmpdir.as_path(), cwd));
+        .is_some_and(|tmpdir| {
+            file_system_policy.can_write_local_path_with_cwd(tmpdir.as_path(), cwd)
+        });
     let slash_tmp = Path::new("/tmp");
     let slash_tmp_writable = slash_tmp.is_absolute()
         && slash_tmp.is_dir()
-        && file_system_policy.can_write_path_with_cwd(slash_tmp, cwd);
+        && file_system_policy.can_write_local_path_with_cwd(slash_tmp, cwd);
 
     SandboxPolicy::WorkspaceWrite {
         writable_roots,

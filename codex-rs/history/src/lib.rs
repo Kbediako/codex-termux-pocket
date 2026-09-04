@@ -58,6 +58,10 @@ pub struct CodexHarnessMetadata {
     /// Whether a response configuration update was created by the Codex harness itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub harness_authored_configuration: bool,
+
+    /// Producer compatibility for an opaque compaction item, never the currently selected model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_model_hash: Option<String>,
 }
 
 impl ResponseItemEnvelope {

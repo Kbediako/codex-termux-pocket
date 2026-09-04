@@ -987,6 +987,7 @@ async fn mcp_tools_output_lists_tools_for_hyphenated_server_names() {
 #[test]
 fn mcp_tools_output_from_statuses_renders_status_only_servers() {
     let statuses = vec![McpServerStatus {
+        tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
         plugin_id: None,
@@ -1019,6 +1020,7 @@ fn mcp_tools_output_from_statuses_renders_status_only_servers() {
 #[test]
 fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
     let statuses = vec![McpServerStatus {
+        tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
         plugin_id: None,

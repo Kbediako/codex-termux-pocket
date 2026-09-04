@@ -44,6 +44,7 @@ mod conflict_tests;
 pub(crate) use bindings::KeymapContext;
 pub(crate) use bindings::bindings_for_action;
 pub(crate) use bindings::keymap_action_id;
+pub(crate) use bindings::keymap_action_ids;
 use bindings::runtime_action_bindings;
 pub(crate) use chords::KEY_CHORD_TIMEOUT;
 pub(crate) use chords::KeyChordMatch;

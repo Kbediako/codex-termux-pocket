@@ -163,6 +163,44 @@ fn guardian_v2_feature_config_preserves_boolean_toggle() {
 }
 
 #[test]
+fn guardian_thread_context_resolves_boolean_config_and_profile_overrides() {
+    for (base, profile, enabled) in [
+        ("", "", false),
+        ("guardian_thread_context = false", "", false),
+        ("guardian_thread_context = true", "", true),
+        (
+            "guardian_thread_context = true",
+            "guardian_thread_context = false",
+            false,
+        ),
+        (
+            "guardian_thread_context = false",
+            "guardian_thread_context = true",
+            true,
+        ),
+    ] {
+        let base = toml::from_str::<FeaturesToml>(base).expect("base features");
+        let profile = toml::from_str::<FeaturesToml>(profile).expect("profile features");
+        let features = Features::from_sources(
+            FeatureConfigSource {
+                features: Some(&base),
+                ..Default::default()
+            },
+            FeatureConfigSource {
+                features: Some(&profile),
+                ..Default::default()
+            },
+            FeatureOverrides::default(),
+        );
+        let mut expected = Features::with_defaults();
+        if enabled {
+            expected.enable(Feature::GuardianThreadContext);
+        }
+        assert_eq!(features.enabled_features(), expected.enabled_features());
+    }
+}
+
+#[test]
 fn guardian_v2_feature_config_deserializes_classifier_and_transcript_settings() {
     let features: FeaturesToml = toml::from_str(
         r#"

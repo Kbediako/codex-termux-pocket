@@ -15,6 +15,7 @@ use codex_core::config::Config;
 use codex_core::context::GuardianReviewEvidence;
 use codex_core::context::NodeReplReviewEvidence;
 use codex_extension_api::ApprovalReviewContributor;
+use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
@@ -107,6 +108,7 @@ fn should_classify_tool(
 pub enum StrictReviewReason {
     ElevatedRisk,
     StaleScore,
+    IncompatibleCompaction,
 }
 
 enum ClassificationOutcome {
@@ -209,7 +211,10 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                 metrics: input.extension_metrics.clone(),
                 ..Default::default()
             });
-            input.thread_store.insert(GuardianReviewEvidence::default());
+            // Preserve the answer path selected by the host for this thread.
+            input
+                .thread_store
+                .get_or_init(GuardianReviewEvidence::default);
             input
                 .thread_store
                 .insert(TrustedSkillRoots::from_config(input.config));
@@ -270,6 +275,9 @@ impl ApprovalReviewContributor for GuardianV2Extension {
         Box::pin(async move {
             thread_store.get::<GuardianV2Enabled>()?;
             let guardian_config = thread_store.get::<GuardianV2Config>()?;
+            let guardian_evidence = thread_store.get_or_init(GuardianReviewEvidence::default);
+            let thread_context_enabled = guardian_evidence.uses_thread_owned_context();
+            let mut initial_cua_call = false;
             if guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly {
                 let Ok(action) = serde_json::from_str::<serde_json::Value>(prompt) else {
                     record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
@@ -287,9 +295,10 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                     record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
                     return None;
                 }
-                // The first REPL execution never waits for synchronous Guardian review.
-                // The async classifier still runs, and later calls use the normal policy.
-                if action.get("tool_name").and_then(serde_json::Value::as_str) == Some("js")
+                // Legacy mode keeps the first REPL execution's review bypass.
+                // Thread-owned context first checks whether Luna can use the checkpoint.
+                initial_cua_call = action.get("tool_name").and_then(serde_json::Value::as_str)
+                    == Some("js")
                     && action
                         .get("connector_id")
                         .and_then(serde_json::Value::as_str)
@@ -298,8 +307,8 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                         .get::<GuardianV2ScoreProgress>()?
                         .js_executions
                         .load(Ordering::Acquire)
-                        == 1
-                {
+                        == 1;
+                if initial_cua_call && !thread_context_enabled {
                     record_fast_decision(
                         extension_metrics.as_deref(),
                         "approved",
@@ -336,7 +345,43 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                 record_fast_decision(extension_metrics.as_deref(), "deferred", "scoring_failure");
                 return None;
             };
-            let current_authorization = ScoreAuthorization::current(&thread).await;
+            let root_authorization = thread
+                .guardian_root_snapshot()
+                .await
+                .map(|snapshot| snapshot.authorization_version);
+            let history = thread.conversation_history_snapshot().await;
+            if thread_context_enabled {
+                let sampler = thread_store.get::<LunaSampler>()?;
+                if requires_sync_for_compaction(&guardian_config, history.as_ref(), &sampler) {
+                    thread_store.insert(StrictReviewReason::IncompatibleCompaction);
+                    record_fast_decision(
+                        extension_metrics.as_deref(),
+                        "deferred",
+                        "incompatible_compaction",
+                    );
+                    return None;
+                }
+            }
+            if initial_cua_call {
+                record_fast_decision(extension_metrics.as_deref(), "approved", "initial_cua_call");
+                return Some(ReviewDecision::Approved);
+            }
+            let current_authorization = ScoreAuthorization {
+                local: guardian_evidence.authorization_version(history.as_ref()),
+                root: root_authorization,
+            };
+            if !current_authorization.local.retained_context_complete
+                || current_authorization
+                    .root
+                    .is_some_and(|root| !root.retained_context_complete)
+            {
+                record_fast_decision(
+                    extension_metrics.as_deref(),
+                    "deferred",
+                    "incomplete_authorization",
+                );
+                return None;
+            }
             let scored_authorization = score_progress
                 .authorization
                 .lock()
@@ -556,6 +601,38 @@ impl GuardianV2Extension {
                 .enable_image_capture();
         }
         input.thread_store.insert(guardian_config.clone());
+        let guardian_evidence = input
+            .thread_store
+            .get_or_init(GuardianReviewEvidence::default);
+        let thread_context_enabled = guardian_evidence.uses_thread_owned_context();
+        if thread_context_enabled
+            && requires_sync_for_compaction(
+                &guardian_config,
+                input.conversation_history.as_ref(),
+                &sampler,
+            )
+        {
+            score_progress
+                .latest_failed_tool_call
+                .fetch_max(tool_call_index, Ordering::Release);
+            Self::record_fail_closed_score(input.thread_store, sampled_at);
+            record_classification(
+                metrics.as_deref(),
+                classification_started_at.elapsed(),
+                "skipped",
+            );
+            return;
+        }
+        let parent_compaction_hash = if thread_context_enabled {
+            input
+                .conversation_history
+                .latest_compaction_model_hash()
+                .map(str::to_owned)
+        } else {
+            parent_model
+                .as_ref()
+                .and_then(|model| model.comp_hash.clone())
+        };
         let parent_compaction = if guardian_config.reuse_parent_compaction {
             match encrypted_parent_compaction(
                 input.conversation_history.items(),
@@ -575,27 +652,28 @@ impl GuardianV2Extension {
         } else {
             None
         };
+        // Legacy requests may omit an incompatible checkpoint because their raw
+        // review transcript is still retained. The sampler rejects supplied
+        // incompatible checkpoints, so preserve that legacy omission here.
+        let parent_compaction = parent_compaction.filter(|_| {
+            thread_context_enabled
+                || sampler.supports_parent_compaction(parent_compaction_hash.as_deref())
+        });
         let call_id = input.call_id.to_owned();
         let mcp_tool = input.mcp_tool.cloned();
         let action = GuardianAction {
             tool_name: input.tool_name.clone(),
             payload: input.payload.clone(),
         };
-        let parent_compaction_hash = parent_model
-            .as_ref()
-            .and_then(|model| model.comp_hash.clone());
         let review_model_override = parent_model
             .as_ref()
             .and_then(|model| model.auto_review_model_override.clone());
         // Snapshot before spawning so a delayed sample cannot see later reviews.
-        let guardian_evidence = input
-            .thread_store
-            .get_or_init(GuardianReviewEvidence::default);
         let sync_reviews = guardian_evidence.snapshot();
-        let authorization_version =
-            guardian_evidence.authorization_version(input.conversation_history.as_ref());
-        let trusted_user_inputs =
-            guardian_evidence.user_input_fragments(input.conversation_history.as_ref());
+        let codex_core::context::GuardianUserInputSnapshot {
+            fragments: trusted_user_inputs,
+            authorization_version,
+        } = guardian_evidence.user_input_snapshot(input.conversation_history.as_ref());
         let history = Arc::clone(&input.conversation_history);
         let local_trusted_skill_paths = guardian_evidence.trusted_skill_paths(input.turn_id);
         let node_repl_images = if guardian_config.transcript.include_images {
@@ -878,6 +956,22 @@ impl GuardianV2Extension {
 enum ParentCompactionError {
     Serialization,
     Oversized,
+}
+
+// Sampling and fast approval must apply the same checkpoint eligibility policy.
+fn requires_sync_for_compaction(
+    config: &GuardianV2Config,
+    history: &dyn ConversationHistorySnapshot,
+    sampler: &LunaSampler,
+) -> bool {
+    config.reuse_parent_compaction
+        && history.items().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+            )
+        })
+        && !sampler.supports_parent_compaction(history.latest_compaction_model_hash())
 }
 
 // An unusable latest compaction must never fall back to an older one. Missing

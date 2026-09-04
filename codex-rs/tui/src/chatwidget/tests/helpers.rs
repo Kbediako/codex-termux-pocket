@@ -15,6 +15,8 @@ pub(super) async fn test_config() -> Config {
         Config::load_default_with_cli_overrides_for_codex_home(codex_home.clone(), Vec::new())
             .await
             .expect("config");
+    // Keep generic UI snapshots stable when the bundled catalog default changes.
+    config.model = Some("gpt-5.6-sol".to_string());
     config.codex_home = codex_home.abs();
     config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs());
     config.log_dir = codex_home.join("log");
@@ -329,10 +331,23 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
 pub(super) fn drain_insert_history(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> Vec<Vec<ratatui::text::Line<'static>>> {
+    drain_insert_history_with(rx, |cell| cell.display_lines(/*width*/ 80))
+}
+
+pub(super) fn drain_insert_history_transcript(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> Vec<Vec<ratatui::text::Line<'static>>> {
+    drain_insert_history_with(rx, |cell| cell.transcript_lines(/*width*/ 80))
+}
+
+fn drain_insert_history_with(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    render: impl Fn(&dyn HistoryCell) -> Vec<ratatui::text::Line<'static>>,
+) -> Vec<Vec<ratatui::text::Line<'static>>> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = ev {
-            let mut lines = cell.display_lines(/*width*/ 80);
+            let mut lines = render(cell.as_ref());
             if !cell.is_stream_continuation() && !out.is_empty() && !lines.is_empty() {
                 lines.insert(0, "".into());
             }

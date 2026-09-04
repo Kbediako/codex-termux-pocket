@@ -91,7 +91,7 @@ impl ChatWidget {
                 "Full Access mode"
             } else if profile
                 .file_system_sandbox_policy()
-                .can_write_path_with_cwd(self.config.cwd.as_path(), self.config.cwd.as_path())
+                .can_write_local_path_with_cwd(self.config.cwd.as_path(), self.config.cwd.as_path())
             {
                 "Agent mode"
             } else {

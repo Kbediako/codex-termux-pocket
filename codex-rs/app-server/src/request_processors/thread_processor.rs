@@ -1329,7 +1329,7 @@ impl ThreadRequestProcessor {
             codex_protocol::models::PermissionProfile::Managed { .. } => {
                 effective_permission_profile
                     .file_system_sandbox_policy()
-                    .can_write_path_with_cwd(config.cwd.as_path(), config.cwd.as_path())
+                    .can_write_local_path_with_cwd(config.cwd.as_path(), config.cwd.as_path())
             }
         };
 

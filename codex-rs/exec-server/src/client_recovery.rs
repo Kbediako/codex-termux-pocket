@@ -476,7 +476,7 @@ impl Inner {
             .as_ref()
             .ok_or_else(|| ExecServerError::Protocol("missing reconnect strategy".to_string()))?;
         let attempt = reconnect_strategy.resume(session_id).await?;
-        let (connection, options, attempt_permit) = attempt.into_parts();
+        let (connection, options, attempt_permit, noise_context) = attempt.into_parts();
         let (rpc_client, events_rx) = RpcClient::new(connection);
         let rpc_client = Arc::new(rpc_client);
         let client = ExecServerClient {
@@ -488,7 +488,9 @@ impl Inner {
         // burst cannot fill the bounded event channel and block the initialize
         // response behind it.
         client.spawn_rpc_reader(&rpc_client, events_rx);
-        client.initialize_rpc(&rpc_client, options).await?;
+        client
+            .initialize_rpc(&rpc_client, options, noise_context)
+            .await?;
 
         self.recover_processes(&rpc_client).await?;
         Ok((rpc_client, attempt_permit))

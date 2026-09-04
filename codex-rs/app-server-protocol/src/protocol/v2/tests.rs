@@ -2578,6 +2578,7 @@ fn mcp_server_elicitation_response_serializes_nullable_content() {
 fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tools_error: None,
             name: "not-ready".to_string(),
             runtime_status: None,
             plugin_id: None,
@@ -2599,6 +2600,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
                 "pluginId": null,
                 "serverInfo": null,
                 "tools": {},
+                "toolsError": null,
                 "resources": [],
                 "resourceTemplates": [],
                 "authStatus": "unknown",
@@ -2623,6 +2625,7 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
     assert_eq!(
         status,
         McpServerStatus {
+            tools_error: None,
             name: "older-server".to_string(),
             runtime_status: None,
             plugin_id: None,
@@ -2694,6 +2697,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
 fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tools_error: None,
             name: "initialized".to_string(),
             runtime_status: None,
             plugin_id: Some("lookup@test".to_string()),
@@ -2729,6 +2733,7 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
                     "websiteUrl": null,
                 },
                 "tools": {},
+                "toolsError": null,
                 "resources": [],
                 "resourceTemplates": [],
                 "authStatus": "unsupported",

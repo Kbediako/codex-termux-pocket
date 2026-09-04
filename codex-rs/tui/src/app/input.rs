@@ -5,8 +5,50 @@
 
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
+use crate::keymap::bindings_for_action;
+use crate::keymap::keymap_action_ids;
 
 impl App {
+    pub(super) fn should_recover_vim_insert_escape(&self, key_event: KeyEvent) -> bool {
+        let active_contexts = self.active_keymap_contexts();
+        // Legacy terminals encode Alt+character and Escape+character identically. Active
+        // bindings and either stroke of a chord win; inactive bindings do not consume input.
+        cfg!(unix)
+            && !self.enhanced_keys_supported
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+            && matches!(key_event.code, KeyCode::Char(_))
+            && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && (key_event.modifiers == KeyModifiers::ALT
+                || key_event.modifiers == (KeyModifiers::ALT | KeyModifiers::SHIFT))
+            && self
+                .chat_widget
+                .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            // ChatWidget's fixed image-paste shortcut is not in the configurable keymap.
+            && !(key_event.kind == KeyEventKind::Press
+                && matches!(key_event.code, KeyCode::Char('v' | 'V')))
+            // Empty-draft agent navigation also has fixed legacy-terminal fallbacks.
+            && !(self.chat_widget.composer_text_with_pending().is_empty()
+                && (previous_agent_shortcut_matches(key_event, /*allow_word_motion_fallback*/ true)
+                    || next_agent_shortcut_matches(key_event, /*allow_word_motion_fallback*/ true)))
+            && !keymap_action_ids()
+                .filter(|action| active_contexts.contains(action.context))
+                .any(|action| {
+                    bindings_for_action(&self.keymap, action.context.config_name(), action.action)
+                        .is_some_and(|bindings| bindings.is_pressed(key_event))
+                })
+            && !matches!(
+                self.key_chord_matcher.clone().advance(
+                    key_event,
+                    &self.keymap.chords,
+                    active_contexts,
+                    tokio::time::Instant::now(),
+                ),
+                crate::keymap::KeyChordMatch::Pending(_)
+                    | crate::keymap::KeyChordMatch::Completed(_)
+            )
+    }
+
     pub(super) fn route_key_chord_event(
         &mut self,
         tui: &mut tui::Tui,

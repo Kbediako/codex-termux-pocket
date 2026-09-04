@@ -231,7 +231,7 @@ struct PendingChord {
 }
 
 /// Tracks one pending two-stroke chord without buffering ordinary input.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct KeyChordMatcher {
     pending: Option<PendingChord>,
 }

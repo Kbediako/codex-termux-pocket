@@ -22,6 +22,12 @@ pub trait ConversationHistorySnapshot: Send + Sync {
         None
     }
 
+    /// Producer compatibility recorded on the latest opaque checkpoint. Missing provenance
+    /// must not be inferred from the currently selected model, including after resume.
+    fn latest_compaction_model_hash(&self) -> Option<&str> {
+        None
+    }
+
     /// Original review evidence retained across parent compaction, in conversation order.
     /// Hosts without separate retention provide their current history.
     fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {

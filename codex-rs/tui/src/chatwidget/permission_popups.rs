@@ -407,7 +407,7 @@ impl ChatWidget {
                 matches!(
                     current_permission_profile,
                     PermissionProfile::Managed { .. }
-                ) && file_system_policy.can_write_path_with_cwd(cwd, cwd)
+                ) && file_system_policy.can_write_local_path_with_cwd(cwd, cwd)
                     && !file_system_policy.has_full_disk_write_access()
             }
             _ => current_permission_profile == &preset.permission_profile,

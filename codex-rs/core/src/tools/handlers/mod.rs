@@ -396,7 +396,7 @@ mod tests {
     use codex_protocol::permissions::FileSystemSpecialPath;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::GranularApprovalConfig;
-    use codex_sandboxing::policy_transforms::intersect_permission_profiles;
+    use codex_sandboxing::policy_transforms::intersect_permission_profiles_with_context;
     use codex_sandboxing::policy_transforms::merge_permission_profiles;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
@@ -538,21 +538,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let stored_grant = intersect_permission_profiles(
+        let cwd_uri = PathUri::from_host_native_path(cwd.path()).expect("cwd URI");
+        let stored_grant = intersect_permission_profiles_with_context(
             requested_permissions.clone(),
             requested_permissions.clone(),
-            cwd.path(),
+            &local_context(&cwd_uri),
         );
         let effective_permissions =
             merge_permission_profiles(Some(&requested_permissions), Some(&stored_grant))
                 .expect("merged permissions");
-        let cwd = PathUri::from_host_native_path(cwd.path()).expect("cwd URI");
 
         assert_eq!(
             preapproved_permission_profile(
                 &effective_permissions,
                 &stored_grant,
-                &local_context(&cwd),
+                &local_context(&cwd_uri),
             ),
             Some(stored_grant)
         );

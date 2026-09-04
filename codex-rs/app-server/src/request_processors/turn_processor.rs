@@ -333,6 +333,17 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ReviewStartParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if matches!(params.delivery, Some(ApiReviewDelivery::Detached)) {
+            self.outgoing
+                .send_server_notification_to_connections(
+                    &[request_id.connection_id],
+                    ServerNotification::DeprecationNotice(DeprecationNoticeNotification {
+                        summary: "review/start with delivery \"detached\" is deprecated and will be removed in a future release.".to_string(),
+                        details: Some("Use thread/start followed by review/start with delivery \"inline\" for a separate review thread, or thread/fork followed by turn/start with your own review instructions.".to_string()),
+                    }),
+                )
+                .await;
+        }
         self.review_start_inner(request_id, params)
             .await
             .map(|()| None)

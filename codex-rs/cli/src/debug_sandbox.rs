@@ -380,7 +380,7 @@ async fn run_command_under_sandbox(
         SandboxType::Seatbelt => {
             let (file_system_sandbox_policy, network_sandbox_policy) =
                 runtime_permission_profile.to_runtime_permissions();
-            let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+            let mut args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
                 command,
                 file_system_sandbox_policy: &file_system_sandbox_policy,
                 network_sandbox_policy,
@@ -392,6 +392,15 @@ async fn run_command_under_sandbox(
                 extra_allow_unix_sockets: allow_unix_sockets,
             })
             .map_err(|err| anyhow::anyhow!(err))?;
+            // This CLI inherits the user's controlling terminal. Keep this deny
+            // after every shared policy allowance so the child cannot queue input
+            // for the unsandboxed shell that resumes when Codex exits.
+            match args.as_mut_slice() {
+                [flag, policy, ..] if flag.as_str() == "-p" => {
+                    policy.push_str("\n(deny file-ioctl (ioctl-command TIOCSTI))");
+                }
+                _ => anyhow::bail!("Seatbelt command is missing its generated policy"),
+            }
             spawn_debug_sandbox_child(
                 PathBuf::from("/usr/bin/sandbox-exec"),
                 args,

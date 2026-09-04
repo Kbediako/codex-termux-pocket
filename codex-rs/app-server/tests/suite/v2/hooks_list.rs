@@ -494,7 +494,8 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
-    assert_eq!(std::fs::read_to_string(&hook_log_path)?, "1\n2\n");
+    // Installation also applies the staged user-config change to this session.
+    assert_eq!(std::fs::read_to_string(&hook_log_path)?, "1\n");
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
@@ -544,7 +545,7 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
         .await?;
     let _: ThreadArchiveResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(archive_id)).await??;
-    assert_eq!(std::fs::read_to_string(&hook_log_path)?, "1\n2\n3\n");
+    assert_eq!(std::fs::read_to_string(&hook_log_path)?, "1\n3\n");
 
     Ok(())
 }

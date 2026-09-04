@@ -163,12 +163,12 @@ impl ConfigRequestProcessor {
                         | "personality"
                 )
             });
-        let reload_user_config = params.reload_user_config;
+        let should_reload = params.reload_user_config;
         let response = self.batch_write_inner(params).await?;
         if !session_defaults_only {
             self.handle_config_mutation().await;
-            if reload_user_config {
-                self.reload_user_config().await;
+            if should_reload {
+                reload_user_config(&self.config_manager, &self.thread_manager).await;
             }
         }
         Ok(ClientResponsePayload::ConfigBatchWrite(response))
@@ -183,7 +183,7 @@ impl ConfigRequestProcessor {
             .handle_config_mutation_result(self.set_experimental_feature_enablement(params).await)
             .await?;
         if !response.enablement.is_empty() {
-            self.reload_user_config().await;
+            reload_user_config(&self.config_manager, &self.thread_manager).await;
         }
         self.outgoing
             .send_response_as(
@@ -321,38 +321,6 @@ impl ConfigRequestProcessor {
         Ok(ExperimentalFeatureEnablementSetResponse { enablement })
     }
 
-    async fn reload_user_config(&self) {
-        match self.load_latest_config(/*fallback_cwd*/ None).await {
-            Ok(_) => {}
-            Err(err) => {
-                tracing::warn!(
-                    "failed to rebuild user config for runtime refresh: {}",
-                    err.message
-                );
-                return;
-            }
-        };
-        let thread_ids = self.thread_manager.list_thread_ids().await;
-        for thread_id in thread_ids {
-            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
-                continue;
-            };
-            let current_config = thread.config().await;
-            let next_config = match self
-                .config_manager
-                .load_latest_config_for_thread(current_config.as_ref())
-                .await
-            {
-                Ok(config) => config,
-                Err(err) => {
-                    tracing::warn!(%thread_id, %err, "failed to reload thread configuration");
-                    continue;
-                }
-            };
-            thread.refresh_runtime_config(next_config).await;
-        }
-    }
-
     async fn emit_plugin_toggle_events(
         &self,
         pending_changes: std::collections::BTreeMap<String, bool>,
@@ -371,6 +339,38 @@ impl ConfigRequestProcessor {
                 self.analytics_events_client.track_plugin_disabled(metadata);
             }
         }
+    }
+}
+
+pub(super) async fn reload_user_config(
+    config_manager: &ConfigManager,
+    thread_manager: &ThreadManager,
+) {
+    if let Err(err) = config_manager
+        .load_latest_config(/*fallback_cwd*/ None)
+        .await
+    {
+        tracing::warn!("failed to rebuild user config for runtime refresh: {err}");
+        return;
+    }
+    let thread_ids = thread_manager.list_thread_ids().await;
+    for thread_id in thread_ids {
+        let Ok(thread) = thread_manager.get_thread(thread_id).await else {
+            continue;
+        };
+        let current_config = thread.config().await;
+        let next_config = match config_manager
+            .load_latest_config_for_thread(current_config.as_ref())
+            .await
+        {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(%thread_id, %err, "failed to reload thread configuration");
+                continue;
+            }
+        };
+        // Keep runtime refresh state off the request dispatcher's stack.
+        Box::pin(thread.refresh_runtime_config(next_config)).await;
     }
 }
 

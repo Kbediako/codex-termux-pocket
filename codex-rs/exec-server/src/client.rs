@@ -328,6 +328,16 @@ pub struct ExecServerClient {
     recovery_policy: RecoveryPolicy,
 }
 
+/// State carried from a Noise readiness wait into the initialize RPC.
+///
+/// The span preserves the existing logical initialize operation while
+/// `timeout_for_error` keeps diagnostics tied to the caller's configured
+/// budget after readiness has consumed part of that budget.
+pub(crate) struct NoiseInitializeContext {
+    pub(crate) span: tracing::Span,
+    pub(crate) timeout_for_error: Duration,
+}
+
 struct ActiveProcessStart {
     inner: Arc<Inner>,
 }
@@ -721,23 +731,41 @@ impl ExecServerClient {
         &self,
         rpc_client: &RpcClient,
         options: ExecServerClientConnectOptions,
+        noise_context: Option<NoiseInitializeContext>,
     ) -> Result<InitializeResponse, ExecServerError> {
         let ExecServerClientConnectOptions {
             client_name,
             initialize_timeout,
             resume_session_id,
         } = options;
+        let timeout_for_error = noise_context
+            .as_ref()
+            .map_or(initialize_timeout, |context| context.timeout_for_error);
 
         timeout(initialize_timeout, async {
-            let response: InitializeResponse = rpc_client
-                .call(
-                    INITIALIZE_METHOD,
-                    &InitializeParams {
-                        client_name,
-                        resume_session_id,
-                    },
-                )
-                .await?;
+            let params = InitializeParams {
+                client_name,
+                resume_session_id,
+            };
+            let response: InitializeResponse = if let Some(noise_context) = noise_context {
+                // This is the one RPC whose wire method and trace operation
+                // intentionally differ: preserve the compatibility initialize
+                // parent while measuring only the actual RPC as initialize_rpc.
+                let initialize_rpc_span = tracing::info_span!(
+                    parent: &noise_context.span,
+                    "codex.exec_server.remote.initialize_rpc",
+                    otel.kind = "client",
+                    otel.name = "codex.exec_server.remote.initialize_rpc",
+                );
+                let response = rpc_client
+                    .call_untraced(INITIALIZE_METHOD, &params)
+                    .instrument(initialize_rpc_span)
+                    .await;
+                drop(noise_context);
+                response?
+            } else {
+                rpc_client.call(INITIALIZE_METHOD, &params).await?
+            };
             let session_id = self
                 .inner
                 .session_id
@@ -755,7 +783,7 @@ impl ExecServerClient {
         })
         .await
         .map_err(|_| ExecServerError::InitializeTimedOut {
-            timeout: initialize_timeout,
+            timeout: timeout_for_error,
         })?
     }
 
@@ -1109,6 +1137,36 @@ impl ExecServerClient {
         options: ExecServerClientConnectOptions,
         reconnect_strategy: Option<ExecServerReconnectStrategy>,
     ) -> Result<Self, ExecServerError> {
+        Self::connect_with_recovery_inner(
+            connection,
+            options,
+            reconnect_strategy,
+            /*noise_context*/ None,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_recovery_and_noise_context(
+        connection: JsonRpcConnection,
+        options: ExecServerClientConnectOptions,
+        reconnect_strategy: Option<ExecServerReconnectStrategy>,
+        noise_context: NoiseInitializeContext,
+    ) -> Result<Self, ExecServerError> {
+        Self::connect_with_recovery_inner(
+            connection,
+            options,
+            reconnect_strategy,
+            Some(noise_context),
+        )
+        .await
+    }
+
+    async fn connect_with_recovery_inner(
+        connection: JsonRpcConnection,
+        options: ExecServerClientConnectOptions,
+        reconnect_strategy: Option<ExecServerReconnectStrategy>,
+        noise_context: Option<NoiseInitializeContext>,
+    ) -> Result<Self, ExecServerError> {
         let (rpc_client, events_rx) = RpcClient::new(connection);
         let rpc_client = Arc::new(rpc_client);
         let session_id = OnceLock::new();
@@ -1144,7 +1202,9 @@ impl ExecServerClient {
         // before initialize returns. Drain them immediately so a burst cannot
         // fill the bounded event channel and block the initialize response.
         client.spawn_rpc_reader(&rpc_client, events_rx);
-        let initialize_response = client.initialize_rpc(&rpc_client, options).await?;
+        let initialize_response = client
+            .initialize_rpc(&rpc_client, options, noise_context)
+            .await?;
         if let Some(info) = initialize_response.environment_info {
             assert!(
                 client.inner.environment_info.set(info).is_ok(),
@@ -1724,6 +1784,7 @@ mod tests {
     use codex_utils_path_uri::PathUri;
     use futures::SinkExt;
     use futures::StreamExt;
+    use http::HeaderMap;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use pretty_assertions::assert_eq;
@@ -2547,6 +2608,7 @@ mod tests {
                 websocket_url,
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
+                http_headers: HeaderMap::new(),
             },
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         );
@@ -2657,6 +2719,7 @@ mod tests {
                 websocket_url,
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
+                http_headers: HeaderMap::new(),
             },
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         );
@@ -2799,6 +2862,7 @@ mod tests {
                 websocket_url,
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
+                http_headers: HeaderMap::new(),
             },
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         );
@@ -2898,6 +2962,7 @@ mod tests {
                 websocket_url,
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
+                http_headers: HeaderMap::new(),
             },
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         );
@@ -2989,6 +3054,7 @@ mod tests {
                 websocket_url,
                 connect_timeout: Duration::from_secs(1),
                 initialize_timeout: Duration::from_secs(1),
+                http_headers: HeaderMap::new(),
             },
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         );

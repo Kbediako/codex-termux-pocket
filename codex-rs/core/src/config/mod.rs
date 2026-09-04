@@ -4091,17 +4091,14 @@ impl Config {
         }) = filesystem_requirements.as_ref()
             && let Some(managed_file_system_policy) = managed_deny_read_policy.as_ref()
         {
-            let _initial_matcher =
-                ReadDenyMatcher::try_new(managed_file_system_policy, resolved_cwd.as_path())
+            let managed_deny_matcher =
+                ReadDenyMatcher::try_new_for_local_paths(managed_file_system_policy, resolved_cwd.as_path())
                     .map_err(std::io::Error::other)?;
             let managed_file_system_policy = Arc::clone(managed_file_system_policy);
-            let permission_cwd = resolved_cwd.clone();
             let requirement_source = requirement_source.clone();
             constrained_permission_profile
                 .value
                 .add_validator(move |permission_profile| {
-                    let managed_deny_matcher =
-                        ReadDenyMatcher::new(&managed_file_system_policy, permission_cwd.as_path());
                     let file_system_policy = permission_profile.file_system_sandbox_policy();
                     let missing_required_deny = managed_file_system_policy
                         .entries
@@ -4118,7 +4115,7 @@ impl Config {
                             let path = path.to_abs_path().ok()?;
                             managed_deny_matcher
                                 .as_ref()
-                                .is_some_and(|matcher| matcher.is_read_denied(path.as_path()))
+                                .is_some_and(|matcher| matcher.is_local_path_read_denied(path.as_path()))
                                 .then_some(path)
                         });
                     if missing_required_deny || violating_root.is_some() {

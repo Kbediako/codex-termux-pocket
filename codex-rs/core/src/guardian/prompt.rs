@@ -126,9 +126,9 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     let trusted_user_inputs = session
         .services
         .thread_extension_data
-        .get::<GuardianReviewEvidence>()
-        .map(|evidence| evidence.user_input_fragments(history.as_ref()))
-        .unwrap_or_default();
+        .get_or_init(GuardianReviewEvidence::default)
+        .user_input_snapshot(history.as_ref())
+        .fragments;
     let ComposedContext {
         authorization,
         transcript: transcript_entries,

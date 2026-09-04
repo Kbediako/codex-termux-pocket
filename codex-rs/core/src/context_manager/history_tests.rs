@@ -154,6 +154,48 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
 }
 
 #[test]
+fn conversation_history_snapshot_binds_compaction_hash_to_the_latest_item() {
+    let checkpoint = ResponseItemEnvelope {
+        item: serde_json::from_value(serde_json::json!({
+            "type": "compaction", "id": "known", "encrypted_content": "opaque checkpoint"
+        }))
+        .expect("checkpoint fixture"),
+        metadata: Some(CodexHarnessMetadata {
+            compaction_model_hash: Some("producer-hash".to_owned()),
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![checkpoint.clone()]);
+    let snapshot = history.conversation_history_snapshot();
+    let mut unknown = checkpoint.clone();
+    unknown.metadata = None;
+    unknown.item = serde_json::from_value(serde_json::json!({
+        "type": "compaction", "id": "unknown", "encrypted_content": "newer opaque checkpoint"
+    }))
+    .expect("unknown checkpoint fixture");
+    history.replace_annotated(vec![checkpoint.clone(), unknown]);
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .latest_compaction_model_hash(),
+        None
+    );
+    assert_eq!(
+        snapshot.latest_compaction_model_hash(),
+        Some("producer-hash")
+    );
+    // Checkpoint replay/rollback restores the item's own provenance, not a new model's metadata.
+    history.replace_annotated(vec![checkpoint]);
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .latest_compaction_model_hash(),
+        Some("producer-hash")
+    );
+}
+
+#[test]
 fn conversation_history_snapshot_excludes_contextual_user_messages() {
     let contextual_message = crate::context::ContextualUserFragment::into(UserInstructions {
         directory: None,

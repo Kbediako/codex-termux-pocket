@@ -837,6 +837,10 @@ impl Session {
             thread_id.to_string(),
             thread_extension_init,
         );
+        // Select the answer path once, before extensions or tool handlers observe the thread.
+        thread_extension_data.insert(crate::context::GuardianReviewEvidence::from_features(
+            &config.features,
+        ));
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
         // - initialize thread persistence with new or resumed session info

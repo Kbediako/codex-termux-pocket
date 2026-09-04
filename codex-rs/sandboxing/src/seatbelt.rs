@@ -607,7 +607,7 @@ fn protected_metadata_names_for_writable_root(
             continue;
         }
         let path = writable_root.root.join(*name);
-        if !file_system_sandbox_policy.can_write_path_with_cwd(path.as_path(), cwd) {
+        if !file_system_sandbox_policy.can_write_local_path_with_cwd(path.as_path(), cwd) {
             names.push((*name).to_string());
         }
     }

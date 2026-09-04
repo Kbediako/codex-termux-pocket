@@ -383,7 +383,7 @@ async fn remote_test_env_exposes_target_shell_and_exec_guidance_to_model() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
+async fn approved_remote_shell_runs_in_remote_cwd() -> Result<()> {
     const CALL_ID: &str = "remote-explicit-shell";
 
     skip_if_no_remote_env!(Ok(()));
@@ -406,9 +406,15 @@ async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
         "shell": shell,
         "login": false,
         "yield_time_ms": 10_000,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Test target-native command approval cwd.",
     }))?;
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+        config.approvals_reviewer = ApprovalsReviewer::User;
+    });
     let test = builder.build_with_auto_env(&server).await?;
+    let selection = test.executor_environment().selection().clone();
     let response_mock = mount_sse_sequence(
         &server,
         vec![
@@ -426,16 +432,39 @@ async fn explicit_remote_shell_runs_in_remote_cwd() -> Result<()> {
     )
     .await;
 
-    test.submit_turn_with_environments(
+    submit_turn_with_approval_and_environments(
+        &test,
         "run the remote shell in the remote cwd",
-        Some(vec![TurnEnvironmentSelection {
-            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-            cwd: test.executor_environment().selection().cwd.clone(),
-            workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
-            config: EnvironmentConfigState::FromThread,
-        }]),
+        vec![selection.clone()],
+        AskForApproval::OnRequest,
     )
     .await?;
+
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    let EventMsg::ExecApprovalRequest(approval) = event else {
+        panic!("expected remote command approval before completion: {event:?}");
+    };
+    assert_eq!(
+        approval.cwd.to_inferred_path_uri().as_ref(),
+        Some(&selection.cwd)
+    );
+    test.codex
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: Some(approval.turn_id),
+            decision: ReviewDecision::Approved,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     let request = response_mock
         .last_request()
         .context("model should receive the command output")?;

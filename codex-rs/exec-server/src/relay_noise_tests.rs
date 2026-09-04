@@ -31,7 +31,7 @@ use crate::noise_channel::NoiseChannelIdentity;
 use crate::noise_channel::NoiseChannelPublicKey;
 use crate::noise_channel::noise_channel_prologue;
 use crate::noise_relay::NoiseHarnessConnectionArgs;
-use crate::noise_relay::noise_harness_connection_from_websocket;
+use crate::noise_relay::noise_harness_connection_from_websocket_with_readiness;
 use crate::noise_relay::stream_handler::NoiseOutboundMessage;
 use crate::noise_relay::stream_handler::NoiseStreamConnection;
 use crate::noise_relay::stream_handler::NoiseStreamHandler;
@@ -208,7 +208,7 @@ async fn processor_exit_resets_noise_harness_stream() -> Result<()> {
             release,
         },
     )));
-    let mut connection = noise_harness_connection_from_websocket(
+    let mut connection = noise_harness_connection_from_websocket_with_readiness(
         harness_websocket,
         NoiseHarnessConnectionArgs {
             connection_label: "processor exit test".to_string(),
@@ -218,7 +218,8 @@ async fn processor_exit_resets_noise_harness_stream() -> Result<()> {
             responder_public_key: identity.public_key(),
             harness_key_authorization: "authorization".to_string(),
         },
-    );
+    )
+    .connection;
     // Valid JSON reaches the processor; an unsolicited response closes it and
     // aborts its writer. The physical relay must still deliver the reset.
     connection

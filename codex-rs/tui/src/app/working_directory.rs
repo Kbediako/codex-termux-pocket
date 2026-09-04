@@ -209,9 +209,12 @@ impl App {
         }
         self.cancel_pending_key_chord();
         self.keymap = keymap;
+        self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
         self.restore_runtime_theme_from_config();
         self.runtime_working_directory_override = Some(cwd.to_path_buf());
-        emit_project_config_warnings(&self.app_event_tx, &self.config);
+        if let Some(message) = project_config_warning(&self.config) {
+            self.chat_widget.add_warning_message(message);
+        }
         let message = format!("Working directory changed to: {}", cwd.display());
         self.chat_widget.add_info_message(message, /*hint*/ None);
         if !self.config.bypass_hook_trust {

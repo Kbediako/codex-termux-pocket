@@ -66,6 +66,7 @@ impl ChatWidget {
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
+                    self.warning_display_state.startup_complete = true;
                     self.on_task_started();
                 }
             }
@@ -194,12 +195,18 @@ impl ChatWidget {
             ServerNotification::DeprecationNotice(notification) => {
                 self.on_deprecation_notice(notification.summary, notification.details)
             }
-            ServerNotification::ConfigWarning(notification) => self.on_warning(
-                notification
+            ServerNotification::ConfigWarning(notification) => {
+                let message = notification
                     .details
                     .map(|details| format!("{}: {details}", notification.summary))
-                    .unwrap_or(notification.summary),
-            ),
+                    .unwrap_or(notification.summary);
+                if self.warning_display_state.startup_complete {
+                    self.on_warning(message);
+                } else if self.warning_display_state.should_display(&message) {
+                    self.add_to_history(history_cell::StartupWarningsCell::new(vec![message]));
+                    self.request_redraw();
+                }
+            }
             ServerNotification::McpServerStatusUpdated(notification) => {
                 self.on_mcp_server_status_updated(notification)
             }

@@ -79,6 +79,9 @@ pub struct McpServerStatus {
     pub plugin_id: Option<String>,
     pub server_info: Option<McpServerInfo>,
     pub tools: std::collections::HashMap<String, McpTool>,
+    /// Tool discovery failed and no catalog was returned.
+    /// Null when a catalog is returned, including cached or empty catalogs.
+    pub tools_error: Option<String>,
     pub resources: Vec<McpResource>,
     pub resource_templates: Vec<McpResourceTemplate>,
     pub auth_status: McpAuthStatus,

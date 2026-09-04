@@ -5894,13 +5894,13 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
     assert!(
         updated
             .file_system_sandbox_policy(&[])
-            .can_write_path_with_cwd(original_cwd.as_path(), updated.cwd().as_path()),
+            .can_write_local_path_with_cwd(original_cwd.as_path(), updated.cwd().as_path()),
         "absolute grant to the old cwd must remain writable"
     );
     assert!(
         !updated
             .file_system_sandbox_policy(&[])
-            .can_write_path_with_cwd(next_cwd.as_path(), updated.cwd().as_path()),
+            .can_write_local_path_with_cwd(next_cwd.as_path(), updated.cwd().as_path()),
         "cwd-only update must not reinterpret an absolute old-cwd grant as :workspace_roots"
     );
 }
@@ -5952,6 +5952,7 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
                 window_number,
                 window_ids,
                 compaction_response_id: None,
+                compaction_model_hash: None,
             },
         ),
     ));

@@ -14,6 +14,7 @@ use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkPolicyRequest;
 use codex_network_proxy::NetworkProxyAuditMetadata;
 use codex_utils_path_uri::PathUri;
+use http::HeaderMap;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::InMemorySpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -430,6 +431,7 @@ async fn policy_requests_use_process_decider_and_cancel_on_unregister() {
             websocket_url,
             connect_timeout: Duration::from_secs(1),
             initialize_timeout: Duration::from_secs(1),
+            http_headers: HeaderMap::new(),
         },
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )

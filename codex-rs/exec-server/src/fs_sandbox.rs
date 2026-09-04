@@ -233,7 +233,7 @@ fn add_helper_runtime_permissions(
     }
 
     for helper_read_root in helper_read_roots {
-        if file_system_policy.can_read_path_with_cwd(helper_read_root.as_path(), cwd) {
+        if file_system_policy.can_read_local_path_with_cwd(helper_read_root.as_path(), cwd) {
             continue;
         }
 
@@ -571,8 +571,8 @@ mod tests {
             cwd.as_path(),
         );
 
-        assert!(policy.can_read_path_with_cwd(readable.as_path(), cwd.as_path()));
-        assert!(policy.can_write_path_with_cwd(writable.as_path(), cwd.as_path()));
+        assert!(policy.can_read_local_path_with_cwd(readable.as_path(), cwd.as_path()));
+        assert!(policy.can_write_local_path_with_cwd(writable.as_path(), cwd.as_path()));
     }
 
     #[test]
@@ -800,10 +800,13 @@ mod tests {
         );
 
         assert!(
-            policy.can_read_path_with_cwd(runtime_paths.codex_self_exe.as_path(), cwd.as_path())
+            policy.can_read_local_path_with_cwd(
+                runtime_paths.codex_self_exe.as_path(),
+                cwd.as_path(),
+            )
         );
-        assert!(!policy.can_read_path_with_cwd(parent.as_path(), cwd.as_path()));
-        assert!(!policy.can_read_path_with_cwd(sibling.as_path(), cwd.as_path()));
+        assert!(!policy.can_read_local_path_with_cwd(parent.as_path(), cwd.as_path()));
+        assert!(!policy.can_read_local_path_with_cwd(sibling.as_path(), cwd.as_path()));
     }
 
     #[test]
@@ -831,11 +834,14 @@ mod tests {
         );
 
         assert!(
-            policy.can_read_path_with_cwd(runtime_paths.codex_self_exe.as_path(), cwd.as_path())
+            policy.can_read_local_path_with_cwd(
+                runtime_paths.codex_self_exe.as_path(),
+                cwd.as_path(),
+            )
         );
-        assert!(policy.can_read_path_with_cwd(alias.as_path(), cwd.as_path()));
-        assert!(!policy.can_read_path_with_cwd(codex_parent.as_path(), cwd.as_path()));
-        assert!(!policy.can_read_path_with_cwd(alias_parent.as_path(), cwd.as_path()));
+        assert!(policy.can_read_local_path_with_cwd(alias.as_path(), cwd.as_path()));
+        assert!(!policy.can_read_local_path_with_cwd(codex_parent.as_path(), cwd.as_path()));
+        assert!(!policy.can_read_local_path_with_cwd(alias_parent.as_path(), cwd.as_path()));
     }
 
     fn restricted_policy(entries: Vec<FileSystemSandboxEntry>) -> FileSystemSandboxPolicy {
