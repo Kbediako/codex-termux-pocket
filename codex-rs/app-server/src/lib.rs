@@ -569,6 +569,10 @@ pub async fn run_main_with_transport_options(
         }
     };
     config.auth_config().validate()?;
+    #[cfg(target_os = "macos")]
+    let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
+        codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
+    );
     let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
         match &runtime_options.code_mode_host_transport {
             CodeModeHostTransport::Local => None,
@@ -731,6 +735,8 @@ pub async fn run_main_with_transport_options(
     }
     let installation_id = resolve_installation_id(&config.codex_home).await?;
     let transport_shutdown_token = CancellationToken::new();
+    // Remote enrollment must cancel before RPC drain without shutting down telemetry.
+    let remote_control_shutdown_token = transport_shutdown_token.child_token();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
@@ -809,7 +815,7 @@ pub async fn run_main_with_transport_options(
         state_db.clone(),
         auth_manager.clone(),
         transport_event_tx.clone(),
-        transport_shutdown_token.clone(),
+        remote_control_shutdown_token.clone(),
         app_server_client_name_rx,
         remote_control_startup_mode,
     )
@@ -1051,6 +1057,8 @@ pub async fn run_main_with_transport_options(
                                     break "outbound_router_closed";
                                 }
                                 if single_client_mode && stdio_closed {
+                                    // Pending remote enrollment must stop before RPCs drain.
+                                    remote_control_shutdown_token.cancel();
                                     break "stdio_connection_closed";
                                 }
                             }

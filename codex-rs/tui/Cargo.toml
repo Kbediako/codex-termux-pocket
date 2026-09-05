@@ -34,6 +34,7 @@ codex-arg0 = { workspace = true }
 codex-install-context = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-config = { workspace = true }
+codex-context-fragments = { workspace = true }
 codex-connectors = { workspace = true }
 codex-core-plugins = { workspace = true }
 codex-history = { workspace = true }
@@ -80,7 +81,7 @@ image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 pathdiff = { workspace = true }
-pulldown-cmark = { workspace = true }
+pulldown-cmark = { workspace = true, features = ["html"] }
 rand = { workspace = true }
 ratatui = { workspace = true, features = [
     "scrolling-regions",

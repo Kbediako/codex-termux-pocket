@@ -60,6 +60,8 @@ pub struct ResponsesOptions {
     pub extra_headers: HeaderMap,
     pub compression: Compression,
     pub turn_state: Option<Arc<OnceLock<String>>>,
+    /// Runtime-only parent receipt, attached after inference tracing.
+    pub guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
 }
 
 impl<T: HttpTransport> ResponsesClient<T> {
@@ -101,7 +103,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
     )]
     pub async fn stream_request(
         &self,
-        request: ResponsesApiRequest,
+        mut request: ResponsesApiRequest,
         options: ResponsesOptions,
     ) -> Result<ResponseStream, ApiError> {
         let ResponsesOptions {
@@ -111,10 +113,19 @@ impl<T: HttpTransport> ResponsesClient<T> {
             extra_headers,
             compression,
             turn_state,
+            guardian_ticket,
         } = options;
+        crate::guardian_ticket::attach(
+            &mut request.client_metadata,
+            guardian_ticket.as_ref(),
+            self.endpoint,
+        );
 
-        let body = EncodedJsonBody::encode(&request)
+        let mut body = EncodedJsonBody::encode(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        if guardian_ticket.is_some() {
+            body = body.without_body_logging();
+        }
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {

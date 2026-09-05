@@ -82,6 +82,7 @@ async fn experimental_features_rpc_paginates_thread_config_and_bounds_bad_server
         fetch(
             AppServerRequestHandle::Remote(client.request_handle()),
             thread_id,
+            "tui-experimental-features",
             tx,
         );
         let result = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), rx)
@@ -126,6 +127,7 @@ async fn experimental_features_rpc_paginates_thread_config_and_bounds_bad_server
                 fetch(
                     AppServerRequestHandle::Remote(client.request_handle()),
                     thread_id,
+                    "tui-experimental-features",
                     tx,
                 );
                 assert_eq!(
@@ -143,5 +145,108 @@ async fn experimental_features_rpc_paginates_thread_config_and_bounds_bad_server
                 _ => 1,
             }
         );
+    }
+}
+
+#[tokio::test]
+async fn experimental_feature_writes_use_server_defaults_and_refresh_configured_values() {
+    for scenario in [
+        "overridden",
+        "write_error",
+        "write_timeout",
+        "readback_error",
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let thread_id = ThreadId::new();
+        let selected_file = std::env::temp_dir().join("selected.config.toml");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut wrote = false;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap() else {
+                    continue;
+                };
+                let fail = (request.method == "config/batchWrite" && scenario == "write_error")
+                    || (request.method == "experimentalFeature/list"
+                        && wrote
+                        && scenario == "readback_error");
+                if fail {
+                    socket.send(Message::Text(json!({"id": request.id, "error": {"code": -32600, "message": "rejected", "data": "private diagnostic"}}).to_string().into())).await.unwrap();
+                    continue;
+                }
+                let result = match request.method.as_str() {
+                    "initialize" => json!({"userAgent": "experimental-test"}),
+                    "experimentalFeature/list" => {
+                        json!({"data": [
+                            {"name": "default_off", "stage": "beta", "displayName": null, "description": null, "announcement": null, "enabled": !wrote || scenario == "overridden", "defaultEnabled": false},
+                            {"name": "default_on", "stage": "beta", "displayName": null, "description": null, "announcement": null, "enabled": !wrote, "defaultEnabled": true},
+                            {"name": "new_server_feature", "stage": "beta", "displayName": null, "description": null, "announcement": null, "enabled": wrote, "defaultEnabled": false}
+                        ], "nextCursor": null})
+                    }
+                    "config/batchWrite" => {
+                        assert_eq!(
+                            request.params,
+                            Some(json!({
+                                "edits": [
+                                    {"keyPath": "features.\"default_off\"", "value": null, "mergeStrategy": "replace"},
+                                    {"keyPath": "features.\"default_on\"", "value": false, "mergeStrategy": "replace"},
+                                    {"keyPath": "features.\"new_server_feature\"", "value": true, "mergeStrategy": "replace"}
+                                ], "filePath": null, "expectedVersion": null, "reloadUserConfig": true
+                            }))
+                        );
+                        wrote = true;
+                        if scenario == "write_timeout" {
+                            tokio::time::pause();
+                            continue;
+                        }
+                        json!({"status": "ok", "version": "v2", "filePath": selected_file, "overriddenMetadata": null})
+                    }
+                    other => panic!("unexpected RPC: {other}"),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": request.id, "result": result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = crate::connect_remote_app_server(RemoteAppServerEndpoint::WebSocket {
+            websocket_url: url,
+            auth_token: None,
+        })
+        .await
+        .unwrap();
+        let handle = client.request_handle();
+        let result = write(
+            handle,
+            thread_id,
+            vec![
+                ("default_off".to_string(), false),
+                ("default_on".to_string(), false),
+                ("new_server_feature".to_string(), true),
+            ],
+        )
+        .await;
+        if scenario == "write_timeout" {
+            tokio::time::resume();
+        }
+        match scenario {
+            "overridden" => assert!(result.unwrap().warning.is_some()),
+            scenario => {
+                let error = result.unwrap_err();
+                assert!(error.contains(match scenario {
+                    "readback_error" => "saved, but configured values could not be refreshed",
+                    "write_timeout" => "write may still finish",
+                    _ => "Failed to save experimental features.",
+                }));
+            }
+        }
+        let _ = client.shutdown().await;
+        server.await.unwrap();
     }
 }

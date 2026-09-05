@@ -29,6 +29,7 @@ pub use codex_history::CompactedItem;
 pub use codex_history::InitialHistory;
 pub use codex_history::ResponseItemEnvelope;
 pub use codex_history::ResumedHistory;
+pub use codex_history::RetainedContextEntry;
 pub use codex_history::RetainedContextEvent;
 pub use codex_history::RolloutItem;
 pub use codex_history::RolloutLine;

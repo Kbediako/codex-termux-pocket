@@ -59,7 +59,7 @@ pub(crate) fn action_summary(action: &GuardianAssessmentAction) -> String {
         }
         GuardianAssessmentAction::ApplyPatch { files, .. } => {
             if files.len() == 1 {
-                format!("apply_patch touching {}", files[0].display())
+                format!("apply_patch touching {}", files[0].render_for_ui())
             } else {
                 format!("apply_patch touching {} files", files.len())
             }
@@ -109,7 +109,7 @@ mod tests {
             action: GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: format!("rm -rf /tmp/test-{id}"),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             },
         }
     }

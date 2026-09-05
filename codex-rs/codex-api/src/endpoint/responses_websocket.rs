@@ -234,9 +234,10 @@ impl ResponsesWebsocketConnection {
     )]
     pub async fn stream_request(
         &self,
-        request: ResponsesWsRequest<'_>,
+        mut request: ResponsesWsRequest<'_>,
         connection_reused: bool,
         turn_state: Option<Arc<OnceLock<String>>>,
+        guardian_ticket: Option<&codex_protocol::guardian_ticket::GuardianTicket>,
     ) -> Result<ResponseStream, ApiError> {
         let (tx_event, rx_event) =
             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
@@ -270,6 +271,12 @@ impl ResponsesWebsocketConnection {
             warmup: ws_request.generate == Some(false),
             connection_reused,
         };
+        let ResponsesWsRequest::ResponseCreate(ws_request) = &mut request;
+        crate::guardian_ticket::attach(
+            &mut ws_request.client_metadata,
+            guardian_ticket,
+            self.endpoint,
+        );
         let request_text = serialize_websocket_request(&request)?;
 
         let current_span = Span::current();

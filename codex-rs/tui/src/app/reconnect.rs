@@ -244,6 +244,7 @@ impl App {
         self.rate_limit_refresh_state.invalidate_recovery();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
+        self.chat_widget.cyber_policy_notice = Default::default();
         self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
@@ -264,6 +265,8 @@ impl App {
         self.pending_plugin_enabled_writes.clear();
         self.pending_hook_enabled_writes.clear();
         self.temporary_structured_requests.clear();
+        self.pending_thread_titles.clear();
+        self.sync_thread_title_progress();
         self.agents_overview.dispatched_requests.clear();
         self.agents_overview.request_id = None;
         self.agents_overview.refresh_pending = false;
@@ -389,6 +392,13 @@ impl App {
             bootstrap.has_chatgpt_account,
             matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
         );
+        if self.chat_widget.has_chatgpt_account() {
+            crate::daybreak::prefetch_notice(
+                &self.config,
+                app_server,
+                self.chat_widget.cyber_policy_notice.clone(),
+            );
+        }
         self.feedback_audience = bootstrap.feedback_audience;
         self.chat_widget.add_info_message(
             "Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.".into(), /*hint*/ None,

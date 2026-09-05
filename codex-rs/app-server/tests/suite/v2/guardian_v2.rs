@@ -31,6 +31,8 @@ use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::StrictReviewRequiredNotification;
+use codex_app_server_protocol::ThreadCompactStartParams;
+use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -116,6 +118,10 @@ async fn resumed_thread_does_not_wait_for_guardian_websocket_warmup() -> Result<
         .with_extra_config("[features.guardianv2]\nenabled = true")
         .enable_feature(Feature::GuardianApproval)
         .write(codex_home.path())?;
+    let config = load_default_config_for_test(&codex_home).await;
+    let mut model = codex_core::test_support::construct_model_info_offline(MODEL, &config);
+    model.node_repl_auto_review_required = true;
+    write_models_cache_with_models(codex_home.path(), vec![model])?;
     let thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
@@ -173,6 +179,8 @@ struct MockResponsesState {
     root_worker: bool,
     root_user_restriction: bool,
     root_user_input_restriction: bool,
+    compact_root_after_answer: bool,
+    thread_context_enabled: bool,
     late_root_restriction: bool,
     user_input_restriction: bool,
 }
@@ -229,6 +237,7 @@ enum ThreadLifecycle {
     RootUserRestriction,
     RootUserInputRestriction,
     RootUserInputHookBlocked,
+    RootUserInputCompaction,
 }
 
 impl ThreadLifecycle {
@@ -241,13 +250,16 @@ impl ThreadLifecycle {
                 | Self::RootTrustedSkill
                 | Self::RootUserInputRestriction
                 | Self::RootUserInputHookBlocked
+                | Self::RootUserInputCompaction
         )
     }
 
     fn has_root_user_input(self) -> bool {
         matches!(
             self,
-            Self::RootUserInputRestriction | Self::RootUserInputHookBlocked
+            Self::RootUserInputRestriction
+                | Self::RootUserInputHookBlocked
+                | Self::RootUserInputCompaction
         )
     }
 
@@ -400,9 +412,27 @@ async fn parent_response(
             .is_none()
     {
         let root_request = state.root_requests.fetch_add(1, Ordering::SeqCst);
+        if state.compact_root_after_answer && root_request == 4 {
+            let input = request["input"].as_array().expect("root model input");
+            assert!(input.iter().any(|item| item["id"] == "cmp_root"));
+            assert!(
+                !input
+                    .iter()
+                    .any(|item| item["call_id"] == "guardian-user-input")
+            );
+        }
         match root_request {
             1 if state.root_user_input_restriction => user_input_request_events(),
-            0 | 2 if root_request == 0 || !state.late_root_restriction => {
+            0 | 2 | 4
+                if root_request == 0
+                    || !state.late_root_restriction
+                        && root_request
+                            == if state.compact_root_after_answer {
+                                4
+                            } else {
+                                2
+                            } =>
+            {
                 let (call_id, tool_name, arguments) = if root_request == 0 {
                     (
                         "guardian-spawn-worker",
@@ -440,6 +470,23 @@ async fn parent_response(
                 .contains("Completed synchronous Guardian review.")
         );
         let request_number = state.parent_requests.fetch_add(1, Ordering::SeqCst);
+        if state.thread_context_enabled && state.late_root_restriction && request_number == 1 {
+            let output = request["input"]
+                .as_array()
+                .expect("worker model input")
+                .iter()
+                .find(|item| {
+                    item["call_id"] == "guardian-action-0" && item["type"] == "function_call_output"
+                })
+                .expect("first tool result after root revocation");
+            assert!(
+                output.to_string().contains("user cancelled MCP tool call")
+                    || output
+                        .to_string()
+                        .contains("Tool execution was cancelled by Guardian."),
+                "a stale sync allow must not execute the first tool: {output}"
+            );
+        }
         if request["model"] == REQUIRED_MODEL && request_number == 3 {
             vec![
                 responses::ev_response_created("required-model-command"),
@@ -571,10 +618,15 @@ async fn guardian_v2_routes_tool_approvals(
         transcript_content,
         GuardianToolScope::AllTools,
         /*sensitive_action*/ None,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The shared fixture varies independent review and context-mode test dimensions."
+)]
 async fn guardian_v2_routes_scoped_tool_approvals(
     risk: GuardianRisk,
     lifecycle: ThreadLifecycle,
@@ -583,6 +635,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     transcript_content: TranscriptContent,
     scope: GuardianToolScope,
     sensitive_action: Option<bool>,
+    thread_context_enabled: bool,
 ) -> Result<()> {
     let server_name = match scope {
         GuardianToolScope::AllTools => TEST_SERVER_NAME,
@@ -629,6 +682,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         root_worker: lifecycle.uses_root_worker(),
         root_user_restriction: matches!(lifecycle, ThreadLifecycle::RootUserRestriction),
         root_user_input_restriction: lifecycle.has_root_user_input(),
+        thread_context_enabled,
+        compact_root_after_answer: matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction),
         late_root_restriction,
         user_input_restriction: lifecycle.has_user_input(),
         ..Default::default()
@@ -637,6 +692,10 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let responses_url = format!("http://{}", listener.local_addr()?);
     let router = Router::new()
         .route("/v1/responses", get(luna_websocket).post(parent_response))
+        .route("/v1/responses/compact", post(|Json(request): Json<Value>| async move {
+            assert!(request.to_string().contains("guardian-user-input"));
+            Json(json!({"output": [{"type": "compaction", "id": "cmp_root", "encrypted_content": "opaque root summary"}]}))
+        }))
         .route(
             "/metrics",
             post(
@@ -736,6 +795,9 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"{tool_approval_mode}\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}{guardian_scope_config}"
         ))
         .enable_feature(Feature::GuardianApproval);
+    if thread_context_enabled {
+        mock_config = mock_config.enable_feature(Feature::GuardianThreadContext);
+    }
     if lifecycle.has_user_input() || lifecycle.has_root_user_input() {
         mock_config = mock_config.enable_feature(Feature::DefaultModeRequestUserInput);
     }
@@ -743,6 +805,13 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         mock_config = mock_config
             .enable_feature(Feature::Collab)
             .enable_feature(Feature::MultiAgentV2);
+    }
+    if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
+        mock_config = mock_config
+            .with_provider_name("OpenAI")
+            .disable_feature(Feature::RemoteCompactionV2)
+            .disable_feature(Feature::TokenBudget)
+            .disable_feature(Feature::EnableRequestCompression);
     }
     mock_config.write(codex_home.path())?;
     if node_repl_review_required {
@@ -764,7 +833,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::RootTrustedSkill
         | ThreadLifecycle::RootUserRestriction
         | ThreadLifecycle::RootUserInputRestriction
-        | ThreadLifecycle::RootUserInputHookBlocked => None,
+        | ThreadLifecycle::RootUserInputHookBlocked
+        | ThreadLifecycle::RootUserInputCompaction => None,
         ThreadLifecycle::Resume | ThreadLifecycle::Fork => {
             let thread_id = create_fake_rollout(
                 codex_home.path(),
@@ -812,7 +882,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::RootTrustedSkill
         | ThreadLifecycle::RootUserRestriction
         | ThreadLifecycle::RootUserInputRestriction
-        | ThreadLifecycle::RootUserInputHookBlocked => {
+        | ThreadLifecycle::RootUserInputHookBlocked
+        | ThreadLifecycle::RootUserInputCompaction => {
             let started = app_server
                 .start_thread(ThreadStartParams {
                     approval_policy: Some(AskForApproval::OnRequest),
@@ -865,7 +936,13 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         .lock()
         .expect("root thread lock should not be poisoned") = Some(thread_id.clone());
     let mut turn_input = vec![UserInput::Text {
-        text: USER_CONTEXT.to_owned(),
+        text: if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
+            // Exceed the full-text storage cap; the bounded root excerpt must survive
+            // after compaction removes the original from the live model window.
+            format!("{USER_CONTEXT}\n{}", "Context detail. ".repeat(1_200))
+        } else {
+            USER_CONTEXT.to_owned()
+        },
         text_elements: Vec::new(),
     }];
     if let Some(skill_path) = root_skill.as_ref() {
@@ -1304,11 +1381,56 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 &mut app_server,
                 json!({
                     "browser_authorization": {
-                        "answers": ["Stop"]
+                        "answers": [if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) { "Continue" } else { "Stop" }]
                     }
                 }),
             )
             .await?;
+            if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
+                loop {
+                    let completed: TurnCompletedNotification =
+                        timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
+                    if completed.thread_id == thread_id {
+                        break;
+                    }
+                }
+                let id = app_server
+                    .send_turn_start_request(TurnStartParams {
+                        thread_id: thread_id.clone(),
+                        input: vec![UserInput::Text {
+                            text: ROOT_RESTRICTION.to_owned(),
+                            text_elements: Vec::new(),
+                        }],
+                        ..Default::default()
+                    })
+                    .await?;
+                let _: TurnStartResponse = timeout(TIMEOUT, app_server.read_response(id)).await??;
+                let completed: TurnCompletedNotification =
+                    timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
+                assert_eq!(completed.thread_id, thread_id);
+                let id = app_server
+                    .send_thread_compact_start_request(ThreadCompactStartParams {
+                        thread_id: thread_id.clone(),
+                    })
+                    .await?;
+                let _: ThreadCompactStartResponse =
+                    timeout(TIMEOUT, app_server.read_response(id)).await??;
+                let completed: TurnCompletedNotification =
+                    timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
+                assert_eq!(completed.thread_id, thread_id);
+                let id = app_server
+                    .send_turn_start_request(TurnStartParams {
+                        thread_id: thread_id.clone(),
+                        input: vec![UserInput::Text {
+                            text: "Ask the worker to check again under the current restrictions."
+                                .to_owned(),
+                            text_elements: Vec::new(),
+                        }],
+                        ..Default::default()
+                    })
+                    .await?;
+                let _: TurnStartResponse = timeout(TIMEOUT, app_server.read_response(id)).await??;
+            }
         } else {
             let followup_id = app_server
                 .send_turn_start_request(TurnStartParams {
@@ -1359,8 +1481,11 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 | ThreadLifecycle::RootUserRestriction
                 | ThreadLifecycle::RootUserInputRestriction
                 | ThreadLifecycle::RootUserInputHookBlocked
+                | ThreadLifecycle::RootUserInputCompaction
         ) {
-            let restriction = if lifecycle.has_root_user_input() {
+            let restriction = if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
+                ROOT_RESTRICTION
+            } else if lifecycle.has_root_user_input() {
                 "assistant: Can I keep using the browser?\nassistant: Stop: Stop using the browser.\nuser: Stop\n"
             } else {
                 ROOT_RESTRICTION
@@ -1381,6 +1506,40 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         if matches!(risk, GuardianRisk::Low) {
             wait_for_guardian_reviews(responses_state.as_ref(), expected_guardian_reviews + 1)
                 .await?;
+        }
+        if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
+            wait_for_guardian_reviews(responses_state.as_ref(), expected_guardian_reviews + 1)
+                .await?;
+            let reviews = responses_state
+                .guardian_requests
+                .lock()
+                .expect("review log");
+            for request in [
+                post_authorization_change_sample.clone(),
+                reviews.last().expect("post-compaction review").clone(),
+            ] {
+                let text = request.to_string();
+                assert!(
+                    text.find("user: Continue").expect("retained grant")
+                        < text.find(ROOT_RESTRICTION).expect("later revocation")
+                );
+                assert!(text.contains("does not grant general child permission"));
+                let (_, root_conversation) = text
+                    .split_once(">>> ROOT CONVERSATION START")
+                    .expect("root conversation start");
+                let (root_conversation, _) = root_conversation
+                    .split_once(">>> ROOT CONVERSATION END")
+                    .expect("root conversation end");
+                assert!(root_conversation.contains(&format!("user: {USER_CONTEXT}")));
+                assert!(!root_conversation.contains("some root user instructions are unavailable"));
+            }
+            assert!(
+                !reviews
+                    .last()
+                    .expect("fresh reviewer session")
+                    .to_string()
+                    .contains("TRANSCRIPT DELTA START")
+            );
         }
         responses_state.allow_luna.notify_one();
     }
@@ -1709,6 +1868,7 @@ async fn guardian_v2_inherits_root_user_skills_for_delegated_workers() -> Result
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -1731,6 +1891,7 @@ async fn guardian_v2_computer_use_only_scopes_classification_and_fast_reviews(
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
         /*sensitive_action*/ None,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2028,6 +2189,7 @@ async fn guardian_v2_required_model_computer_use_preserves_strict_approval(
         TranscriptContent::Normal,
         GuardianToolScope::ComputerUseOnly { server_name },
         sensitive_action,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2049,6 +2211,7 @@ async fn guardian_v2_discards_sync_reviews_after_user_input_answer(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
@@ -2071,15 +2234,20 @@ async fn guardian_v2_validates_user_input_before_history_truncation(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
+        /*thread_context_enabled*/ false,
     )
     .await
 }
 
-#[test_case(ThreadLifecycle::RootUserInputRestriction; "root answer reaches worker")]
-#[test_case(ThreadLifecycle::RootUserInputHookBlocked; "blocked root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputRestriction, false; "legacy root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputHookBlocked, false; "legacy blocked root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputRestriction, true; "root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputHookBlocked, true; "blocked root answer reaches worker")]
+#[test_case(ThreadLifecycle::RootUserInputCompaction, true; "root answer survives parent compaction")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
     lifecycle: ThreadLifecycle,
+    thread_context_enabled: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     guardian_v2_routes_scoped_tool_approvals(
@@ -2092,6 +2260,7 @@ async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
+        thread_context_enabled,
     )
     .await
 }
@@ -2224,6 +2393,10 @@ async fn guardian_v2_low_scores_require_current_authorization(
             server_name: "node_repl",
         },
         /*sensitive_action*/ None,
+        matches!(
+            lifecycle,
+            ThreadLifecycle::RootRestrictionDuringClassification
+        ),
     )
     .await
 }

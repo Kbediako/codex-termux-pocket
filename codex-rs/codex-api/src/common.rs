@@ -96,7 +96,10 @@ pub struct MemorySummarizeOutput {
 
 #[derive(Debug)]
 pub enum ResponseEvent {
-    Created,
+    Created {
+        /// Runtime-only receipt for this exact server response.
+        guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
+    },
     SafetyBuffering(SafetyBuffering),
     OutputItemDone(ResponseItem),
     OutputItemAdded(ResponseItem),

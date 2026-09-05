@@ -1,6 +1,8 @@
 mod action;
+mod approval;
 mod authorization;
 mod config;
+mod coverage;
 mod extension;
 mod metrics;
 mod review_evidence;

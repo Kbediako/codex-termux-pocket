@@ -1478,16 +1478,19 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
 async fn reconstruct_history_legacy_compaction_without_replacement_history_does_not_inject_current_initial_context()
  {
     let (session, turn_context) = make_session_and_context().await;
-    let answer =
-        codex_history::RetainedContextEvent::VerifiedAnswer(codex_history::VerifiedAnswer {
+    let answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
             turn_id: "legacy-turn".to_owned(),
             call_id: "ask-1".to_owned(),
             questions: vec![codex_history::VerifiedQuestionAnswer {
                 question: "Upload?".to_owned(),
                 answer: "Only privately.".to_owned(),
             }],
-        });
+        },
+        acceptance_order: None,
+    };
     let mut retained = codex_history::RetainedContext::default();
+    retained.mark_user_messages_incomplete();
     retained.record(&answer);
     let rollout_items = vec![
         RolloutItem::ResponseItem(user_message("before compact").into()),

@@ -16,6 +16,11 @@ use axum::routing::get;
 use axum::routing::post;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::GuardianApprovalReview;
+use codex_app_server_protocol::GuardianApprovalReviewStatus;
+use codex_app_server_protocol::GuardianRiskLevel;
+use codex_app_server_protocol::GuardianUserAuthorization;
+use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -56,9 +61,10 @@ use super::user_input_request_events;
 use super::wait_for_luna_request;
 
 #[derive(Clone, Copy)]
-enum AnswerSize {
+enum EvidenceSize {
     Normal,
-    Oversized,
+    OversizedAnswer,
+    OversizedInstruction,
 }
 
 #[derive(Clone, Copy)]
@@ -67,52 +73,103 @@ enum ContextPath {
     ThreadOwned,
 }
 
-#[test_case(ContextPath::ThreadOwned, Some("matching"), Some("matching"), 0, AnswerSize::Normal; "compatible checkpoint")]
-#[test_case(ContextPath::ThreadOwned, Some("matching"), Some("different"), 0, AnswerSize::Normal; "incompatible checkpoint")]
-#[test_case(ContextPath::ThreadOwned, Some("matching"), None, 0, AnswerSize::Normal; "unknown Luna compatibility")]
-#[test_case(ContextPath::ThreadOwned, Some("matching"), Some(""), 0, AnswerSize::Normal; "empty Luna compatibility")]
-#[test_case(ContextPath::ThreadOwned, None, Some("matching"), 0, AnswerSize::Normal; "unknown producer remains unknown after model switch")]
-#[test_case(ContextPath::ThreadOwned, Some("matching"), Some("matching"), 140, AnswerSize::Normal; "source call evicted")]
-#[test_case(ContextPath::ThreadOwned, Some("matching"), Some("matching"), 0, AnswerSize::Oversized; "incomplete answers reject fresh low score")]
-#[test_case(ContextPath::Legacy, Some("matching"), Some("matching"), 0, AnswerSize::Normal; "legacy answers remain runtime only")]
-#[test_case(ContextPath::Legacy, Some("matching"), Some("different"), 0, AnswerSize::Normal; "legacy incompatible checkpoint still samples")]
-#[test_case(ContextPath::Legacy, Some("matching"), None, 0, AnswerSize::Normal; "legacy unknown Luna compatibility still samples")]
-#[test_case(ContextPath::Legacy, Some("matching"), Some("matching"), 140, AnswerSize::Normal; "legacy source call evicted")]
-#[test_case(ContextPath::Legacy, Some("matching"), Some("matching"), 0, AnswerSize::Oversized; "legacy answer truncation")]
+#[derive(Clone, Copy)]
+enum CheckpointReuse {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Copy)]
+enum ReviewCheckpoint {
+    Valid,
+    EmptyContent,
+    IncompatibleReviewer,
+    UnknownReviewer,
+    EmptyReviewerHash,
+}
+
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::IncompatibleReviewer; "incompatible sync reviewer fails closed")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync compatibility fails closed")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync compatibility fails closed")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::IncompatibleReviewer; "legacy sync compatibility is unchanged")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "disabled Luna reuse requires sync")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy disabled Luna reuse still samples")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedInstruction, ReviewCheckpoint::Valid; "instruction budget preserves fresh low score")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "compatible checkpoint")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "incompatible checkpoint")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown Luna compatibility")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some(""), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty Luna compatibility")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, None, Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown producer remains unknown after model switch")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "source call evicted")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "incomplete answers reject fresh low score")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy answers remain runtime only")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy incompatible checkpoint still samples")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy unknown Luna compatibility still samples")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy source call evicted")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "legacy answer truncation")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollback(
     context_path: ContextPath,
+    checkpoint_reuse: CheckpointReuse,
     parent_hash: Option<&str>,
     luna_hash: Option<&str>,
     tool_traffic: usize,
-    answer_size: AnswerSize,
+    evidence_size: EvidenceSize,
+    review_checkpoint: ReviewCheckpoint,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const RESTRICTION: &str = "Only publish to a private repository.";
     const EVIDENCE: &str = "repository is private";
     const SUMMARY: &str = "Repository inspection was summarized.";
-    let compatible = parent_hash == Some("matching") && luna_hash == parent_hash;
+    let reuse_parent_compaction = matches!(checkpoint_reuse, CheckpointReuse::Enabled);
+    let compatible =
+        reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
     let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
-    let answer = match answer_size {
-        AnswerSize::Normal => USER_INPUT_RESTRICTION.to_owned(),
-        AnswerSize::Oversized => "Never publish this repository publicly. ".repeat(200),
+    let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
+    let reviewer_hash = match review_checkpoint {
+        ReviewCheckpoint::IncompatibleReviewer => Some("different-reviewer"),
+        ReviewCheckpoint::UnknownReviewer => None,
+        ReviewCheckpoint::EmptyReviewerHash => Some(""),
+        ReviewCheckpoint::Valid | ReviewCheckpoint::EmptyContent => Some("matching"),
+    };
+    let reject_sync_checkpoint = matches!(context_path, ContextPath::ThreadOwned)
+        && (!matches!(review_checkpoint, ReviewCheckpoint::Valid)
+            || parent_hash != Some("matching"));
+    let answer = match evidence_size {
+        EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
+            USER_INPUT_RESTRICTION.to_owned()
+        }
+        EvidenceSize::OversizedAnswer => "Never publish this repository publicly. ".repeat(200),
+    };
+    let restriction = if oversized_instruction {
+        RESTRICTION.repeat(150)
+    } else {
+        RESTRICTION.to_owned()
     };
     let expected_output = format!("\"echoed\":\"{EVIDENCE}\"");
     let parent_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let review_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let compact_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let checkpoint = json!({
+    let mut checkpoint = json!({
         "type": "compaction",
         "id": "cmp_repository",
         "encrypted_content": "encrypted summary"
     });
+    match review_checkpoint {
+        ReviewCheckpoint::EmptyContent => checkpoint["encrypted_content"] = json!(""),
+        ReviewCheckpoint::Valid
+        | ReviewCheckpoint::IncompatibleReviewer
+        | ReviewCheckpoint::UnknownReviewer
+        | ReviewCheckpoint::EmptyReviewerHash => {}
+    }
     let rejects_incomplete_score = matches!(
-        (context_path, answer_size),
-        (ContextPath::ThreadOwned, AnswerSize::Oversized)
+        (context_path, evidence_size),
+        (ContextPath::ThreadOwned, EvidenceSize::OversizedAnswer)
     );
     let classifier = Arc::new(MockResponsesState {
-        luna_score: if rejects_incomplete_score || requires_sync {
+        luna_score: if rejects_incomplete_score || oversized_instruction || requires_sync {
             0.0
         } else {
             1.0
@@ -227,8 +284,11 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
         .disable_feature(Feature::RemoteCompactionV2)
         .disable_feature(Feature::TokenBudget)
         .with_extra_config(&format!(
-            "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\npersist_scores = true\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
+            "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
         ));
+    if matches!(context_path, ContextPath::ThreadOwned) {
+        mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
+    }
     mock_config = match context_path {
         ContextPath::Legacy => mock_config.disable_feature(Feature::GuardianThreadContext),
         ContextPath::ThreadOwned => mock_config.enable_feature(Feature::GuardianThreadContext),
@@ -238,12 +298,16 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
     let models = [
         (MODEL, parent_hash),
         ("gpt-5.6-luna", luna_hash),
+        ("codex-auto-review", reviewer_hash),
         ("resumed-parent", Some("matching")),
     ]
     .into_iter()
     .map(|(model, hash)| {
         let mut info = codex_core::test_support::construct_model_info_offline(model, &config);
         info.comp_hash = hash.map(str::to_owned);
+        if model == MODEL || model == "resumed-parent" {
+            info.auto_review_model_override = Some("codex-auto-review".to_owned());
+        }
         info
     })
     .collect();
@@ -270,7 +334,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
     let thread_id = thread.id.clone();
 
     for (index, prompt) in [
-        RESTRICTION,
+        restriction.as_str(),
         "Recheck the repository.",
         "Inspect after resume.",
         "Inspect after partial rollback.",
@@ -332,7 +396,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 ..Default::default()
             })
             .await?;
-        let _: TurnStartResponse = timeout(TIMEOUT, app_server.read_response(id)).await??;
+        let started: TurnStartResponse = timeout(TIMEOUT, app_server.read_response(id)).await??;
         if index == 0 {
             // Wait for the pre-answer sample before replying; scoring runs asynchronously.
             let before_answer = wait_for_luna_request(&classifier, /*index*/ 0).await?;
@@ -350,9 +414,87 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             .await?;
             classifier.allow_luna.notify_one();
         }
+        if reject_sync_checkpoint && (1..=2).contains(&index) {
+            let notification = timeout(
+                TIMEOUT,
+                app_server.read_stream_until_matching_notification(
+                    "checkpoint review failure",
+                    |notification| {
+                        notification.method == "item/autoApprovalReview/completed"
+                            && notification
+                                .params
+                                .as_ref()
+                                .is_some_and(|params| params["turnId"] == started.turn.id)
+                    },
+                ),
+            )
+            .await??;
+            let assessment: ItemGuardianApprovalReviewCompletedNotification =
+                serde_json::from_value(notification.params.expect("review completion"))?;
+            let reason = match review_checkpoint {
+                ReviewCheckpoint::EmptyContent => {
+                    "parent compaction checkpoint is unusable for Guardian review"
+                }
+                ReviewCheckpoint::Valid
+                | ReviewCheckpoint::IncompatibleReviewer
+                | ReviewCheckpoint::UnknownReviewer
+                | ReviewCheckpoint::EmptyReviewerHash => {
+                    "parent compaction checkpoint is incompatible with the Guardian review model or its compatibility is unknown"
+                }
+            };
+            assert_eq!(
+                assessment.review,
+                GuardianApprovalReview {
+                    status: GuardianApprovalReviewStatus::Denied,
+                    risk_level: Some(GuardianRiskLevel::High),
+                    user_authorization: Some(GuardianUserAuthorization::Unknown),
+                    rationale: Some(format!("Automatic approval review failed: {reason}")),
+                }
+            );
+        }
         let completed: TurnCompletedNotification =
             timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
         assert_eq!(completed.turn.status, TurnStatus::Completed);
+        if reject_sync_checkpoint && (1..=2).contains(&index) {
+            // The first review established a cached session before compaction. Neither
+            // that session nor a new one may review unusable evidence, including after resume.
+            let reviews = review_requests.lock().expect("request log lock");
+            assert_eq!(
+                reviews.len(),
+                1,
+                "no sync inference with an unusable checkpoint"
+            );
+            assert_eq!(reviews[0]["model"], "codex-auto-review");
+            let requests = parent_requests.lock().expect("request log lock");
+            let output = requests.last().expect("parent tool result")["input"]
+                .as_array()
+                .expect("parent input")
+                .iter()
+                .find(|item| {
+                    item["type"] == "function_call_output"
+                        && item["call_id"] == format!("inspect-{}", 2 * index + 1)
+                })
+                .expect("declined tool result");
+            assert!(
+                output
+                    .to_string()
+                    .contains("This action was rejected due to unacceptable risk."),
+                "tool must not execute: {output}",
+            );
+            assert_eq!(
+                classifier
+                    .luna_requests
+                    .lock()
+                    .expect("classifier request lock")
+                    .len(),
+                2,
+                "no checkpoint-less async fallback",
+            );
+            if index == 2 {
+                break;
+            }
+            continue;
+        }
         if requires_sync && (1..=3).contains(&index) {
             let reviews = review_requests.lock().expect("request log lock");
             assert_eq!(
@@ -419,10 +561,14 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             .split_once(">>> TRANSCRIPT END")
             .expect("transcript end")
             .0;
-        assert!(
-            transcript.contains(prompt),
-            "current user input missing: {transcript}"
-        );
+        if index == 0 && oversized_instruction {
+            assert!(content.contains("some retained user instructions are unavailable"));
+        } else {
+            assert!(
+                transcript.contains(prompt),
+                "current user input missing: {transcript}"
+            );
+        }
 
         {
             let parent = parent_requests.lock().expect("request log lock");
@@ -472,7 +618,12 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 assert!(!parent_input.contains(EVIDENCE));
                 if index <= 3 {
                     assert!(sync_text.contains(RESTRICTION));
-                    if tool_traffic == 0 {
+                    if matches!(context_path, ContextPath::ThreadOwned) {
+                        assert!(
+                            !sync_text.contains(&expected_output),
+                            "raw tool result must not survive the parent checkpoint"
+                        );
+                    } else if tool_traffic == 0 {
                         assert!(sync_text.contains(EVIDENCE));
                         assert!(sync_text.contains(&format!("tool {TEST_TOOL_NAME} result:")));
                         assert!(sync_text.contains(&expected_output));
@@ -499,16 +650,28 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                         "{compact_output}"
                     );
                     assert!(parent_input.contains(SUMMARY));
-                    assert!(
-                        transcript.contains(RESTRICTION),
-                        "retained user restriction missing: {transcript}"
-                    );
-                    if tool_traffic == 0 {
-                        assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} call:")));
-                        assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} result:")));
-                        assert!(transcript.contains(&expected_output));
+                    if matches!(context_path, ContextPath::ThreadOwned) {
+                        assert!(
+                            content.contains(RESTRICTION),
+                            "retained instruction must survive"
+                        );
+                        assert!(
+                            !transcript.contains(&expected_output),
+                            "raw tool result must not survive the parent checkpoint"
+                        );
+                        assert!(transcript.contains(SUMMARY));
                     } else {
-                        assert!(!transcript.contains("tool request_user_input call:"));
+                        assert!(
+                            transcript.contains(RESTRICTION),
+                            "retained user restriction missing: {transcript}"
+                        );
+                        if tool_traffic == 0 {
+                            assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} call:")));
+                            assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} result:")));
+                            assert!(transcript.contains(&expected_output));
+                        } else {
+                            assert!(!transcript.contains("tool request_user_input call:"));
+                        }
                     }
                 } else {
                     assert!(!sync_text.contains(RESTRICTION));
@@ -527,12 +690,12 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                             panic!("missing {consumer} answers at step {index}: {text}")
                         })
                         .1;
-                    match answer_size {
-                        AnswerSize::Normal => {
+                    match evidence_size {
+                        EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
                             assert!(answers.contains("assistant: Can I keep using the browser?"));
                             assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
                         }
-                        AnswerSize::Oversized => match context_path {
+                        EvidenceSize::OversizedAnswer => match context_path {
                             ContextPath::ThreadOwned => {
                                 assert!(
                                     answers.contains("some verified user answers are unavailable")
@@ -555,7 +718,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             }
         }
         classifier.allow_luna.notify_one();
-        if rejects_incomplete_score || (index == 0 && requires_sync) {
+        if rejects_incomplete_score || oversized_instruction || (index == 0 && requires_sync) {
             // Wait for host publication, not merely a mock response. The next action must
             // see a fresh low score with unchanged authorization, rather than a stale score.
             let path = thread.path.as_ref().expect("legacy rollout path");
@@ -578,7 +741,14 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             })
             .await?;
         }
-        if rejects_incomplete_score {
+        if rejects_incomplete_score || oversized_instruction {
+            let notice = match evidence_size {
+                EvidenceSize::OversizedInstruction => {
+                    "some retained user instructions are unavailable"
+                }
+                EvidenceSize::OversizedAnswer => "some verified user answers are unavailable",
+                EvidenceSize::Normal => unreachable!("incomplete evidence fixture"),
+            };
             let completed = app_server
                 .start_turn_and_wait_for_completion(TurnStartParams {
                     thread_id: thread_id.clone(),
@@ -588,21 +758,19 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 .await?;
             assert_eq!(completed.turn.status, TurnStatus::Completed);
             let fresh_sample = wait_for_luna_request(&classifier, /*index*/ 2).await?;
-            assert!(
-                fresh_sample
-                    .to_string()
-                    .contains("some verified user answers are unavailable")
-            );
+            assert!(fresh_sample.to_string().contains(notice));
             let reviews = review_requests.lock().expect("request log lock");
             assert_eq!(
                 reviews.len(),
-                2,
-                "an incomplete fresh score must still require sync review"
+                1 + usize::from(rejects_incomplete_score),
+                "only incomplete verified answers require another sync review"
             );
             assert!(
-                reviews[1]
+                reviews
+                    .last()
+                    .expect("initial sync review")
                     .to_string()
-                    .contains("some verified user answers are unavailable")
+                    .contains(notice)
             );
             classifier.allow_luna.notify_one();
             break;
@@ -611,6 +779,16 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
 
     app_server.shutdown_gracefully().await?;
     let rollout = std::fs::read_to_string(thread.path.as_ref().expect("saved rollout path"))?;
+    if matches!(context_path, ContextPath::ThreadOwned) {
+        for line in rollout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            if line["type"] == "compacted" {
+                assert!(line["payload"]["guardian_history"].is_null());
+            }
+        }
+    }
     let items = rollout
         .lines()
         .map(codex_rollout::parse_rollout_line)

@@ -156,7 +156,10 @@ impl App {
         } else {
             app_server
                 .start_thread_with_session_start_source(
-                    &config, /*session_start_source*/ None, /*remote_cwd_override*/ None,
+                    &local_settings,
+                    &config,
+                    /*session_start_source*/ None,
+                    /*remote_cwd_override*/ None,
                 )
                 .await
         };

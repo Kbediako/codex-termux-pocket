@@ -192,6 +192,7 @@ async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
 
 fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
+        guardian_ticket: None,
         instructions: "Return high for high risk or low for low risk.".to_owned(),
         trusted_review_evidence: Vec::new(),
         trusted_tool_context: None,
@@ -446,6 +447,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
 
     let first = sampler
         .sample(LunaSamplingRequest {
+            guardian_ticket: None,
             instructions: "Return high for high risk or low for low risk.".to_owned(),
             trusted_review_evidence: Vec::new(),
             trusted_tool_context: None,
@@ -477,6 +479,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     manager.refresh_token_from_authority().await?;
     let second = sampler
         .sample(LunaSamplingRequest {
+            guardian_ticket: None,
             instructions: "Return high for high risk or low for low risk.".to_owned(),
             trusted_review_evidence: Vec::new(),
             trusted_tool_context: None,
@@ -652,6 +655,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
     let output = tokio::time::timeout(
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
+            guardian_ticket: None,
             instructions: "Return high for high risk or low for low risk.".to_owned(),
             trusted_review_evidence: Vec::new(),
             trusted_tool_context: None,
@@ -1110,6 +1114,57 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
     assert_eq!(second.single_connection().len(), 1);
     assert_eq!(third.single_connection().len(), 1);
     assert!(unused.handshakes().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_ticket_survives_classifier_transport_retry() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    for free_guardian in [false, true] {
+        let healthy = responses::start_websocket_server(vec![vec![vec![
+            ev_assistant_message("resp-review", "low"),
+            ev_completed("resp-review"),
+        ]]])
+        .await;
+        let expired = responses::start_websocket_server(vec![vec![vec![json!({
+            "type": "error", "status": 400,
+            "error": {"type": "invalid_request_error", "code": "websocket_connection_limit_reached", "message": "expired"}
+        })]]]).await;
+        let base_url = proxy_websocket_servers(&[&healthy, &expired]).await?;
+        let mut config = sampler_config(base_url.clone());
+        if free_guardian {
+            config.free_guardian = true;
+            config.provider = create_model_provider(
+                ModelProviderInfo::create_openai_provider(Some(format!(
+                    "{}/backend-api/codex",
+                    base_url.trim_end_matches("/v1")
+                ))),
+                Some(AuthManager::from_auth_for_testing(
+                    CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                )),
+            );
+        }
+        let sampler = connect_sampler(config).await?;
+        let raw_ticket = "t".repeat(43);
+        let mut request = sample_request("turn-1");
+        request.guardian_ticket =
+            codex_protocol::guardian_ticket::GuardianTicket::from_server(&raw_ticket);
+        assert_eq!(sampler.sample(request).await?, "low");
+        for server in [&expired, &healthy] {
+            let requests = server.single_connection();
+            assert_eq!(requests.len(), 1);
+            let body = requests[0].body_json();
+            assert_eq!(
+                (
+                    body["client_metadata"].get("guardian_ticket").cloned(),
+                    body["client_metadata"].get("guardian_ticket_requested"),
+                ),
+                (free_guardian.then(|| json!(raw_ticket)), None)
+            );
+            assert!(!body["input"].to_string().contains(&raw_ticket));
+        }
+    }
 
     Ok(())
 }

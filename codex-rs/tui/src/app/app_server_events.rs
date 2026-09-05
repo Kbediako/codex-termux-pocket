@@ -225,6 +225,7 @@ impl App {
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
+                self.chat_widget.cyber_policy_notice = Default::default();
                 self.rate_limit_hard_stop_generation =
                     self.rate_limit_hard_stop_generation.wrapping_add(1);
                 self.rate_limit_refresh_state.invalidate_recovery();
@@ -252,6 +253,13 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                if self.chat_widget.has_chatgpt_account() {
+                    crate::daybreak::prefetch_notice(
+                        &self.config,
+                        app_server_client,
+                        self.chat_widget.cyber_policy_notice.clone(),
+                    );
+                }
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {

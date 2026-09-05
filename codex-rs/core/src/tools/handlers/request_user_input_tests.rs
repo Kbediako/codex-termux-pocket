@@ -196,16 +196,27 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
             .expect("request_user_input handler should succeed");
         assert!(output.success_for_logging());
         let history = session.conversation_history_snapshot().await;
-        let RenderedVerifiedAnswers {
-            fragments,
-            complete,
-        } = codex_guardian_context::render_verified_answers(
-            history.retained_context().expect("host context snapshot"),
-        );
         if thread_context_enabled {
+            let RenderedVerifiedAnswers {
+                fragments,
+                complete,
+            } = codex_guardian_context::render_verified_answers(
+                history.retained_context().expect("host context snapshot"),
+            );
+            let expected_fragments = expected
+                .fragments
+                .iter()
+                .map(|fragment| {
+                    if expected.complete {
+                        format!("Retained source order: 0\n{fragment}")
+                    } else {
+                        fragment.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
                 (&fragments, complete),
-                (&expected.fragments, expected.complete)
+                (&expected_fragments, expected.complete)
             );
         } else {
             assert_eq!(
@@ -239,7 +250,11 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
             }
             _ => assert_eq!(
                 legacy_answer,
-                fragments.first().cloned().filter(|_| complete)
+                expected
+                    .fragments
+                    .first()
+                    .cloned()
+                    .filter(|_| expected.complete)
             ),
         }
     }

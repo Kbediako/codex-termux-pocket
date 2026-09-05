@@ -1,4 +1,8 @@
-//! Private helper lifecycle foundation. No devices, native plugins, or media are opened yet.
+//! Same-build helper lifecycle, private runtime initialization and owned transport. No devices yet.
+
+mod runtime;
+mod transport;
+mod transport_runtime;
 
 use std::io;
 use std::io::Write;
@@ -20,7 +24,13 @@ fn main() {
     match (args.next(), args.next()) {
         (Some(arg), None) if arg == "--build-commit" => println!("{BUILD_COMMIT}"),
         (None, None) => {
-            if run().is_err() {
+            if run(|executor| {
+                executor
+                    .block_on(transport::Transport::new())
+                    .map_err(io::Error::other)
+            })
+            .is_err()
+            {
                 std::process::exit(/*code*/ 1);
             }
         }
@@ -28,7 +38,9 @@ fn main() {
     }
 }
 
-fn run() -> io::Result<()> {
+fn run(
+    start_transport: impl Fn(&tokio::runtime::Runtime) -> io::Result<transport::Transport>,
+) -> io::Result<()> {
     let (sender, receiver) = mpsc::sync_channel(/*bound*/ 1);
     std::thread::Builder::new()
         .name("voice-control".into())
@@ -64,12 +76,61 @@ fn run() -> io::Result<()> {
     let mut output = io::stdout().lock();
     output.write_all(&encode_frame(&Message::Ready {})?)?;
     output.flush()?;
-    match receiver.recv() {
-        Ok(Message::Close {}) => {
-            output.write_all(&encode_frame(&Message::Closed {})?)?;
-            output.flush()
-        }
-        Err(_) => Ok(()),
-        Ok(_) => Err(io::Error::other("invalid voice control sequence")),
+    let mut runtime = None;
+    let executor = tokio::runtime::Runtime::new()?;
+    let mut transport = None;
+    let mut answered = false;
+    loop {
+        let reply = match receiver.recv() {
+            Ok(Message::StartTransport {}) if transport.is_none() => {
+                let peer = start_transport(&executor)?;
+                let sdp = executor.block_on(peer.offer()).map_err(io::Error::other)?;
+                transport = Some(peer);
+                Message::Offer {
+                    sdp: sdp.try_into().map_err(io::Error::other)?,
+                }
+            }
+            Ok(Message::ApplyAnswer { sdp }) if !answered => {
+                let Some(peer) = transport.as_ref() else {
+                    return Err(io::Error::other("voice transport not started"));
+                };
+                executor
+                    .block_on(peer.apply_answer(sdp.into_sdp()))
+                    .map_err(io::Error::other)?;
+                answered = true;
+                Message::TransportReady {}
+            }
+            Ok(Message::InitializeRuntime {}) => {
+                if runtime.is_some() {
+                    return Err(io::Error::other("runtime already initialized"));
+                }
+                runtime = Some(runtime::Runtime::initialize()?);
+                Message::RuntimeReady {}
+            }
+            Ok(Message::Close {}) => {
+                if let Some(mut peer) = transport.take() {
+                    executor.block_on(peer.close()).map_err(io::Error::other)?;
+                }
+                output.write_all(&encode_frame(&Message::Closed {})?)?;
+                return output.flush();
+            }
+            Err(_) => return Ok(()),
+            Ok(
+                Message::Hello { .. }
+                | Message::Ready {}
+                | Message::RuntimeReady {}
+                | Message::StartTransport {}
+                | Message::ApplyAnswer { .. }
+                | Message::Offer { .. }
+                | Message::TransportReady {}
+                | Message::Closed {},
+            ) => return Err(io::Error::other("invalid voice control sequence")),
+        };
+        output.write_all(&encode_frame(&reply)?)?;
+        output.flush()?;
     }
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

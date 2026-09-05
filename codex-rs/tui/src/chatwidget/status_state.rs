@@ -116,6 +116,7 @@ pub(super) struct StatusState {
     pub(super) terminal_title_status_kind: TerminalTitleStatusKind,
     pub(super) retry_status_header: Option<String>,
     pub(super) pending_status_indicator_restore: bool,
+    pub(super) thread_title_generation_pending: bool,
 }
 
 impl Default for StatusState {
@@ -127,6 +128,7 @@ impl Default for StatusState {
             terminal_title_status_kind: TerminalTitleStatusKind::Working,
             retry_status_header: None,
             pending_status_indicator_restore: false,
+            thread_title_generation_pending: false,
         }
     }
 }

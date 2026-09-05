@@ -227,7 +227,8 @@ def codex_rust_crate(
             Crates are only compiled in a single configuration across the workspace, i.e.
             with all features in this list enabled. So use sparingly, and prefer to refactor
             optional functionality to a separate crate.
-        crate_srcs: Optional explicit srcs; defaults to `src/**/*.rs`.
+        crate_srcs: Optional explicit library srcs; [] disables the library target.
+            Defaults to `src/**/*.rs` excluding binary entrypoints.
         crate_edition: Rust edition override, if not default.
             You probably don't want this, it's only here for a single caller.
         proc_macro: Whether this crate builds a proc-macro library.
@@ -303,7 +304,7 @@ def codex_rust_crate(
 
     binaries = DEP_DATA.get(native.package_name())["binaries"]
 
-    lib_srcs = crate_srcs or native.glob(["src/**/*.rs"], exclude = binaries.values(), allow_empty = True)
+    lib_srcs = crate_srcs if crate_srcs != None else native.glob(["src/**/*.rs"], exclude = binaries.values(), allow_empty = True)
 
     maybe_deps = []
 

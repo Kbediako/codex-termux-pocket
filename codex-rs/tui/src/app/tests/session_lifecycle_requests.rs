@@ -49,6 +49,8 @@ enum HistoryCapabilities {
     LegacyDynamicToolsAndHistory,
     ForkHydrationFails,
     ThreadListFails,
+    ThreadStartFails,
+    ConfigReadUnsupported(i64),
 }
 
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
@@ -78,6 +80,7 @@ pub(super) async fn start_recording_app_server(
         blocked_thread_list,
         failed_thread_name,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await
 }
@@ -91,6 +94,7 @@ pub(super) async fn start_recording_remote_app_server(
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Remote,
+        LoaderOverrides::default(),
     )
     .await
 }
@@ -102,6 +106,7 @@ async fn start_recording_app_server_with_history(
     mut blocked_thread_list: Option<(ThreadId, oneshot::Sender<()>, oneshot::Receiver<()>)>,
     failed_thread_name: Option<&'static str>,
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
+    loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
     let state_db =
         crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
@@ -110,7 +115,7 @@ async fn start_recording_app_server_with_history(
         codex_arg0::Arg0DispatchPaths::default(),
         config.clone(),
         Vec::new(),
-        codex_config::LoaderOverrides::default(),
+        loader_overrides,
         /*strict_config*/ false,
         codex_config::CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
@@ -185,7 +190,30 @@ async fn start_recording_app_server_with_history(
                             .is_some_and(|tools| {
                                 tools.iter().any(|tool| tool["type"] == "namespace")
                             });
-                    let response = if request.method == "thread/list"
+                    let response = if let HistoryCapabilities::ConfigReadUnsupported(code) =
+                        history_capabilities
+                        && request.method == "config/read"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code,
+                                data: None,
+                                message: "unknown variant `config/read`".to_string(),
+                            },
+                        })
+                    } else if history_capabilities == HistoryCapabilities::ThreadStartFails
+                        && request.method == "thread/start"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                data: None,
+                                message: "replacement unavailable".to_string(),
+                            },
+                        })
+                    } else if request.method == "thread/list"
                         && std::mem::take(&mut reject_thread_list)
                     {
                         JSONRPCMessage::Error(JSONRPCError {
@@ -504,6 +532,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     assert!(app_server.task_tools_available(started.session.thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -662,6 +691,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     assert!(app_server.task_tools_available(thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -1013,6 +1043,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1021,6 +1052,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
     assert!(!app_server.task_tools_available(started.session.thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -1279,6 +1311,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             params: codex_app_server_protocol::ThreadMetadataUpdateParams {
                 thread_id: creation_source.to_string(),
                 project_id: Some(project.project.id.clone()),
+                daybreak_enabled: None,
                 git_info: None,
             },
         })
@@ -1863,6 +1896,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1955,6 +1989,7 @@ async fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> 
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1986,6 +2021,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -2053,6 +2089,7 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -2391,6 +2428,7 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> 
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -2437,6 +2475,7 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
             /*blocked_thread_list*/ None,
             /*failed_thread_name*/ None,
             crate::app_server_session::ThreadParamsMode::Embedded,
+            LoaderOverrides::default(),
         )
         .await?;
         let started = app_server.start_thread(&app.config).await?;
@@ -2514,6 +2553,7 @@ async fn agents_overview_stop_uses_full_history_after_legacy_negotiation() -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
     app_server.start_thread(&app.config).await?;
@@ -3392,3 +3432,6 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
         .join()
         .expect("session lifecycle request test thread")
 }
+
+#[path = "new_session_tests.rs"]
+mod new_session_tests;

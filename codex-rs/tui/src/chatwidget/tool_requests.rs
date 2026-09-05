@@ -58,7 +58,7 @@ impl ChatWidget {
                 Some(auto_review_denials::action_summary(action))
             }
             GuardianAssessmentAction::ApplyPatch { files, .. } => Some(if files.len() == 1 {
-                format!("apply_patch touching {}", files[0].display())
+                format!("apply_patch touching {}", files[0].render_for_ui())
             } else {
                 format!("apply_patch touching {} files", files.len())
             }),
@@ -173,7 +173,7 @@ impl ChatWidget {
                     GuardianAssessmentAction::ApplyPatch { files, .. } => {
                         let files = files
                             .iter()
-                            .map(|path| path.display().to_string())
+                            .map(codex_utils_path_uri::LegacyAppPathString::render_for_ui)
                             .collect::<Vec<_>>();
                         history_cell::new_guardian_timed_out_patch_request(files)
                     }
@@ -223,7 +223,7 @@ impl ChatWidget {
                 GuardianAssessmentAction::ApplyPatch { files, .. } => {
                     let files = files
                         .iter()
-                        .map(|path| path.display().to_string())
+                        .map(codex_utils_path_uri::LegacyAppPathString::render_for_ui)
                         .collect::<Vec<_>>();
                     history_cell::new_guardian_denied_patch_request(files)
                 }

@@ -7,6 +7,7 @@ use codex_worktree::WorktreeSettings;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -108,6 +109,41 @@ fn run_git(repository: &Path, args: &[&str]) -> String {
         .expect("git output is UTF-8")
         .trim()
         .to_owned()
+}
+
+#[test]
+fn cli_creation_shares_default_and_custom_desktop_pools_without_enabling_cleanup() {
+    let fixture = RepositoryFixture::new();
+    for root in [None, Some(fixture.codex_home.join("custom-desktop"))] {
+        let desktop =
+            root.map(|root| HashMap::from([("git-worktree-root".to_owned(), json!(root))]));
+        let desktop_settings =
+            WorktreeSettings::from_desktop_config(&fixture.codex_home, desktop.as_ref())
+                .expect("resolve desktop settings");
+        let mut cli_desktop = desktop.unwrap_or_default();
+        cli_desktop.insert("worktree-auto-cleanup-enabled".to_owned(), json!("unused"));
+        cli_desktop.insert("worktree-keep-count".to_owned(), json!(0));
+        let manager = WorktreeManager::new(
+            WorktreeSettings::for_cli(&fixture.codex_home, Some(&cli_desktop))
+                .expect("resolve CLI settings"),
+        );
+        let worktree = create_worktree(&manager, &fixture.repository, /*base*/ None)
+            .expect("create CLI worktree");
+        assert!(worktree.root.starts_with(&desktop_settings.root));
+        assert_eq!(
+            manager.settings(),
+            &WorktreeSettings {
+                auto_cleanup_enabled: false,
+                ..desktop_settings.clone()
+            }
+        );
+        assert_eq!(
+            WorktreeManager::new(desktop_settings)
+                .list(&fixture.repository)
+                .expect("list desktop worktrees"),
+            vec![worktree],
+        );
+    }
 }
 
 #[test]

@@ -9,6 +9,8 @@ use codex_network_proxy::NetworkDecision;
 use codex_network_proxy::NetworkPolicyDecision;
 use codex_network_proxy::NetworkPolicyRequest;
 use codex_network_proxy::NetworkProtocol;
+use codex_network_proxy::NetworkRequestCancellation;
+use codex_network_proxy::NetworkRequestCancellationReason;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -526,6 +528,10 @@ impl Inner {
                 Ok(true) => self.remove_session_if(process_id, session),
                 Ok(false) => {}
                 Err(error) => {
+                    session
+                        .network_policy
+                        .cancellation
+                        .record(NetworkRequestCancellationReason::ProcessCancelled);
                     let terminated: Result<TerminateResponse, ExecServerError> = rpc_client
                         .call_for_cleanup(
                             EXEC_TERMINATE_METHOD,
@@ -688,6 +694,10 @@ impl ExecServerClient {
                         let process_cancelled = session
                             .as_ref()
                             .map(|session| session.network_policy.cancelled.clone());
+                        let process_cancellation = session
+                            .as_ref()
+                            .map(|session| session.network_policy.cancellation.clone());
+                        let cancellation = NetworkRequestCancellation::default();
                         let expected_session = session.as_ref().map(Arc::downgrade);
                         let policy_request =
                             (process_id_valid && host_valid).then_some(NetworkPolicyRequest {
@@ -712,6 +722,7 @@ impl ExecServerClient {
                                 exec_policy_hint: None,
                                 execution_id: None,
                                 disconnect: None,
+                                cancellation: Some(cancellation.clone()),
                             });
                         let inner = Arc::downgrade(&inner);
                         let rpc_client = Arc::downgrade(&rpc_client);
@@ -721,18 +732,26 @@ impl ExecServerClient {
                             let _request_guard = request_guard;
                             let decision = match (controller, policy_request, process_cancelled) {
                                 (Some(controller), Some(request), Some(process_cancelled)) => {
-                                    // Core's pending-approval guard makes dropping this
-                                    // future on process removal or deadline fail closed.
+                                    // Keep the decision future outside select/timeout so its
+                                    // guard sees the cancellation cause before it is dropped.
+                                    let mut decision = controller.decider.decide(request);
                                     tokio::select! {
                                         biased;
-                                        _ = connection_cancelled.cancelled() => return,
+                                        _ = connection_cancelled.cancelled() => {
+                                            cancellation.record(NetworkRequestCancellationReason::ConnectionClosed);
+                                            return;
+                                        },
                                         _ = process_cancelled.cancelled() => {
+                                            cancellation.record(process_cancellation.as_ref()
+                                                .and_then(NetworkRequestCancellation::reason)
+                                                .unwrap_or(NetworkRequestCancellationReason::ProcessCancelled));
                                             NetworkDecision::deny(NETWORK_POLICY_DENIAL_REASON)
                                         }
-                                        decision = timeout(
+                                        result = timeout(
                                             controller.timeout,
-                                            controller.decider.decide(request),
-                                        ) => decision.unwrap_or_else(|_| {
+                                            &mut decision,
+                                        ) => result.unwrap_or_else(|_| {
+                                            cancellation.record(NetworkRequestCancellationReason::TimedOut);
                                             NetworkDecision::deny(NETWORK_POLICY_DENIAL_REASON)
                                         }),
                                     }

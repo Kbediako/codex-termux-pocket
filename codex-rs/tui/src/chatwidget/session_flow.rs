@@ -30,7 +30,6 @@ impl ChatWidget {
             self.backend_banner_notice_model = None;
             self.automatic_model_switch_state =
                 backend_banners::AutomaticModelSwitchState::default();
-            self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
         }
@@ -265,13 +264,7 @@ impl ChatWidget {
         )));
     }
 
-    /// Apply a persisted automatic name immediately and suppress its confirmation.
-    pub(crate) fn expect_automatic_thread_name(&mut self, name: String) {
-        self.thread_name = Some(name.clone());
-        self.pending_automatic_thread_names.insert(name);
-    }
-
-    /// Make a confirmed manual rename visible before its queued server notification arrives.
+    /// Update status surfaces before a confirmed manual rename's server notification arrives.
     pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
         if self.thread_id == Some(thread_id) {
             self.thread_name = Some(name);
@@ -280,23 +273,13 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn on_thread_name_updated(
+    /// Update name metadata silently, including late and replayed notifications.
+    pub(crate) fn on_thread_name_updated(
         &mut self,
         thread_id: ThreadId,
         thread_name: Option<String>,
     ) {
         if self.thread_id == Some(thread_id) {
-            let automatic = thread_name
-                .as_ref()
-                .is_some_and(|name| self.pending_automatic_thread_names.remove(name));
-
-            if let Some(name) = thread_name.as_deref()
-                && !automatic
-            {
-                let cell = Self::rename_confirmation_cell(name, self.thread_id);
-                self.add_boxed_history(Box::new(cell));
-            }
-
             self.thread_name = thread_name;
             self.refresh_status_surfaces();
             self.request_redraw();

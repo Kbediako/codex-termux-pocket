@@ -140,7 +140,7 @@ pub enum GuardianAssessmentAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     Execve {
         source: GuardianCommandSource,
@@ -157,8 +157,8 @@ pub enum GuardianAssessmentAction {
         cwd: PathUri,
     },
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     NetworkAccess {
         target: String,
@@ -183,6 +183,23 @@ pub enum GuardianAssessmentAction {
 pub struct NetworkPolicyAmendment {
     pub host: String,
     pub action: NetworkPolicyRuleAction,
+}
+
+/// Why this approval needs a fresh Guardian assessment.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardianReviewReason {
+    Policy,
+    FreshRequired,
+    MissingScore,
+    StaleScore,
+    InvalidScore,
+    IncompatibleCompaction,
+    ElevatedRisk,
+    ScoringFailure,
+    AuthorizationChanged,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -469,7 +486,7 @@ mod tests {
             GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: "rm -rf /tmp/guardian".to_string(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             }
         );
     }

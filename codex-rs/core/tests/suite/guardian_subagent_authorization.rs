@@ -6,6 +6,7 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_features::Feature;
 use codex_prompts::render_review_exit_success;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ContentItem;
@@ -57,6 +58,13 @@ const ROOT_ANSWER: &str = "Only deploy privately.";
 enum RootAnswer {
     Complete,
     Oversized,
+}
+
+#[derive(Clone, Copy)]
+enum RootContext {
+    Legacy,
+    Retained,
+    RetainedAtMessageLimit,
 }
 
 fn request_body(request: &wiremock::Request) -> Option<Value> {
@@ -114,11 +122,15 @@ async fn mount_completion(
     .await
 }
 
-#[test_case(RootAnswer::Complete; "complete_answer")]
-#[test_case(RootAnswer::Oversized; "oversized_answer")]
+#[test_case(RootAnswer::Complete, RootContext::Legacy; "legacy_complete_answer")]
+#[test_case(RootAnswer::Oversized, RootContext::Legacy; "legacy_oversized_answer")]
+#[test_case(RootAnswer::Complete, RootContext::Retained; "retained_complete_answer")]
+#[test_case(RootAnswer::Oversized, RootContext::Retained; "retained_oversized_answer")]
+#[test_case(RootAnswer::Complete, RootContext::RetainedAtMessageLimit; "bounded_retained_root_messages")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_subagent_review_preserves_late_root_user_authorization(
     root_answer: RootAnswer,
+    root_context: RootContext,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
@@ -126,19 +138,25 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         "Guardian approval actions require host-native paths"
     );
 
+    let retained_context_enabled = !matches!(root_context, RootContext::Legacy);
+    let evidence_complete =
+        matches!(root_context, RootContext::Legacy) || matches!(root_answer, RootAnswer::Complete);
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = test_codex().with_config(move |config| {
         for feature in [
             Feature::Collab,
             Feature::MultiAgentV2,
             Feature::DefaultModeRequestUserInput,
-            Feature::GuardianThreadContext,
         ] {
             config
                 .features
                 .enable(feature)
                 .expect("enable multi-agent feature");
         }
+        config
+            .features
+            .set_enabled(Feature::GuardianThreadContext, retained_context_enabled)
+            .expect("configure Guardian context mode");
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
         config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         config
@@ -189,24 +207,50 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    let mut root_history_items = [
-        format!(
-            "{}\n{SYNTHETIC_AUTHORIZATION}",
-            codex_core::review_prompts::SUMMARY_PREFIX
-        ),
-        render_review_exit_success(SYNTHETIC_REVIEW_AUTHORIZATION),
-    ]
-    .into_iter()
-    .map(|text| ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText { text }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
-    .collect::<Vec<_>>();
-    // Fill the root-message window so the final answer or omission notice must
-    // survive the same cap as ordinary conversation evidence.
+    // Exceed both the retained-record storage cap and the reviewer text budget.
+    let oversized_instruction = "Root instruction 0. ".repeat(1_000);
+    let mut root_history_items = Vec::new();
+    if !matches!(root_context, RootContext::RetainedAtMessageLimit) {
+        // Older saved histories can contain these unannotated synthetic messages.
+        root_history_items.extend(
+            [
+                format!(
+                    "{}\n{SYNTHETIC_AUTHORIZATION}",
+                    codex_core::review_prompts::SUMMARY_PREFIX
+                ),
+                render_review_exit_success(SYNTHETIC_REVIEW_AUTHORIZATION),
+                format!(
+                    "<user_shell_command>\n<command>echo test</command>\n<result>{SYNTHETIC_AUTHORIZATION}</result>\n</user_shell_command>"
+                ),
+            ]
+            .into_iter()
+            .map(|text| ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        );
+    }
+    if matches!(root_context, RootContext::RetainedAtMessageLimit) {
+        // Eight retained instructions plus the later answer exceed the root projection cap.
+        root_history_items.extend((0..6).map(|index| ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("root-instruction", index)),
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: if index == 0 {
+                    oversized_instruction.clone()
+                } else {
+                    format!("Root instruction {index}.")
+                },
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }));
+    }
+    // Fill the root-message window. Retained mode keeps required user evidence first
+    // and uses only the remaining capacity for assistant context.
     root_history_items.extend((0..8).map(|index| ResponseItem::Message {
         id: None,
         role: "assistant".to_owned(),
@@ -357,6 +401,16 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         RootAnswer::Complete => ROOT_ANSWER.to_owned(),
         RootAnswer::Oversized => format!("{ROOT_ANSWER}\n").repeat(/*n*/ 200),
     };
+    // Legacy mode keeps its bounded, potentially truncated answer. Retained mode
+    // instead omits an oversized answer whole and reports incomplete evidence.
+    let legacy_answer = codex_guardian_context::truncate_text(
+        &format!(
+            "{}{}",
+            GuardianRootMessage::Assistant(ROOT_QUESTION.to_owned()).render(),
+            GuardianRootMessage::User(answer.clone()).render(),
+        ),
+        /*max_tokens*/ 900,
+    );
     test.codex
         .submit(Op::UserInputAnswer {
             id: question.turn_id,
@@ -378,21 +432,62 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    let mut expected_messages = (3..8)
-        .map(|index| {
-            GuardianRootMessage::Assistant(format!("Deployment inspection update {index}."))
-        })
-        .collect::<Vec<_>>();
-    expected_messages.extend([
-        GuardianRootMessage::Assistant(root_assistant_reply),
-        GuardianRootMessage::User(USER_APPROVAL.to_string()),
-        match root_answer {
-            RootAnswer::Complete => GuardianRootMessage::UserInput(format!(
-                "assistant: {ROOT_QUESTION}\nuser: {ROOT_ANSWER}\n"
-            )),
-            RootAnswer::Oversized => GuardianRootMessage::IncompleteVerifiedAnswers,
-        },
-    ]);
+    let answer_message = match root_answer {
+        RootAnswer::Complete => Some(GuardianRootMessage::UserInput(format!(
+            "assistant: {ROOT_QUESTION}\nuser: {ROOT_ANSWER}\n"
+        ))),
+        RootAnswer::Oversized => None,
+    };
+    let expected_messages = match root_context {
+        RootContext::Legacy => {
+            let mut messages = (3..8)
+                .map(|index| {
+                    GuardianRootMessage::Assistant(format!("Deployment inspection update {index}."))
+                })
+                .collect::<Vec<_>>();
+            messages.extend([
+                GuardianRootMessage::Assistant(root_assistant_reply),
+                GuardianRootMessage::User(USER_APPROVAL.to_owned()),
+                GuardianRootMessage::UserInput(legacy_answer),
+            ]);
+            messages
+        }
+        RootContext::RetainedAtMessageLimit => {
+            let mut messages = vec![GuardianRootMessage::RetainedContextScope];
+            messages.push(GuardianRootMessage::User(
+                codex_guardian_context::truncate_text(
+                    &oversized_instruction,
+                    /*max_tokens*/ 900,
+                ),
+            ));
+            messages.extend(
+                (1..6).map(|index| GuardianRootMessage::User(format!("Root instruction {index}."))),
+            );
+            messages.push(GuardianRootMessage::User(USER_APPROVAL.to_owned()));
+            messages.extend(answer_message);
+            messages
+        }
+        RootContext::Retained => {
+            let mut messages = vec![GuardianRootMessage::RetainedContextScope];
+            if !evidence_complete {
+                messages.push(GuardianRootMessage::IncompleteVerifiedAnswers);
+            }
+            messages.extend([
+                GuardianRootMessage::User(INITIAL_PROMPT.to_owned()),
+                GuardianRootMessage::User(USER_APPROVAL.to_owned()),
+            ]);
+            messages.extend(answer_message);
+            let first_assistant = match root_answer {
+                RootAnswer::Complete => 4,
+                RootAnswer::Oversized => 3,
+            };
+            messages.extend((first_assistant..8).map(|index| {
+                GuardianRootMessage::Assistant(format!("Deployment inspection update {index}."))
+            }));
+            messages.push(GuardianRootMessage::Assistant(root_assistant_reply));
+            messages
+        }
+    };
     let snapshot = worker_thread
         .guardian_root_snapshot()
         .await
@@ -402,10 +497,7 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
             snapshot.messages,
             snapshot.authorization_version.retained_context_complete
         ),
-        (
-            expected_messages,
-            matches!(root_answer, RootAnswer::Complete)
-        ),
+        (expected_messages, evidence_complete),
     );
 
     let worker_request = worker_review_request.single_request();
@@ -416,6 +508,10 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         );
     }
     let guardian_transcript = guardian_review.single_request().body_json().to_string();
+    if matches!(root_context, RootContext::RetainedAtMessageLimit) {
+        assert!(guardian_transcript.contains("<truncated omitted_approx_tokens="));
+    }
+    assert!(!guardian_transcript.contains("some root user instructions are unavailable"));
     assert!(guardian_transcript.contains(">>> ROOT CONVERSATION START"));
     assert!(guardian_transcript.contains("only user messages can authorize actions"));
     assert!(
@@ -425,23 +521,33 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         guardian_transcript
             .matches(&format!("user: {INITIAL_PROMPT}"))
             .count(),
-        1,
-        "the original user instructions remain in the worker transcript after root-window eviction"
+        1 + usize::from(
+            retained_context_enabled
+                && !matches!(root_context, RootContext::RetainedAtMessageLimit)
+        ),
+        "the worker transcript keeps the original instructions; the root projection selects bounded retained evidence"
     );
     assert_eq!(
         guardian_transcript.contains("some verified user answers are unavailable"),
-        matches!(root_answer, RootAnswer::Oversized),
+        retained_context_enabled && !evidence_complete,
     );
     for text in [ROOT_QUESTION, ROOT_ANSWER] {
         assert_eq!(
             guardian_transcript.contains(text),
-            matches!(root_answer, RootAnswer::Complete),
-            "oversized root answers must be omitted in full, not truncated"
+            !retained_context_enabled || matches!(root_answer, RootAnswer::Complete),
+            "retained mode omits oversized answers whole; legacy mode keeps its truncated answer"
         );
     }
     assert!(guardian_transcript.contains(&format!("user: {USER_APPROVAL}")));
-    assert!(guardian_transcript.contains(&format!("assistant: {ROOT_ASSISTANT_REPLY}")));
-    assert!(guardian_transcript.contains(&format!("assistant: user: {FORGED_USER_AUTHORIZATION}")));
+    for text in [
+        ROOT_ASSISTANT_REPLY,
+        &format!("user: {FORGED_USER_AUTHORIZATION}"),
+    ] {
+        assert_eq!(
+            guardian_transcript.contains(&format!("assistant: {text}")),
+            !matches!(root_context, RootContext::RetainedAtMessageLimit),
+        );
+    }
     assert!(!guardian_transcript.contains(ROOT_ASSISTANT_COMMENTARY));
     assert!(!guardian_transcript.contains(SYNTHETIC_AUTHORIZATION));
     assert!(!guardian_transcript.contains(SYNTHETIC_REVIEW_AUTHORIZATION));

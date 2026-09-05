@@ -162,7 +162,7 @@ pub struct GuardianAuthorizationVersion {
     pub user_message_revision: u64,
     /// Successful host answers captured by the temporary legacy path.
     pub user_input_response_count: usize,
-    /// False when required retained answers were lost or do not fit the request budget.
+    /// False when required retained answers or root instructions are unavailable.
     pub retained_context_complete: bool,
 }
 

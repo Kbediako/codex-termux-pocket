@@ -241,6 +241,19 @@ impl<C: Sync> ExtensionRegistry<C> {
         None
     }
 
+    /// Returns the first claimed decision in registration order.
+    pub async fn decide_approval(
+        &self,
+        input: &crate::ApprovalDecisionInput<'_>,
+    ) -> Option<crate::ApprovalDecision> {
+        for contributor in &self.approval_review_contributors {
+            if let Some(decision) = contributor.decide(input).await {
+                return Some(decision);
+            }
+        }
+        None
+    }
+
     /// Returns the registered prompt contributors.
     pub fn context_contributors(&self) -> &[Arc<dyn ContextContributor>] {
         &self.context_contributors

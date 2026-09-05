@@ -58,6 +58,8 @@ pub(crate) const WORKSPACES_KEY: &str = "workspaces";
 // App-server clients can specify additional metadata in the `responsesapi_client_metadata` param
 // when submitting a turn, but they must not override fields owned by core.
 const RESERVED_METADATA_KEYS: &[&str] = &[
+    codex_protocol::guardian_ticket::GUARDIAN_TICKET_METADATA_KEY,
+    "guardian_ticket_requested",
     INSTALLATION_ID_KEY,
     X_CODEX_INSTALLATION_ID_HEADER,
     SESSION_ID_KEY,
@@ -217,6 +219,8 @@ pub(crate) enum TurnToolSource {
 /// truth.
 #[derive(Clone, Debug)]
 pub struct CodexResponsesMetadata {
+    /// Opaque runtime receipt; deliberately omitted from metadata projections.
+    pub(crate) guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
     pub(crate) installation_id: String,
     pub(crate) session_id: String,
     pub(crate) thread_id: String,
@@ -256,6 +260,7 @@ impl CodexResponsesMetadata {
         window_id: String,
     ) -> Self {
         Self {
+            guardian_ticket: None,
             installation_id,
             session_id,
             thread_id,

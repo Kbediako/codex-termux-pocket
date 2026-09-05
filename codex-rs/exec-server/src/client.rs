@@ -13,6 +13,8 @@ use arc_swap::ArcSwapOption;
 use codex_exec_server_protocol::JSONRPCNotification;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxyAuditMetadata;
+use codex_network_proxy::NetworkRequestCancellation;
+use codex_network_proxy::NetworkRequestCancellationReason;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -211,6 +213,7 @@ pub(crate) struct SessionState {
 struct NetworkPolicyState {
     controller: ArcSwapOption<NetworkPolicyDecisionController>,
     cancelled: CancellationToken,
+    cancellation: NetworkRequestCancellation,
     audit: Option<NetworkPolicyAuditContext>,
 }
 
@@ -877,6 +880,13 @@ impl ExecServerClient {
         &self,
         process_id: &ProcessId,
     ) -> Result<TerminateResponse, ExecServerError> {
+        // A close notification may arrive before the termination response.
+        if let Some(session) = self.inner.get_session(process_id) {
+            session
+                .network_policy
+                .cancellation
+                .record(NetworkRequestCancellationReason::ProcessCancelled);
+        }
         self.call_for_cleanup(
             EXEC_TERMINATE_METHOD,
             &TerminateParams {
@@ -1318,6 +1328,7 @@ impl SessionState {
             network_policy: NetworkPolicyState {
                 controller: ArcSwapOption::empty(),
                 cancelled: CancellationToken::new(),
+                cancellation: NetworkRequestCancellation::default(),
                 audit: None,
             },
         }
@@ -1381,6 +1392,11 @@ impl SessionState {
             let is_closed = matches!(&event, ExecProcessEvent::Closed { .. });
             ordered_events.closed_published |= is_closed;
             published_closed |= is_closed;
+            if is_closed && ordered_events.exit_published {
+                self.network_policy
+                    .cancellation
+                    .record(NetworkRequestCancellationReason::ProcessFinished);
+            }
             self.events.publish(event);
         }
         published_closed
@@ -1581,6 +1597,10 @@ impl Session {
     }
 
     pub(crate) fn cancel_network_policy_decisions(&self) {
+        self.state
+            .network_policy
+            .cancellation
+            .record(NetworkRequestCancellationReason::ProcessCancelled);
         self.state.network_policy.cancelled.cancel();
     }
 
@@ -1638,6 +1658,10 @@ impl Inner {
         let mut next_sessions = sessions.as_ref().clone();
         next_sessions.remove(process_id);
         self.sessions.store(Arc::new(next_sessions));
+        expected
+            .network_policy
+            .cancellation
+            .record(NetworkRequestCancellationReason::ProcessCancelled);
         expected.network_policy.cancelled.cancel();
         expected.network_policy.controller.store(None);
     }
@@ -1678,6 +1702,10 @@ fn fail_all_sessions(inner: &Arc<Inner>, message: String) {
     let sessions = inner.take_all_sessions();
 
     for (_, session) in sessions {
+        session
+            .network_policy
+            .cancellation
+            .record(NetworkRequestCancellationReason::ConnectionClosed);
         session.network_policy.cancelled.cancel();
         session.network_policy.controller.store(None);
         // Sessions synthesize a closed read response and emit a pushed Failed

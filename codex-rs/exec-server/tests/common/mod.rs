@@ -222,13 +222,32 @@ fn maybe_run_exec_server_from_test_binary(guard: Option<&TestBinaryDispatchGuard
             std::process::exit(1);
         }
     };
-    let exit_code = match runtime.block_on(codex_exec_server::run_main_with_telemetry(
-        &listen_url,
-        runtime_paths,
-        ExecServerTelemetry::default(),
-        http_client_factory,
-        request_dispatch_mode,
-    )) {
+    let exit_code = match runtime.block_on(async {
+        #[cfg(target_os = "macos")]
+        let runtime_paths = {
+            let home = codex_utils_home_dir::find_codex_home()?;
+            let config = codex_config::loader::load_config_layers_state(
+                &codex_exec_server::LocalFileSystem::unsandboxed(),
+                home.as_path(),
+                /*cwd*/ None,
+                &[],
+                codex_config::LoaderOverrides::default(),
+                &codex_config::NoopThreadConfigLoader,
+            )
+            .await?;
+            runtime_paths.with_allowed_symlinked_codex_home(
+                codex_config::allowed_symlinked_codex_home(&config, &home),
+            )
+        };
+        codex_exec_server::run_main_with_telemetry(
+            &listen_url,
+            runtime_paths,
+            ExecServerTelemetry::default(),
+            http_client_factory,
+            request_dispatch_mode,
+        )
+        .await
+    }) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("exec-server failed: {error}");

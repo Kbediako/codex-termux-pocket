@@ -102,6 +102,78 @@ async fn create_process_context(use_remote: bool) -> Result<ProcessContext> {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_home_symlink_opt_out_respects_host_config_and_scope() -> Result<()> {
+    use codex_exec_server::WriteFileOptions;
+    use common::exec_server::exec_server_with_env;
+    use std::os::unix::fs::symlink;
+
+    let workspace = TempDir::new()?;
+    let home = TempDir::new()?;
+    let target = TempDir::new()?;
+    let alias = home.path().join("visualizations");
+    let other_alias = workspace.path().join(".codex/visualizations");
+    std::fs::create_dir(workspace.path().join(".codex"))?;
+    symlink(target.path(), &alias)?;
+    symlink(target.path(), &other_alias)?;
+    std::fs::write(
+        workspace.path().join(".codex/config.toml"),
+        "allow_symlinked_codex_home = true\n",
+    )?;
+
+    for enabled in [None, Some(false), Some(true)] {
+        std::fs::write(
+            home.path().join("config.toml"),
+            enabled.map_or_else(String::new, |enabled| {
+                format!("allow_symlinked_codex_home = {enabled}\n")
+            }),
+        )?;
+        let mut server = exec_server_with_env([("CODEX_HOME", home.path())], &[]).await?;
+        let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
+        for root in [alias.as_path(), other_alias.as_path(), workspace.path()] {
+            let mut policy = FileSystemSandboxPolicy::read_only();
+            policy.entries.push(FileSystemSandboxEntry::new(
+                PathUri::from_host_native_path(root)?.into(),
+                FileSystemAccessMode::Write,
+            ));
+            let sandbox = FileSystemSandboxContext::from_permission_profile_with_cwd(
+                PermissionProfile::from_runtime_permissions(
+                    &policy,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                PathUri::from_host_native_path(workspace.path())?,
+            );
+            let result = environment
+                .get_filesystem()
+                .write_file(
+                    &PathUri::from_host_native_path(root.join("output"))?,
+                    b"written".to_vec(),
+                    WriteFileOptions::default(),
+                    Some(&sandbox),
+                )
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                root == workspace.path() || (enabled == Some(true) && root == alias),
+                "root={root:?}, enabled={enabled:?}: {result:?}"
+            );
+            if let Err(error) = result {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("symlinked writable roots are not supported"),
+                    "{error}"
+                );
+            }
+        }
+        server.shutdown().await?;
+    }
+    assert_eq!(std::fs::read(target.path().join("output"))?, b"written");
+    assert_eq!(std::fs::read(workspace.path().join("output"))?, b"written");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test_case(false, false, false, false, "bash"; "local_pipe")]
 #[test_case(false, true, false, false, "bash"; "local_tty")]

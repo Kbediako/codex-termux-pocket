@@ -18,6 +18,7 @@ mod metrics;
 mod prompt;
 mod review;
 mod review_session;
+mod runtime;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,7 +73,9 @@ const GUARDIAN_MAX_MESSAGE_TRANSCRIPT_TOKENS: usize = 20_000;
 const GUARDIAN_MAX_TOOL_TRANSCRIPT_TOKENS: usize = 10_000;
 const GUARDIAN_MAX_MESSAGE_ENTRY_TOKENS: usize = 5_000;
 const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = 1_000;
+pub(crate) const GUARDIAN_MAX_ROOT_MESSAGE_TOKENS: usize = 900;
 pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
+pub(crate) const GUARDIAN_MAX_ACTION_BYTES: usize = 8_000;
 const GUARDIAN_MAX_ACTION_STRING_TOKENS: usize = 16_000;
 const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
 
@@ -85,6 +88,8 @@ const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
 /// step-scoped things past their lifetime (like MCP bindings)
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
+    /// Ticket from the response currently handled in this execution context.
+    pub(crate) guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
     turn: Arc<TurnContext>,
     environments: TurnEnvironmentSnapshot,
     // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
@@ -104,6 +109,11 @@ impl GuardianReviewContext {
         settings: &ResolvedStepSettings,
     ) -> Self {
         Self {
+            guardian_ticket: turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             environments: turn.environments.clone(),
             model_info: Arc::clone(&settings.model_info),
             reasoning_effort: settings.reasoning_effort().cloned(),
@@ -126,6 +136,12 @@ impl GuardianReviewContext {
 impl From<&Arc<StepContext>> for GuardianReviewContext {
     fn from(step: &Arc<StepContext>) -> Self {
         Self {
+            guardian_ticket: step
+                .turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             turn: Arc::clone(&step.turn),
             environments: step.environments.clone(),
             model_info: Arc::clone(&step.settings.model_info),
@@ -140,6 +156,11 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
 impl From<Arc<TurnContext>> for GuardianReviewContext {
     fn from(turn: Arc<TurnContext>) -> Self {
         Self {
+            guardian_ticket: turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             environments: turn.environments.clone(),
             model_info: Arc::clone(turn.model_info()),
             reasoning_effort: turn.reasoning_effort().cloned(),

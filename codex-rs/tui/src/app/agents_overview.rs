@@ -652,6 +652,7 @@ impl App {
         );
         match app_server
             .start_thread_with_session_start_source(
+                &self.local_settings,
                 &config,
                 /*session_start_source*/ None,
                 remote_cwd.as_deref(),

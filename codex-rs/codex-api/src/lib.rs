@@ -4,6 +4,7 @@ pub(crate) mod common;
 pub(crate) mod endpoint;
 pub(crate) mod error;
 pub(crate) mod files;
+mod guardian_ticket;
 pub(crate) mod images;
 pub(crate) mod provider;
 pub(crate) mod rate_limits;

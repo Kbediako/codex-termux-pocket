@@ -91,6 +91,7 @@ fn test_model_info(
         used_fallback_model_metadata: false,
         supports_search_tool: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,

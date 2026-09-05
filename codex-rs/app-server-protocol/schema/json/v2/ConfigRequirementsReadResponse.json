@@ -215,6 +215,12 @@
             "null"
           ]
         },
+        "allowWebmcp": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "defaultOriginPolicy": {
           "anyOf": [
             {

@@ -322,6 +322,7 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
         );
         let result = crate::app_server_session::start_thread_with_request_handle(
             session.request_handle(),
+            &app.local_settings,
             app.config.clone(),
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,

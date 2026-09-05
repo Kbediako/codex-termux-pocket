@@ -90,6 +90,8 @@ pub struct LunaSamplerConfig {
 
 /// One tool-less Luna classification request over an already-open connection.
 pub struct LunaSamplingRequest {
+    /// Runtime receipt of the response handling the classified tool.
+    pub guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
     /// Trusted instructions describing the requested classification.
     pub instructions: String,
     /// Host-supplied Guardian reviews isolated from untrusted transcript entries.
@@ -452,6 +454,7 @@ impl LunaSampler {
         }
         // A classification is its own inference turn; retries keep that identity.
         let turn_id = Uuid::now_v7().to_string();
+        let guardian_ticket = request.guardian_ticket;
         let parent_turn_id = request.parent_turn_id;
         let root_turn_id = request.root_turn_id;
         let mut input = vec![
@@ -634,6 +637,7 @@ impl LunaSampler {
                     ResponsesWsRequest::ResponseCreate((&request).into()),
                     /*connection_reused*/ true,
                     /*turn_state*/ None,
+                    guardian_ticket.as_ref(),
                 )
                 .await
             {

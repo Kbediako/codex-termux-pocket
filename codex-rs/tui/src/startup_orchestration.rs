@@ -360,6 +360,10 @@ pub(super) async fn run_main_inner(
             ))
             .await??
     };
+    #[cfg(target_os = "macos")]
+    let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
+        codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
+    );
     let environment_manager = Arc::new(
         prepared_environment_manager
             .build(Some(local_runtime_paths), config.http_client_factory())

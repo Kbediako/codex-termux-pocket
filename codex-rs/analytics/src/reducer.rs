@@ -1966,12 +1966,20 @@ impl AnalyticsReducer {
                         .get(&notification.turn_id)
                         .and_then(|turn| turn.resolved_config.as_ref())
                         .and_then(|config| config.turn_metadata.root_turn_id());
+                    // Fast collaborator tools can complete before their sampling response.
+                    // Keep the event until that response can supply its originating ID.
+                    let emission =
+                        if matches!(&notification.item, ThreadItem::CollabAgentToolCall { .. }) {
+                            ToolEventEmission::AwaitResponse
+                        } else {
+                            ToolEventEmission::ImmediateUnlessCorrelated
+                        };
                     self.record_tool_event(
                         &notification.thread_id,
                         &notification.turn_id,
                         root_turn_id,
                         event,
-                        ToolEventEmission::ImmediateUnlessCorrelated,
+                        emission,
                         out,
                     );
                 }

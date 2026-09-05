@@ -1069,14 +1069,7 @@ async fn track_turn_resolved_config_analytics(
                 .services
                 .thread_extension_data
                 .get::<codex_extension_api::GuardianV2Enabled>()
-                .is_some_and(|state| {
-                    state.computer_use_only
-                        || !turn_context
-                            .config
-                            .config_layer_stack
-                            .requirements()
-                            .auto_review_required_for_model(&turn_context.model_info().slug)
-                }),
+                .is_some(),
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
             collaboration_mode: turn_context.mode(),
             personality: turn_context.personality(),
@@ -1444,6 +1437,10 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
+        // A retry must not lend a previous response's ticket to the next tool call.
+        turn_context
+            .extension_data
+            .remove::<codex_protocol::guardian_ticket::GuardianTicket>();
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
@@ -2379,7 +2376,11 @@ async fn try_run_sampling_request(
         record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
-            ResponseEvent::Created => {}
+            ResponseEvent::Created { guardian_ticket } => {
+                if let Some(ticket) = guardian_ticket {
+                    turn_context.extension_data.insert(ticket);
+                }
+            }
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {

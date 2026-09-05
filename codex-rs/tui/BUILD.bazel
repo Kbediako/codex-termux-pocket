@@ -20,4 +20,6 @@ codex_rust_crate(
     test_shard_counts = {
         "tui-unit-tests": 8,
     },
+    # The startup symlink test applies its own Seatbelt policy, which cannot be nested.
+    test_tags = ["no-sandbox"],
 )

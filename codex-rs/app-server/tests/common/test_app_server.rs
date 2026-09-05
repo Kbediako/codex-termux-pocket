@@ -195,7 +195,15 @@ impl TestAppServer {
     /// Closes stdio and waits for app-server's graceful thread teardown to finish.
     pub async fn shutdown_gracefully(&mut self) -> std::io::Result<ExitStatus> {
         drop(self.stdin.take());
-        self.process.wait().await
+        // Drain final notifications so a full stdout pipe cannot block runtime shutdown.
+        let mut sink = tokio::io::sink();
+        tokio::select! {
+            status = self.process.wait() => status,
+            drained = tokio::io::copy(&mut self.stdout, &mut sink) => {
+                drained?;
+                self.process.wait().await
+            }
+        }
     }
 
     /// Returns the automatically selected test environment retained by this server.

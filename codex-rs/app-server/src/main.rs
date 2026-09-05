@@ -12,6 +12,14 @@ use codex_protocol::protocol::SessionSource;
 use codex_utils_cli::CliConfigOverrides;
 use std::path::PathBuf;
 
+#[cfg(all(
+    target_os = "linux",
+    target_env = "musl",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // Debug-only test hook: lets integration tests point the server at a temporary
 // managed config file without writing to /etc.
 const MANAGED_CONFIG_PATH_ENV_VAR: &str = "CODEX_APP_SERVER_MANAGED_CONFIG_PATH";

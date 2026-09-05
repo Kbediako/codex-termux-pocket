@@ -18,6 +18,7 @@ pub trait ConversationHistorySnapshot: Send + Sync {
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_>;
 
     /// Host-owned retained facts captured atomically with the parent model window.
+    /// Legacy hosts can withhold these facts to preserve their existing reviewer policy.
     fn retained_context(&self) -> Option<&RetainedContext> {
         None
     }

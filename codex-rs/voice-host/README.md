@@ -1,14 +1,26 @@
 # Private voice helper foundation
 
 `codex-voice-host` establishes the inherited-pipe lifecycle for the proposed
-bundled voice process. It does not open devices, load native plugins, negotiate
-WebRTC, or enable voice in the TUI. The existing CLI is unchanged.
+bundled voice process and owns WebRTC negotiation. It does not open devices or
+enable voice in the TUI. The existing CLI is unchanged.
 
-Frames are a big-endian u32 length followed by at most 256 bytes of JSON. The
+Frames are a big-endian u32 length followed by at most 128 KiB of JSON. SDP is
+limited to 64 KiB and redacted in diagnostics. The
 parent sends `hello` with protocol `1` and the helper's exact `buildCommit` before
 receiving `ready`. It then sends `close` and receives `closed` before process exit.
+After `ready`, the parent may send `initializeRuntime` once. `runtimeReady` means
+the physical package's GStreamer library and seven explicit plugins initialized;
+it does not mean an audio session started. Missing or invalid runtime files cause
+the helper to exit without a readiness response or raw native diagnostics. The
+client terminates the helper if initialization fails or exceeds its deadline.
 Unknown fields, incompatible builds, invalid order and oversized frames fail
 closed without echoing input. EOF exits even when the main worker cannot progress.
+
+After `ready`, `startTransport` gathers an `offer`; `applyAnswer` returns
+`transportReady` only when the ordered `oai-events` channel opens. This can run
+without native audio initialization and does not establish audio readiness.
+Negotiation has a deadline; `close` tears down the peer before acknowledging exit.
+UDP and TCP peer tests use real sockets, without a backend or audio devices.
 
 Bazel stamps the binary with `STABLE_GIT_COMMIT`. Cargo builders must provide the
 same variable; an unstamped source build reports `dev` via `--build-commit` and is
@@ -35,5 +47,20 @@ Omitting `--runtime` retains helper-only assembly.
 
 This accepts a development runtime receipt, not an authenticated release. It
 does not repeat native loader inspection or establish trust in the build inputs.
-The helper still does not load these files; native loading, media/privacy controls,
-linking against the prepared SDK and actual audio proof remain integration stages.
+The helper opens only physical packaged paths. The parent fixes GStreamer search
+paths to empty, disables registry updates/forking, and points its registry to the
+OS null device. Windows loads use only the DLL's directory and System32. Native
+libraries remain loaded until helper exit, even after partial initialization,
+because GStreamer registers process-global callbacks. The small private C ABI
+bootstrap does not expose native pointers to the parent or link native libraries
+into ordinary Codex. The existing `libloading` dependency supplies OS loading.
+Media/privacy controls, a full media binding layer and actual audio proof remain
+integration stages; helper-only packages continue to support lifecycle calls.
+
+The ignored `packaged_runtime` integration test uses real libraries prepared for
+the host platform. From `codex-rs`, run
+`CODEX_TEST_VOICE_RUNTIME=/absolute/prepared/runtime just test -p codex-voice-host --test packaged_runtime --run-ignored all`.
+It copies and relocates the runtime with the real helper, checks client
+initialization and close, and rejects duplicate initialization. This requires
+native inputs separately; ordinary CI does not run this ignored test. It tests
+helper loading, not microphone, speaker, backend, or release behavior.

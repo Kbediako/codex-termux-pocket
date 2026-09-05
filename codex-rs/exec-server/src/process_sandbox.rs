@@ -185,6 +185,9 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
         network_policy,
     );
     let sandbox_manager = SandboxManager::new();
+    #[cfg(target_os = "macos")]
+    let sandbox_manager = sandbox_manager
+        .with_allowed_symlinked_codex_home(runtime_paths.allowed_symlinked_codex_home.clone());
     let sandbox = sandbox_manager.select_initial(
         &permissions,
         SandboxablePreference::Require,

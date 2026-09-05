@@ -1,4 +1,6 @@
 use super::*;
+use codex_history::CodexHarnessMetadata;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ErrorEvent;
@@ -103,8 +105,10 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         node_repl_policy: GuardianNodeReplPolicy::from_model_messages(/*messages*/ None),
         request: GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "status".to_string()],
-            cwd,
+            cwd: cwd.clone().into(),
+            guardian_cwd: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&cwd),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Inspect repo state.".to_string()),
@@ -113,6 +117,7 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         reasons: ApprovalRequestReasons::default(),
         schema: super::super::prompt::guardian_output_schema(),
         model,
+        compaction_model_hash: None,
         reasoning_effort,
         guardian_default_review_model_id: "codex-auto-review".to_string(),
         guardian_catalog_contains_auto_review: true,
@@ -251,8 +256,18 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
     );
 }
 
-#[test]
-fn encrypted_parent_compaction_requires_original_item_id() {
+#[test_case::test_case(true; "thread owned")]
+#[test_case::test_case(false; "legacy")]
+#[tokio::test]
+async fn encrypted_parent_compaction_requires_original_item_id(thread_context_enabled: bool) {
+    let (session, _) = crate::session::tests::make_session_and_context().await;
+    let mut features = session.get_config().await.features.clone();
+    features
+        .enable(Feature::GuardianReuseParentCompaction)
+        .expect("legacy reuse");
+    features
+        .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
+        .expect("context mode");
     let item = ResponseItem::Compaction {
         id: Some(codex_protocol::ResponseItemId::from_server(
             "cmp_guardian_parent_summary".to_string(),
@@ -261,18 +276,36 @@ fn encrypted_parent_compaction_requires_original_item_id() {
         internal_chat_message_metadata_passthrough: None,
     };
 
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![ResponseItemEnvelope {
+        item: item.clone(),
+        metadata: Some(CodexHarnessMetadata {
+            compaction_model_hash: Some("compatible".to_owned()),
+            ..Default::default()
+        }),
+    }]);
     assert_eq!(
-        encrypted_parent_compaction(std::slice::from_ref(&item)),
+        encrypted_parent_compaction(&history, &features, Some("compatible"))
+            .expect("valid checkpoint"),
         Some(item)
     );
-    assert_eq!(
-        encrypted_parent_compaction(&[ResponseItem::Compaction {
+    // The latest unusable checkpoint must not fall back to the older valid one.
+    let mut items = history.annotated_items().to_vec();
+    items.push(
+        ResponseItem::Compaction {
             id: None,
             encrypted_content: "encrypted guardian parent summary".to_string(),
             internal_chat_message_metadata_passthrough: None,
-        }]),
-        None
+        }
+        .into(),
     );
+    history.replace_annotated(items);
+    let result = encrypted_parent_compaction(&history, &features, Some("compatible"));
+    if thread_context_enabled {
+        assert!(result.is_err());
+    } else {
+        assert_eq!(result.expect("legacy omission"), None);
+    }
 }
 
 #[tokio::test]

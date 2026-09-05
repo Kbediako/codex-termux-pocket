@@ -22,6 +22,7 @@ async fn resolve_runtime_model_provider_base_url(provider: &ModelProviderInfo) -
 
 fn spawn_startup_thread_start(
     app_server: &AppServerSession,
+    local_settings: crate::local_settings::LocalSettings,
     config: Config,
     app_event_tx: AppEventSender,
 ) {
@@ -32,6 +33,7 @@ fn spawn_startup_thread_start(
     tokio::spawn(async move {
         let result = crate::app_server_session::start_thread_with_request_handle(
             request_handle,
+            &local_settings,
             config,
             thread_params_mode,
             remote_cwd_override,
@@ -288,7 +290,12 @@ impl App {
             | SessionSelection::Exit
             | SessionSelection::AgentsOverview => {
                 if !start_in_agents_overview {
-                    spawn_startup_thread_start(&app_server, config.clone(), app_event_tx.clone());
+                    spawn_startup_thread_start(
+                        &app_server,
+                        local_settings.clone(),
+                        config.clone(),
+                        app_event_tx.clone(),
+                    );
                 }
                 // Count a startup tooltip once the initial chat widget can render it.
                 let startup_tooltip_override = if start_in_agents_overview {
@@ -505,6 +512,7 @@ See the Codex keymap documentation for supported actions and examples."
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
+            feature_write_lock: Arc::default(),
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -551,6 +559,7 @@ See the Codex keymap documentation for supported actions and examples."
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             temporary_structured_requests: HashMap::new(),
+            pending_thread_titles: HashSet::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             agents_overview: Default::default(),
@@ -707,6 +716,11 @@ See the Codex keymap documentation for supported actions and examples."
         // already has data and available reset credits can be surfaced, without
         // delaying the initial frame render.
         if requires_openai_auth && has_chatgpt_account {
+            crate::daybreak::prefetch_notice(
+                &app.config,
+                &app_server,
+                app.chat_widget.cyber_policy_notice.clone(),
+            );
             let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
             app.refresh_rate_limits(
                 &app_server,
@@ -904,6 +918,7 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                     } => {
                         app.chat_widget.refresh_goal_status_indicator_for_time_tick();
+                        app.chat_widget.refresh_thread_title_progress_for_time_tick();
                         app.chat_widget.refresh_terminal_title();
                         AppRunControl::Continue
                     }

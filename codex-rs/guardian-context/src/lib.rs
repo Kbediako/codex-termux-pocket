@@ -16,6 +16,7 @@ use codex_protocol::models::ResponseItem;
 
 use authorization::RootConversationSection;
 use authorization::TrustedUserAnswersSection;
+use retained_instructions::RetainedUserInstructionsSection;
 use transcript::ConversationTranscriptSection;
 
 pub use authorization::GuardianRootMessage;
@@ -39,6 +40,8 @@ mod verified_answers;
 pub use verified_answers::RenderedVerifiedAnswers;
 pub use verified_answers::render_verified_answer;
 pub use verified_answers::render_verified_answers;
+
+mod retained_instructions;
 
 mod authorization;
 mod composition;
@@ -102,6 +105,11 @@ pub struct SectionInput<'a> {
 pub trait SectionHistory: Send + Sync {
     /// Returns borrowed response items in their original conversation order.
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_>;
+
+    /// Bounded host-owned facts from the same snapshot as the current items.
+    fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
+        None
+    }
 }
 
 impl SectionHistory for Vec<ResponseItem> {
@@ -170,6 +178,7 @@ pub fn default_registry() -> &'static SectionRegistry {
     static REGISTRY: LazyLock<SectionRegistry> = LazyLock::new(|| {
         let mut registry = SectionRegistry::default();
         registry.register(RootConversationSection);
+        registry.register(RetainedUserInstructionsSection);
         registry.register(TrustedUserAnswersSection);
         registry.register(ConversationTranscriptSection);
         registry
@@ -211,6 +220,9 @@ pub enum ContextSection {
         items: Vec<String>,
     },
     TrustedUserAnswers {
+        items: Vec<String>,
+    },
+    RetainedUserInstructions {
         items: Vec<String>,
     },
 }

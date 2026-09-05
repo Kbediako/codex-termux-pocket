@@ -312,6 +312,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             agent_role: None,
             git_info: None,
             name: None,
+            daybreak_enabled: None,
             turns: Vec::new(),
         },
         model: "gpt-5".to_string(),
@@ -2863,12 +2864,12 @@ fn automatic_approval_review_deserializes_aborted_status() {
 }
 
 #[test]
-fn guardian_approval_review_action_round_trips_command_shape() {
+fn guardian_approval_review_action_round_trips_foreign_command_path() {
     let value = json!({
         "type": "command",
         "source": "shell",
-        "command": "rm -rf /tmp/example.sqlite",
-        "cwd": absolute_path_string("tmp"),
+        "command": r"Remove-Item C:\workspace\example.sqlite",
+        "cwd": r"C:\workspace",
     });
     let action: GuardianApprovalReviewAction =
         serde_json::from_value(value.clone()).expect("guardian review action");
@@ -2877,8 +2878,8 @@ fn guardian_approval_review_action_round_trips_command_shape() {
         action,
         GuardianApprovalReviewAction::Command {
             source: GuardianCommandSource::Shell,
-            command: "rm -rf /tmp/example.sqlite".to_string(),
-            cwd: absolute_path("tmp"),
+            command: r"Remove-Item C:\workspace\example.sqlite".to_string(),
+            cwd: LegacyAppPathString::from_string(r"C:\workspace"),
         }
     );
     assert_eq!(

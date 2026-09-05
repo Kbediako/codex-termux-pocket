@@ -686,12 +686,15 @@ async fn symlinked_writable_root_reports_sandbox_failure_instead_of_session_corr
 -> Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
+    let home_path = home.path().display().to_string();
+    let canonical_home_path = home.path().canonicalize()?.display().to_string();
     let visualization_target = home.path().join("visualization-target");
     std::fs::create_dir(&visualization_target)?;
     let visualization_root = home.path().join("visualizations");
     create_directory_symlink(&visualization_target, &visualization_root);
 
     let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.project_doc_max_bytes = 1;
         let mut file_system_policy = FileSystemSandboxPolicy::read_only();
         file_system_policy.entries.push(FileSystemSandboxEntry::new(
             config.cwd.join("private.txt").into(),
@@ -727,6 +730,13 @@ async fn symlinked_writable_root_reports_sandbox_failure_instead_of_session_corr
         !error.contains("Session data under"),
         "sandbox preparation failure should not be diagnosed as session corruption: {error}"
     );
+    let error = error
+        .replace(&canonical_home_path, "$CODEX_HOME")
+        .replace(&home_path, "$CODEX_HOME");
+    insta::assert_snapshot!(error, @"
+    Fatal error: Failed to initialize session: failed to load AGENTS.md instructions for environment `local`: failed to prepare fs sandbox: failed to prepare Seatbelt sandbox: writable root $CODEX_HOME/visualizations contains symlink component $CODEX_HOME/visualizations; symlinked writable roots are not supported.
+    If this writable root is at or beneath CODEX_HOME and you trust its symlink targets, set `allow_symlinked_codex_home = true` at the top level of `$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`) on the execution host, then restart Codex or its executor. This opt-out trusts targets outside CODEX_HOME and targets changed between commands. It does not apply to other writable roots.
+    ");
 
     Ok(())
 }

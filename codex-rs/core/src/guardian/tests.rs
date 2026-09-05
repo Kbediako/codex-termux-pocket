@@ -7,6 +7,7 @@ use crate::config::NetworkProxySpec;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::test_config;
 use crate::environment_selection::TurnEnvironmentState;
+use crate::guardian::approval_request::format_guardian_action_compact;
 use crate::guardian::approval_request::guardian_request_target_item_id;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
@@ -64,6 +65,7 @@ use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::TempDirExt;
@@ -289,11 +291,17 @@ async fn guardian_test_session_turn_and_rx(
     (session, turn, rx)
 }
 
+fn native_guardian_cwd(path: &str) -> LegacyAppPathString {
+    LegacyAppPathString::from_abs_path(&test_path_buf(path).abs())
+}
+
 fn guardian_exec_command_request(id: &str) -> GuardianApprovalRequest {
     GuardianApprovalRequest::ExecCommand {
         id: id.to_string(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec!["git".to_string(), "push".to_string()],
-        cwd: test_path_buf("/repo/codex-rs/core").abs(),
+        cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+        guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
         sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
         additional_permissions: None,
         justification: Some("Need to push the reviewed docs fix.".to_string()),
@@ -508,8 +516,10 @@ async fn build_guardian_prompt_full_mode_preserves_initial_review_format() -> an
         Some("Sandbox denied outbound git push to github.com.".to_string()),
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the reviewed docs fix.".to_string()),
@@ -545,8 +555,10 @@ async fn build_guardian_prompt_prefers_retry_reason_over_approval_reason() -> an
         },
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: None,
@@ -584,8 +596,10 @@ async fn build_guardian_prompt_truncates_oversized_approval_reason() -> anyhow::
         },
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: None,
@@ -675,8 +689,10 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
         },
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["cat".to_string(), "/repo/private/secret.txt".to_string()],
-            cwd: test_path_buf("/repo").abs(),
+            cwd: test_path_buf("/repo").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::RequireEscalated,
             additional_permissions: None,
             justification: Some("Need to inspect the secret file.".to_string()),
@@ -732,8 +748,10 @@ async fn build_guardian_prompt_delta_mode_preserves_original_numbering() -> anyh
         /*retry_reason*/ None,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-2".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the second docs fix.".to_string()),
@@ -771,8 +789,10 @@ async fn build_guardian_prompt_delta_mode_handles_empty_delta() -> anyhow::Resul
         /*retry_reason*/ None,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-2".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the second docs fix.".to_string()),
@@ -807,8 +827,10 @@ async fn build_guardian_prompt_stale_delta_cursor_falls_back_to_full_prompt() ->
         /*retry_reason*/ None,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-3".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the docs fix.".to_string()),
@@ -893,8 +915,10 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
         /*retry_reason*/ None,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-4".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push after the compaction.".to_string()),
@@ -1199,22 +1223,26 @@ fn guardian_truncate_text_keeps_prefix_suffix_and_xml_marker() {
 }
 
 #[test]
-fn format_guardian_action_pretty_truncates_large_string_fields() -> serde_json::Result<()> {
-    let patch = "line\n".repeat(100_000);
+fn guardian_action_formatters_reject_large_aggregate_payloads() {
+    let file: PathUri = test_path_buf("/tmp/file").abs().into();
     let action = GuardianApprovalRequest::ApplyPatch {
         id: "patch-1".to_string(),
-        cwd: test_path_buf("/tmp").abs(),
-        files: Vec::new(),
-        patch: patch.clone(),
+        cwd: test_path_buf("/tmp").abs().into(),
+        files: vec![file; 1_000],
+        patch: String::new(),
     };
 
-    let rendered = format_guardian_action_pretty(&action)?;
-
-    assert!(rendered.text.contains("\"tool\": \"apply_patch\""));
-    assert!(rendered.text.contains("<truncated omitted_approx_tokens="));
-    assert!(rendered.text.len() < patch.len());
-    assert!(rendered.truncated);
-    Ok(())
+    for error in [
+        format_guardian_action_pretty(&action).map(|_| ()),
+        format_guardian_action_compact(&action).map(|_| ()),
+    ] {
+        assert_eq!(
+            error
+                .expect_err("aggregate action should exceed the review limit")
+                .to_string(),
+            "Guardian action exceeds the 8000-byte review limit"
+        );
+    }
 }
 
 #[test]
@@ -1222,7 +1250,7 @@ fn format_guardian_action_pretty_reports_no_truncation_for_small_payload() -> se
 {
     let action = GuardianApprovalRequest::ApplyPatch {
         id: "patch-1".to_string(),
-        cwd: test_path_buf("/tmp").abs(),
+        cwd: test_path_buf("/tmp").abs().into(),
         files: Vec::new(),
         patch: "line\n".to_string(),
     };
@@ -1520,26 +1548,80 @@ fn guardian_write_stdin_preserves_input_and_foreign_cwd(
     Ok(())
 }
 
+#[test_case::test_case(codex_utils_path_uri::PathConvention::Windows, r"C:\workspace"; "windows")]
+#[test_case::test_case(codex_utils_path_uri::PathConvention::Posix, "/C:/workspace"; "posix")]
+fn guardian_exec_command_uses_executor_cwd_convention(
+    cwd_convention: codex_utils_path_uri::PathConvention,
+    expected_cwd: &str,
+) -> serde_json::Result<()> {
+    let cwd = PathUri::parse("file:///C:/workspace").expect("valid executor cwd");
+    let action = crate::tools::sandboxing::ApprovalAction::ExecCommand {
+        id: "command-1".to_string(),
+        environment_id: codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string(),
+        command: vec!["git".to_string(), "status".to_string()],
+        hook_command: "git status".to_string(),
+        cwd,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        justification: None,
+        tty: false,
+        proposed_execpolicy_amendment: None,
+    }
+    .into_guardian_request(Some(cwd_convention))
+    .expect("Guardian request should render executor cwd");
+
+    assert_eq!(
+        guardian_approval_request_to_json(&action)?,
+        serde_json::json!({
+            "tool": "exec_command",
+            "command": ["git", "status"],
+            "cwd": expected_cwd,
+            "sandbox_permissions": "use_default",
+            "tty": false,
+        }),
+    );
+    assert_eq!(
+        guardian_assessment_action(&action),
+        GuardianAssessmentAction::Command {
+            source: codex_protocol::approvals::GuardianCommandSource::UnifiedExec,
+            command: "git status".to_string(),
+            cwd: LegacyAppPathString::from_string(expected_cwd),
+        },
+    );
+    Ok(())
+}
+
 #[test]
-fn guardian_assessment_action_redacts_apply_patch_patch_text() {
-    let cwd = test_path_buf("/tmp").abs();
-    let file = test_path_buf("/tmp/guardian.txt").abs();
+fn guardian_apply_patch_preserves_foreign_paths_and_redacts_patch_text() -> serde_json::Result<()> {
+    let cwd = PathUri::parse("file:///C:/workspace").expect("valid executor cwd");
+    let file =
+        PathUri::parse("file:///C:/workspace/guardian.txt").expect("valid executor file path");
+    let patch = "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+secret\n*** End Patch";
     let action = GuardianApprovalRequest::ApplyPatch {
         id: "patch-1".to_string(),
-        cwd: cwd.clone(),
-        files: vec![file.clone()],
-        patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+secret\n*** End Patch"
-            .to_string(),
+        cwd,
+        files: vec![file],
+        patch: patch.to_string(),
     };
 
     assert_eq!(
-        serde_json::to_value(guardian_assessment_action(&action)).expect("serialize action"),
+        guardian_approval_request_to_json(&action)?,
         serde_json::json!({
-            "type": "apply_patch",
-            "cwd": cwd,
-            "files": [file],
+            "tool": "apply_patch",
+            "cwd": r"C:\workspace",
+            "files": [r"C:\workspace\guardian.txt"],
+            "patch": patch,
         }),
     );
+    assert_eq!(
+        serde_json::to_value(guardian_assessment_action(&action))?,
+        serde_json::json!({
+            "type": "apply_patch",
+            "cwd": r"C:\workspace",
+            "files": [r"C:\workspace\guardian.txt"],
+        }),
+    );
+    Ok(())
 }
 
 #[test]
@@ -1555,8 +1637,8 @@ fn guardian_request_turn_id_prefers_network_access_owner_turn() {
     };
     let apply_patch = GuardianApprovalRequest::ApplyPatch {
         id: "patch-1".to_string(),
-        cwd: test_path_buf("/tmp").abs(),
-        files: vec![test_path_buf("/tmp/guardian.txt").abs()],
+        cwd: test_path_buf("/tmp").abs().into(),
+        files: vec![test_path_buf("/tmp/guardian.txt").abs().into()],
         patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+hello\n*** End Patch"
             .to_string(),
     };
@@ -1607,8 +1689,8 @@ async fn cancelled_guardian_review_emits_terminal_abort_without_warning() {
         "review-cancelled-guardian".to_string(),
         GuardianApprovalRequest::ApplyPatch {
             id: "patch-1".to_string(),
-            cwd: test_path_buf("/tmp").abs(),
-            files: vec![test_path_buf("/tmp/guardian.txt").abs()],
+            cwd: test_path_buf("/tmp").abs().into(),
+            files: vec![test_path_buf("/tmp/guardian.txt").abs().into()],
             patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+hello\n*** End Patch"
                 .to_string(),
         },
@@ -1990,8 +2072,10 @@ async fn guardian_request_model_for_auto_review(
         turn,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: None,
@@ -2231,13 +2315,15 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
 
     let request = GuardianApprovalRequest::ExecCommand {
         id: "shell-1".to_string(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec![
             "git".to_string(),
             "push".to_string(),
             "origin".to_string(),
             "guardian-approval-mvp".to_string(),
         ],
-        cwd: test_path_buf("/repo/codex-rs/core").abs(),
+        cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+        guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
         sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
         additional_permissions: None,
         justification: Some("Need to push the reviewed docs fix to the repo remote.".to_string()),
@@ -2397,8 +2483,10 @@ async fn build_guardian_prompt_items_includes_parent_session_id() -> anyhow::Res
         /*retry_reason*/ None,
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "status".to_string()],
-            cwd: test_path_buf("/repo").abs(),
+            cwd: test_path_buf("/repo").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: None,
@@ -2491,8 +2579,10 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
 
     let first_request = GuardianApprovalRequest::ExecCommand {
         id: "shell-1".to_string(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec!["git".to_string(), "push".to_string()],
-        cwd: test_path_buf("/repo/codex-rs/core").abs(),
+        cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+        guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
         sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
         additional_permissions: None,
         justification: Some("Need to push the first docs fix.".to_string()),
@@ -2538,12 +2628,14 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         .await;
     let second_request = GuardianApprovalRequest::ExecCommand {
         id: "shell-2".to_string(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec![
             "git".to_string(),
             "push".to_string(),
             "--force-with-lease".to_string(),
         ],
-        cwd: test_path_buf("/repo/codex-rs/core").abs(),
+        cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+        guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
         sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
         additional_permissions: None,
         justification: Some("Need to push the second docs fix.".to_string()),
@@ -2612,8 +2704,10 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         .await;
     let third_request = GuardianApprovalRequest::ExecCommand {
         id: "shell-3".to_string(),
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec!["git".to_string(), "push".to_string()],
-        cwd: test_path_buf("/repo/codex-rs/core").abs(),
+        cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+        guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
         sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
         additional_permissions: None,
         justification: Some("Need to push the third docs fix.".to_string()),
@@ -2860,8 +2954,10 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
         Arc::clone(&turn),
         GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the first docs fix.".to_string()),
@@ -2906,8 +3002,10 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
         Arc::clone(&turn),
         GuardianApprovalRequest::ExecCommand {
             id: "shell-2".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the second docs fix.".to_string()),
@@ -2987,8 +3085,10 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
         "review-shell-guardian-error".to_string(),
         GuardianApprovalRequest::ExecCommand {
             id: "shell-guardian-error".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Need to push the reviewed docs fix.".to_string()),
@@ -3442,8 +3542,10 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
 
         let initial_request = GuardianApprovalRequest::ExecCommand {
             id: "shell-guardian-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "status".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Inspect repo state before proceeding.".to_string()),
@@ -3486,8 +3588,10 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
 
         let second_request = GuardianApprovalRequest::ExecCommand {
             id: "shell-guardian-2".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "diff".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Inspect pending changes before proceeding.".to_string()),
@@ -3495,8 +3599,10 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
         };
         let third_request = GuardianApprovalRequest::ExecCommand {
             id: "shell-guardian-3".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             command: vec!["git".to_string(), "push".to_string()],
-            cwd: test_path_buf("/repo/codex-rs/core").abs(),
+            cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
+            guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: Some("Inspect whether pushing is safe before proceeding.".to_string()),

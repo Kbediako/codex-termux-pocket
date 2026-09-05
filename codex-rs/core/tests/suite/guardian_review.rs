@@ -130,21 +130,21 @@ impl TimeProvider for RecordingTimeProvider {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(CodexAuth::from_api_key("test-api-key"), "/v1", true, "/v1/responses"; "api_key_uses_responses")]
-#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "/backend-api/codex", false, "/backend-api/codex/responses"; "chatgpt_uses_responses_by_default")]
-#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "/backend-api/codex", true, "/backend-api/codex/guardian"; "chatgpt_uses_guardian_when_enabled")]
-#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "/v1", true, "/v1/responses"; "custom_openai_url_uses_responses")]
+#[test_case(CodexAuth::from_api_key("test-api-key"), "OpenAI", "/v1", true, "/v1/responses", true; "api_key_uses_responses")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", false, "/backend-api/codex/responses", true; "chatgpt_uses_responses_by_default")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", true, "/backend-api/codex/guardian", true; "chatgpt_uses_guardian_when_enabled")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/v1", true, "/v1/responses", true; "custom_openai_url_uses_responses")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "Custom", "/backend-api/codex", true, "/backend-api/codex/responses", true; "custom_provider_uses_responses")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", true, "/backend-api/codex/guardian", false; "server_without_tickets")]
 async fn guardian_session_inherits_parent_http_fallback(
     auth: CodexAuth,
+    provider_name: &str,
     base_path: &str,
     free_guardian: bool,
     expected_guardian_path: &str,
+    ticket_issued: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
-    skip_if_wine_exec!(
-        Ok(()),
-        "Guardian approval actions require host-native paths"
-    );
 
     let server = start_mock_server().await;
     let websocket_fallback = Mock::given(method("GET"))
@@ -154,10 +154,16 @@ async fn guardian_session_inherits_parent_http_fallback(
         .mount_as_scoped(&server)
         .await;
 
+    let parent_ticket = "p".repeat(43);
     let responses = mount_sse_sequence(
         &server,
         vec![
+            // A failed sampling attempt must not lend its receipt to the retried action.
+            sse(vec![json!({"type": "response.created", "response": {
+                "id": "failed-parent", "headers": {"x-codex-guardian-ticket": "f".repeat(43)}
+            }})]),
             sse(vec![
+                json!({"type": "response.created", "response": {"id": "parent-tool", "headers": ticket_issued.then(|| json!({"x-codex-guardian-ticket": parent_ticket}))}}),
                 ev_function_call(
                     "call",
                     "exec_command",
@@ -175,6 +181,7 @@ async fn guardian_session_inherits_parent_http_fallback(
     .await;
 
     let base_url = format!("{}{base_path}", server.uri());
+    let provider_name = provider_name.to_owned();
     let mut builder = test_codex()
         .with_auth(auth)
         .with_pre_build_hook(move |home| {
@@ -186,7 +193,9 @@ async fn guardian_session_inherits_parent_http_fallback(
         })
         .with_config(move |config| {
             config.model_provider.base_url = Some(base_url);
+            config.model_provider.name = provider_name;
             config.model_provider.supports_websockets = true;
+            config.model_provider.stream_max_retries = Some(1);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::User;
         });
@@ -232,6 +241,47 @@ async fn guardian_session_inherits_parent_http_fallback(
         })
         .expect("Guardian reviewer inference request");
     assert_eq!(guardian_request.path(), expected_guardian_path);
+    let tickets_enabled = expected_guardian_path.ends_with("/guardian");
+    let body = guardian_request.body_json();
+    assert_eq!(
+        (
+            body["client_metadata"].get("guardian_ticket").cloned(),
+            body["client_metadata"].get("guardian_ticket_requested"),
+        ),
+        (
+            (tickets_enabled && ticket_issued).then(|| json!(parent_ticket)),
+            None
+        )
+    );
+    assert!(!body["input"].to_string().contains(&parent_ticket));
+    for request in responses.requests() {
+        let body = request.body_json();
+        if body["client_metadata"]["x-openai-subagent"] != "guardian" {
+            assert_eq!(
+                (
+                    body["client_metadata"]
+                        .get("guardian_ticket_requested")
+                        .cloned(),
+                    body["client_metadata"].get("guardian_ticket"),
+                ),
+                (tickets_enabled.then(|| json!("true")), None)
+            );
+        }
+    }
+    let guardian_context = guardian_request.message_input_texts("user").join("\n");
+    let executor_cwd = test
+        .executor_environment()
+        .selection()
+        .cwd
+        .inferred_native_path_string();
+    assert!(
+        guardian_context.contains(&format!(
+            "\"cwd\": \"{}\"",
+            executor_cwd.replace('\\', r"\\")
+        )),
+        "Guardian omitted the executor-native cwd from its planned action: {guardian_context}"
+    );
+    test.codex.shutdown_and_wait().await?;
 
     Ok(())
 }
@@ -348,15 +398,18 @@ async fn guardian_review_resends_full_transcript_after_reviewer_context_rollover
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(CodexAuth::from_api_key("test-api-key"), "gpt-5.6-luna"; "api_key_uses_luna_with_responses_lite")]
-#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "codex-auto-review"; "chatgpt_uses_codex_auto_review")]
+#[test_case(CodexAuth::from_api_key("test-api-key"), true, "gpt-5.6-luna"; "api_key_uses_luna_with_responses_lite")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), true, "codex-auto-review"; "chatgpt_uses_codex_auto_review")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), false, "codex-auto-review"; "chatgpt_without_free_guardian")]
 async fn guardian_session_prewarms_and_is_reused_for_first_review(
     auth: CodexAuth,
+    free_guardian: bool,
     expected_model: &str,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let uses_codex_backend = auth.uses_codex_backend();
+    let tickets_enabled = free_guardian && uses_codex_backend;
     let bundled_models = codex_models_manager::bundled_models_response()?.models;
     let catalog_auto_review = bundled_models
         .iter()
@@ -389,11 +442,12 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         "justification": "Exercise Guardian approval routing.",
     })
     .to_string();
+    let parent_ticket = "w".repeat(43);
     let server = start_websocket_server(vec![
         vec![vec![ev_response_created("warm-1"), ev_completed("warm-1")]],
         vec![vec![ev_response_created("warm-2"), ev_completed("warm-2")]],
         vec![vec![
-            ev_response_created("approval-request"),
+            json!({"type": "response.created", "response": {"id": "approval-request", "headers": {"x-codex-guardian-ticket": parent_ticket}}}),
             ev_function_call("approval-call", "exec_command", &tool_args),
             ev_completed("approval-request"),
         ]],
@@ -419,10 +473,10 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     let backend_base_url = format!("{}/backend-api/codex", server.uri());
     let mut builder = test_codex()
         .with_auth(auth)
-        .with_pre_build_hook(|home| {
+        .with_pre_build_hook(move |home| {
             fs::write(
                 home.join("config.toml"),
-                "[features.guardianv2]\nfree_guardian = true\n",
+                format!("[features.guardianv2]\nfree_guardian = {free_guardian}\n"),
             )
             .expect("Guardian endpoint configuration should be written");
         })
@@ -546,6 +600,34 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         .expect("reviewed parent turn id");
     assert_parent_turn(&parent_request, /*expected*/ None)?;
     assert_parent_turn(&guardian_review, Some(parent_turn_id))?;
+    assert_eq!(
+        (
+            guardian_review["client_metadata"]
+                .get("guardian_ticket")
+                .cloned(),
+            guardian_review["client_metadata"].get("guardian_ticket_requested"),
+            parent_request["client_metadata"]
+                .get("guardian_ticket_requested")
+                .cloned(),
+            parent_request["client_metadata"].get("guardian_ticket"),
+        ),
+        (
+            tickets_enabled.then(|| json!(parent_ticket)),
+            None,
+            tickets_enabled.then(|| json!("true")),
+            None,
+        )
+    );
+    assert!(
+        guardian_prewarm["client_metadata"]
+            .get("guardian_ticket")
+            .is_none()
+    );
+    assert!(
+        !guardian_review["input"]
+            .to_string()
+            .contains(&parent_ticket)
+    );
     for request in [&parent_request, &guardian_review] {
         assert_root_turn(request, Some(parent_turn_id))?;
     }
@@ -628,7 +710,7 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     assert_eq!(guardian_context_windows, vec![Some(258_400)]);
     for handshake in server.handshakes() {
         let is_guardian = handshake.header("x-openai-subagent").as_deref() == Some("guardian");
-        let uses_guardian_endpoint = uses_codex_backend && is_guardian;
+        let uses_guardian_endpoint = tickets_enabled && is_guardian;
         assert_eq!(
             handshake.uri(),
             if uses_guardian_endpoint {

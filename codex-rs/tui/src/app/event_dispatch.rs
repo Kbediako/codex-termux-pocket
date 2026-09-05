@@ -205,8 +205,8 @@ impl App {
                     self.chat_widget.maybe_send_next_queued_input();
                 }
             }
-            AppEvent::CopySelection { text, label } => {
-                self.chat_widget.copy_selection(text, label);
+            AppEvent::CopySelection { text, label, format } => {
+                self.chat_widget.copy_selection(text, label, format);
             }
             AppEvent::ClearUi { name } => {
                 self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
@@ -483,6 +483,7 @@ impl App {
                         Ok(_) => {
                             app_server
                                 .start_thread_with_session_start_source(
+&self.local_settings,
                                     &config, /*session_start_source*/ None,
                                     /*remote_cwd_override*/ None,
                                 )
@@ -1630,12 +1631,13 @@ impl App {
                     .await;
 
                 if let Some(default_effort) = default_effort.as_ref()
-                    && let Err(err) = crate::config_update::write_config_batch(
+                    && let Err(err) = self.persist_model_defaults(
                         app_server.request_handle(),
                         crate::config_update::build_model_selection_edits(
                             model.as_str(),
                             Some(default_effort),
                         ),
+                        "default model and reasoning effort",
                     )
                     .await
                 {
@@ -1693,7 +1695,7 @@ impl App {
                 category,
                 include_logs,
             } => {
-                self.chat_widget.open_feedback_note(category, include_logs);
+                self.chat_widget.open_feedback_note(category, include_logs, self.feedback_audience);
             }
             AppEvent::OpenFeedbackConsent { category } => {
                 self.chat_widget.open_feedback_consent(category);
@@ -2158,16 +2160,17 @@ impl App {
                 }
             }
             AppEvent::PersistModelSelection { model, effort } => {
-                match crate::config_update::write_config_batch(
+                match self.persist_model_defaults(
                     app_server.request_handle(),
                     crate::config_update::build_model_selection_edits(
                         model.as_str(),
                         effort.as_ref(),
                     ),
+                    "default model and reasoning effort",
                 )
                 .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let effort_label = effort
                             .as_ref()
                             .map(std::string::ToString::to_string)
@@ -2260,10 +2263,10 @@ impl App {
                 let edits = crate::config_update::build_service_tier_selection_edits(
                     service_tier.as_deref(),
                 );
-                match crate::config_update::write_config_batch(app_server.request_handle(), edits)
+                match self.persist_model_defaults(app_server.request_handle(), edits, "default service tier")
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let message = if let Some(service_tier) = service_tier {
                             format!("Service tier set to {service_tier}")
                         } else {
@@ -2400,11 +2403,10 @@ impl App {
                 }
             }
             AppEvent::FetchExperimentalFeatures { thread_id, response_tx } => {
-                crate::experimental_features::fetch(
-                    app_server.request_handle(),
-                    thread_id,
-                    response_tx,
-                );
+                self.fetch_experimental_features(app_server, thread_id, response_tx);
+            }
+            AppEvent::SaveExperimentalFeatures { thread_id, updates, response_tx } => {
+                self.save_experimental_features(app_server, thread_id, updates, response_tx);
             }
             AppEvent::UpdateFeatureFlags { updates } => {
                 self.update_feature_flags(app_server, updates).await;
@@ -2480,9 +2482,10 @@ impl App {
                 } else {
                     crate::config_update::clear_config_value(key_path)
                 };
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = self.persist_model_defaults(
                     app_server.request_handle(),
                     vec![edit],
+                    "Plan mode reasoning effort",
                 )
                 .await
                 {
@@ -2580,16 +2583,20 @@ impl App {
                 self.temporary_structured_requests
                     .remove(&temporary_thread_id);
 
+                self.finish_thread_title_generation(thread_id, destination);
                 match destination {
-                    ThreadTitleDestination::Automatic { expected_title } => {
+                    ThreadTitleDestination::Automatic => {
                         if let Ok(response) = result
                             && let Some(title) = super::thread_title::parse_thread_title(&response)
-                            && self.chat_widget.thread_id() == Some(thread_id)
-                            && self.chat_widget.thread_name().as_deref()
-                                == Some(expected_title.as_str())
+                            && let Ok(thread) = app_server
+                                .thread_read(thread_id, /*include_turns*/ false)
+                                .await
+                            && thread.name.is_none()
                         {
                             match app_server.thread_set_name(thread_id, title.clone()).await {
-                                Ok(()) => self.chat_widget.expect_automatic_thread_name(title),
+                                Ok(()) => self
+                                    .chat_widget
+                                    .on_thread_name_updated(thread_id, Some(title)),
                                 Err(error) => {
                                     tracing::debug!(%error, "failed to apply generated thread title");
                                 }

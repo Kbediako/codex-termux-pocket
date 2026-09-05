@@ -91,7 +91,10 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
 
 #[tokio::test]
 async fn app_server_cyber_policy_error_renders_dedicated_notice() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
+    chat.cyber_policy_notice
+        .set(crate::daybreak::Notice::Apply)
+        .unwrap();
 
     handle_error(
         &mut chat,
@@ -102,27 +105,10 @@ async fn app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can't be shown"));
-    assert!(rendered.contains("extra caution with cybersecurity requests"));
-    assert!(rendered.contains("openai.com/form/enterprise-trusted-access-for-cyber"));
+    assert!(rendered.contains("This content can’t be shown"));
+    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
+    assert!(rendered.contains("Apply for Daybreak"));
     assert!(!rendered.contains("server fallback message"));
-}
-
-#[tokio::test]
-async fn app_server_cyber_policy_error_uses_individual_link_for_personal_plan() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.plan_type = Some(PlanType::Free);
-    chat.has_chatgpt_account = true;
-
-    handle_error(
-        &mut chat,
-        "server fallback message",
-        Some(CodexErrorInfo::CyberPolicy),
-    );
-
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1);
-    assert!(lines_to_single_string(&cells[0]).contains("https://chatgpt.com/cyber/"));
 }
 
 #[tokio::test]

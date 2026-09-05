@@ -496,6 +496,10 @@ pub(super) fn collect_guardian_context(
 struct GuardianReviewHistory<'a>(&'a dyn ConversationHistorySnapshot);
 
 impl SectionHistory for GuardianReviewHistory<'_> {
+    fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
+        self.0.retained_context()
+    }
+
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         self.0.review_items()
     }
@@ -504,6 +508,10 @@ impl SectionHistory for GuardianReviewHistory<'_> {
 struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
+    fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
+        self.0.retained_context()
+    }
+
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(self.0.items().filter(|item| {
             !matches!(

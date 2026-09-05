@@ -14,9 +14,14 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::debug;
 use tracing::warn;
 
+use codex_api::AuthError;
+use codex_api::AuthProvider;
 use codex_http_client::HttpClientFactory;
+use codex_http_client::Request;
+use codex_http_client::RequestCompression;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
+use codex_websocket_client::WebSocketConnection;
 use codex_websocket_client::WebSocketConnector;
 use codex_websocket_client::WebSocketTlsMode;
 use http::HeaderMap;
@@ -49,6 +54,113 @@ const ENVIRONMENT_CLIENT_NAME: &str = "codex-environment";
 const INITIAL_REGISTRY_MAX_RETRIES: u32 = 4;
 const INITIAL_REGISTRY_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_REGISTRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(14);
+
+pub(crate) async fn connect_websocket_request(
+    request: http::Request<()>,
+    diagnostic_url: String,
+    connector: WebSocketConnector,
+    connect_timeout: Duration,
+    use_loopback_direct: bool,
+) -> Result<WebSocketConnection, ExecServerError> {
+    let websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    timeout(connect_timeout, async {
+        if use_loopback_direct {
+            connector
+                .connect_loopback_direct(request, websocket_config)
+                .await
+        } else {
+            connector.connect(request, websocket_config).await
+        }
+    })
+    .await
+    .map_err(|_| ExecServerError::WebSocketConnectTimeout {
+        url: diagnostic_url.clone(),
+        timeout: connect_timeout,
+    })?
+    .map(|(websocket, _)| websocket)
+    .map_err(|source| ExecServerError::WebSocketConnect {
+        url: diagnostic_url,
+        source,
+    })
+}
+
+pub(crate) async fn authenticate_websocket_request(
+    request: &mut http::Request<()>,
+    auth_provider: &dyn AuthProvider,
+) -> Result<(), AuthError> {
+    let url = request.uri().to_string();
+    let signing_url = if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        url
+    };
+    let mut auth_request = Request::new(request.method().clone(), signing_url);
+    // Intermediaries may rewrite WebSocket and hop-by-hop headers after signing.
+    if let Some(host) = request.headers().get(http::header::HOST) {
+        auth_request
+            .headers
+            .insert(http::header::HOST, host.clone());
+    }
+    let authenticated = auth_provider.apply_auth(auth_request).await?;
+    if authenticated.method != *request.method() {
+        return Err(AuthError::Build(
+            "authentication changed the WebSocket request method".to_string(),
+        ));
+    }
+    if authenticated.body.is_some() || authenticated.compression != RequestCompression::None {
+        return Err(AuthError::Build(
+            "authentication added a body or compression to the WebSocket request".to_string(),
+        ));
+    }
+
+    let authenticated_websocket_url = websocket_url_from_authenticated_url(&authenticated.url)?;
+    let authenticated_uri = authenticated_websocket_url.parse().map_err(|error| {
+        AuthError::Build(format!("invalid authenticated WebSocket URL: {error}"))
+    })?;
+    let original_host = request.headers().get(http::header::HOST).cloned();
+    for (name, value) in &authenticated.headers {
+        if is_websocket_handshake_header(name) {
+            if name == http::header::HOST && original_host.as_ref() == Some(value) {
+                continue;
+            }
+            return Err(AuthError::Build(format!(
+                "authentication changed WebSocket handshake header {name}"
+            )));
+        }
+        request.headers_mut().insert(name, value.clone());
+    }
+    *request.uri_mut() = authenticated_uri;
+    Ok(())
+}
+
+fn websocket_url_from_authenticated_url(url: &str) -> Result<String, AuthError> {
+    let mut url = url::Url::parse(url)
+        .map_err(|error| AuthError::Build(format!("invalid authenticated request URL: {error}")))?;
+    let websocket_scheme = match url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        scheme => {
+            return Err(AuthError::Build(format!(
+                "authentication returned unsupported WebSocket URL scheme: {scheme}"
+            )));
+        }
+    };
+    url.set_scheme(websocket_scheme).map_err(|_| {
+        AuthError::Build("failed to convert authenticated URL to WebSocket scheme".to_string())
+    })?;
+    Ok(url.into())
+}
+
+fn is_websocket_handshake_header(name: &http::header::HeaderName) -> bool {
+    name == http::header::HOST
+        || name == http::header::CONNECTION
+        || name == http::header::UPGRADE
+        || name == http::header::CONTENT_LENGTH
+        || name == http::header::TRANSFER_ENCODING
+        || name.as_str().starts_with("sec-websocket-")
+}
 
 /// Everything the recovery loop needs for one connection attempt.
 ///
@@ -430,26 +542,14 @@ impl ExecServerClient {
             WebSocketTlsMode::TungsteniteDefault,
         )
         .map_err(|error| ExecServerError::WebSocketConfiguration(error.to_string()))?;
-        let websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
-        let connect = async {
-            if !http_headers.is_empty() && request.uri().scheme_str() == Some("ws") {
-                connector
-                    .connect_loopback_direct(request, websocket_config)
-                    .await
-            } else {
-                connector.connect(request, websocket_config).await
-            }
-        };
-        let (stream, _) = timeout(connect_timeout, connect)
-            .await
-            .map_err(|_| ExecServerError::WebSocketConnectTimeout {
-                url: websocket_url.clone(),
-                timeout: connect_timeout,
-            })?
-            .map_err(|source| ExecServerError::WebSocketConnect {
-                url: websocket_url.clone(),
-                source,
-            })?;
+        let stream = connect_websocket_request(
+            request,
+            websocket_url.clone(),
+            connector,
+            connect_timeout,
+            !http_headers.is_empty() && websocket_url.starts_with("ws://"),
+        )
+        .await?;
 
         let connection_label = format!("exec-server websocket {websocket_url}");
         let connection = if is_rendezvous_harness_url(&websocket_url) {
