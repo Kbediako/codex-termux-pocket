@@ -26,7 +26,7 @@ source and both PNGs are ready to commit together.
 ## Update from the repository root
 
 Use Bash on Linux, macOS, Termux, or Windows via WSL, with ImageMagick 7's
-`magick` command and its PNG, JPEG, and internal SVG (MSVG) support available.
+`magick` command with PNG, JPEG, librsvg (RSVG), and internal SVG (MSVG) support.
 No fonts, stock mockups, image-generation service, or network access are needed.
 Provide an upright, opaque sRGB screenshot; the renderer does not auto-rotate or
 colour-correct it. Inspect the capture for private information before publishing.
@@ -35,6 +35,7 @@ rather than editing the screen pixels.
 
 ```sh
 magick -version
+magick -list format | grep -E "RSVG|MSVG"
 ./scripts/render-readme-hero.sh \
   .github/assets/readme/termux-screenshot.jpg \
   .github/assets/readme/codex-termux-pocket-readme-hero.png
@@ -80,18 +81,26 @@ remain fully inside. Chassis geometry, radii, gradients, seam ticks, camera,
 corner mask, colours, and shadow parameters live in the renderer and in the
 scoped asset instructions, not in conversational history.
 
-The renderer forces ImageMagick's internal SVG renderer and a single worker,
+The renderer pins RSVG for the chassis, MSVG for the corner mask, and a single worker,
 strips output metadata and PNG timestamps, and stages both renders before
 replacing either destination. Each rename is atomic, but the pair is not a
 filesystem transaction; commit both outputs together. The regression test
 checks byte-identical repeated runs on the same toolchain, unchanged source
 pixels at native scale, exact placement and camera position, dimensions and
-background, the @2x relationship, bad-input handling, and failure safety.
+background, visible metallic rims on all four edges, a non-flat rim gradient,
+the @2x relationship, bad-input handling, and failure safety.
 
-Validated locally with ImageMagick **7.1.2-1 Q16-HDRI**, internal MSVG. Exact
-PNG bytes across different ImageMagick, quantum-depth, HDRI, or codec builds are
-not promised: record `magick -version` when reproducing or upgrading, rerun the
-tests, and review the images. Never accept rendering drift by reconstructing UI.
+Validated locally with ImageMagick **7.1.2-1 Q16-HDRI** and **librsvg 2.60.0**.
+The previous forced-MSVG chassis rendered its SVG rim gradient and outline black
+in this build. Explicit RSVG restores the existing thin metallic bezel without
+changing its 18 px geometry, scaling, or any screenshot pixels. The simple
+corner mask still uses MSVG. Missing RSVG support is an error, not permission to
+fall back to an invisible rim or a synthetic screen.
+
+Exact PNG bytes across different ImageMagick, librsvg, quantum-depth, HDRI, or
+codec builds are not promised: record `magick -version` and the RSVG entry from
+`magick -list format` when reproducing or upgrading, rerun the tests, and review
+the images. Never accept rendering drift by reconstructing UI.
 
 The original geometry/compositing approach came from the owner's supplied
 `render_codex_termux_readme_mockup(1).sh`. This version retains that process,

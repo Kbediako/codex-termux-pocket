@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline rendering regression tests; requires Bash and ImageMagick 7.
+# Offline rendering regression tests; requires Bash and ImageMagick 7 with RSVG.
 set -euo pipefail
 export LC_ALL=C MAGICK_THREAD_LIMIT=1
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -37,6 +37,18 @@ cp -- "$SOURCE" "$WORK/unchanged.png"
 # This catches reconstructed/altered pixels AND a leaked +3,+6 shadow offset.
 PX=$(((1898 - 396) / 2))
 PY=$(((1190 - 496) / 2 - 3))
+# Regression: the previous MSVG chassis lost BOTH the SVG rim gradient and
+# its stroke, producing a black-on-black bezel. Check actual rendered pixels
+# along all four straight edges, away from rounded corners and seam ticks.
+for point in "1,100" "394,100" "100,1" "100,494"; do
+  IFS=, read -r X Y <<< "$point"
+  [[ $(magick "$NORMAL" -format "%[hex:p{$((PX+X)),$((PY+Y))}]" info:) == 69696E ]] ||
+    fail "Missing metallic bezel edge at $point"
+done
+TOP_RIM=$(magick "$NORMAL" -format "%[hex:p{$((PX+5)),$((PY+100))}]" info:)
+LOW_RIM=$(magick "$NORMAL" -format "%[hex:p{$((PX+390)),$((PY+395))}]" info:)
+[[ $TOP_RIM != 000000 && $LOW_RIM != 000000 && $TOP_RIM != "$LOW_RIM" ]] ||
+  fail 'Metallic rim gradient is missing or flat'
 magick "$SOURCE" -crop 336x400+12+48 +repage "$WORK/expected.png"
 magick "$NORMAL" -crop "336x400+$((PX+18+12))+$((PY+18+48))" +repage "$WORK/actual.png"
 equal_pixels "$WORK/expected.png" "$WORK/actual.png"
@@ -97,4 +109,4 @@ fi
 cmp -s "$WORK/first.png" "$NORMAL" || fail 'Failed render replaced normal'
 cmp -s "$WORK/first@2x.png" "$RETINA" || fail 'Failed render replaced retina'
 [[ -z $(find "$WORK/output with spaces" -name '.readme-hero.*' -print) ]] || fail 'Leaked temporary files'
-printf 'PASS: pixel fidelity, placement, camera, dimensions, colour, @2x, determinism, inputs and failure safety.\n'
+printf 'PASS: visible metallic bezels, gradient, pixel fidelity, placement, camera, dimensions, colour, @2x, determinism, inputs and failure safety.\n'

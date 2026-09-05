@@ -24,7 +24,11 @@ only a shape reference, not a compositing asset.
 - Read the screenshot dimensions dynamically. Add an 18 px native-resolution
   bezel; use outer chassis radius 24, inner black face radius 18, and mask only
   the screenshot's outer corners with `rx=10`. Retain the dark metallic SVG
-  gradient and small centred top/bottom Fold seam ticks.
+  gradient and small centred top/bottom Fold seam ticks. Render the chassis with
+  explicit `RSVG:` (ImageMagick's librsvg delegate), not `MSVG:` or an unpinned
+  SVG delegate. In the validated build MSVG lost the rim gradient and outline,
+  making the bezel black-on-black. Fail clearly if RSVG is missing; do not hide
+  this regression by thickening the bezel. Keep the corner mask on `MSVG:`.
 - The approved unfolded-Fold camera is centred over the **right half** of the
   screen: `x = bezel + 3 * screenshot_width / 4`, `y = bezel + 25`. Use the dark
   concentric circles in the renderer, not a camera at the centre hinge.
@@ -52,7 +56,7 @@ PNG at `width="100%"` for legibility; keep operational detail out of the root RE
 
 Before committing, visually check: exactly front-on; no device/UI clipping; no
 watermark; original status bar and bottom controls visible; original text and
-colours retained; thin bezels; right-half camera clear of status icons; exact
+colours retained; thin, visibly metallic bezels on all four edges; right-half camera clear of status icons; exact
 purple background; both resolutions regenerated from the same capture. Tests
 supplement this visual review, not replace it. Reject a bad capture instead of
 repairing its pixels.

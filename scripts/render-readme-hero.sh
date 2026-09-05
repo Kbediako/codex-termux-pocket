@@ -8,7 +8,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/render-readme-hero.sh SCREENSHOT OUTPUT.png [PHONE_HEIGHT]
 
-Requires Bash and ImageMagick 7 (magick). Accepts a local PNG or JPEG screenshot.
+Requires Bash and ImageMagick 7 (magick) with RSVG. Accepts a PNG or JPEG screenshot.
 Writes OUTPUT.png (1898x1190) and OUTPUT@2x.png (3796x2380).
 Default phone height: 1000 px; pass 900 to reproduce the original framing.
 The input is never overwritten. No network, fonts, or stock images are needed.
@@ -20,6 +20,8 @@ if (( $# < 2 || $# > 3 )); then usage >&2; exit 2; fi
 command -v magick >/dev/null 2>&1 || fail 'ImageMagick 7 (magick) is required.'
 VERSION=$(magick -version)
 [[ $VERSION == 'Version: ImageMagick 7.'* ]] || fail 'magick must be ImageMagick 7.'
+FORMATS=$(magick -list format)
+[[ $FORMATS =~ [[:space:]]RSVG\*?[[:space:]] ]] || fail 'ImageMagick needs the librsvg (RSVG) delegate for the metallic chassis.'
 
 INPUT=$1
 OUT=$2
@@ -71,7 +73,9 @@ PY=$(((CH - TARGET_H) / 2 + Y_OFFSET))
   fail 'Phone would clip or leave insufficient margin; choose a smaller phone height.'
 
 # Custom SVG chassis only; the reference mockup contributes no stock pixels.
-# Force ImageMagick's internal SVG renderer rather than PATH-dependent delegates.
+# Pin the RSVG delegate: MSVG rendered this gradient/stroke black in our
+# validated build, making the thin metallic bezel disappear into the screen.
+# Keep the source-resolution 18 px bezel; do not compensate by thickening it.
 cat > "$WORK/frame.svg" <<SVG
 <svg xmlns="http://www.w3.org/2000/svg" width="$OW" height="$OH" viewBox="0 0 $OW $OH">
   <defs>
@@ -89,7 +93,7 @@ cat > "$WORK/frame.svg" <<SVG
   <rect x="$((OW/2-22))" y="$((OH-5))" width="44" height="3" rx="1.5" fill="#111114" opacity="0.85"/>
 </svg>
 SVG
-magick -background none -density 96 "MSVG:$WORK/frame.svg" "$WORK/frame.png"
+magick -background none -density 96 "RSVG:$WORK/frame.svg" "$WORK/frame.png"
 
 # Only the outer display corners are masked. Do not crop, sharpen, recolour,
 # remove version/usage text, or reconstruct the status bar/terminal/keyboard.
