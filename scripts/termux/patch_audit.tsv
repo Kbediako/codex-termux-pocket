@@ -198,3 +198,5 @@ subject	termux: update to 0.154.0-alpha.3	runtime-critical	Merges the exact offi
 subject	release: request validated Termux 0.154.0-alpha.3 publication	tooling	Records the five successful exact-source alpha.3 release gates consumed by the permanent publisher.
 subject	termux: promote termux-v0.154.0-alpha.3-1472570006	tooling	Promotes the independently verified public alpha.3 updater manifest after publication.
 subject	termux: update to 0.154.0-alpha.4	runtime-critical	Merges the exact official 0.154.0-alpha.4 source and preserves the maintained Android and Termux runtime patch stack.
+subject	release: request validated Termux 0.154.0-alpha.4 publication	tooling	Records the five successful exact-source alpha.4 release gates consumed by the permanent publisher.
+subject	termux: promote termux-v0.154.0-alpha.4-2390e5d349	tooling	Promotes the independently verified public alpha.4 updater manifest after publication.
