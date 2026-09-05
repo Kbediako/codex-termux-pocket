@@ -3,6 +3,7 @@
 Codex CLI for aarch64 Android phones running current Termux. For desktop
 platforms, use [OpenAI Codex](https://github.com/openai/codex).
 
+<!-- README artwork: follow .github/assets/AGENTS.md and .github/assets/readme/README.md. -->
 <p align="center">
   <img
     src=".github/assets/termux-codex-screenshot.webp"
