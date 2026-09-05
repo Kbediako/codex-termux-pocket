@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::path::Path;
 
 use codex_analytics::GuardianReviewedAction;
@@ -7,15 +6,12 @@ use codex_protocol::approvals::GuardianCommandSource;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionProfile;
-#[cfg(unix)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use serde::Serialize;
-use serde::ser::Error as _;
 use serde_json::Value;
 
-use super::GUARDIAN_MAX_ACTION_BYTES;
 use super::GUARDIAN_MAX_ACTION_STRING_TOKENS;
 use super::prompt::guardian_truncate_text;
 
@@ -23,11 +19,8 @@ use super::prompt::guardian_truncate_text;
 pub(crate) enum GuardianApprovalRequest {
     ExecCommand {
         id: String,
-        environment_id: String,
         command: Vec<String>,
-        cwd: PathUri,
-        /// Executor-native rendering sent to Guardian; `cwd` remains typed for attribution.
-        guardian_cwd: LegacyAppPathString,
+        cwd: AbsolutePathBuf,
         sandbox_permissions: crate::sandboxing::SandboxPermissions,
         additional_permissions: Option<AdditionalPermissionProfile>,
         justification: Option<String>,
@@ -55,8 +48,8 @@ pub(crate) enum GuardianApprovalRequest {
     },
     ApplyPatch {
         id: String,
-        cwd: PathUri,
-        files: Vec<PathUri>,
+        cwd: AbsolutePathBuf,
+        files: Vec<AbsolutePathBuf>,
         patch: String,
     },
     NetworkAccess {
@@ -119,7 +112,7 @@ pub(crate) struct GuardianMcpAnnotations {
 struct CommandApprovalAction<'a> {
     tool: &'a str,
     command: &'a [String],
-    cwd: LegacyAppPathString,
+    cwd: &'a Path,
     sandbox_permissions: crate::sandboxing::SandboxPermissions,
     #[serde(skip_serializing_if = "Option::is_none")]
     additional_permissions: Option<&'a AdditionalPermissionProfile>,
@@ -127,14 +120,6 @@ struct CommandApprovalAction<'a> {
     justification: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tty: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct ApplyPatchApprovalAction<'a> {
-    tool: &'static str,
-    cwd: LegacyAppPathString,
-    files: Vec<LegacyAppPathString>,
-    patch: &'a str,
 }
 
 #[derive(Serialize)]
@@ -212,7 +197,7 @@ fn serialize_guardian_action(value: impl Serialize) -> serde_json::Result<Value>
 fn serialize_command_guardian_action(
     tool: &'static str,
     command: &[String],
-    cwd: LegacyAppPathString,
+    cwd: &Path,
     sandbox_permissions: crate::sandboxing::SandboxPermissions,
     additional_permissions: Option<&AdditionalPermissionProfile>,
     justification: Option<&String>,
@@ -232,7 +217,7 @@ fn serialize_command_guardian_action(
 fn command_assessment_action(
     source: GuardianCommandSource,
     command: &[String],
-    cwd: &LegacyAppPathString,
+    cwd: &AbsolutePathBuf,
 ) -> GuardianAssessmentAction {
     GuardianAssessmentAction::Command {
         source,
@@ -298,10 +283,8 @@ pub(crate) fn guardian_approval_request_to_json(
     match action {
         GuardianApprovalRequest::ExecCommand {
             id: _,
-            environment_id: _,
             command,
-            cwd: _,
-            guardian_cwd,
+            cwd,
             sandbox_permissions,
             additional_permissions,
             justification,
@@ -309,7 +292,7 @@ pub(crate) fn guardian_approval_request_to_json(
         } => serialize_command_guardian_action(
             "exec_command",
             command,
-            guardian_cwd.clone(),
+            cwd,
             *sandbox_permissions,
             additional_permissions.as_ref(),
             justification.as_ref(),
@@ -354,12 +337,12 @@ pub(crate) fn guardian_approval_request_to_json(
             cwd,
             files,
             patch,
-        } => serialize_guardian_action(ApplyPatchApprovalAction {
-            tool: "apply_patch",
-            cwd: cwd.clone().into(),
-            files: files.iter().cloned().map(Into::into).collect(),
-            patch,
-        }),
+        } => Ok(serde_json::json!({
+            "tool": "apply_patch",
+            "cwd": cwd,
+            "files": files,
+            "patch": patch,
+        })),
         GuardianApprovalRequest::NetworkAccess {
             id: _,
             turn_id: _,
@@ -425,11 +408,9 @@ pub(crate) fn guardian_assessment_action(
     action: &GuardianApprovalRequest,
 ) -> GuardianAssessmentAction {
     match action {
-        GuardianApprovalRequest::ExecCommand {
-            command,
-            guardian_cwd,
-            ..
-        } => command_assessment_action(GuardianCommandSource::UnifiedExec, command, guardian_cwd),
+        GuardianApprovalRequest::ExecCommand { command, cwd, .. } => {
+            command_assessment_action(GuardianCommandSource::UnifiedExec, command, cwd)
+        }
         GuardianApprovalRequest::WriteStdin {
             approval_id,
             process_id,
@@ -457,8 +438,8 @@ pub(crate) fn guardian_assessment_action(
         },
         GuardianApprovalRequest::ApplyPatch { cwd, files, .. } => {
             GuardianAssessmentAction::ApplyPatch {
-                cwd: cwd.clone().into(),
-                files: files.iter().cloned().map(Into::into).collect(),
+                cwd: cwd.clone(),
+                files: files.clone(),
             }
         }
         GuardianApprovalRequest::NetworkAccess {
@@ -589,23 +570,8 @@ pub(crate) fn format_guardian_action_pretty(
 ) -> serde_json::Result<FormattedGuardianAction> {
     let value = guardian_approval_request_to_json(action)?;
     let (value, truncated) = truncate_guardian_action_value(value);
-    let text = enforce_guardian_action_byte_limit(serde_json::to_string_pretty(&value)?)?;
-    Ok(FormattedGuardianAction { text, truncated })
-}
-
-fn enforce_guardian_action_byte_limit(text: String) -> serde_json::Result<String> {
-    if text.len() > GUARDIAN_MAX_ACTION_BYTES {
-        return Err(serde_json::Error::custom(format!(
-            "Guardian action exceeds the {GUARDIAN_MAX_ACTION_BYTES}-byte review limit"
-        )));
-    }
-    Ok(text)
-}
-
-pub(crate) fn format_guardian_action_compact(
-    action: &GuardianApprovalRequest,
-) -> serde_json::Result<String> {
-    enforce_guardian_action_byte_limit(serde_json::to_string(&guardian_approval_request_to_json(
-        action,
-    )?)?)
+    Ok(FormattedGuardianAction {
+        text: serde_json::to_string_pretty(&value)?,
+        truncated,
+    })
 }

@@ -579,7 +579,7 @@ impl From<GuardianCommandSource> for CoreGuardianCommandSource {
 pub struct GuardianCommandReviewAction {
     pub source: GuardianCommandSource,
     pub command: String,
-    pub cwd: LegacyAppPathString,
+    pub cwd: AbsolutePathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -596,8 +596,8 @@ pub struct GuardianExecveReviewAction {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct GuardianApplyPatchReviewAction {
-    pub cwd: LegacyAppPathString,
-    pub files: Vec<LegacyAppPathString>,
+    pub cwd: AbsolutePathBuf,
+    pub files: Vec<AbsolutePathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -639,7 +639,7 @@ pub enum GuardianApprovalReviewAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: LegacyAppPathString,
+        cwd: AbsolutePathBuf,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -661,8 +661,8 @@ pub enum GuardianApprovalReviewAction {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ApplyPatch {
-        cwd: LegacyAppPathString,
-        files: Vec<LegacyAppPathString>,
+        cwd: AbsolutePathBuf,
+        files: Vec<AbsolutePathBuf>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]

@@ -31,12 +31,7 @@ use std::io;
 use std::path::Path;
 
 #[cfg(target_os = "windows")]
-const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &[
-    "USERNAME",
-    "USERPROFILE",
-    // ShellExecuteExW needs SystemRoot to elevate the setup helper.
-    "SYSTEMROOT",
-];
+const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &["USERNAME", "USERPROFILE"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxType {
@@ -280,12 +275,10 @@ impl std::error::Error for SandboxTransformError {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct SandboxManager {
     #[cfg(target_os = "macos")]
     seatbelt_profile: MacosSeatbeltProfile,
-    #[cfg(target_os = "macos")]
-    allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
 }
 
 impl SandboxManager {
@@ -298,20 +291,7 @@ impl SandboxManager {
         Self {
             #[cfg(target_os = "macos")]
             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
-            #[cfg(target_os = "macos")]
-            allowed_symlinked_codex_home: None,
         }
-    }
-
-    /// Allows otherwise-authorized writable roots beneath the opted-in user home
-    /// to follow symlinks, including targets outside that home.
-    #[cfg(target_os = "macos")]
-    pub fn with_allowed_symlinked_codex_home(
-        mut self,
-        allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
-    ) -> Self {
-        self.allowed_symlinked_codex_home = allowed_symlinked_codex_home;
-        self
     }
 
     pub fn select_initial(
@@ -415,7 +395,6 @@ impl SandboxManager {
                         extra_allow_unix_sockets: &[],
                     },
                     self.seatbelt_profile,
-                    self.allowed_symlinked_codex_home.as_ref(),
                 )
                 .map_err(|err| match err {
                     SeatbeltPreparationError::FileSystem(message) => {

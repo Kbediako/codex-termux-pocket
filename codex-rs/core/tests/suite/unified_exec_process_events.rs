@@ -1075,6 +1075,3 @@ timeout = 900
 
     Ok(())
 }
-
-#[path = "network_approval_completion.rs"]
-mod network_approval_completion;

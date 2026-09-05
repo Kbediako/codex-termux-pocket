@@ -2,7 +2,6 @@ use crate::config::OtelExporter;
 use crate::metrics::Result;
 use crate::metrics::names::API_CALL_COUNT_METRIC;
 use crate::metrics::names::API_CALL_DURATION_METRIC;
-use crate::metrics::names::EXEC_SERVER_CLIENT_REQUEST_COUNT_METRIC;
 use crate::metrics::names::RESPONSES_API_ENGINE_IAPI_TTFT_DURATION_METRIC;
 use crate::metrics::names::RESPONSES_API_ENGINE_SERVICE_TBT_DURATION_METRIC;
 use crate::metrics::names::RESPONSES_API_ENGINE_SERVICE_TTFT_DURATION_METRIC;
@@ -24,8 +23,6 @@ const STATSIG_DISABLED_METRICS: &[&str] = &[
     API_CALL_COUNT_METRIC,
     API_CALL_DURATION_METRIC,
     CONVERSATION_TURN_COUNT_METRIC,
-    // Caller-side executor volume belongs in configured observability collectors.
-    EXEC_SERVER_CLIENT_REQUEST_COUNT_METRIC,
     RESPONSES_API_ENGINE_IAPI_TTFT_DURATION_METRIC,
     RESPONSES_API_ENGINE_SERVICE_TBT_DURATION_METRIC,
     RESPONSES_API_ENGINE_SERVICE_TTFT_DURATION_METRIC,

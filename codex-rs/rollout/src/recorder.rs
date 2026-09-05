@@ -1289,7 +1289,6 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         preview,
         section,
         project_id,
-        daybreak_enabled,
         cwd,
         git_branch,
         git_sha,
@@ -1320,7 +1319,6 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
     item.section = section;
     item.project_id = project_id;
-    item.daybreak_enabled = daybreak_enabled;
     item.model = model;
     item.reasoning_effort = reasoning_effort;
     if item.cwd.is_none() {
@@ -2038,7 +2036,6 @@ fn thread_item_from_state_metadata(
         preview: item.preview,
         section: item.section,
         project_id: item.project_id,
-        daybreak_enabled: item.daybreak_enabled,
         cwd: Some(item.cwd),
         git_branch: item.git_branch,
         git_sha: item.git_sha,

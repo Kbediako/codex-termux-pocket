@@ -862,7 +862,6 @@ async fn steer_only_enforces_expected_turn_id() {
         .spawn_task(
             Arc::clone(&turn_context),
             vec![TurnInput::UserInput {
-                acceptance_order: None,
                 content: vec![UserInput::Text {
                     text: "hello".to_string(),
                     text_elements: Vec::new(),
@@ -952,7 +951,6 @@ async fn rejects_non_regular_turns() {
             .spawn_task(
                 Arc::clone(&turn_context),
                 vec![TurnInput::UserInput {
-                    acceptance_order: None,
                     content: vec![UserInput::Text {
                         text: "hello".to_string(),
                         text_elements: Vec::new(),

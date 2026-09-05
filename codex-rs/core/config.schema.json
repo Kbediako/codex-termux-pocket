@@ -1020,9 +1020,6 @@
             "unified_exec": {
               "type": "boolean"
             },
-            "unified_exec_tty": {
-              "type": "boolean"
-            },
             "unified_exec_zsh_fork": {
               "type": "boolean"
             },
@@ -1057,9 +1054,6 @@
               "type": "boolean"
             },
             "workspace_owner_usage_nudge": {
-              "type": "boolean"
-            },
-            "worktrees": {
               "type": "boolean"
             },
             "write_stdin_approval": {
@@ -3889,8 +3883,6 @@
               "interrupt_turn": null,
               "next_permission_mode": null,
               "previous_permission_mode": null,
-              "prompt_stack_back": null,
-              "skip_question": null,
               "toggle_voice_mute": null
             },
             "composer": {
@@ -4087,11 +4079,6 @@
           "default": "composer",
           "description": "Where the terminal pet should anchor vertically.\n\nDefaults to `composer`, which follows the current TUI composer viewport."
         },
-        "question_esc_back": {
-          "default": true,
-          "description": "Escape returns from async questions to the composer, preserving the answer draft.",
-          "type": "boolean"
-        },
         "raw_output_mode": {
           "default": false,
           "description": "Start the TUI in raw scrollback mode for copy-friendly transcript output. Defaults to `false`.",
@@ -4122,7 +4109,7 @@
         },
         "status_line": {
           "default": null,
-          "description": "Ordered list of status line item identifiers.\n\nWhen set, the TUI renders the selected items as the status line. When unset, the TUI defaults to: `model-with-reasoning`, `current-dir`, and `thread-name`.",
+          "description": "Ordered list of status line item identifiers.\n\nWhen set, the TUI renders the selected items as the status line. When unset, the TUI defaults to: `model-with-reasoning` and `current-dir`.",
           "items": {
             "type": "string"
           },
@@ -4142,7 +4129,7 @@
         },
         "terminal_title": {
           "default": null,
-          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `activity`, `thread-name`, and `project-name`. The `activity` item spins while working and shows an action-required message when blocked on the user.",
+          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `activity` and `project`. The `activity` item spins while working and shows an action-required message when blocked on the user.",
           "items": {
             "type": "string"
           },
@@ -4156,11 +4143,6 @@
         "vim_mode_default": {
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
-          "type": "boolean"
-        },
-        "whimsy": {
-          "default": true,
-          "description": "Enable decorative effects such as Astra composer stars. Also requires animations. Defaults to `true`.",
           "type": "boolean"
         }
       },
@@ -4310,7 +4292,7 @@
               "$ref": "#/definitions/KeybindingsSpec"
             }
           ],
-          "description": "Move up through pending async questions, then edit the most recently queued message."
+          "description": "Edit the most recently queued message."
         },
         "increase_reasoning_effort": {
           "allOf": [
@@ -4343,22 +4325,6 @@
             }
           ],
           "description": "Switch to the previous available permission mode."
-        },
-        "prompt_stack_back": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/KeybindingsSpec"
-            }
-          ],
-          "description": "Move back through pending async questions toward the composer."
-        },
-        "skip_question": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/KeybindingsSpec"
-            }
-          ],
-          "description": "Skip the focused question."
         },
         "toggle_voice_mute": {
           "allOf": [
@@ -4713,8 +4679,6 @@
             "interrupt_turn": null,
             "next_permission_mode": null,
             "previous_permission_mode": null,
-            "prompt_stack_back": null,
-            "skip_question": null,
             "toggle_voice_mute": null
           }
         },
@@ -5839,10 +5803,6 @@
       "description": "Whether the model may request a login shell for shell-based tools. Default to `true`\n\nIf `true`, the model may request a login shell (`login = true`), and omitting `login` defaults to using a login shell. If `false`, the model can never use a login shell: `login = true` requests are rejected, and omitting `login` defaults to a non-login shell.",
       "type": "boolean"
     },
-    "allow_symlinked_codex_home": {
-      "description": "Allow macOS sandbox writable roots at or beneath CODEX_HOME to traverse symlinks. Read only from the host's user config at startup; defaults to false. This grants no write access by itself, but trusts symlink targets even if they change between commands or lie outside CODEX_HOME. This setting has no effect on Linux or Windows.",
-      "type": "boolean"
-    },
     "analytics": {
       "allOf": [
         {
@@ -6411,9 +6371,6 @@
         "unified_exec": {
           "type": "boolean"
         },
-        "unified_exec_tty": {
-          "type": "boolean"
-        },
         "unified_exec_zsh_fork": {
           "type": "boolean"
         },
@@ -6448,9 +6405,6 @@
           "type": "boolean"
         },
         "workspace_owner_usage_nudge": {
-          "type": "boolean"
-        },
-        "worktrees": {
           "type": "boolean"
         },
         "write_stdin_approval": {

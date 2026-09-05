@@ -505,7 +505,6 @@ pub struct ComputerUseRequirements {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct BrowserUseRequirements {
-    pub allow_webmcp: Option<bool>,
     pub allow_history_access: Option<bool>,
     pub disable_auto_review: Option<bool>,
     pub allow_global_persistent_approval: Option<bool>,

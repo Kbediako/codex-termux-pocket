@@ -24,12 +24,9 @@ mod turn_lifecycle;
 mod world_state;
 
 pub use approval_review::ApprovalAssessment;
-pub use approval_review::ApprovalDecision;
-pub use approval_review::ApprovalDecisionInput;
 pub use approval_review::ApprovalReviewError;
 pub use approval_review::ApprovalReviewInput;
 pub use approval_review::GuardianV2Enabled;
-pub use approval_review::SynchronousApprovalReviewer;
 pub use context::TurnContextContributionInput;
 pub use mcp::McpServerContribution;
 pub use mcp::McpServerContributionContext;
@@ -355,14 +352,6 @@ pub trait ToolLifecycleContributor: Send + Sync {
 /// a full structured review, or support both paths. Returning `None` leaves the
 /// request available to the next contributor or the host's fallback path.
 pub trait ApprovalReviewContributor: Send + Sync {
-    /// Claims one request, including a handoff to the user.
-    fn decide<'a>(
-        &'a self,
-        _input: &'a ApprovalDecisionInput<'_>,
-    ) -> ExtensionFuture<'a, Option<ApprovalDecision>> {
-        Box::pin(std::future::ready(None))
-    }
-
     /// Returns an available approval decision without performing a full review.
     fn fast_decision<'a>(
         &'a self,

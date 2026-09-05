@@ -98,7 +98,6 @@ impl ChatWidget {
             pet_http_client.clone(),
         );
         let mut widget = Self {
-            cyber_policy_notice: Default::default(),
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
@@ -213,6 +212,7 @@ impl ChatWidget {
             pet_image_support_override: None,
             thread_id: None,
             thread_name: None,
+            pending_automatic_thread_names: HashSet::new(),
             thread_rename_block_message: None,
             active_side_conversation: false,
             blocks_direct_input: false,
@@ -309,10 +309,6 @@ impl ChatWidget {
             .bottom_pane
             .set_token_activity_command_enabled(widget.has_codex_backend_auth);
         widget.refresh_status_surfaces();
-        widget.bottom_pane.set_astra_sparkle(
-            widget.effective_collaboration_mode().model(),
-            &widget.local_settings.tui,
-        );
 
         widget
     }

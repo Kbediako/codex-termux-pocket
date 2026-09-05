@@ -32,10 +32,8 @@ use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
-use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
-use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -357,12 +355,7 @@ async fn run_compact_task_inner_impl(
     let summary_suffix =
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let identity = if sess.enabled(Feature::GuardianThreadContext) {
-        CompactedMessageIdentity::Preserve
-    } else {
-        CompactedMessageIdentity::Regenerate
-    };
-    let user_messages = collect_annotated_user_messages(history_items, identity);
+    let user_messages = collect_annotated_user_messages(history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     if let Some(summary_item) = new_history.last_mut() {
@@ -534,9 +527,6 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompactedUserMessage {
-    // Keep source identity even when compaction shortens the text, so rollback can
-    // correlate the rebuilt message with thread-owned retained evidence.
-    id: Option<ResponseItemId>,
     message: String,
     internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     harness_metadata: Option<CodexHarnessMetadata>,
@@ -550,24 +540,12 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUser
         .collect()
 }
 
-pub(crate) enum CompactedMessageIdentity {
-    Preserve,
-    Regenerate,
-}
-
 pub(crate) fn collect_annotated_user_messages(
     items: &[ResponseItemEnvelope],
-    identity: CompactedMessageIdentity,
 ) -> Vec<CompactedUserMessage> {
     items
         .iter()
         .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.clone()))
-        .map(|mut message| {
-            if matches!(identity, CompactedMessageIdentity::Regenerate) {
-                message.id = None;
-            }
-            message
-        })
         .collect()
 }
 
@@ -582,7 +560,6 @@ fn compacted_user_message(
         return None;
     }
     Some(CompactedUserMessage {
-        id: item.id().cloned(),
         message: user.message(),
         internal_chat_message_metadata_passthrough: match item {
             ResponseItem::Message {
@@ -701,7 +678,6 @@ fn build_compacted_history_with_limit(
                 let truncated =
                     truncate_text(&message.message, TruncationPolicy::Tokens(remaining));
                 selected_messages.push(CompactedUserMessage {
-                    id: message.id.clone(),
                     message: truncated,
                     internal_chat_message_metadata_passthrough: message
                         .internal_chat_message_metadata_passthrough
@@ -716,7 +692,7 @@ fn build_compacted_history_with_limit(
 
     for message in &selected_messages {
         let mut item = ResponseItem::Message {
-            id: message.id.clone(),
+            id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: message.message.clone(),

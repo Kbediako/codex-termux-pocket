@@ -945,7 +945,6 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             section: None,
             section_entered_at: None,
             project_id: None,
-            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: "notification-provider".to_string(),
             model: None,

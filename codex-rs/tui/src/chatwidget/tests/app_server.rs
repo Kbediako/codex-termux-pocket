@@ -813,7 +813,6 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
     chat.open_feedback_note(
         crate::app_event::FeedbackCategory::Bug,
         /*include_logs*/ false,
-        crate::bottom_pane::FeedbackAudience::External,
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1643,8 +1642,8 @@ async fn live_app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can’t be shown"));
-    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
+    assert!(rendered.contains("This content can't be shown"));
+    assert!(rendered.contains("extra caution with cybersecurity requests"));
     assert!(!rendered.contains("server fallback message"));
     assert!(!chat.bottom_pane.is_task_running());
 }
@@ -1736,13 +1735,11 @@ async fn live_app_server_invalid_thread_name_update_is_ignored() {
 }
 
 #[tokio::test]
-async fn live_app_server_manual_thread_name_updates_status_surfaces() {
+async fn live_app_server_thread_name_update_shows_resume_hint() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id =
         ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").expect("thread id");
     chat.thread_id = Some(thread_id);
-
-    chat.expect_manual_thread_name(thread_id, "review-fix".to_string());
 
     chat.handle_server_notification(
         ServerNotification::ThreadNameUpdated(
@@ -1756,53 +1753,46 @@ async fn live_app_server_manual_thread_name_updates_status_surfaces() {
 
     assert_eq!(chat.thread_name, Some("review-fix".to_string()));
     let cells = drain_insert_history(&mut rx);
-    let transcript = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<String>();
-    let footer = render_bottom_popup(&chat, /*width*/ 80);
-    let title = chat.last_terminal_title.as_deref().unwrap();
-    assert_chatwidget_snapshot!(
-        "manual_thread_name_status_surfaces",
-        normalize_snapshot_paths(format!(
-            "transcript:\n{transcript}\nfooter:\n{footer}\ntitle: {title}"
-        ))
-    );
+    assert_eq!(cells.len(), 1);
+    let rendered = lines_to_single_string(&cells[0]);
+    assert_chatwidget_snapshot!("thread_name_update_resume_hint", rendered);
 }
 
 #[tokio::test]
 async fn live_app_server_automatic_thread_name_update_is_silent() {
-    for replay_kind in [
-        None,
-        Some(ReplayKind::ThreadSnapshot),
-        Some(ReplayKind::ResumeInitialMessages),
-    ] {
-        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-        let thread_id = ThreadId::new();
-        let mut session = configured_thread_session(thread_id);
-        session.thread_name = Some("Generated title".to_string());
-        chat.handle_thread_session(session);
-        drain_insert_history(&mut rx);
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    for title in ["Provisional title", "Generated title"] {
+        chat.expect_automatic_thread_name(title.to_string());
+        assert_eq!(chat.thread_name(), Some(title.to_string()));
 
         chat.handle_server_notification(
             ServerNotification::ThreadNameUpdated(
                 codex_app_server_protocol::ThreadNameUpdatedNotification {
                     thread_id: thread_id.to_string(),
-                    thread_name: Some("Generated title".to_string()),
+                    thread_name: Some(title.to_string()),
                 },
             ),
-            replay_kind,
+            /*replay_kind*/ None,
         );
 
-        assert_eq!(chat.thread_name(), Some("Generated title".to_string()));
-        let transcript = drain_insert_history(&mut rx)
-            .iter()
-            .map(|lines| lines_to_single_string(lines))
-            .collect::<String>();
-        insta::allow_duplicates! {
-            assert_snapshot!(transcript, @"");
-        }
+        assert_eq!(chat.thread_name, Some(title.to_string()));
+        assert!(drain_insert_history(&mut rx).is_empty());
     }
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadNameUpdated(
+            codex_app_server_protocol::ThreadNameUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                thread_name: Some("Manual title".to_string()),
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(chat.thread_name, Some("Manual title".to_string()));
+    assert_eq!(drain_insert_history(&mut rx).len(), 1);
 }
 
 #[tokio::test]
@@ -1810,6 +1800,7 @@ async fn live_app_server_manual_thread_name_is_visible_before_notification() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
+    chat.expect_automatic_thread_name("Provisional title".to_string());
 
     chat.expect_manual_thread_name(thread_id, "Manual title".to_string());
 
@@ -1827,7 +1818,7 @@ async fn live_app_server_manual_thread_name_is_visible_before_notification() {
     );
 
     assert_eq!(chat.thread_name(), Some("Manual title".to_string()));
-    assert!(drain_insert_history(&mut rx).is_empty());
+    assert_eq!(drain_insert_history(&mut rx).len(), 1);
 }
 
 #[tokio::test]

@@ -395,16 +395,12 @@ impl ChatWidget {
     pub(super) fn on_cyber_policy_error(&mut self) {
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
-        let notice = if self.config.model_provider_id == "openai" {
-            self.cyber_policy_notice
-                .get()
-                .copied()
-                .unwrap_or_default()
-                .for_model(self.current_model())
+        let plan_type = if self.has_chatgpt_account {
+            self.plan_type
         } else {
-            crate::daybreak::Notice::Limited
+            None
         };
-        self.add_to_history(history_cell::new_cyber_policy_error_event(notice));
+        self.add_to_history(history_cell::new_cyber_policy_error_event(plan_type));
         self.request_redraw();
 
         // After an error ends the turn, try sending the next queued input.

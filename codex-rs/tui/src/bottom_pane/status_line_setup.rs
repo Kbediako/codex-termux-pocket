@@ -144,10 +144,7 @@ pub(crate) enum StatusLineItem {
     /// Whether raw scrollback mode is currently active.
     RawOutput,
 
-    /// Current thread name, omitted when unnamed.
-    ThreadName,
-
-    /// Current thread title, falling back to its identifier when unnamed.
+    /// Current thread title (if set by user).
     ThreadTitle,
 
     /// Current workspace notification headline.
@@ -205,7 +202,6 @@ impl StatusLineItem {
             StatusLineItem::SessionId => "Current thread identifier (omitted until thread starts)",
             StatusLineItem::FastMode => "Whether Fast mode is currently active",
             StatusLineItem::RawOutput => "Whether raw scrollback mode is active",
-            StatusLineItem::ThreadName => "Current thread name (omitted when unnamed)",
             StatusLineItem::ThreadTitle => {
                 "Current thread title, or thread identifier when unnamed"
             }
@@ -246,7 +242,6 @@ impl StatusLineItem {
             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
             StatusLineItem::FastMode => StatusSurfacePreviewItem::FastMode,
             StatusLineItem::RawOutput => StatusSurfacePreviewItem::RawOutput,
-            StatusLineItem::ThreadName => StatusSurfacePreviewItem::ThreadName,
             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
             StatusLineItem::WorkspaceHeadline => StatusSurfacePreviewItem::WorkspaceHeadline,
             StatusLineItem::TaskProgress => StatusSurfacePreviewItem::TaskProgress,

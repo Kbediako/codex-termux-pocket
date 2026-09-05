@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::bottom_pane::BottomPaneView;
-use crate::clipboard_copy::CopyFormat;
 
 impl ChatWidget {
     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
@@ -14,9 +13,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if self.handle_question_key(key_event) {
-            return;
-        }
         if self.bottom_pane.has_active_view()
             && !matches!(
                 key_event,
@@ -287,11 +283,9 @@ impl ChatWidget {
         false
     }
 
-    /// Copy the last response as Markdown with HTML for rich-text destinations.
+    /// Copy the last agent response (raw markdown) to the system clipboard.
     pub(crate) fn copy_last_agent_markdown(&mut self) {
-        self.copy_last_agent_markdown_with(|text| {
-            crate::clipboard_copy::copy_to_clipboard(text, CopyFormat::Markdown)
-        });
+        self.copy_last_agent_markdown_with(crate::clipboard_copy::copy_to_clipboard);
     }
 
     /// Inner implementation with an injectable clipboard backend for testing.
@@ -333,7 +327,6 @@ impl ChatWidget {
         let mut choices = vec![(
             "Whole response".to_string(),
             Arc::<str>::from(markdown.as_str()),
-            CopyFormat::Markdown,
         )];
         let source = self
             .transcript
@@ -350,27 +343,21 @@ impl ChatWidget {
                             |language| format!("{language} code"),
                         ),
                         content,
-                        CopyFormat::PlainText,
                     )),
                     crate::markdown::CopyTarget::Quote(content) => {
                         let content: String = content
                             .split_inclusive('\n')
                             .map(|line| crate::git_action_directives::strip_line_directives(line).0)
                             .collect();
-                        (!content.trim().is_empty()).then(|| {
-                            (
-                                "Blockquote".to_string(),
-                                Arc::from(content),
-                                CopyFormat::PlainText,
-                            )
-                        })
+                        (!content.trim().is_empty())
+                            .then(|| ("Blockquote".to_string(), Arc::from(content)))
                     }
                 }),
         );
 
         let items = choices
             .into_iter()
-            .map(|(label, text, format)| {
+            .map(|(label, text)| {
                 let description = text
                     .lines()
                     .find(|line| !line.trim().is_empty())
@@ -382,7 +369,6 @@ impl ChatWidget {
                         tx.send(AppEvent::CopySelection {
                             text: Arc::clone(&text),
                             label: label.clone(),
-                            format,
                         });
                     })],
                     dismiss_on_select: true,
@@ -400,10 +386,8 @@ impl ChatWidget {
         self.defer_input_until_settings_applied();
     }
 
-    pub(crate) fn copy_selection(&mut self, text: Arc<str>, label: String, format: CopyFormat) {
-        self.copy_selection_with(&text, &label, |text| {
-            crate::clipboard_copy::copy_to_clipboard(text, format)
-        });
+    pub(crate) fn copy_selection(&mut self, text: Arc<str>, label: String) {
+        self.copy_selection_with(&text, &label, crate::clipboard_copy::copy_to_clipboard);
     }
 
     pub(super) fn copy_selection_with(
@@ -524,7 +508,7 @@ impl ChatWidget {
     ///
     /// When the double-press quit shortcut is enabled, pressing the same shortcut again before
     /// expiry requests a shutdown-first quit.
-    pub(super) fn on_ctrl_c(&mut self) {
+    fn on_ctrl_c(&mut self) {
         let key = key_hint::ctrl(KeyCode::Char('c'));
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
         let should_pause_active_goal = self

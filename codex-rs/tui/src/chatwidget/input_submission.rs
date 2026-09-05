@@ -107,7 +107,7 @@ impl ChatWidget {
         .1
     }
 
-    pub(super) fn submit_user_message_with_history_and_shell_escape_policy(
+    fn submit_user_message_with_history_and_shell_escape_policy(
         &mut self,
         user_message: UserMessage,
         history_record: UserMessageHistoryRecord,

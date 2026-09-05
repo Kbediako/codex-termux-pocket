@@ -8098,12 +8098,6 @@
               "null"
             ]
           },
-          "allowWebmcp": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
           "defaultOriginPolicy": {
             "anyOf": [
               {
@@ -12534,7 +12528,7 @@
                 "type": "string"
               },
               "cwd": {
-                "$ref": "#/definitions/v2/LegacyAppPathString"
+                "$ref": "#/definitions/v2/AbsolutePathBuf"
               },
               "source": {
                 "$ref": "#/definitions/v2/GuardianCommandSource"
@@ -12627,11 +12621,11 @@
           {
             "properties": {
               "cwd": {
-                "$ref": "#/definitions/v2/LegacyAppPathString"
+                "$ref": "#/definitions/v2/AbsolutePathBuf"
               },
               "files": {
                 "items": {
-                  "$ref": "#/definitions/v2/LegacyAppPathString"
+                  "$ref": "#/definitions/v2/AbsolutePathBuf"
                 },
                 "type": "array"
               },

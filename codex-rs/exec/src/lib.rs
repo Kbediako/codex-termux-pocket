@@ -76,7 +76,6 @@ use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_core::read_session_meta_line;
-use codex_features::Feature;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
 use codex_history::RolloutItem;
@@ -106,9 +105,6 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::SharedCliOptions;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
-use codex_worktree::CreateWorktree;
-use codex_worktree::WorktreeManager;
-use codex_worktree::WorktreeSettings;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 pub use event_processor_with_jsonl_output::CodexStatus;
 pub use event_processor_with_jsonl_output::CollectedThreadEvents;
@@ -222,18 +218,12 @@ struct ExecRunArgs {
     json_mode: bool,
     last_message_file: Option<PathBuf>,
     model_provider: Option<String>,
-    managed_worktree: Option<ManagedExecWorktree>,
     oss: bool,
     output_schema_path: Option<PathBuf>,
     prompt: Option<String>,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
     thread_source: ThreadSource,
-}
-
-struct ManagedExecWorktree {
-    manager: WorktreeManager,
-    checkout: PathBuf,
 }
 
 fn exec_root_span() -> tracing::Span {
@@ -287,27 +277,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
         cwd,
-        mut add_dir,
-        worktree,
+        add_dir,
     } = shared;
-
-    if worktree {
-        if ignore_user_config {
-            anyhow::bail!("--worktree cannot be combined with --ignore-user-config");
-        }
-        if ephemeral {
-            anyhow::bail!("--worktree cannot be combined with --ephemeral");
-        }
-        match command.as_ref() {
-            Some(ExecCommand::Resume(_)) => {
-                anyhow::bail!("--worktree is not supported with `codex exec resume`");
-            }
-            Some(ExecCommand::Review(_)) => {
-                anyhow::bail!("--worktree is not supported with `codex exec review`");
-            }
-            Some(ExecCommand::Fork(_)) | None => {}
-        }
-    }
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
         cli::Color::Always => (true, true),
@@ -338,8 +309,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         }
     };
 
-    let mut resolved_cwd = cwd.clone();
-    let mut config_cwd = match resolved_cwd.as_deref() {
+    let resolved_cwd = cwd.clone();
+    let config_cwd = match resolved_cwd.as_deref() {
         Some(path) => {
             AbsolutePathBuf::from_absolute_path(canonicalize_existing_preserving_symlinks(path)?)?
         }
@@ -366,77 +337,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ..Default::default()
     };
 
-    if worktree
-        && EnvironmentManager::prepare_from_codex_home(&codex_home)
-            .await?
-            .default_environment_is_remote()
-    {
-        anyhow::bail!("--worktree requires local execution");
-    }
-
-    let managed_worktree = if worktree {
-        let gate_bootstrap = load_bootstrap_config_or_exit(
-            &codex_home,
-            /*cwd*/ None,
-            cli_kv_overrides.clone(),
-            loader_overrides.clone(),
-            strict_config,
-            CloudConfigBundleLoader::default(),
-        )
-        .await;
-        let gate_cloud_config = cloud_config_bundle_loader_for_storage(
-            bootstrap_auth_config(&codex_home, &gate_bootstrap)?,
-            /*enable_codex_api_key_env*/ false,
-        )
-        .await?;
-        let gate_config = ConfigBuilder::default()
-            .codex_home(codex_home.to_path_buf())
-            .cli_overrides(cli_kv_overrides.clone())
-            .loader_overrides(LoaderOverrides {
-                ignore_project_config: true,
-                ..loader_overrides.clone()
-            })
-            .fallback_cwd(Some(config_cwd.to_path_buf()))
-            .strict_config(strict_config)
-            .cloud_config_bundle(gate_cloud_config)
-            .build()
-            .await?;
-        if !gate_config.features.enabled(Feature::Worktrees) {
-            anyhow::bail!(
-                "--worktree requires the worktrees feature; enable it with --enable worktrees"
-            );
-        }
-        for path in &mut add_dir {
-            if path.is_relative() {
-                *path = config_cwd.as_path().join(&*path);
-            }
-        }
-        // Allocation belongs to the host, not this session's project, profile, or overrides.
-        let host_config = load_bootstrap_config_or_exit(
-            &codex_home,
-            /*cwd*/ None,
-            Vec::new(),
-            LoaderOverrides::default(),
-            strict_config,
-            CloudConfigBundleLoader::default(),
-        )
-        .await;
-        let settings =
-            WorktreeSettings::for_cli(&codex_home, host_config.config_toml.desktop.as_ref())?;
-        let manager = WorktreeManager::new(settings);
-        let checkout = manager.create(&CreateWorktree {
-            source_cwd: config_cwd.as_path().to_path_buf(),
-            base: None,
-        })?;
-        resolved_cwd = Some(checkout.cwd.clone());
-        config_cwd = AbsolutePathBuf::from_absolute_path(checkout.cwd.clone())?;
-        Some(ManagedExecWorktree {
-            manager,
-            checkout: checkout.root,
-        })
-    } else {
-        None
-    };
     let bootstrap_config = load_bootstrap_config_or_exit(
         &codex_home,
         Some(&config_cwd),
@@ -626,10 +526,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    #[cfg(target_os = "macos")]
-    let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
-        codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
-    );
     let state_db = codex_core::init_state_db(&config).await;
     let environment_manager = if run_loader_overrides.ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
@@ -675,7 +571,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         json_mode,
         last_message_file,
         model_provider,
-        managed_worktree,
         oss,
         output_schema_path,
         prompt,
@@ -775,7 +670,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         json_mode,
         last_message_file,
         model_provider,
-        managed_worktree,
         oss,
         output_schema_path,
         prompt,
@@ -1028,12 +922,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?;
         (session_configured.thread_id, session_configured)
     };
-
-    if let Some(worktree) = managed_worktree.as_ref() {
-        worktree
-            .manager
-            .bind_thread(&worktree.checkout, &primary_thread_id.to_string())?;
-    }
 
     let primary_thread_id_for_span = primary_thread_id.to_string();
     // Use the start/resume response as the authoritative bootstrap payload.

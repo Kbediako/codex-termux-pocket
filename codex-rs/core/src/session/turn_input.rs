@@ -121,7 +121,6 @@ impl PreparedTurnInputSettings {
         kind: TurnStartKind,
     ) -> CodexResult<Option<Arc<TurnContext>>> {
         let TurnStartOptions {
-            guardian_ticket,
             turn_trigger,
             final_output_json_schema,
             service_tier,
@@ -139,7 +138,6 @@ impl PreparedTurnInputSettings {
         updates.service_tier_for_turn = service_tier;
 
         let options = NewTurnContextOptions {
-            guardian_ticket,
             final_output_json_schema,
             cyber_access_program,
         };
@@ -313,7 +311,7 @@ async fn start_or_steer(
             }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
             if has_explicit_input {
-                task_input.push(pending_turn_input(session, input).await);
+                task_input.push(pending_turn_input(input));
             }
             session
                 .spawn_task(turn_context, task_input, RegularTask::new())
@@ -424,7 +422,7 @@ async fn start_if_idle(
             if let SubmittedTurnInput::UserInput { content, .. } = &input {
                 turn_context.session_telemetry.user_prompt(content);
             }
-            task_input.push(pending_turn_input(session, input).await);
+            task_input.push(pending_turn_input(input));
         }
         TurnStartKind::Automatic => {
             // Empty automatic user input resumes sampling without a new message.
@@ -433,7 +431,7 @@ async fn start_if_idle(
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        vec![pending_turn_input(session, input).await],
+                        vec![pending_turn_input(input)],
                     )
                     .await;
             }
@@ -621,10 +619,9 @@ impl Session {
                 TurnInput::UserInput {
                     content: std::mem::take(content),
                     client_id: client_id.clone(),
-                    acceptance_order: self.reserve_user_input_order().await,
                 }
             }
-            input => pending_turn_input(self, input.clone()).await,
+            input => pending_turn_input(input.clone()),
         };
         pending_input.push(input);
         if active_task
@@ -664,13 +661,11 @@ async fn merge_additional_context_input(
         .collect()
 }
 
-async fn pending_turn_input(session: &Session, input: SubmittedTurnInput) -> TurnInput {
+fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
     match input {
-        SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
-            content,
-            client_id,
-            acceptance_order: session.reserve_user_input_order().await,
-        },
+        SubmittedTurnInput::UserInput { content, client_id } => {
+            TurnInput::UserInput { content, client_id }
+        }
         SubmittedTurnInput::ResponseItem(mut item)
             if matches!(
                 &item,

@@ -200,3 +200,5 @@ subject	termux: promote termux-v0.154.0-alpha.3-1472570006	tooling	Promotes the 
 subject	termux: update to 0.154.0-alpha.4	runtime-critical	Merges the exact official 0.154.0-alpha.4 source and preserves the maintained Android and Termux runtime patch stack.
 subject	release: request validated Termux 0.154.0-alpha.4 publication	tooling	Records the five successful exact-source alpha.4 release gates consumed by the permanent publisher.
 subject	termux: promote termux-v0.154.0-alpha.4-2390e5d349	tooling	Promotes the independently verified public alpha.4 updater manifest after publication.
+subject	release: rollback alpha.4 to verified alpha.3 [skip ci]	runtime-critical	Owner-directed forward revert to the verified alpha.3 source and channel after upstream alpha.4 release removal; preserves history, artifact bytes, checksums and provenance.
+subject	ci: execute owner-requested alpha.3 rollback	tooling	Disposable staging-only job in the permanent publisher path; verifies and withdraws alpha.4, reselects alpha.3 and dispatches permanent final-main checks; removed with staging branch.

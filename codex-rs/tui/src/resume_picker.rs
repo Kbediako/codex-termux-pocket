@@ -17,7 +17,7 @@ use crate::keymap::RuntimeChordKeymap;
 use crate::keymap::RuntimeKeymap;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
-use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd as render_assistant;
+use crate::markdown::append_markdown;
 use crate::pager_overlay::Overlay;
 use crate::session_resume::resolve_session_thread_id;
 use crate::status::format_directory_display;
@@ -3192,7 +3192,7 @@ fn render_transcript_preview_lines(
             .into(),
         ],
         Some(TranscriptPreviewState::Loaded(lines)) => {
-            render_conversation_preview_lines(lines, width, row.cwd.as_deref())
+            render_conversation_preview_lines(lines, width)
         }
         None => Vec::new(),
     };
@@ -3242,7 +3242,6 @@ fn render_expanded_session_details(
 fn render_conversation_preview_lines(
     lines: &[TranscriptPreviewLine],
     width: u16,
-    cwd: Option<&Path>,
 ) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return vec![
@@ -3256,7 +3255,7 @@ fn render_conversation_preview_lines(
 
     let mut rendered = Vec::new();
     for line in lines {
-        rendered.extend(render_transcript_content_lines(line, width, cwd));
+        rendered.extend(render_transcript_content_lines(line, width));
     }
     let rendered_len = rendered.len();
     rendered
@@ -3273,11 +3272,7 @@ fn render_conversation_preview_lines(
         .collect()
 }
 
-fn render_transcript_content_lines(
-    line: &TranscriptPreviewLine,
-    width: u16,
-    cwd: Option<&Path>,
-) -> Vec<Line<'static>> {
+fn render_transcript_content_lines(line: &TranscriptPreviewLine, width: u16) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4) as usize;
     let lines = match line.speaker {
         TranscriptPreviewSpeaker::User => vec![conversation_content_line(
@@ -3285,11 +3280,10 @@ fn render_transcript_content_lines(
             conversation_user_style(),
         )],
         TranscriptPreviewSpeaker::Assistant => {
-            let mut lines = render_assistant(&line.text, /*width*/ None, cwd, &|_| false)
-                .lines
-                .into_iter()
-                .map(|line| line.line)
-                .collect::<Vec<_>>();
+            let mut lines = Vec::new();
+            append_markdown(
+                &line.text, /*width*/ None, /*cwd*/ None, &mut lines,
+            );
             for line in &mut lines {
                 *line = conversation_content_line(line.clone(), conversation_assistant_style());
             }
@@ -5488,9 +5482,7 @@ session_picker_view = "dense"
                 },
                 TranscriptPreviewLine {
                     speaker: TranscriptPreviewSpeaker::Assistant,
-                    text: String::from(
-                        r#"Here are the *last* lines: [docs](https://example.com) :codex-file-citation{path="/tmp/codex/report.xlsx"}."#,
-                    ),
+                    text: String::from("Here are the *last* few lines."),
                 },
             ]),
         );
@@ -6287,7 +6279,6 @@ session_picker_view = "dense"
             section: None,
             section_entered_at: None,
             project_id: None,
-            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             model: None,
@@ -6334,7 +6325,6 @@ session_picker_view = "dense"
             section: None,
             section_entered_at: None,
             project_id: None,
-            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             model: None,
@@ -6421,7 +6411,6 @@ session_picker_view = "dense"
             section: None,
             section_entered_at: None,
             project_id: None,
-            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             model: None,
@@ -6499,7 +6488,6 @@ session_picker_view = "dense"
             section: None,
             section_entered_at: None,
             project_id: None,
-            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             model: None,

@@ -1,5 +1,7 @@
-//! Resolves managed-worktree settings shared with Desktop.
-//! CLI allocation uses the same root without enabling automatic cleanup.
+//! Parses and validates worktree settings from the existing `[desktop]` config.
+//!
+//! Resolves the managed worktree root and the automatic-cleanup and retention
+//! settings without introducing a separate configuration format.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -15,7 +17,7 @@ const KEEP_COUNT: &str = "worktree-keep-count";
 
 pub const DEFAULT_WORKTREE_KEEP_COUNT: usize = 15;
 
-/// Effective host-local settings for managed worktrees.
+/// Effective host-local settings already understood by Codex Desktop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeSettings {
     pub root: PathBuf,
@@ -24,17 +26,6 @@ pub struct WorktreeSettings {
 }
 
 impl WorktreeSettings {
-    /// Shares Desktop's allocation root while leaving CLI cleanup disabled.
-    pub fn for_cli(codex_home: &Path, desktop: Option<&HashMap<String, Value>>) -> Result<Self> {
-        let desktop = desktop
-            .and_then(|settings| settings.get(WORKTREE_ROOT))
-            .map(|root| HashMap::from([(WORKTREE_ROOT.to_owned(), root.clone())]));
-        Ok(Self {
-            auto_cleanup_enabled: false,
-            ..Self::from_desktop_config(codex_home, desktop.as_ref())?
-        })
-    }
-
     /// Resolves existing `[desktop]` values without introducing another config format.
     pub fn from_desktop_config(
         codex_home: &Path,

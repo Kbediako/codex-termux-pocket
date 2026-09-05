@@ -289,7 +289,6 @@ pub(crate) fn summary_to_thread(
         thread_source: None,
         git_info,
         name: None,
-        daybreak_enabled: None,
         turns: Vec::new(),
     }
 }

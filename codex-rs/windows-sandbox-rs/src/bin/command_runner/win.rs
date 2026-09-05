@@ -77,6 +77,9 @@ use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
+// Kept in sync with codex_exec_server::CODEX_FS_HELPER_ARG1 without introducing
+// a dependency cycle.
+const FS_HELPER_ARG: &str = "--codex-run-as-fs-helper";
 const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
 const TERMINATION_WAIT_MS: u32 = 5_000;
 const WAIT_TIMEOUT: u32 = 0x0000_0102;
@@ -352,7 +355,11 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
             &req.env,
             stdin_mode,
             StderrMode::Separate,
-            ConsoleMode::NoWindow,
+            if req.command.get(1).is_some_and(|arg| arg == FS_HELPER_ARG) {
+                ConsoleMode::NoWindow
+            } else {
+                ConsoleMode::Inherit
+            },
             desktop,
             Some(log_dir.as_path()),
         )?;

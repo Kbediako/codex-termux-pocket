@@ -1,5 +1,4 @@
 use crate::reasons::REASON_POLICY_DENIED;
-use crate::request_cancellation::NetworkRequestCancellation;
 use crate::request_disconnect::NetworkRequestDisconnect;
 use crate::runtime::HostBlockDecision;
 use crate::runtime::HostBlockReason;
@@ -110,8 +109,6 @@ pub struct NetworkPolicyRequest {
     pub execution_id: Option<String>,
     /// Present only when the local HTTP transport can identify an abandoned request.
     pub disconnect: Option<NetworkRequestDisconnect>,
-    /// Controller-owned cause, published before an abandoned decision future is dropped.
-    pub cancellation: Option<NetworkRequestCancellation>,
 }
 
 pub struct NetworkPolicyRequestArgs {
@@ -148,7 +145,6 @@ impl NetworkPolicyRequest {
             exec_policy_hint,
             execution_id: None,
             disconnect: None,
-            cancellation: None,
         }
     }
 }

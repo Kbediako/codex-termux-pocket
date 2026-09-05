@@ -370,7 +370,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
 }
 
 #[tokio::test]
-async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Result<()> {
+async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
@@ -432,8 +432,7 @@ async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Re
     let client = start_in_process_client(config, loader_overrides).await?;
     let reads_before_resume = thread_store.calls().await.read_thread_with_history;
     // The in-memory store is pathless, so resume currently fails later while
-    // assembling the response. Reuse the probe within each attempt, but read it
-    // again after loading configuration without the metadata permit.
+    // assembling the response. The history-bearing probe must still be reused.
     let _resume_result = client
         .request(ClientRequest::ThreadResume {
             request_id: RequestId::Integer(3),
@@ -444,9 +443,12 @@ async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Re
         })
         .await?;
 
-    let reads_after_resume = thread_store.calls().await.read_thread_with_history;
+    assert_eq!(
+        thread_store.calls().await.read_thread_with_history,
+        reads_before_resume + 1
+    );
+
     client.shutdown().await?;
-    assert_eq!(reads_after_resume, reads_before_resume + 2);
     Ok(())
 }
 

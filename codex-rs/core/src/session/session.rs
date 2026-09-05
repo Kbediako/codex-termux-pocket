@@ -619,7 +619,6 @@ impl Session {
             request_kind,
         );
         CodexResponsesMetadata {
-            guardian_ticket: turn_context.guardian_ticket.clone(),
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
             history_ingest_requested: turn_context
@@ -833,9 +832,6 @@ impl Session {
         thread_extension_init.insert(codex_extension_api::ThreadOriginator(
             session_configuration.originator.clone(),
         ));
-        // Publish the already resolved model before extensions make startup decisions.
-        // Turn construction refreshes this attachment when the selected model changes.
-        thread_extension_init.insert(model_info);
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
@@ -1266,9 +1262,6 @@ impl Session {
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
             );
-            if config.features.enabled(Feature::GuardianThreadContext) {
-                state.history.enable_user_message_retention();
-            }
             state.base_instructions_provenance = base_instructions_provenance.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack

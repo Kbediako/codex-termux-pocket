@@ -1,5 +1,3 @@
-mod answered_question;
-pub use answered_question::AnsweredQuestion;
 mod additional_context;
 mod annotated_content;
 mod fragment;

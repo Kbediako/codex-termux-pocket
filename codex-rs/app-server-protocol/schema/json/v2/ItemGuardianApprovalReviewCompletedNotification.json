@@ -315,7 +315,7 @@
               "type": "string"
             },
             "cwd": {
-              "$ref": "#/definitions/LegacyAppPathString"
+              "$ref": "#/definitions/AbsolutePathBuf"
             },
             "source": {
               "$ref": "#/definitions/GuardianCommandSource"
@@ -408,11 +408,11 @@
         {
           "properties": {
             "cwd": {
-              "$ref": "#/definitions/LegacyAppPathString"
+              "$ref": "#/definitions/AbsolutePathBuf"
             },
             "files": {
               "items": {
-                "$ref": "#/definitions/LegacyAppPathString"
+                "$ref": "#/definitions/AbsolutePathBuf"
               },
               "type": "array"
             },

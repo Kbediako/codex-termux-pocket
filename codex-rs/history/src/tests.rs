@@ -79,7 +79,6 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             metadata: Some(CodexHarnessMetadata {
                 client_authored: true,
                 fallback_token_limit_override: Some(20_000),
-                inherited_user_message: true,
                 ..Default::default()
             }),
         }),
@@ -93,11 +92,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             "ordinal": 7,
             "type": "response_item",
             "payload": response_item,
-            "metadata": {
-                "client_authored": true,
-                "fallback_token_limit_override": 20_000,
-                "inherited_user_message": true,
-            },
+            "metadata": { "client_authored": true, "fallback_token_limit_override": 20_000 },
         })
     );
     assert_eq!(serialized["payload"].get("metadata"), None);
@@ -111,7 +106,6 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         Some(CodexHarnessMetadata {
             client_authored: true,
             fallback_token_limit_override: Some(20_000),
-            inherited_user_message: true,
             ..Default::default()
         })
     );

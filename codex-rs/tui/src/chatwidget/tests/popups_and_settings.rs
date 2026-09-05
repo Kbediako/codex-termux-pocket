@@ -2998,33 +2998,22 @@ async fn apps_popup_for_not_installed_app_uses_install_only_selected_description
 async fn experimental_features_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let worktrees = Feature::Worktrees.stage();
     let features = vec![
         ExperimentalFeatureItem {
-            key: Feature::JsRepl.key().to_string(),
-            writable: true,
+            feature: Some(Feature::JsRepl),
             name: "JavaScript REPL".to_string(),
             description: "Enable a persistent Node-backed JavaScript REPL for interactive website debugging and other inline JavaScript execution capabilities.".to_string(),
             enabled: false,
         },
         ExperimentalFeatureItem {
-            key: Feature::ShellTool.key().to_string(),
-            writable: true,
+            feature: Some(Feature::ShellTool),
             name: "Shell tool".to_string(),
             description: "Allow the model to run shell commands.".to_string(),
             enabled: true,
         },
-        ExperimentalFeatureItem {
-            key: Feature::Worktrees.key().to_string(),
-            writable: true,
-            name: worktrees.experimental_menu_name().unwrap().to_string(),
-            description: worktrees.experimental_menu_description().unwrap().to_string(),
-            enabled: false,
-        },
     ];
     let view = ExperimentalFeaturesView::new(
         features,
-        ThreadId::new(),
         /*catalog_rx*/ None,
         chat.app_event_tx.clone(),
         crate::keymap::RuntimeKeymap::defaults().list,
@@ -3042,13 +3031,11 @@ async fn experimental_features_popup_snapshot() {
         .expect("valid experimental-feature chord");
     let view = ExperimentalFeaturesView::new(
         vec![ExperimentalFeatureItem {
-            key: Feature::ShellTool.key().to_string(),
-            writable: true,
+            feature: Some(Feature::ShellTool),
             name: "Shell tool".to_string(),
             description: "Allow the model to run shell commands.".to_string(),
             enabled: true,
         }],
-        ThreadId::new(),
         /*catalog_rx*/ None,
         chat.app_event_tx.clone(),
         keymap.list,
@@ -3062,21 +3049,17 @@ async fn experimental_features_popup_snapshot() {
 async fn experimental_features_toggle_saves_on_exit() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let mut keymap = crate::keymap::RuntimeKeymap::defaults().list;
-    keymap.cancel = vec![crate::key_hint::plain(KeyCode::F(2))];
     let expected_feature = Feature::JsRepl;
     let view = ExperimentalFeaturesView::new(
         vec![ExperimentalFeatureItem {
-            key: expected_feature.key().to_string(),
-            writable: true,
+            feature: Some(expected_feature),
             name: "JavaScript REPL".to_string(),
             description: "Enable a persistent Node-backed JavaScript REPL for interactive website debugging and other inline JavaScript execution capabilities.".to_string(),
             enabled: false,
         }],
-        ThreadId::new(),
         /*catalog_rx*/ None,
         chat.app_event_tx.clone(),
-        keymap,
+        crate::keymap::RuntimeKeymap::defaults().list,
     );
     chat.bottom_pane.show_view(Box::new(view));
 
@@ -3087,17 +3070,12 @@ async fn experimental_features_toggle_saves_on_exit() {
         "expected no updates until saving the popup"
     );
 
-    chat.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-    assert!(
-        !chat.has_active_view(),
-        "remapped cancel must save and close"
-    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     let mut updates = None;
     while let Ok(event) = rx.try_recv() {
-        if let AppEvent::SaveExperimentalFeatures {
+        if let AppEvent::UpdateFeatureFlags {
             updates: event_updates,
-            ..
         } = event
         {
             updates = Some(event_updates);
@@ -3105,8 +3083,8 @@ async fn experimental_features_toggle_saves_on_exit() {
         }
     }
 
-    let updates = updates.expect("expected SaveExperimentalFeatures event");
-    assert_eq!(updates, vec![(expected_feature.key().to_string(), true)]);
+    let updates = updates.expect("expected UpdateFeatureFlags event");
+    assert_eq!(updates, vec![(expected_feature, true)]);
 }
 
 #[tokio::test]

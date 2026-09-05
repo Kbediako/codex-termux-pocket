@@ -5,10 +5,7 @@ use crate::app_event::TranscriptExportDestination;
 
 impl ChatWidget {
     pub(crate) fn copy_transcript_to_clipboard(&mut self, markdown: &str) {
-        match crate::clipboard_copy::copy_to_clipboard(
-            markdown,
-            crate::clipboard_copy::CopyFormat::PlainText,
-        ) {
+        match crate::clipboard_copy::copy_to_clipboard(markdown) {
             Ok(lease) => {
                 self.clipboard_lease = lease;
                 self.add_info_message(
