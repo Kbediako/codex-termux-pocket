@@ -105,6 +105,38 @@ fn merge_toml_values_at_path(base: &mut TomlValue, overlay: &TomlValue, path: &m
             normalize_case_insensitive_keys(base_table);
             normalize_case_insensitive_keys(&mut overlay_table);
         }
+        if path.split_last().is_some_and(|(field, feature_path)| {
+            field == "credentials" && is_structured_feature_path(feature_path)
+        }) {
+            for (provider_id, provider) in &overlay_table {
+                let Some(overlay_sources) = provider.get("env").and_then(TomlValue::as_array)
+                else {
+                    continue;
+                };
+                base_table.retain(|existing_id, existing| {
+                    existing_id == provider_id
+                        || !overlay_table
+                            .get(existing_id)
+                            .and_then(|provider| provider.get("env"))
+                            .or_else(|| existing.get("env"))
+                            .and_then(TomlValue::as_array)
+                            .is_some_and(|existing_sources| {
+                                existing_sources.iter().filter_map(TomlValue::as_str).any(
+                                    |existing_source| {
+                                        overlay_sources.iter().filter_map(TomlValue::as_str).any(
+                                            |overlay_source| {
+                                                existing_source == overlay_source
+                                                    || cfg!(windows)
+                                                        && existing_source
+                                                            .eq_ignore_ascii_case(overlay_source)
+                                            },
+                                        )
+                                    },
+                                )
+                            })
+                });
+            }
+        }
         for (key, value) in overlay_table {
             path.push(key.clone());
             if let Some(existing) = base_table.get_mut(&key) {

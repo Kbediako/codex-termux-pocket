@@ -5,6 +5,8 @@ mod macos;
 mod project_discovery;
 #[cfg(test)]
 mod tests;
+#[cfg(windows)]
+mod windows;
 
 use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
@@ -58,6 +60,10 @@ pub use local::LocalConfigLayers;
 pub use local::LocalTomlLayer;
 pub use local::LocalTomlLayerStack;
 pub use local::load_local_config_layers;
+#[cfg(windows)]
+pub use windows::WindowsSystemConfigNamespaceProbe;
+#[cfg(windows)]
+pub use windows::probe_windows_system_config_namespace;
 
 #[cfg(unix)]
 const SYSTEM_CONFIG_TOML_FILE_UNIX: &str = "/etc/codex/config.toml";
@@ -366,6 +372,11 @@ pub async fn load_config_layers_state(
         if let Some(cli_overrides_layer) = cli_overrides_layer.as_ref() {
             merge_toml_values(&mut merged_so_far, cli_overrides_layer);
         }
+        let trusted_broker_config = credential_broker_trusted_config(
+            &merged_so_far,
+            &thread_config_layers,
+            &loaded_config_layers,
+        );
         // Managed config wins over CLI config. Apply it before choosing the
         // project root and trust, but keep its final layers above project config.
         project_discovery::merge_managed_config_for_discovery(
@@ -390,11 +401,7 @@ pub async fn load_config_layers_state(
         let mut project_trust_context = match project_trust_context(
             fs,
             &merged_so_far,
-            &credential_broker_trusted_config(
-                &merged_so_far,
-                &thread_config_layers,
-                &loaded_config_layers,
-            ),
+            &trusted_broker_config,
             &cwd,
             &project_root_markers,
             codex_home,
@@ -1357,6 +1364,8 @@ async fn project_trust_context(
     })
 }
 
+// Start before managed layers are merged: replaying credential source remaps
+// can discard provider fields needed to protect their environment bindings.
 fn credential_broker_trusted_config(
     merged_config: &TomlValue,
     thread_config_layers: &[ConfigLayerEntry],

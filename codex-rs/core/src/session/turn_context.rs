@@ -295,6 +295,8 @@ pub struct TurnContext {
     /// Frozen settings used to construct this context. Legacy turn consumers
     /// keep this view even when later steps use different settings.
     pub(crate) initial_settings: Arc<ResolvedStepSettings>,
+    /// Thread-owned plugin selection captured when this turn was admitted.
+    pub(crate) disabled_plugin_ids: Vec<String>,
     /// Snapshot for the next step; request consumers use their captured StepContext.
     pub(super) current_settings: ArcSwap<ResolvedStepSettings>,
     /// Turn-wide telemetry; model-attributed step work should use `StepContext::session_telemetry`.
@@ -339,6 +341,11 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    /// Captures current model metadata without preparing a step.
+    pub(crate) fn capture_current_model_info(&self) -> Arc<ModelInfo> {
+        Arc::clone(&self.current_settings.load().model_info)
+    }
+
     /// Legacy: returns the frozen initial-turn model metadata.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
@@ -369,16 +376,6 @@ impl TurnContext {
         self.initial_settings.personality()
     }
 
-    /// Legacy: returns the frozen initial-turn collaboration-mode developer instructions.
-    /// Step-scoped consumers should use their captured `StepContext::settings`.
-    pub(crate) fn collaboration_mode_developer_instructions(&self) -> &Option<String> {
-        &self
-            .initial_settings
-            .selected_collaboration_mode()
-            .settings
-            .developer_instructions
-    }
-
     pub(crate) fn skills_snapshot(&self) -> Arc<HostSkillsSnapshot> {
         let Some(snapshot) = self.extension_data.get::<HostSkillsSnapshot>() else {
             unreachable!("every turn has a host skills snapshot");
@@ -389,14 +386,7 @@ impl TurnContext {
     /// Legacy: returns the frozen initial-turn collaboration mode with the resolved model slug.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn collaboration_mode(&self) -> CollaborationMode {
-        CollaborationMode {
-            mode: self.mode(),
-            settings: Settings {
-                model: self.model_info().slug.clone(),
-                reasoning_effort: self.reasoning_effort().cloned(),
-                developer_instructions: self.collaboration_mode_developer_instructions().clone(),
-            },
-        }
+        self.initial_settings.effective_collaboration_mode()
     }
 
     pub(crate) fn plugin_attribution_for_command(
@@ -606,6 +596,7 @@ impl TurnContext {
             use_model_token_budget_defaults: self.use_model_token_budget_defaults,
             auth_manager: self.auth_manager.clone(),
             initial_settings: Arc::clone(&step_settings),
+            disabled_plugin_ids: self.disabled_plugin_ids.clone(),
             current_settings: ArcSwap::from(step_settings),
             session_telemetry,
             provider: self.provider.clone(),
@@ -667,6 +658,7 @@ impl TurnContext {
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             root_turn_id: self.turn_metadata_state.root_turn_id(),
+            disabled_plugin_ids: Some(self.disabled_plugin_ids.clone()),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -878,6 +870,7 @@ impl Session {
             use_model_token_budget_defaults,
             auth_manager,
             initial_settings: Arc::clone(&step_settings),
+            disabled_plugin_ids: session_configuration.disabled_plugin_ids.clone(),
             current_settings: ArcSwap::from(step_settings),
             session_telemetry: session_telemetry_for_context,
             provider,

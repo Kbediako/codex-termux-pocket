@@ -1442,6 +1442,13 @@ class FeedbackUploadResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    prompt_hash: Annotated[
+        str | None,
+        Field(
+            alias="promptHash",
+            description="Whitespace-normalized SHA-256 of the session base instructions, matching the uploaded `prompt_hash` tag. Does not include later developer messages. Null when the reported rollout has no prompt metadata.",
+        ),
+    ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
 
 

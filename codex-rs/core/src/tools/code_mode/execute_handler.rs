@@ -33,7 +33,7 @@ impl CodeModeExecuteHandler {
     async fn execute(
         &self,
         session: std::sync::Arc<crate::session::session::Session>,
-        turn: std::sync::Arc<crate::session::turn_context::TurnContext>,
+        step_context: std::sync::Arc<crate::session::step_context::StepContext>,
         call_id: String,
         originating_item_id: Option<codex_protocol::ResponseItemId>,
         code: String,
@@ -41,7 +41,10 @@ impl CodeModeExecuteHandler {
     ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args =
             codex_code_mode::parse_exec_source(&code).map_err(FunctionCallError::RespondToModel)?;
-        let exec = ExecContext { session, turn };
+        let exec = ExecContext {
+            session,
+            turn: Arc::clone(&step_context.turn),
+        };
         let mut enabled_tools = Vec::with_capacity(self.nested_tool_specs.len());
         for (spec, cached_runtime) in &self.nested_tool_specs {
             if let Some(cached_definitions) = cached_runtime
@@ -138,9 +141,14 @@ impl CodeModeExecuteHandler {
         let wall_time = response
             .code_mode_host_duration()
             .unwrap_or_else(|| started_at.elapsed());
-        handle_runtime_response(&exec, response, args.max_output_tokens, wall_time)
-            .await
-            .map_err(FunctionCallError::RespondToModel)
+        handle_runtime_response(
+            &step_context.settings.model_info,
+            response,
+            args.max_output_tokens,
+            wall_time,
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)
     }
 }
 
@@ -170,6 +178,7 @@ impl CodeModeExecuteHandler {
         let ToolInvocation {
             session,
             turn,
+            step_context,
             call_id,
             tool_name,
             payload,
@@ -188,7 +197,7 @@ impl CodeModeExecuteHandler {
             ToolPayload::Custom { input } if is_exec_tool_name(&tool_name) => self
                 .execute(
                     session,
-                    turn,
+                    step_context,
                     call_id,
                     originating_item_id,
                     input,

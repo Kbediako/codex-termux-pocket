@@ -44,6 +44,7 @@ pub use executed_tool_calls::ExecutedToolCall;
 pub use executed_tool_calls::ExecutedToolCallArguments;
 pub use executed_tool_calls::ExecutedToolCallTruncation;
 pub use executed_tool_calls::MAX_TOOL_RESULT_SOURCE_FIELD_BYTES;
+pub use executed_tool_calls::ToolResultMetadata;
 pub use executed_tool_calls::ToolResultSource;
 pub use executed_tool_calls::ToolResultSources;
 pub use executed_tool_calls::bound_executed_tool_calls_for_prompt;

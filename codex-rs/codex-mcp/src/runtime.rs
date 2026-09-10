@@ -46,8 +46,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpConfig;
 use crate::binding::McpBinding;
-use crate::client_tool_catalog::ClientToolCatalogRevision;
 use crate::client_tool_catalog::CodexAppsToolSnapshot;
+use crate::connection_manager::BindingCatalogRevision;
 use crate::connection_manager::McpConnectionSet;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
@@ -119,7 +119,7 @@ struct PublishedMcpRuntime {
 }
 
 struct CachedMcpBinding {
-    catalog_revisions: HashMap<String, ClientToolCatalogRevision>,
+    catalog_revisions: HashMap<String, BindingCatalogRevision>,
     binding: Arc<McpBinding>,
 }
 
@@ -363,7 +363,10 @@ impl McpRuntime {
         required_plugins: &HashSet<String>,
     ) -> Option<Arc<McpBinding>> {
         let config = Arc::clone(current.config.as_ref()?);
-        let stable_catalog_revisions = current.connections.stable_catalog_revisions().await;
+        let stable_catalog_revisions = current
+            .connections
+            .stable_catalog_revisions(required_servers, required_plugins)
+            .await;
         if let Some(catalog_revisions) = &stable_catalog_revisions {
             let cached = current
                 .cached_binding
@@ -390,7 +393,7 @@ impl McpRuntime {
         if let Some(catalog_revisions) = stable_catalog_revisions
             && current
                 .connections
-                .stable_catalog_revisions()
+                .stable_catalog_revisions(required_servers, required_plugins)
                 .await
                 .as_ref()
                 == Some(&catalog_revisions)

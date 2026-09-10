@@ -21,6 +21,14 @@ pub struct CredentialProviderConfig {
     pub prefix: Option<String>,
 }
 
+impl CredentialProviderConfig {
+    /// Validate a complete provider definition using the broker's compilation rules.
+    pub fn validate(&self, id: &str) -> anyhow::Result<()> {
+        super::configured::ConfiguredCredentialProvider::compile(id, self)?;
+        Ok(())
+    }
+}
+
 /// Authentication formats supported by declarative credential providers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -302,10 +302,6 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
 
     let server = start_mock_server().await;
     let summary = "Guardian retained the user's standing authorization.";
-    let compact = core_test_support::responses::mount_compact_user_history_with_summary_once(
-        &server, summary,
-    )
-    .await;
     let mut builder = test_codex()
         .with_model_info_override("gpt-5.5", |model| {
             model.auto_review_model_override = Some(model.slug.clone());
@@ -328,10 +324,6 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
                 .features
                 .set_enabled(Feature::GuardianThreadContext, thread_owned)
                 .expect("configure Guardian context mode");
-            config
-                .features
-                .disable(Feature::RemoteCompactionV2)
-                .expect("use remote compaction");
             config.model_context_window = Some(100_000);
             config.model_auto_compact_token_limit = Some(50_000);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -368,6 +360,13 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
                 ev_completed("resp-parent-second"),
             ]),
             sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {"type": "compaction", "encrypted_content": summary},
+                }),
+                ev_completed("resp-guardian-compact"),
+            ]),
+            sse(vec![
                 ev_response_created("resp-guardian-second"),
                 ev_assistant_message("guardian-second", approval),
                 ev_completed("resp-guardian-second"),
@@ -389,6 +388,7 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
         .iter()
         .filter(|request| {
             request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
+                && request.inputs_of_type("compaction_trigger").is_empty()
         })
         .collect::<Vec<_>>();
     assert_eq!(guardian_requests.len(), 2);
@@ -402,7 +402,12 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
     for request in &guardian_requests {
         assert!(!request.has_content_kinds(&["token_budget.context_window"]));
     }
-    let compact_request = compact.single_request();
+    let compact_requests = requests
+        .iter()
+        .filter(|request| !request.inputs_of_type("compaction_trigger").is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(compact_requests.len(), 1);
+    let compact_request = compact_requests[0];
     assert!(
         compact_request
             .message_input_texts("user")

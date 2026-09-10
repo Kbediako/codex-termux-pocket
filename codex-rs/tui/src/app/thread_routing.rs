@@ -917,6 +917,7 @@ impl App {
                 let store = Arc::clone(&self.ensure_thread_channel(review_thread_id).store);
                 let mut store = store.lock().await;
                 store.set_active_turn_id(response.turn.id);
+                self.chat_widget.on_review_started();
                 Ok(true)
             }
             AppCommand::CleanBackgroundTerminals => {
@@ -1510,6 +1511,7 @@ impl App {
             self.recap.reset_for_new_thread(Instant::now());
         }
         self.primary_thread_id = Some(thread_id);
+        self.agents_overview.hidden_threads.remove(&thread_id);
         self.agents_overview.threads.entry(thread_id).or_default();
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(

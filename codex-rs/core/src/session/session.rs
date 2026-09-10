@@ -116,6 +116,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) codex_home: AbsolutePathBuf,
     /// Optional user-facing name for the thread, updated during the session.
     pub(super) thread_name: Option<String>,
+    /// Thread-owned plugin selection inherited by future turns.
+    pub(super) disabled_plugin_ids: Vec<String>,
 
     // TODO(pakrym): Remove config from here
     pub(super) original_config_do_not_use: Arc<Config>,
@@ -302,6 +304,7 @@ impl SessionConfiguration {
             reasoning_summary: self.step_settings.reasoning_summary,
             personality: self.step_settings.personality,
             collaboration_mode: self.step_settings.collaboration_mode.clone(),
+            disabled_plugin_ids: self.disabled_plugin_ids.clone(),
         }
     }
 
@@ -330,6 +333,7 @@ impl SessionConfiguration {
             service_tier: Some(self.step_settings.service_tier.clone()),
             collaboration_mode: Some(self.step_settings.collaboration_mode.clone()),
             personality: self.step_settings.personality,
+            disabled_plugin_ids: Some(self.disabled_plugin_ids.clone()),
             ..Default::default()
         }
     }
@@ -370,6 +374,9 @@ impl SessionConfiguration {
         current_environments: &[TurnEnvironmentSelection],
     ) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
+        if let Some(disabled_plugin_ids) = &updates.disabled_plugin_ids {
+            next_configuration.disabled_plugin_ids = disabled_plugin_ids.clone();
+        }
         let current_file_system_sandbox_policy =
             self.file_system_sandbox_policy(current_environments);
         let file_system_policy_has_rebindable_project_root_write =
@@ -573,6 +580,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) service_tier_for_turn: Option<String>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
+    pub(crate) disabled_plugin_ids: Option<Vec<String>>,
 }
 
 pub(crate) struct AppServerClientMetadata {
@@ -869,7 +877,7 @@ impl Session {
         // - load history metadata (skipped for subagents)
         let thread_persistence_fut = async {
             if config.ephemeral {
-                Ok::<_, anyhow::Error>(None)
+                Ok::<_, anyhow::Error>(LiveThreadInitGuard::new(/*live_thread*/ None))
             } else {
                 let live_thread = match &initial_history {
                     InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
@@ -947,7 +955,8 @@ impl Session {
                         .await?
                     }
                 };
-                Ok(Some(live_thread))
+                // The completed result can wait in join! while the other startup work is pending.
+                Ok(LiveThreadInitGuard::new(Some(live_thread)))
             }
         }
         .instrument(info_span!(
@@ -1027,11 +1036,10 @@ impl Session {
         let (thread_persistence_result, state_db_ctx, (auth, mcp_projection)) =
             tokio::join!(thread_persistence_fut, state_db_fut, auth_and_mcp_fut);
 
-        let mut live_thread_init =
-            LiveThreadInitGuard::new(thread_persistence_result.map_err(|e| {
-                error!("failed to initialize thread persistence: {e:#}");
-                e
-            })?);
+        let mut live_thread_init = thread_persistence_result.map_err(|e| {
+            error!("failed to initialize thread persistence: {e:#}");
+            e
+        })?;
         let session_result: anyhow::Result<Arc<Self>> = async {
             let rollout_path = if let Some(live_thread) = live_thread_init.as_ref() {
                 live_thread.local_rollout_path().await?
@@ -1143,7 +1151,7 @@ impl Session {
                 model: Some(session_model.clone()),
                 slug: Some(session_model),
             };
-            config.features.emit_metrics(&session_telemetry);
+            crate::config::emit_session_start_metrics(config.as_ref(), &session_telemetry);
             let is_worktree = session_configuration.cwd().canonicalize().ok().and_then(|cwd| {
                 codex_git_utils::repository_identity(&cwd).and_then(|_| {
                     get_git_repo_root(&cwd).map(|root| root.join(".git").is_file())
@@ -1470,7 +1478,10 @@ impl Session {
                 }).await;
             }
 
-            let executed_tool_calls = crate::state::ExecutedToolCalls::new(&config.features);
+            let executed_tool_calls = crate::state::ExecutedToolCalls::new(
+                &config.features,
+                &initial_history,
+            );
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1674,10 +1685,15 @@ impl Session {
             sess.schedule_startup_prewarm(sess.get_prompt_base_instructions().await.text)
                 .await;
             let session_start_source = match &initial_history {
-                InitialHistory::Resumed(_) => codex_hooks::SessionStartSource::Resume,
-                InitialHistory::New | InitialHistory::Forked(_) => {
-                    codex_hooks::SessionStartSource::Startup
+                InitialHistory::Forked(_) if forked_from_id.is_some() => {
+                    codex_hooks::SessionStartSource::Fork
                 }
+                // `thread/resume` with supplied history uses `Forked` internally
+                // without a fork parent, so it should still report `resume`.
+                InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
+                    codex_hooks::SessionStartSource::Resume
+                }
+                InitialHistory::New => codex_hooks::SessionStartSource::Startup,
                 InitialHistory::Cleared => codex_hooks::SessionStartSource::Clear,
             };
 

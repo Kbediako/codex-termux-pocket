@@ -62,6 +62,7 @@ members = [
     "ext/extension-api",
     "ext/goal",
     "ext/git-attribution",
+    "ext/guardian-reviewer",
     "ext/guardian-v2",
     "ext/history-notes",
     "ext/image-generation",
@@ -150,7 +151,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.154.0-alpha.11"
+version = "0.155.0-alpha.1"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -213,6 +214,7 @@ codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
 codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
+codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
 codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }

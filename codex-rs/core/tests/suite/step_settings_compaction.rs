@@ -9,12 +9,10 @@ use test_case::test_case;
 #[derive(Clone, Copy)]
 enum CompactionMode {
     Local,
-    Remote,
     RemoteV2,
 }
 
 #[test_case(CompactionMode::Local; "local")]
-#[test_case(CompactionMode::Remote; "remote")]
 #[test_case(CompactionMode::RemoteV2; "remote v2")]
 #[tokio::test]
 async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()> {
@@ -32,23 +30,16 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
             responses::ev_completed_with_tokens("plan-response", /*total_tokens*/ 330_000),
         ]),
     ];
-    let compact = match mode {
-        CompactionMode::Local => {
-            bodies.push(sse(vec![
-                responses::ev_assistant_message("summary", "Compacted history"),
-                ev_completed("compact"),
-            ]));
-            None
-        }
-        CompactionMode::Remote => Some(
-            responses::mount_compact_user_history_with_summary_once(&server, "encrypted-summary")
-                .await,
-        ),
-        CompactionMode::RemoteV2 => {
-            bodies.push(sse(vec![json!({"type": "response.output_item.done", "item": {"type": "compaction", "encrypted_content": "encrypted-summary"}}), ev_completed("compact")]));
-            None
-        }
-    };
+    bodies.push(match mode {
+        CompactionMode::Local => sse(vec![
+            responses::ev_assistant_message("summary", "Compacted history"),
+            ev_completed("compact"),
+        ]),
+        CompactionMode::RemoteV2 => sse(vec![
+            json!({"type": "response.output_item.done", "item": {"type": "compaction", "encrypted_content": "encrypted-summary"}}),
+            ev_completed("compact"),
+        ]),
+    });
     bodies.push(sse_completed("done"));
     let responses = mount_sse_sequence(&server, bodies).await;
     let test = step_settings_test()
@@ -61,20 +52,9 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
                 .expect("disable token budget");
             config.model_provider.name = match mode {
                 CompactionMode::Local => "Local compaction test",
-                CompactionMode::Remote | CompactionMode::RemoteV2 => "OpenAI",
+                CompactionMode::RemoteV2 => "OpenAI",
             }
             .to_string();
-            if matches!(mode, CompactionMode::RemoteV2) {
-                config
-                    .features
-                    .enable(Feature::RemoteCompactionV2)
-                    .expect("enable v2");
-            } else {
-                config
-                    .features
-                    .disable(Feature::RemoteCompactionV2)
-                    .expect("disable v2");
-            }
         })
         .build_with_auto_env(&server)
         .await?;
@@ -106,9 +86,6 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
         ],
         [json!("concise"), json!("detailed")]
     );
-    if let Some(compact) = compact {
-        compact.single_request();
-    }
     let rollout =
         std::fs::read_to_string(test.session_configured.rollout_path.expect("rollout path"))?;
     let items = rollout

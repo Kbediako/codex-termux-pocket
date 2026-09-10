@@ -641,6 +641,7 @@ impl Session {
         run_hooks_and_record_inputs(
             self,
             &turn_context,
+            &turn_context.capture_current_model_info(),
             &pending_input,
             PersistContext::Standard,
         )
@@ -951,6 +952,7 @@ impl Session {
         {
             self.record_conversation_items(
                 task.turn_context.as_ref(),
+                task.turn_context.model_info(),
                 std::slice::from_ref(&marker),
             )
             .await;

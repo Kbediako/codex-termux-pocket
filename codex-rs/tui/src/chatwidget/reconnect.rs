@@ -41,7 +41,10 @@ impl ChatWidget {
             if input.user_turn_pending_start
                 && let Some(prompt) = input.safety_buffering_prompt.take()
             {
-                input.queued_user_messages.push_front(prompt.into());
+                input.queued_user_messages.push_front(QueuedUserMessage {
+                    source: input.safety_buffering_source,
+                    ..QueuedUserMessage::from(prompt)
+                });
                 input
                     .queued_user_message_history_records
                     .push_front(UserMessageHistoryRecord::UserMessageText);

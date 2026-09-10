@@ -62,8 +62,8 @@ pub enum ApprovalDecision {
     AskUser,
 }
 
-/// Runs the existing synchronous review for the bound action and cancellation token.
-/// Implementations must not resolve policy or reuse an async score.
+/// Runs an extension-owned synchronous review already bound to an action by the host.
+/// Implementations must not resolve approval routing or reuse an async score.
 pub trait SynchronousApprovalReviewer: Send + Sync {
     fn review(
         &self,

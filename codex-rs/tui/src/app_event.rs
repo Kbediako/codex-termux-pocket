@@ -67,6 +67,13 @@ use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
 
 use crate::history_cell::HistoryCell;
 
+/// Confirmed server lifecycle operations available from the agents dashboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentsOverviewAction {
+    Archive,
+    Delete,
+}
+
 /// Whether a managed checkout starts fresh or preserves the current conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManagedWorktreeMode {
@@ -309,6 +316,20 @@ pub(crate) enum AppEvent {
     /// Interrupt a task directly from the shared dashboard.
     StopAgentsOverviewThread {
         thread_id: ThreadId,
+    },
+    /// Hide a dashboard row locally without stopping its task.
+    HideAgentsOverviewThread {
+        thread_id: ThreadId,
+    },
+    /// Confirm a server lifecycle action for the selected dashboard task.
+    ConfirmAgentsOverviewAction {
+        thread_id: ThreadId,
+        action: AgentsOverviewAction,
+    },
+    /// Execute a confirmed dashboard lifecycle action.
+    RunAgentsOverviewAction {
+        thread_id: ThreadId,
+        action: AgentsOverviewAction,
     },
     /// Start the shared app-server daemon without moving the current embedded session.
     #[cfg(any(unix, windows))]
@@ -1229,19 +1250,6 @@ pub(crate) enum AppEvent {
     BeginWindowsSandboxLegacySetup {
         preset: ApprovalPreset,
         profile_selection: Option<PermissionProfileSelection>,
-    },
-
-    /// Begin a non-elevated grant of read access for an additional directory.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    BeginWindowsSandboxGrantReadRoot {
-        path: String,
-    },
-
-    /// Result of attempting to grant read access for an additional directory.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    WindowsSandboxGrantReadRootCompleted {
-        path: PathBuf,
-        error: Option<String>,
     },
 
     /// Enable the Windows sandbox feature and switch to Agent mode.

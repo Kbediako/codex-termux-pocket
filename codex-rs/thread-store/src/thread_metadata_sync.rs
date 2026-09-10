@@ -656,6 +656,7 @@ mod tests {
             ThreadSettingsAppliedEvent {
                 thread_id: None,
                 thread_settings: ThreadSettingsSnapshot {
+                    disabled_plugin_ids: Vec::new(),
                     model: "gpt-5.2-codex".to_string(),
                     model_provider_id: "updated-provider".to_string(),
                     service_tier: None,

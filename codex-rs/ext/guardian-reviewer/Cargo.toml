@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-guardian-reviewer"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "codex_guardian_reviewer"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+codex-analytics = { workspace = true }
+codex-extension-api = { workspace = true }
+codex-protocol = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

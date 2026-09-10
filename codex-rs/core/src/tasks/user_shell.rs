@@ -469,7 +469,11 @@ async fn persist_user_shell_output(
 
     if mode == UserShellCommandMode::StandaloneTurn {
         session
-            .record_conversation_items(turn_context, std::slice::from_ref(&output_item))
+            .record_conversation_items(
+                turn_context,
+                turn_context.model_info(),
+                std::slice::from_ref(&output_item),
+            )
             .await;
         // Standalone shell turns can run before any regular user turn, so
         // explicitly materialize rollout persistence after recording output.

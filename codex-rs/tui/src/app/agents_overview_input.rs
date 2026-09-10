@@ -1,5 +1,5 @@
 //! Focus and input routing for the agent dashboard. Refreshes retain the shared
-//! composer; dashboard actions never consume keys while its editor owns focus.
+//! composer; Right opens the selected task from an empty editor with no pending input.
 
 use super::*;
 use crate::bottom_pane::InputResult;
@@ -13,6 +13,17 @@ impl AgentsOverviewView {
         let mut state = self.state();
         let offline = state.connection_notice.is_some();
         let status_grouping = state.status_grouping;
+        if !offline
+            && crate::key_hint::plain(KeyCode::Right).is_press(key)
+            && state
+                .composer
+                .as_ref()
+                .is_some_and(ChatComposer::can_leave_empty_prompt_with_right)
+        {
+            drop(state);
+            self.activate();
+            return;
+        }
         if key.code == KeyCode::Esc && !state.composer_owns_escape() {
             state.focus = AgentsOverviewFocus::List;
             return;
@@ -101,6 +112,16 @@ impl AgentsOverviewView {
             && state.composer_owns_escape()
         {
             *key = "esc esc".to_string();
+        }
+        if composing
+            && state.connection_notice.is_none()
+            && state
+                .composer
+                .as_ref()
+                .is_some_and(ChatComposer::can_leave_empty_prompt_with_right)
+            && self.rows.get(self.selected).is_some()
+        {
+            hints.push(("→".to_string(), "open task".to_string()));
         }
         if area.width < 60 && hints.len() > 2 {
             hints.remove(/*index*/ 1);

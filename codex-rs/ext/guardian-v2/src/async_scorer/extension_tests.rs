@@ -349,7 +349,25 @@ fn fast_decision_metric(decision: &str, reason: &str) -> RecordedMetric {
 #[derive(Default)]
 struct RecordingMetrics(Mutex<Vec<RecordedMetric>>);
 
+impl RecordingMetrics {
+    fn classification_samples(&self) -> Vec<RecordedMetric> {
+        self.0.lock().unwrap().iter().filter(|sample| {
+            !matches!(sample, RecordedMetric::Histogram(name, _, _) if name == codex_guardian_context::SECTION_COST_METRIC || name == codex_guardian_context::REQUEST_TOKENS_METRIC)
+        }).cloned().collect()
+    }
+}
+
 impl ExtensionMetrics for RecordingMetrics {
+    fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        _boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) {
+        self.histogram(name, value, tags);
+    }
+
     fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]) {
         self.0.lock().unwrap().push(RecordedMetric::Counter(
             name.to_owned(),
@@ -1436,12 +1454,22 @@ max_recent_non_user_entries = 8
             .latest_scored_tool_call
             .load(Ordering::Acquire)
             == 0
-            || metrics.0.lock().unwrap().len() < 14
+            || metrics.classification_samples().len() < 14
         {
             tokio::task::yield_now().await;
         }
     })
     .await?;
+    assert!(metrics.0.lock().unwrap().iter().any(|sample| {
+        matches!(sample, RecordedMetric::Histogram(name, value, tags)
+        if name == codex_guardian_context::SECTION_COST_METRIC
+            && *value > 0
+            && tags == &[
+                ("target".to_owned(), "async".to_owned()),
+                ("section".to_owned(), "conversation_transcript".to_owned()),
+                ("measurement".to_owned(), "text_bytes".to_owned()),
+            ])
+    }));
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.65)]),
         call_id: None,
@@ -1535,7 +1563,7 @@ max_recent_non_user_entries = 8
         Some(ReviewDecision::Approved)
     );
 
-    let samples = initial_metrics.0.lock().unwrap();
+    let samples = initial_metrics.classification_samples();
     let classification_duration_ms = match &samples[9] {
         RecordedMetric::Histogram(name, duration_ms, _)
             if name == CLASSIFICATION_DURATION_METRIC =>
@@ -1545,7 +1573,7 @@ max_recent_non_user_entries = 8
         sample => panic!("expected classification duration metric, got {sample:?}"),
     };
     assert_eq!(
-        *samples,
+        samples,
         [
             ("total", 150),
             ("input", 120),
@@ -1930,6 +1958,7 @@ async fn assert_luna_pool_context(thread_context_enabled: bool) -> Result<()> {
             "parent_turn_id": "turn-1",
             "root_turn_id": "root-turn",
             "thread_source": "guardian_classifier",
+            "turn_trigger": "guardian_classifier",
         })
     );
     assert_eq!(request["client_metadata"]["x-openai-subagent"], "guardian");
@@ -3420,3 +3449,6 @@ fn review_scope(action: &serde_json::Value) -> Option<GuardianScope> {
         tool => GuardianScope::for_tool(&ToolName::plain(tool)),
     }
 }
+
+#[path = "budget_tests.rs"]
+mod budget;

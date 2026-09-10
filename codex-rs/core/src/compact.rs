@@ -15,8 +15,6 @@ use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
-#[cfg(test)]
-use crate::session::PreviousTurnSettings;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -103,10 +101,7 @@ pub(crate) async fn build_compaction_initial_context(
             step_context,
         } => {
             let items = sess
-                .build_initial_context_with_world_state(
-                    step_context.turn.as_ref(),
-                    world_state.as_ref(),
-                )
+                .build_initial_context_with_world_state(step_context, world_state.as_ref())
                 .await;
             (
                 items.into_iter().map(ResponseItemEnvelope::new).collect(),
@@ -311,8 +306,11 @@ async fn run_compact_task_inner_impl(
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(&turn_context, event).await;
+                // Pre-turn failures are reported after preserving the incoming prompt.
+                if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
+                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                    sess.send_event(&turn_context, event).await;
+                }
                 return Err(e);
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
@@ -327,8 +325,10 @@ async fn run_compact_task_inner_impl(
                 }
                 sess.set_total_tokens_full(turn_context.as_ref()).await;
                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(&turn_context, event).await;
+                if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
+                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                    sess.send_event(&turn_context, event).await;
+                }
                 return Err(e);
             }
             Err(e) => {
@@ -345,8 +345,10 @@ async fn run_compact_task_inner_impl(
                     continue;
                 } else {
                     sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                    sess.send_event(&turn_context, event).await;
+                    if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
+                        let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                        sess.send_event(&turn_context, event).await;
+                    }
                     return Err(e);
                 }
             }
@@ -794,8 +796,12 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                sess.record_conversation_items(
+                    turn_context,
+                    turn_context.model_info(),
+                    std::slice::from_ref(&item),
+                )
+                .await;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;

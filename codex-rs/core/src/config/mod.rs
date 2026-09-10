@@ -164,6 +164,7 @@ use toml_edit::DocumentMut;
 mod auth_keyring;
 pub mod edit;
 mod managed_features;
+mod metrics;
 mod network_proxy_spec;
 mod otel;
 mod permission_profile_catalog;
@@ -186,6 +187,7 @@ pub use codex_network_proxy::NetworkProxyAuditMetadata;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 pub use codex_sandboxing::system_bwrap_warning;
 pub use managed_features::ManagedFeatures;
+pub(crate) use metrics::emit_session_start_metrics;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
 pub use permission_profile_catalog::PermissionProfileCatalogEntry;
@@ -1790,6 +1792,11 @@ impl Config {
                 Vec::new()
             },
             protocol_mode: self.mcp_protocol_mode(),
+            host_owned_apps_protocol_mode: if self.features.enabled(Feature::CodexAppsMcp20260728) {
+                McpProtocolMode::V20260728
+            } else {
+                McpProtocolMode::Legacy
+            },
             client_elicitation_capability: if self.features.enabled(Feature::AuthElicitation) {
                 ElicitationCapability::new()
                     .with_form(FormElicitationCapability::new())

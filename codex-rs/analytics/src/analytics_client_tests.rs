@@ -22,6 +22,7 @@ use crate::events::CodexRuntimeMetadata;
 use crate::events::CodexToolItemEventBase;
 use crate::events::CodexTurnEventRequest;
 use crate::events::FinalApprovalOutcome;
+use crate::events::GuardianAdditionalPermissions;
 use crate::events::GuardianApprovalRequestSource;
 use crate::events::GuardianReviewDecision;
 use crate::events::GuardianReviewEventParams;
@@ -172,9 +173,12 @@ use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
 use codex_protocol::models::PermissionProfile as CorePermissionProfile;
+use codex_protocol::models::SandboxPermissions;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::GuardianCommandSource;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookHandlerType;
@@ -1497,7 +1501,7 @@ fn compaction_event_serializes_expected_shape() {
                 turn_id: "turn-1".to_string(),
                 trigger: CompactionTrigger::Auto,
                 reason: CompactionReason::ContextLimit,
-                implementation: CompactionImplementation::ResponsesCompact,
+                implementation: CompactionImplementation::ResponsesCompactionV2,
                 phase: CompactionPhase::MidTurn,
                 strategy: CompactionStrategy::Memento,
                 status: CompactionStatus::Completed,
@@ -1550,7 +1554,7 @@ fn compaction_event_serializes_expected_shape() {
                 "parent_thread_id": null,
                 "trigger": "auto",
                 "reason": "context_limit",
-                "implementation": "responses_compact",
+                "implementation": "responses_compaction_v2",
                 "phase": "mid_turn",
                 "strategy": "memento",
                 "status": "completed",
@@ -2518,6 +2522,81 @@ async fn compaction_event_ingests_custom_fact() {
     assert_eq!(payload[0]["event_params"]["phase"], "standalone_turn");
     assert_eq!(payload[0]["event_params"]["strategy"], "memento");
     assert_eq!(payload[0]["event_params"]["status"], "failed");
+}
+
+#[test]
+fn execve_serializes_enabled_network_permissions() {
+    let permissions: AdditionalPermissionProfile = serde_json::from_value(json!({
+        "network": { "enabled": true },
+    }))
+    .expect("network permissions");
+
+    let action = GuardianReviewedAction::Execve {
+        source: GuardianCommandSource::UnifiedExec,
+        additional_permissions: Some(GuardianAdditionalPermissions::from(&permissions)),
+    };
+
+    assert_eq!(
+        serde_json::to_value(action).expect("serialize action"),
+        json!({
+            "type": "execve",
+            "source": "unified_exec",
+            "additional_permissions": {
+                "network": { "enabled": true },
+            },
+        }),
+    );
+}
+
+#[test]
+fn unified_exec_serializes_disabled_network_permissions() {
+    let permissions: AdditionalPermissionProfile = serde_json::from_value(json!({
+        "network": { "enabled": false },
+    }))
+    .expect("network permissions");
+
+    let action = GuardianReviewedAction::UnifiedExec {
+        sandbox_permissions: SandboxPermissions::WithAdditionalPermissions,
+        additional_permissions: Some(GuardianAdditionalPermissions::from(&permissions)),
+        tty: false,
+    };
+
+    assert_eq!(
+        serde_json::to_value(action).expect("serialize action"),
+        json!({
+            "type": "unified_exec",
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": {
+                "network": { "enabled": false },
+            },
+            "tty": false,
+        }),
+    );
+}
+
+#[test]
+fn permission_metadata_preserves_absent_and_empty_requests() {
+    for (input, expected) in [
+        (json!(null), json!(null)),
+        (json!({}), json!({ "network": null })),
+        (
+            json!({ "network": { "enabled": null } }),
+            json!({
+                "network": { "enabled": null },
+            }),
+        ),
+    ] {
+        let permissions: Option<AdditionalPermissionProfile> =
+            serde_json::from_value(input).expect("optional permissions");
+        let metadata = permissions
+            .as_ref()
+            .map(GuardianAdditionalPermissions::from);
+
+        assert_eq!(
+            serde_json::to_value(metadata).expect("serialize permissions"),
+            expected,
+        );
+    }
 }
 
 #[tokio::test]

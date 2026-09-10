@@ -383,7 +383,7 @@ impl App {
                 }
             }
             AppEvent::ArchiveCurrentThread => {
-                return Ok(self.archive_current_thread(app_server).await);
+                return self.archive_current_thread(tui, app_server).await;
             }
             AppEvent::DeleteCurrentThread => {
                 return Ok(self.delete_current_thread(app_server).await);
@@ -2167,63 +2167,6 @@ impl App {
                     let _ = (preset, profile_selection);
                 }
             }
-            AppEvent::BeginWindowsSandboxGrantReadRoot { path } => {
-                #[cfg(target_os = "windows")]
-                {
-                    self.chat_widget
-                        .add_to_history(history_cell::new_info_event(
-                            format!("Granting sandbox read access to {path} ..."),
-                            /*hint*/ None,
-                        ));
-
-                    let permission_profile = self.config.permissions.effective_permission_profile();
-                    let workspace_roots = self.config.effective_workspace_roots();
-                    let command_cwd = self.config.cwd.clone();
-                    let env_map: std::collections::HashMap<String, String> =
-                        std::env::vars().collect();
-                    let codex_home = self.config.codex_home.clone();
-                    let tx = self.app_event_tx.clone();
-
-                    tokio::task::spawn_blocking(move || {
-                        let requested_path = PathBuf::from(path);
-                        let event = match crate::windows_sandbox::grant_read_root_non_elevated(
-                            &permission_profile,
-                            workspace_roots.as_slice(),
-                            command_cwd.as_path(),
-                            &env_map,
-                            codex_home.as_path(),
-                            requested_path.as_path(),
-                        ) {
-                            Ok(canonical_path) => AppEvent::WindowsSandboxGrantReadRootCompleted {
-                                path: canonical_path,
-                                error: None,
-                            },
-                            Err(err) => AppEvent::WindowsSandboxGrantReadRootCompleted {
-                                path: requested_path,
-                                error: Some(err.to_string()),
-                            },
-                        };
-                        tx.send(event);
-                    });
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = path;
-                }
-            }
-            AppEvent::WindowsSandboxGrantReadRootCompleted { path, error } => match error {
-                Some(err) => {
-                    self.chat_widget
-                        .add_to_history(history_cell::new_error_event(format!("Error: {err}")));
-                }
-                None => {
-                    self.chat_widget
-                        .add_to_history(history_cell::new_info_event(
-                            format!("Sandbox read access granted for {}", path.display()),
-                            /*hint*/ None,
-                        ));
-                }
-            },
             AppEvent::EnableWindowsSandboxForAgentMode {
                 preset,
                 mode,
@@ -2859,6 +2802,16 @@ impl App {
                         );
                     }
                 }
+            }
+            AppEvent::HideAgentsOverviewThread { thread_id } => {
+                self.agents_overview.hidden_threads.insert(thread_id);
+                self.repaint_agents_overview();
+            }
+            AppEvent::ConfirmAgentsOverviewAction { thread_id, action } => {
+                self.confirm_agents_overview_action(thread_id, action);
+            }
+            AppEvent::RunAgentsOverviewAction { thread_id, action } => {
+                self.run_agents_overview_action(tui, app_server, thread_id, action).await?;
             }
             AppEvent::StopAgentsOverviewThread { thread_id } => {
                 self.stop_agents_overview_thread(app_server, thread_id)
@@ -3505,29 +3458,62 @@ impl App {
 
     pub(super) async fn archive_current_thread(
         &mut self,
+        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-    ) -> AppRunControl {
+    ) -> Result<AppRunControl> {
         let Some(thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) else {
             self.chat_widget
                 .add_error_message("A thread must start before it can be archived.".to_string());
-            return AppRunControl::Continue;
+            return Ok(AppRunControl::Continue);
         };
         if self.side_threads.contains_key(&thread_id) {
             self.chat_widget.add_error_message(
                 "'/archive' is unavailable in side conversations. Press Ctrl+C to return to the main thread first."
                     .to_string(),
             );
-            return AppRunControl::Continue;
+            return Ok(AppRunControl::Continue);
         }
 
-        match app_server.thread_archive(thread_id).await {
-            Ok(()) => AppRunControl::Exit(ExitReason::Archived(thread_id)),
+        if !matches!(self.app_server_target, AppServerTarget::Embedded) {
+            self.shutdown_side_threads(app_server).await;
+            if !self.side_threads.is_empty() {
+                return Ok(AppRunControl::Continue);
+            }
+        }
+
+        Ok(match app_server.thread_archive(thread_id).await {
+            Ok(()) if matches!(self.app_server_target, AppServerTarget::Embedded) => {
+                AppRunControl::Exit(ExitReason::Archived(thread_id))
+            }
+            Ok(()) => {
+                self.track_agents_overview_notification(&ServerNotification::ThreadArchived(
+                    codex_app_server_protocol::ThreadArchivedNotification {
+                        thread_id: thread_id.to_string(),
+                    },
+                ));
+                self.discard_thread_local_state(thread_id).await;
+                self.agents_overview.input_states.remove(&thread_id);
+                self.agents_overview.dispatched_requests.remove(&thread_id);
+                self.reset_for_thread_switch(tui)?;
+                self.pending_thread_switch_resets += 1;
+                self.app_event_tx
+                    .send(AppEvent::ResetTranscriptForThreadSwitch);
+                self.reset_thread_event_state();
+                let init = self.chatwidget_init_for_forked_or_resumed_thread(
+                    tui,
+                    self.config.clone(),
+                    /*initial_user_message*/ None,
+                );
+                self.replace_chat_widget(ChatWidget::new_with_app_event(init));
+                self.open_agents_overview(app_server);
+                AppRunControl::Continue
+            }
             Err(err) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to archive current thread: {err}"));
                 AppRunControl::Continue
             }
-        }
+        })
     }
 
     pub(super) async fn delete_current_thread(

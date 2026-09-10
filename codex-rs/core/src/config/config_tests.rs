@@ -7018,7 +7018,7 @@ async fn to_mcp_config_flows_mcp_tool_prefix_from_feature() -> std::io::Result<(
 }
 
 #[tokio::test]
-async fn to_mcp_config_flows_mcp_2026_feature_from_config() -> std::io::Result<()> {
+async fn to_mcp_config_flows_independent_mcp_2026_features() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let mut config = Config::load_from_base_config_with_overrides(
         ConfigToml::default(),
@@ -7030,13 +7030,42 @@ async fn to_mcp_config_flows_mcp_2026_feature_from_config() -> std::io::Result<(
         plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
-    assert_eq!(mcp_config.protocol_mode, codex_mcp::McpProtocolMode::Legacy);
+    assert_eq!(
+        (
+            mcp_config.protocol_mode,
+            mcp_config.host_owned_apps_protocol_mode,
+        ),
+        (
+            codex_mcp::McpProtocolMode::Legacy,
+            codex_mcp::McpProtocolMode::Legacy,
+        )
+    );
 
     let _ = config.features.enable(Feature::Mcp20260728);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert_eq!(
-        mcp_config.protocol_mode,
-        codex_mcp::McpProtocolMode::V20260728
+        (
+            mcp_config.protocol_mode,
+            mcp_config.host_owned_apps_protocol_mode,
+        ),
+        (
+            codex_mcp::McpProtocolMode::V20260728,
+            codex_mcp::McpProtocolMode::Legacy,
+        )
+    );
+
+    let _ = config.features.disable(Feature::Mcp20260728);
+    let _ = config.features.enable(Feature::CodexAppsMcp20260728);
+    let mcp_config = config.to_mcp_config(&plugins_manager).await;
+    assert_eq!(
+        (
+            mcp_config.protocol_mode,
+            mcp_config.host_owned_apps_protocol_mode,
+        ),
+        (
+            codex_mcp::McpProtocolMode::Legacy,
+            codex_mcp::McpProtocolMode::V20260728,
+        )
     );
 
     Ok(())

@@ -4,12 +4,15 @@
 
 use codex_protocol::protocol::TruncationPolicy;
 
+use crate::BudgetPriority;
+use crate::Budgeted;
 use crate::ContextTarget;
 use crate::ConversationTranscriptConfig;
 use crate::ConversationTranscriptEntry;
 use crate::ConversationTranscriptEntryKind;
 use crate::ConversationTranscriptOptions;
 use crate::RenderedTranscript;
+use crate::Retention;
 use crate::TranscriptEntryLimits;
 use crate::TranscriptRetentionConfig;
 use crate::TruncationObservation;
@@ -18,6 +21,8 @@ use crate::select_user_messages;
 
 use self::window::TranscriptWindow;
 mod window;
+
+const MIN_RECENT_TOOL_ENTRIES: usize = 5;
 
 /// Request-local policy resolved from the consumer's model and configuration.
 /// Registry scope follows `target`; source flags and caps apply before retention.
@@ -198,7 +203,7 @@ impl ContextProfile {
             && included.iter().any(|included| !included))
         .then(|| "Some conversation entries were omitted.".to_owned());
         let mut truncations = Vec::new();
-        let items = entries
+        let mut items: Vec<_> = entries
             .into_iter()
             .enumerate()
             .filter_map(|(index, entry)| {
@@ -221,9 +226,32 @@ impl ContextProfile {
                         retained_bytes,
                     });
                 }
-                included[index].then_some(entry.text)
+                if included[index] {
+                    Some(match entry.kind {
+                        TranscriptEntryKind::User | TranscriptEntryKind::ProtectedMessage => {
+                            Budgeted::required(entry.text)
+                        }
+                        TranscriptEntryKind::Message => {
+                            Budgeted::optional(entry.text, BudgetPriority::Commentary)
+                        }
+                        TranscriptEntryKind::Tool => {
+                            Budgeted::optional(entry.text, BudgetPriority::Tool)
+                        }
+                    })
+                } else {
+                    None
+                }
             })
             .collect();
+        // Keep the newest tool evidence even when the aggregate allowance is tight.
+        for item in items
+            .iter_mut()
+            .rev()
+            .filter(|item| item.retention == Retention::Optional(BudgetPriority::Tool))
+            .take(MIN_RECENT_TOOL_ENTRIES)
+        {
+            item.retention = Retention::Required;
+        }
         RenderedTranscript {
             items,
             omission_note,

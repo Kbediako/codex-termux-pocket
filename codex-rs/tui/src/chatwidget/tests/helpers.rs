@@ -298,13 +298,23 @@ fn test_model_info(slug: &str, priority: i32, supports_fast_mode: bool) -> Model
 }
 
 pub(crate) fn set_fast_mode_test_catalog(chat: &mut ChatWidget) {
+    set_fast_mode_test_catalog_for_models(chat, "gpt-5.4", "gpt-5.2");
+}
+
+pub(crate) fn set_fast_mode_test_catalog_for_models(
+    chat: &mut ChatWidget,
+    fast_model: &str,
+    standard_model: &str,
+) {
     let models: Vec<ModelPreset> = ModelsResponse {
         models: vec![
             test_model_info(
-                "gpt-5.4", /*priority*/ 0, /*supports_fast_mode*/ true,
+                fast_model, /*priority*/ 0, /*supports_fast_mode*/ true,
             ),
             test_model_info(
-                "gpt-5.2", /*priority*/ 1, /*supports_fast_mode*/ false,
+                standard_model,
+                /*priority*/ 1,
+                /*supports_fast_mode*/ false,
             ),
         ],
     }
@@ -984,6 +994,7 @@ pub(super) fn pending_steer(text: &str) -> PendingSteer {
         client_id: "test-submission".to_string(),
         user_message: UserMessage::from(text),
         history_record: UserMessageHistoryRecord::UserMessageText,
+        source: UserMessageSource::Prompt,
         compare_key: PendingSteerCompareKey {
             message: text.to_string(),
             image_count: 0,

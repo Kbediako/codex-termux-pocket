@@ -70,6 +70,7 @@ impl CodeModeWaitHandler {
         let ToolInvocation {
             session,
             turn,
+            step_context,
             call_id,
             tool_name,
             payload,
@@ -159,10 +160,15 @@ impl CodeModeWaitHandler {
                 let wall_time = wait_response
                     .code_mode_host_duration()
                     .unwrap_or_else(|| started_at.elapsed());
-                handle_runtime_response(&exec, wait_response.into(), args.max_tokens, wall_time)
-                    .await
-                    .map_err(FunctionCallError::RespondToModel)
-                    .map(boxed_tool_output)
+                handle_runtime_response(
+                    &step_context.settings.model_info,
+                    wait_response.into(),
+                    args.max_tokens,
+                    wall_time,
+                )
+                .await
+                .map_err(FunctionCallError::RespondToModel)
+                .map(boxed_tool_output)
             }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{WAIT_TOOL_NAME} expects JSON arguments"

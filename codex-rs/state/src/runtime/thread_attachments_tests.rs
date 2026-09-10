@@ -10,6 +10,7 @@ use crate::RemoveThreadAttachmentOutcome;
 use crate::runtime::test_support::test_thread_metadata;
 use crate::runtime::test_support::unique_temp_dir;
 use anyhow::Result;
+use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
@@ -80,6 +81,13 @@ async fn attachment_attachments_are_idempotent_and_scoped_to_their_thread() -> R
         anyhow::bail!("the same identity on another thread should create its own attachment");
     };
     assert_ne!(first.id, other.id);
+    assert_eq!(
+        runtime
+            .list_thread_attachments(thread_ids[0], /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments,
+        vec![first]
+    );
     Ok(())
 }
 
@@ -112,6 +120,68 @@ async fn attachment_removals_return_not_found_or_the_removed_record() -> Result<
             .await?,
         RemoveThreadAttachmentOutcome::Removed(explicit)
     );
+    assert!(
+        runtime
+            .list_thread_attachments(thread_id, /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_listing_scopes_pagination_to_one_thread() -> Result<()> {
+    let (runtime, _codex_home, thread_ids) = runtime_with_threads(/*count*/ 2).await?;
+    let mut expected = Vec::new();
+    for (thread_id, identity_key) in [
+        (thread_ids[0], "first"),
+        (thread_ids[0], "second"),
+        (thread_ids[0], "third"),
+        (thread_ids[1], "excluded"),
+    ] {
+        let created = runtime
+            .add_thread_attachment(
+                thread_id,
+                "pull_request",
+                identity_key,
+                &json!({ "identity": identity_key }),
+            )
+            .await?;
+        if thread_id == thread_ids[0] {
+            let AddThreadAttachmentOutcome::Created(attachment) = created else {
+                anyhow::bail!("new identities should create attachments");
+            };
+            expected.push(attachment);
+        }
+    }
+
+    let first_page = runtime
+        .list_thread_attachments(thread_ids[0], /*cursor*/ None, /*limit*/ 2)
+        .await?;
+    assert_eq!(first_page.attachments, expected[..2]);
+    let other_thread_error = runtime
+        .list_thread_attachments(
+            thread_ids[1],
+            first_page.next_cursor.as_deref(),
+            /*limit*/ 2,
+        )
+        .await
+        .expect_err("a cursor from another thread must be rejected");
+    assert!(
+        other_thread_error
+            .to_string()
+            .contains("invalid pagination cursor")
+    );
+    let second_page = runtime
+        .list_thread_attachments(
+            thread_ids[0],
+            first_page.next_cursor.as_deref(),
+            /*limit*/ 2,
+        )
+        .await?;
+    assert_eq!(second_page.attachments, expected[2..]);
+    assert_eq!(second_page.next_cursor, None);
     Ok(())
 }
 
@@ -172,7 +242,60 @@ async fn active_attachment_limit_is_freed_by_removal() -> Result<()> {
 }
 
 #[tokio::test]
-async fn attachment_mutations_reject_invalid_identity_payload_and_unknown_threads() -> Result<()> {
+async fn attachments_survive_restart_and_archive_but_cascade_on_thread_deletion() -> Result<()> {
+    let (runtime, codex_home, thread_ids) = runtime_with_threads(/*count*/ 1).await?;
+    let thread_id = thread_ids[0];
+    let AddThreadAttachmentOutcome::Created(attachment) = runtime
+        .add_thread_attachment(
+            thread_id,
+            "pull_request",
+            "openai/codex#123",
+            &json!({ "url": "https://github.com/openai/codex/pull/123" }),
+        )
+        .await?
+    else {
+        anyhow::bail!("first attachment should create an attachment");
+    };
+
+    let reopened = StateRuntime::init(
+        crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        reopened
+            .list_thread_attachments(thread_id, /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments,
+        vec![attachment.clone()]
+    );
+
+    let rollout_path = codex_home.join("archived.jsonl");
+    reopened
+        .mark_archived(thread_id, &rollout_path, Utc::now())
+        .await?;
+    reopened.mark_unarchived(thread_id, &rollout_path).await?;
+    assert_eq!(
+        reopened
+            .list_thread_attachments(thread_id, /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments,
+        vec![attachment]
+    );
+
+    assert_eq!(reopened.delete_thread(thread_id).await?, 1);
+    assert!(
+        reopened
+            .list_thread_attachments(thread_id, /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_requests_reject_invalid_identity_payload_and_cursor() -> Result<()> {
     let (runtime, _codex_home, thread_ids) = runtime_with_threads(/*count*/ 1).await?;
     let thread_id = thread_ids[0];
     for (attachment_type, identity_key, expected) in [
@@ -210,6 +333,15 @@ async fn attachment_mutations_reject_invalid_identity_payload_and_unknown_thread
         .await
         .expect_err("oversized attachment payload must be rejected");
     assert!(too_large.to_string().contains("payload exceeds"));
+    let invalid_cursor = runtime
+        .list_thread_attachments(thread_id, Some("not-a-cursor"), /*limit*/ 10)
+        .await
+        .expect_err("malformed cursor must be rejected");
+    assert!(
+        invalid_cursor
+            .to_string()
+            .contains("invalid pagination cursor")
+    );
     let missing = ThreadId::new();
     let missing_error = runtime
         .add_thread_attachment(missing, "pull_request", "pr", &json!({}))
@@ -246,5 +378,13 @@ async fn concurrent_attachment_attachments_preserve_one_deterministic_identity()
         }
     }
     assert_eq!(created, 1);
+    assert_eq!(
+        runtime
+            .list_thread_attachments(thread_id, /*cursor*/ None, /*limit*/ 10)
+            .await?
+            .attachments
+            .len(),
+        1
+    );
     Ok(())
 }

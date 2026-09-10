@@ -61,7 +61,7 @@ fn native_grants_preserve_denies_and_read_only_carveouts() -> Result<()> {
     ]);
     let profile =
         PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
-    let request = build_request(&command(&profile, root), root, Vec::new())?;
+    let request = build_request(&command(&profile, root), root, Vec::new(), &[], &[])?;
     let mut expected_read = [
         root.join(".agents"),
         root.join(".codex"),
@@ -95,21 +95,171 @@ fn native_grants_preserve_denies_and_read_only_carveouts() -> Result<()> {
 }
 
 #[test]
-fn unsupported_deny_globs_fail_before_launch() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let fs = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
-        FileSystemPath::GlobPattern {
-            pattern: "**/*.secret".to_owned(),
-        },
-        FileSystemAccessMode::Deny,
-    )]);
+fn volume_expansion_does_not_turn_read_only_child_writable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let canonical = canonical_root(&temp)?;
+    let root = canonical.as_path();
+    let readonly = root.join("protected");
+    let writable = root.join("work");
+    std::fs::create_dir(&readonly)?;
+    std::fs::create_dir(&writable)?;
+    let fs = FileSystemSandboxPolicy::restricted(vec![
+        entry(root, FileSystemAccessMode::Write)?,
+        entry(&readonly, FileSystemAccessMode::Read)?,
+    ]);
     let profile =
         PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
-    let error =
-        build_request(&command(&profile, root.path()), root.path(), Vec::new()).unwrap_err();
+    let request = build_request(
+        &command(&profile, root),
+        root,
+        Vec::new(),
+        &[root.to_owned()],
+        &[],
+    )?;
     assert_eq!(
-        error.to_string(),
-        "MXC does not support filesystem deny glob patterns"
+        request.policy.readwrite_paths,
+        vec![root.to_str().unwrap(), writable.to_str().unwrap()]
+    );
+    assert_eq!(
+        request.policy.readonly_paths,
+        vec![
+            root.join(".agents").to_str().unwrap(),
+            root.join(".codex").to_str().unwrap(),
+            root.join(".git").to_str().unwrap(),
+            readonly.to_str().unwrap()
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn volume_expansion_does_not_turn_read_only_alias_writable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = canonical_root(&temp)?;
+    let readonly = root.join("protected");
+    let alias = root.join("alias");
+    std::fs::write(&readonly, "protected")?;
+    std::fs::hard_link(&readonly, &alias)?;
+    let fs = FileSystemSandboxPolicy::restricted(vec![
+        entry(&root, FileSystemAccessMode::Write)?,
+        entry(&readonly, FileSystemAccessMode::Read)?,
+    ]);
+    let profile =
+        PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
+    let request = build_request(
+        &command(&profile, &root),
+        &root,
+        Vec::new(),
+        std::slice::from_ref(&root),
+        &[],
+    )?;
+    let alias = alias.display().to_string();
+    assert_eq!(
+        (
+            request.policy.readwrite_paths.contains(&alias),
+            request.policy.readonly_paths.contains(&alias),
+        ),
+        (false, true)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn volume_expansion_uses_normalized_root_access() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = canonical_root(&temp)?;
+    let volume = root.join("volume");
+    let child = volume.join("child");
+    let alias = root.join("alias");
+    std::fs::create_dir_all(&child)?;
+    std::os::unix::fs::symlink(&volume, &alias)?;
+    let fs = FileSystemSandboxPolicy::restricted(vec![
+        entry(&volume, FileSystemAccessMode::Write)?,
+        entry(&alias, FileSystemAccessMode::Read)?,
+    ]);
+    let profile =
+        PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
+    let request = build_request(
+        &command(&profile, &root),
+        &root,
+        Vec::new(),
+        std::slice::from_ref(&volume),
+        &[],
+    )?;
+    let child = child.display().to_string();
+    assert_eq!(
+        (
+            request.policy.readwrite_paths.contains(&child),
+            request.policy.readonly_paths.contains(&child),
+        ),
+        (false, true)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn volume_expansion_skips_uninspectable_children() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = canonical_root(&temp)?;
+    let uninspectable = root.join("loop");
+    std::os::unix::fs::symlink(&uninspectable, &uninspectable)?;
+    let denied = root.join("secret");
+    std::fs::write(&denied, "secret")?;
+    let fs = FileSystemSandboxPolicy::restricted(vec![
+        entry(&root, FileSystemAccessMode::Write)?,
+        entry(&denied, FileSystemAccessMode::Deny)?,
+    ]);
+    let profile =
+        PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
+    let request = build_request(
+        &command(&profile, &root),
+        &root,
+        Vec::new(),
+        std::slice::from_ref(&root),
+        &[],
+    )?;
+    assert_eq!(
+        (request.policy.readwrite_paths, request.policy.denied_paths),
+        (
+            vec![root.to_str().unwrap().to_owned()],
+            vec![denied.to_str().unwrap().to_owned()],
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn deny_globs_expand_files_and_directories_before_launch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = canonical_root(&temp)?;
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested)?;
+    let file = nested.join("file.secret");
+    let directory = nested.join("directory.secret");
+    std::fs::write(&file, "secret")?;
+    std::fs::create_dir(&directory)?;
+    std::fs::write(nested.join("allowed.txt"), "allowed")?;
+    let missing = root.join("explicit.secret");
+    let fs = FileSystemSandboxPolicy::restricted(vec![
+        entry(&root, FileSystemAccessMode::Write)?,
+        entry(&missing, FileSystemAccessMode::Deny)?,
+        FileSystemSandboxEntry::new(
+            FileSystemPath::GlobPattern {
+                pattern: "**/*.secret".to_owned(),
+            },
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let profile =
+        PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
+    let request = build_request(&command(&profile, &root), &nested, Vec::new(), &[], &[])?;
+    let mut expected = [file, directory, missing];
+    expected.sort();
+    assert_eq!(
+        request.policy.denied_paths,
+        expected.map(|path| path.to_str().unwrap().to_owned())
     );
     Ok(())
 }
@@ -125,8 +275,14 @@ fn relative_working_directories_fail_before_launch() -> Result<()> {
         (Path::new("relative"), root.path(), "policy"),
         (root.path(), Path::new("relative"), "command"),
     ] {
-        let error =
-            build_request(&command(&profile, policy_cwd), command_cwd, Vec::new()).unwrap_err();
+        let error = build_request(
+            &command(&profile, policy_cwd),
+            command_cwd,
+            Vec::new(),
+            &[],
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
             format!("MXC requires an absolute {kind} working directory")
@@ -162,7 +318,8 @@ fn non_unicode_paths_fail_before_launch() -> Result<()> {
         )?]);
         let profile =
             PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
-        let error = build_request(&command(&profile, &root), command_cwd, Vec::new()).unwrap_err();
+        let error = build_request(&command(&profile, &root), command_cwd, Vec::new(), &[], &[])
+            .unwrap_err();
         assert_eq!(error.to_string(), expected);
     }
     Ok(())

@@ -85,9 +85,9 @@ pub(crate) async fn run_codex_thread_interactive(
         Arc::clone(&parent_session.services.extensions)
     };
     // Inline delegates never register with ThreadManager or receive on_thread_ready.
-    // Seed their standalone Guardian manager before inherited extensions run.
+    // Bind their standalone spawn path before inherited extensions run.
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
-    thread_extension_init.insert(crate::guardian::GuardianReviewSessionManager::default());
+    thread_extension_init.insert(crate::guardian::GuardianReviewSessionHost::default());
     let (session, io) = Session::spawn(SessionSpawnArgs {
         config,
         allow_provider_model_fallback: false,
@@ -106,6 +106,7 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
+        disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,

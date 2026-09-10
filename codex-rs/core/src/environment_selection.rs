@@ -818,11 +818,11 @@ impl ThreadEnvironments {
         let selected = self.environments.load_full();
         let mut environments = Vec::with_capacity(selected.len());
         for environment in selected.iter() {
-            if matches!(
-                environment.selection.config,
-                EnvironmentConfigState::Failed(_)
-            ) {
-                environments.push(TurnEnvironmentState::Failed);
+            if let EnvironmentConfigState::Failed(error) = &environment.selection.config {
+                environments.push(TurnEnvironmentState::Failed {
+                    selection: environment.selection.clone(),
+                    error: error.clone(),
+                });
                 continue;
             }
             let pending = matches!(
@@ -857,7 +857,10 @@ pub(crate) enum TurnEnvironmentState {
     Ready(TurnEnvironment),
     Starting(StartingTurnEnvironment),
     /// Unavailable for execution, but still selected when evaluating permissions.
-    Failed,
+    Failed {
+        selection: TurnEnvironmentSelection,
+        error: String,
+    },
 }
 
 impl TurnEnvironmentState {
@@ -870,7 +873,10 @@ impl TurnEnvironmentState {
                 let mut selection = starting.selection;
                 if matches!(selection.config, EnvironmentConfigState::Pending) {
                     let Some(config) = environment.installed_config else {
-                        return Self::Failed;
+                        return Self::Failed {
+                            selection,
+                            error: "Environment configuration was not supplied.".to_string(),
+                        };
                     };
                     selection.config = EnvironmentConfigState::Ready(config);
                 }
@@ -896,7 +902,10 @@ impl TurnEnvironmentState {
                     environment_id = %starting.selection.environment_id,
                     "skipping failed turn environment: {err}"
                 );
-                Self::Failed
+                Self::Failed {
+                    selection: starting.selection,
+                    error: err.to_string(),
+                }
             }
             None => Self::Starting(starting),
         }
@@ -925,7 +934,7 @@ impl TurnEnvironmentSnapshot {
                 .iter()
                 .map(|environment| match environment {
                     TurnEnvironmentState::Ready(environment) => &environment.selection.config,
-                    TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed => {
+                    TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed { .. } => {
                         &EnvironmentConfigState::Pending
                     }
                 }),
@@ -947,7 +956,7 @@ impl TurnEnvironmentSnapshot {
                         environment.resolution.clone().now_or_never(),
                     )
                 }
-                TurnEnvironmentState::Failed => TurnEnvironmentState::Failed,
+                TurnEnvironmentState::Failed { .. } => environment.clone(),
             })
             .collect();
         Self { environments }
@@ -1022,7 +1031,7 @@ impl TurnEnvironmentSnapshot {
                 {
                     environment.selection.cwd.to_abs_path().ok()
                 }
-                TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed => None,
+                TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed { .. } => None,
             })
     }
 

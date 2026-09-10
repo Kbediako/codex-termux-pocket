@@ -631,6 +631,9 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "api_key_model_discovery": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -699,6 +702,9 @@
               "type": "boolean"
             },
             "code_mode_prewarm": {
+              "type": "boolean"
+            },
+            "codex_apps_mcp_2026_07_28": {
               "type": "boolean"
             },
             "codex_git_commit": {
@@ -3987,6 +3993,9 @@
           ],
           "default": {
             "agents": {
+              "archive": null,
+              "delete": null,
+              "hide": null,
               "new_task": null,
               "rename": null,
               "resume": null,
@@ -4297,6 +4306,30 @@
       "additionalProperties": false,
       "description": "Shortcuts specific to the shared agents overview.",
       "properties": {
+        "archive": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Archive the selected task and its child agents after confirmation."
+        },
+        "delete": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Permanently delete the selected task and its child agents after confirmation."
+        },
+        "hide": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Hide the selected task until explicitly resumed or the TUI restarts."
+        },
         "new_task": {
           "allOf": [
             {
@@ -4802,6 +4835,9 @@
             }
           ],
           "default": {
+            "archive": null,
+            "delete": null,
+            "hide": null,
             "new_task": null,
             "rename": null,
             "resume": null,
@@ -6120,6 +6156,9 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "api_key_model_discovery": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -6188,6 +6227,9 @@
           "type": "boolean"
         },
         "code_mode_prewarm": {
+          "type": "boolean"
+        },
+        "codex_apps_mcp_2026_07_28": {
           "type": "boolean"
         },
         "codex_git_commit": {

@@ -109,14 +109,14 @@ pub(crate) async fn decide_approval(
             ));
         }
     };
-    let runtime = ReviewRuntime {
+    let runtime = codex_guardian_reviewer::SynchronousReview::new(ReviewRuntime {
         session: Arc::clone(&session),
         context: context.clone(),
         review_id: review_id.clone(),
         request: request.clone(),
         reasons,
         options,
-    };
+    });
     let input = ApprovalDecisionInput {
         approval_id: &review_id,
         tool_call_id: request

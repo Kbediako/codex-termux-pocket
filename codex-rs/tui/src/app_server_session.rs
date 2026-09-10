@@ -3466,7 +3466,7 @@ mod tests {
     async fn persisted_resume_does_not_forward_implicit_service_tier() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&codex_home).await;
-        config.model = Some("gpt-5.4".to_string());
+        config.model = Some("gpt-5.5".to_string());
         config.service_tier = None;
         config
             .features
@@ -3486,8 +3486,8 @@ mod tests {
         let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
         let mut preset = crate::test_support::TEST_MODEL_PRESETS
             .iter()
-            .find(|preset| preset.model == "gpt-5.4")
-            .expect("gpt-5.4 test preset")
+            .find(|preset| preset.model == "gpt-5.5")
+            .expect("gpt-5.5 test preset")
             .clone();
         preset.service_tiers = vec![ModelServiceTier {
             id: ServiceTier::Fast.request_value().to_string(),

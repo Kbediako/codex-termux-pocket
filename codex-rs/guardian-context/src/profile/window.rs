@@ -8,7 +8,7 @@ use crate::TranscriptRetentionConfig;
 use super::TranscriptEntry;
 use super::TranscriptEntryKind;
 
-const MIN_RECENT_TOOL_ENTRIES: usize = 5;
+use super::MIN_RECENT_TOOL_ENTRIES;
 
 #[derive(Default)]
 struct EntryPool {

@@ -32,6 +32,8 @@ pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
 pub(super) struct AgentsOverviewState {
     /// Missing metadata records a local resume until the next metadata refresh.
     pub(super) threads: HashMap<ThreadId, Option<Thread>>,
+    /// Local visibility only; activity and metadata refreshes never reveal hidden roots.
+    pub(super) hidden_threads: HashSet<ThreadId>,
     pub(super) last_messages: HashMap<ThreadId, String>,
     pub(super) activity: HashMap<ThreadId, super::agents_overview_details::AgentsOverviewActivity>,
     pub(super) initialized: bool,
@@ -270,6 +272,9 @@ impl App {
             let Ok(thread_id) = ThreadId::from_string(&root.id) else {
                 continue;
             };
+            if self.agents_overview.hidden_threads.contains(&thread_id) {
+                continue;
+            }
             rows.push(AgentsOverviewRow {
                 details: self.agents_overview_details(root, &children),
                 thread: root.clone(),
@@ -284,7 +289,6 @@ impl App {
         AgentsOverviewView::new(
             rows,
             selected_thread_id,
-            self.primary_thread_id.is_none(),
             self.config.features.enabled(Feature::Worktrees)
                 && !crate::uses_remote_workspace_or_environment(
                     &self.app_server_target,

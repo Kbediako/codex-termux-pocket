@@ -108,6 +108,9 @@ pub const MAX_THREAD_ATTACHMENT_TYPE_BYTES: usize = 256;
 /// Maximum byte length of a persisted stable attachment identity key.
 pub const MAX_THREAD_ATTACHMENT_IDENTITY_KEY_BYTES: usize = 256;
 
+/// Maximum number of attachments returned in one page.
+pub const MAX_THREAD_ATTACHMENT_LIST_PAGE_SIZE: usize = 100;
+
 /// Maximum number of active attachments retained for one thread.
 pub const MAX_THREAD_ATTACHMENTS_PER_THREAD: usize = 100;
 

@@ -3,16 +3,20 @@
 use super::StateRuntime;
 use crate::AddThreadAttachmentOutcome;
 use crate::MAX_THREAD_ATTACHMENT_IDENTITY_KEY_BYTES;
+use crate::MAX_THREAD_ATTACHMENT_LIST_PAGE_SIZE;
 use crate::MAX_THREAD_ATTACHMENT_PAYLOAD_BYTES;
 use crate::MAX_THREAD_ATTACHMENT_TYPE_BYTES;
 use crate::MAX_THREAD_ATTACHMENTS_PER_THREAD;
 use crate::RemoveThreadAttachmentOutcome;
 use crate::ThreadAttachment;
+use crate::ThreadAttachmentPage;
 use anyhow::Context;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use serde_json::Value;
+use sqlx::QueryBuilder;
 use sqlx::Row;
+use sqlx::Sqlite;
 use sqlx::sqlite::SqliteRow;
 use uuid::Uuid;
 
@@ -129,6 +133,61 @@ impl StateRuntime {
         transaction.commit().await?;
         Ok(outcome)
     }
+
+    /// List one bounded page of attachments for one thread in stable keyset order.
+    pub async fn list_thread_attachments(
+        &self,
+        thread_id: ThreadId,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<ThreadAttachmentPage> {
+        if !(1..=MAX_THREAD_ATTACHMENT_LIST_PAGE_SIZE).contains(&limit) {
+            anyhow::bail!(
+                "invalid thread attachment request: page limit must be between 1 and {MAX_THREAD_ATTACHMENT_LIST_PAGE_SIZE}"
+            );
+        }
+
+        let thread_id_string = thread_id.to_string();
+        let anchor = cursor.map(parse_attachment_cursor).transpose()?;
+        if let Some((cursor_thread_id, _, _)) = anchor.as_ref()
+            && cursor_thread_id != &thread_id_string
+        {
+            anyhow::bail!("invalid thread attachment request: invalid pagination cursor");
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, thread_id, attachment_type, identity_key, payload, created_at FROM thread_attachments WHERE thread_id = ",
+        );
+        query.push_bind(thread_id_string);
+        if let Some((_, created_at, attachment_id)) = anchor {
+            query.push(" AND (created_at, id) > (");
+            query.push_bind(created_at);
+            query.push(", ");
+            query.push_bind(attachment_id);
+            query.push(")");
+        }
+        query.push(" ORDER BY created_at ASC, id ASC LIMIT ");
+        query.push_bind(i64::try_from(limit + 1)?);
+        let rows = query.build().fetch_all(self.pool.as_ref()).await?;
+        let mut attachments = rows
+            .iter()
+            .map(attachment_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let next_cursor = if attachments.len() > limit {
+            attachments.pop();
+            attachments.last().map(|attachment| {
+                format!(
+                    "{}|{}|{}",
+                    attachment.thread_id, attachment.created_at, attachment.id
+                )
+            })
+        } else {
+            None
+        };
+        Ok(ThreadAttachmentPage {
+            attachments,
+            next_cursor,
+        })
+    }
 }
 
 fn validate_attachment_identity(attachment_type: &str, identity_key: &str) -> anyhow::Result<()> {
@@ -151,6 +210,25 @@ fn validate_attachment_identity(attachment_type: &str, identity_key: &str) -> an
         );
     }
     Ok(())
+}
+
+fn parse_attachment_cursor(cursor: &str) -> anyhow::Result<(String, i64, String)> {
+    let mut segments = cursor.split('|');
+    let (Some(thread_id), Some(created_at), Some(attachment_id), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        anyhow::bail!("invalid thread attachment request: invalid pagination cursor");
+    };
+    if ThreadId::from_string(thread_id).is_err() || Uuid::parse_str(attachment_id).is_err() {
+        anyhow::bail!("invalid thread attachment request: invalid pagination cursor");
+    }
+    let created_at = created_at
+        .parse::<i64>()
+        .context("invalid thread attachment request: invalid pagination cursor")?;
+    Ok((thread_id.to_string(), created_at, attachment_id.to_string()))
 }
 
 fn attachment_from_row(row: &SqliteRow) -> anyhow::Result<ThreadAttachment> {

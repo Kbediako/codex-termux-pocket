@@ -585,72 +585,58 @@ async fn make_history_test_app() -> Result<(App, tempfile::TempDir)> {
 }
 
 #[tokio::test]
-async fn removing_remote_thread_omits_disconnect_guidance() -> Result<()> {
-    for event in [
-        AppEvent::ArchiveCurrentThread,
-        AppEvent::DeleteCurrentThread,
-    ] {
-        let (mut app, codex_home) = make_history_test_app().await?;
-        let thread_id = ThreadId::from_string(
-            &create_fake_rollout(
-                codex_home.path(),
-                "2026-01-01T00-00-00",
-                "2026-01-01T00:00:00Z",
-                "Saved user message",
-                Some(app.config.model_provider_id.as_str()),
-                /*git_info*/ None,
-            )
-            .expect("create rollout"),
-        )?;
-        let (mut server, _, proxy) = start_recording_app_server(
-            &app.config,
-            /*blocked_thread_list*/ None,
-            /*failed_thread_name*/ None,
+async fn deleting_remote_thread_omits_disconnect_guidance() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    let thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            "2026-01-01T00-00-00",
+            "2026-01-01T00:00:00Z",
+            "Saved user message",
+            Some(app.config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create rollout"),
+    )?;
+    let (mut server, _, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    let resumed = server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
         )
         .await?;
-        let resumed = server
-            .resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                thread_id,
-                crate::app_server_session::ResumeModelSettings::RestoreFromThread,
-            )
-            .await?;
-        app.app_server_target = AppServerTarget::Remote {
-            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
-        };
-        app.active_thread_id = Some(thread_id);
-        app.chat_widget.handle_thread_session(resumed.session);
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        let archived = matches!(&event, AppEvent::ArchiveCurrentThread);
-        // Keep the large dispatcher future off the Windows test thread's stack.
-        let AppRunControl::Exit(reason) =
-            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?
-        else {
-            panic!("removing the current thread must exit");
-        };
-        if archived {
-            assert_matches!(reason, ExitReason::Archived(id) if id == thread_id);
-        } else {
-            assert_matches!(reason, ExitReason::ThreadRemoved);
-        }
-        let mut exit_info = app.exit_info(reason);
-        exit_info.token_usage = TokenUsage {
-            output_tokens: 2,
-            total_tokens: 2,
-            ..Default::default()
-        };
-        let mut expected = vec!["Token usage: total=2 input=0 output=2".to_string()];
-        if archived {
-            expected.push(format!("Session archived: {thread_id}"));
-        }
-        assert_eq!(
-            exit_info.format_exit_messages(/*color_enabled*/ false),
-            expected
-        );
-        server.shutdown().await?;
-        proxy.await??;
-    }
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+    };
+    app.active_thread_id = Some(thread_id);
+    app.chat_widget.handle_thread_session(resumed.session);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    // Keep the large dispatcher future off the Windows test thread's stack.
+    let AppRunControl::Exit(reason) =
+        Box::pin(app.handle_event(&mut tui, &mut server, AppEvent::DeleteCurrentThread)).await?
+    else {
+        panic!("removing the current thread must exit");
+    };
+    assert_matches!(reason, ExitReason::ThreadRemoved);
+    let mut exit_info = app.exit_info(reason);
+    exit_info.token_usage = TokenUsage {
+        output_tokens: 2,
+        total_tokens: 2,
+        ..Default::default()
+    };
+    assert_eq!(
+        exit_info.format_exit_messages(/*color_enabled*/ false),
+        vec!["Token usage: total=2 input=0 output=2".to_string()]
+    );
+    server.shutdown().await?;
+    proxy.await??;
     Ok(())
 }
 
@@ -813,19 +799,118 @@ async fn archive_current_thread_reports_success_only_after_archiving() -> Result
     )?;
     let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
 
+    let mut tui = crate::tui::test_support::make_test_tui()?;
     app.active_thread_id = Some(ThreadId::new());
     assert_matches!(
-        app.archive_current_thread(&mut app_server).await,
+        app.archive_current_thread(&mut tui, &mut app_server)
+            .await?,
         AppRunControl::Continue
     );
 
     app.active_thread_id = Some(thread_id);
     assert_matches!(
-        app.archive_current_thread(&mut app_server).await,
+        app.archive_current_thread(&mut tui, &mut app_server).await?,
         AppRunControl::Exit(ExitReason::Archived(archived_id)) if archived_id == thread_id
     );
 
     app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()> {
+    let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:4500")?;
+    for target in [
+        AppServerTarget::LocalDaemon {
+            endpoint: endpoint.clone(),
+        },
+        AppServerTarget::Remote { endpoint },
+    ] {
+        let (mut app, _codex_home) = make_history_test_app().await?;
+        let thread_id =
+            create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "archive me")?;
+        let (mut server, requests, proxy) = start_recording_app_server(
+            &app.config,
+            /*blocked_thread_list*/ None,
+            /*failed_thread_name*/ None,
+        )
+        .await?;
+        let resumed = server
+            .resume_thread(
+                &app.local_settings,
+                app.config.clone(),
+                thread_id,
+                crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+            )
+            .await?;
+        let mut side_config = app.config.clone();
+        side_config.ephemeral = true;
+        let side = server
+            .fork_side_thread(&app.local_settings, side_config, thread_id)
+            .await?;
+        let side_id = side.session.thread_id;
+        app.side_threads
+            .insert(side_id, SideThreadState::new(thread_id));
+        app.app_server_target = target;
+        app.enqueue_primary_thread_session(resumed.session.clone(), resumed.turns)
+            .await?;
+        app.chat_widget.handle_thread_session(resumed.session);
+        app.chat_widget.insert_str("Unsent archived draft");
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        app.app_event_tx = AppEventSender::new(tx);
+
+        assert_matches!(
+            Box::pin(app.handle_event(&mut tui, &mut server, AppEvent::ArchiveCurrentThread))
+                .await?,
+            AppRunControl::Continue
+        );
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), events.recv())
+                .await?
+                .expect("expected command center refresh");
+            let refreshed = matches!(&event, AppEvent::AgentsOverviewThreadsLoaded { .. });
+            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+            if refreshed {
+                break;
+            }
+        }
+        assert!(app.agents_overview.initialized);
+        assert_eq!(
+            (
+                app.active_thread_id,
+                app.primary_thread_id,
+                app.chat_widget.thread_id()
+            ),
+            (None, None, None)
+        );
+        assert!(!app.agents_overview.threads.contains_key(&thread_id));
+        assert!(app.thread_event_channels.is_empty());
+        assert!(app.side_threads.is_empty());
+        assert_eq!(
+            recorded_params(&requests, "thread/unsubscribe"),
+            vec![serde_json::json!({"threadId": side_id.to_string()})]
+        );
+        assert!(app.chat_widget.composer_is_empty());
+        assert_eq!(
+            recorded_params(&requests, "thread/archive"),
+            vec![serde_json::json!({"threadId": thread_id.to_string()})]
+        );
+        assert!(
+            app.chat_widget
+                .selected_index_for_present_view(
+                    crate::app::agents_overview::AGENTS_OVERVIEW_VIEW_ID
+                )
+                .is_some()
+        );
+        assert_snapshot!(
+            "agents_command_center_after_archive",
+            render_bottom_popup(&app.chat_widget, /*width*/ 100)
+        );
+
+        server.shutdown().await?;
+        proxy.await??;
+    }
     Ok(())
 }
 
@@ -3411,8 +3496,10 @@ terminal_visualization_instructions = true
             _ => None,
         })
         .expect("browser should resolve a saved owner");
+    // Archive stops the writer; unarchive leaves a stored thread eligible for compression.
+    server.thread_archive(saved_owner.id).await?;
     let saved_path = server
-        .thread_read(saved_owner.id, /*include_turns*/ false)
+        .thread_unarchive(saved_owner.id)
         .await?
         .path
         .expect("saved rollout path");

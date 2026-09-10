@@ -27,7 +27,6 @@ use codex_extension_api::GuardianV2Enabled;
 use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::ThreadLifecycleContributor;
-use codex_extension_api::ThreadOriginator;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
@@ -37,7 +36,6 @@ use codex_guardian_context::ContextTarget;
 use codex_guardian_context::PlannedAction;
 use codex_guardian_context::PlannedActionKind;
 use codex_history::RolloutItem;
-use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::ThreadId;
@@ -59,10 +57,8 @@ use super::metrics::sampler_failure_reason;
 use super::parent_compaction::ParentCompactionError;
 use super::parent_compaction::select_parent_compaction;
 use super::sampler::LunaSampler;
-use super::sampler::LunaSamplerConfig;
 use super::sampler::LunaSamplerError;
 use super::sampler::LunaSamplingRequest;
-use super::sampler::MODEL;
 use super::truncation::ClassificationTruncations;
 use super::trusted_skills::TrustedSkillInvocations;
 use super::trusted_skills::TrustedSkillRoots;
@@ -132,38 +128,12 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                 policy.enforce_required_model();
             }
             let scoring_enabled = policy.scoring_enabled();
-            let luna_compaction_hash = if let Some(thread_manager) = self.thread_manager.upgrade() {
-                thread_manager
-                    .get_models_manager()
-                    .get_model_info(MODEL, &input.config.to_models_manager_config())
-                    .await
-                    .comp_hash
-            } else {
-                None
-            };
-            let sampler_config = LunaSamplerConfig {
-                provider: create_model_provider(
-                    input.config.model_provider.clone(),
-                    Some(Arc::clone(&self.auth_manager)),
-                ),
-                http_client_factory: input.config.http_client_factory(),
-                agent_identity_policy: if input.config.features.enabled(Feature::UseAgentIdentity) {
-                    AgentIdentityAuthPolicy::ChatGptAuth
-                } else {
-                    AgentIdentityAuthPolicy::JwtOnly
-                },
-                session_source: input.session_source.clone(),
-                session_id: input.session_store.level_id().to_string(),
-                thread_id: thread_id.clone(),
-                originator: input
-                    .thread_store
-                    .get::<ThreadOriginator>()
-                    .map(|originator| originator.0.clone()),
-                free_guardian: input.config.free_guardian_enabled(),
-                service_tier: input.config.service_tier.clone(),
-                luna_compaction_hash,
-                metrics: input.extension_metrics.clone(),
-            };
+            let sampler_config = super::startup::sampler_config(
+                &input,
+                Arc::clone(&self.auth_manager),
+                self.thread_manager.upgrade(),
+            )
+            .await;
 
             if scoring_enabled && guardian_config.transcript.include_images {
                 input
@@ -545,6 +515,7 @@ impl GuardianV2Extension {
             };
             let action_section = PlannedAction {
                 json: planned_action.clone(),
+                tool_descriptions: None,
                 kind: PlannedActionKind::Command,
                 reason: None,
             };
@@ -600,6 +571,22 @@ impl GuardianV2Extension {
             drop(history);
             drop(node_repl_images);
             truncations.extend(std::mem::take(&mut transcript.truncations));
+            if let Some(metrics) = metrics.as_deref() {
+                for (section, cost) in transcript.section_costs() {
+                    for (measurement, value) in cost.measurements() {
+                        metrics.histogram_with_boundaries(
+                            codex_guardian_context::SECTION_COST_METRIC,
+                            i64::try_from(value).unwrap_or(i64::MAX),
+                            codex_guardian_context::SECTION_COST_BOUNDARIES,
+                            &[
+                                ("target", "async"),
+                                ("section", section),
+                                ("measurement", measurement),
+                            ],
+                        );
+                    }
+                }
+            }
             let classification_input = transcript.into_messages();
             let mut failure_reason = "invalid_output";
             let mut classification_risk = None;
