@@ -218,3 +218,5 @@ subject	ci: retire reconciled dependency branches	tooling	Requests retirement on
 subject	termux: update to 0.154.0-alpha.11	runtime-critical	Integrates the exact published alpha.11 source with rollback-aware tree review, preserves Termux runtime/security patches, and regenerates coherent Cargo/Bazel locks.
 subject	release: request validated Termux 0.154.0-alpha.11 publication	tooling	Records only the five successful exact-source alpha.11 gates for the sole permanent publisher.
 subject	ci: format release helpers for alpha preparation	tooling	Applies AST-equivalent Python formatting required by the upstream formatter; preserves all preparation and publication guards.
+subject	ci: audit release installer update	tooling	Classifies the reviewed installer-action pin update without changing runtime source or publication gates.
+subject	ci: refresh pinned release installer (#118)	tooling	Updates installer-action pins in permanent sandbox and preparation jobs, retaining explicit tool versions and release validation.
