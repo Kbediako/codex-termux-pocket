@@ -70,7 +70,9 @@ jobs:
           fi
 
       - name: Self-test the executable release contract
-        run: python3 .github/scripts/termux_release_control.py self-test
+        run: |
+          python3 .github/scripts/termux_release_control.py self-test
+          python3 -m unittest discover -s .github/scripts/termux_release -p test_maintenance.py
 
       - name: Validate locked Cargo metadata
         working-directory: codex-rs

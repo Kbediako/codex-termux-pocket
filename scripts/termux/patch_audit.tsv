@@ -207,3 +207,5 @@ subject	docs: restore thin metallic README hero bezels	tooling	Fixes determinist
 subject	Bump taiki-e/install-action from 2.62.49 to 2.87.2	tooling	Updates the pinned sandbox test installer action while preserving nextest@0.9.103 and all runtime and release gates.
 subject	ci: audit pinned sandbox installer update	tooling	Classifies the reviewed Dependabot installer update and its squash merge without changing runtime or release state.
 subject	ci: refresh pinned sandbox installer (#111)	tooling	Updates the pinned sandbox test installer action and its patch audit together; runtime source and release verification remain unchanged.
+subject	ci: add permanent release maintenance requests	security-critical	Adds a tested bounded request interface in the existing publisher for original Git-object transport, exact-head dispatch and closed-PR branch retirement; all publication and verification gates remain unchanged.
+subject	termux: record reviewed upstream ancestry	runtime-critical	Records the exact official upstream parent for an already reviewed complete source tree without changing its bytes; all five release gates run on the resulting commit.

@@ -119,3 +119,12 @@ blocking-ci.yml
 
 The tracker closes only after those checks pass and API reads prove the release,
 manifest, issue, workflow inventory, and branch inventory satisfy the runbook.
+
+## Permanent connected-maintainer requests
+
+The publisher also contains the permanent read-only `route` job and bounded
+`maintain-release` job. They use `scripts/termux/release-maintenance.json` and
+`.github/scripts/termux_release/maintenance.py` for original Git-object transport,
+exact-head check dispatch, and explicitly closed PR branch retirement. They do
+not publish or promote releases, edit workflow YAML, or add an alternate release
+writer. See [the request contract](../scripts/termux_release/MAINTENANCE.md).

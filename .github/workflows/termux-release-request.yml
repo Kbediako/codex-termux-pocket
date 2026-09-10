@@ -1,33 +1,89 @@
 name: termux-release-request
-run-name: Publish validated Termux runtime from ${{ github.sha }}
+run-name: Termux release control · ${{ github.sha }}
 
-# This is the repository's only release writer. The request file identifies one
-# runtime source and the five successful exact-source gates. A shared executable
-# contract validates, publishes, anonymously audits, and only then promotes it.
+# The only release writer. Maintenance requests use a separate permanent job;
+# they cannot invoke publication, promotion, or arbitrary shell commands.
 on:
   push:
     branches:
       - main
     paths:
       - "scripts/termux/release-publication.env"
+      - "scripts/termux/release-maintenance.json"
   workflow_dispatch:
 
 permissions:
-  actions: read
-  contents: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+  contents: read
 
 concurrency:
   group: termux-release-request
   cancel-in-progress: false
 
 jobs:
+  route:
+    name: Validate and separate release request types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+      operation: ${{ steps.route.outputs.operation }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test permanent maintenance guards
+        run: python3 -m unittest discover -s .github/scripts/termux_release -p test_maintenance.py
+      - id: route
+        run: python3 .github/scripts/termux_release/maintenance.py route
+
+  maintain-release:
+    name: Execute bounded maintainer request
+    needs: route
+    if: needs.route.outputs.mode == 'maintenance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned source toolchain when recording a reviewed merge
+        if: needs.route.outputs.operation == 'record-upstream'
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Execute the immutable request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: "1"
+          GIT_TERMINAL_PROMPT: "0"
+        run: python3 .github/scripts/termux_release/maintenance.py run
+      - name: Retain original source objects for independent merge review
+        if: always() && (needs.route.outputs.operation == 'export-upstream' || needs.route.outputs.operation == 'import-upstream')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: termux-source-export
+          path: ${{ runner.temp }}/termux-source-export/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
   publish-validated-runtime:
     name: Publish complete immutable release as Latest
+    needs: route
+    if: needs.route.outputs.mode == 'publication'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Checkout immutable release controls

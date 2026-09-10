@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "request_id": "source-import-20260910-1",
+  "operation": "import-upstream",
+  "upstream_tag": "rust-v0.154.0-alpha.6.1",
+  "upstream_tag_object": "2be88a3ee3694eeae18d888cd83280dee44d8ffa",
+  "upstream_commit": "9db71b9871a5a63c3d1eae16184d872ea388bfdf"
+}
