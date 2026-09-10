@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import maintenance as subject
+import source_preparation as preparation
 
 
 class MaintenanceTests(unittest.TestCase):
@@ -106,6 +107,63 @@ class MaintenanceTests(unittest.TestCase):
         with patch.object(subject, "command", side_effect=["", subject.REQUEST + "\ncodex-rs/core/src/lib.rs"]):
             with self.assertRaises(RuntimeError):
                 subject.record_upstream(value, "owner/repo", "a" * 40)
+
+
+class SourcePreparationTests(unittest.TestCase):
+    def request(self):
+        before, after = b"old text\n", b"new text\n"
+        return {"format_version": 1, "operation": "prepare-source", "request_id": "prepare.1",
+                "base_main": "a" * 40, "prepared_commit": "b" * 40, "expected_input_tree": "c" * 40,
+                "edits": [{"path": "codex-rs/cli/src/main.rs", "before": preparation.blob_sha(before),
+                           "after": preparation.blob_sha(after),
+                           "replacements": [{"old": "old", "new": "new"}]}],
+                "package_updates": [{"name": "socket2@0.6.3", "version": "0.6.5"}]}
+
+    def test_valid_preparation(self):
+        value = self.request()
+        self.assertEqual(subject.validate_request(value), value)
+        self.assertEqual(preparation.apply_edit(b"old text\n", value["edits"][0]), b"new text\n")
+
+    def test_preparation_cannot_modify_workflows(self):
+        for path in (".github/workflows/blocking-ci.yml", "codex-rs/../.github/workflows/a.yml",
+                     "/tmp/a.rs", "codex-rs/.git/config.toml", "codex-rs/./cli/a.rs", "scripts/a.py"):
+            value = self.request()
+            value["edits"][0]["path"] = path
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                subject.validate_request(value)
+
+    def test_preparation_rejects_wrong_before_and_after(self):
+        value = self.request()
+        for key in ("before", "after"):
+            edit = copy.deepcopy(value["edits"][0])
+            edit[key] = "d" * 40
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                preparation.apply_edit(b"old text\n", edit)
+
+    def test_preparation_rejects_repeated_matches(self):
+        value = self.request()
+        edit = value["edits"][0]
+        edit["before"] = preparation.blob_sha(b"old old")
+        with self.assertRaises(ValueError):
+            preparation.apply_edit(b"old old", edit)
+
+    def test_preparation_rejects_unsafe_packages_and_fields(self):
+        for update in ({"name": "--help", "version": "0.1.0"},
+                       {"name": "socket2", "version": "latest"},
+                       {"name": "socket2", "version": "0.6.5", "shell": "echo"}):
+            value = self.request()
+            value["package_updates"] = [update]
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                subject.validate_request(value)
+        value = self.request() | {"command": "echo unsafe"}
+        with self.assertRaises(ValueError):
+            subject.validate_request(value)
+
+    def test_preparation_rejects_duplicate_edits(self):
+        value = self.request()
+        value["edits"] *= 2
+        with self.assertRaises(ValueError):
+            subject.validate_request(value)
 
 
 if __name__ == "__main__":

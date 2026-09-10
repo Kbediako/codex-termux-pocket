@@ -60,3 +60,22 @@ Run the offline guard tests with:
 
 The router and Fork CI execute these tests. The original workflow-topology
 validator and every existing release check remain enabled without relaxed rules.
+
+## Reviewed source preparation
+
+`prepare-source` accepts `base_main`, `prepared_commit`, `expected_input_tree`,
+`edits` and `package_updates`. The prepared commit must descend from base_main;
+only the request can have changed on main since that base. Its workflow and
+release-control trees must exactly match the triggering main. Each bounded text
+edit names a Rust/Markdown/TOML file, pre/post Git blob hashes, and literal
+replacements that each match exactly once. The entire resulting input tree is
+hash-checked before any dependency command runs. No workflow edits are allowed.
+
+The job runs full Cargo resolution, explicit package/version updates, `just fmt`,
+and `just bazel-lock-update`, then verifies locked metadata and requested package
+versions. Only reviewed edit paths and the two generated lockfiles may change.
+The output files are stored as unreferenced Git blobs and retained with a receipt
+in `termux-prepared-source`. A maintainer must independently review these bytes
+and create the final source commit through direct Git writes. This operation
+never advances refs, publishes, promotes, or closes issues. The ordinary five
+exact-source runtime gates are still mandatory after source selection.

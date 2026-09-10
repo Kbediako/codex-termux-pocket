@@ -54,8 +54,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned source toolchain when recording a reviewed merge
-        if: needs.route.outputs.operation == 'record-upstream'
+        if: needs.route.outputs.operation == 'record-upstream' || needs.route.outputs.operation == 'prepare-source'
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Set up reviewed source preparation tools
+        if: needs.route.outputs.operation == 'prepare-source'
+        uses: ./.github/actions/setup-ci
+      - name: Install pinned formatter dependency runner
+        if: needs.route.outputs.operation == 'prepare-source'
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: uv@0.12.10
+      - name: Install pinned Bazelisk
+        if: needs.route.outputs.operation == 'prepare-source'
+        run: bash .github/scripts/install-bazelisk.sh
       - name: Execute the immutable request
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,6 +82,15 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+
+      - name: Retain generated files for independent maintainer review
+        if: always() && needs.route.outputs.operation == 'prepare-source'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: termux-prepared-source
+          path: ${{ runner.temp }}/termux-prepared-source/
+          if-no-files-found: error
+          retention-days: 3
 
   publish-validated-runtime:
     name: Publish complete immutable release as Latest

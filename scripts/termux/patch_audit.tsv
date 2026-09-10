@@ -34,7 +34,7 @@ subject	termux: cache mobile release targets	tooling	Fork workflow-only cold-bui
 subject	termux: cache mobile rusty_v8 outputs	tooling	Fork workflow-only follow-up to include the prebuilt rusty_v8 archive path in the mobile target cache.
 subject	termux: tune mobile artifact cold-build workflow	tooling	Fork workflow-only speedup and benchmarking changes; runtime/install/auth behavior unchanged.
 subject	termux: normalize x64 mobile benchmark env	tooling	Fork workflow-only x64 benchmark fix; the shipped Termux runtime/auth path stays unchanged.
-subject	termux: scope x64 benchmark cflags to target	tooling	Fork workflow-only x64 benchmark fix; keeps target flags off host builds without changing shipped runtime/auth behavior.
+subject	termux: scope x64 benchmark cflags to target	tooling	Fork workflow-only x64 benchmark fix; keeps target flags off host builds without changing runtime/auth behavior.
 subject	termux: keep mobile artifact builds on arm runner	tooling	Fork workflow-only cleanup after x64 benchmark attempts; preserves the green Android shipping path.
 subject	termux: benchmark zig linker on x64 mobile builds	tooling	Fork workflow-only x64 benchmark spike; keeps the shipping Android artifact path on arm while testing a zig-linker fallback on hosted x64.
 subject	termux: fix x64 libcap benchmark bootstrap	tooling	Fork workflow-only follow-up for the hosted x64 benchmark; keeps libcap host helper builds native while target libcap and Rust linking stay on the cross path.
@@ -209,3 +209,9 @@ subject	ci: audit pinned sandbox installer update	tooling	Classifies the reviewe
 subject	ci: refresh pinned sandbox installer (#111)	tooling	Updates the pinned sandbox test installer action and its patch audit together; runtime source and release verification remain unchanged.
 subject	ci: add permanent release maintenance requests	security-critical	Adds a tested bounded request interface in the existing publisher for original Git-object transport, exact-head dispatch and closed-PR branch retirement; all publication and verification gates remain unchanged.
 subject	termux: record reviewed upstream ancestry	runtime-critical	Records the exact official upstream parent for an already reviewed complete source tree without changing its bytes; all five release gates run on the resulting commit.
+subject	ci: add reviewed source preparation	security-critical	Adds bounded hashed text materialization and Cargo/Bazel lock regeneration without ref writes; preserves workflow ownership and release gates.
+subject	ci: prepare reviewed alpha source	tooling	Requests exact reviewed source materialization and dependency lock regeneration; does not publish or promote a runtime.
+subject	termux: update to 0.154.0-alpha.6.1	runtime-critical	Integrates the original newest-published alpha commit, preserves Termux patches and resolves reviewed Cargo updates with regenerated lockfiles.
+subject	release: request validated Termux 0.154.0-alpha.6.1 publication	tooling	Records the five successful exact-source release gates for the permanent publisher.
+subject	release: verify final Termux channel	tooling	Dispatches permanent post-promotion checks on the exact cleaned main head.
+subject	ci: retire reconciled dependency branches	tooling	Requests retirement only of explicitly closed PR branches with matching reviewed identities.

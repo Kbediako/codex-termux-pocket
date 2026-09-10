@@ -29,6 +29,7 @@ FIELDS = {
     "export-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit"},
     "import-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit"},
     "record-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit", "prepared_commit"},
+    "prepare-source": {"base_main", "prepared_commit", "expected_input_tree", "edits", "package_updates"},
     "dispatch-checks": {"phase"},
     "retire-branches": {"branches"},
 }
@@ -64,6 +65,9 @@ def validate_request(value):
             raise ValueError(f"invalid {key}")
     if "upstream_tag" in value and (not isinstance(value["upstream_tag"], str) or not TAG.fullmatch(value["upstream_tag"])):
         raise ValueError("invalid official alpha tag")
+    if operation == "prepare-source":
+        from source_preparation import validate
+        validate(value)
     if operation == "dispatch-checks" and value["phase"] not in ("pre", "post"):
         raise ValueError("phase must be pre or post")
     if operation == "retire-branches":
@@ -267,6 +271,9 @@ def main():
         export_upstream(request, source)
     elif operation == "record-upstream":
         record_upstream(request, repo, source)
+    elif operation == "prepare-source":
+        from source_preparation import execute
+        execute(request, repo, source, api, live_main)
     elif operation == "dispatch-checks":
         dispatch_checks(repo, source, request["phase"])
     elif operation == "retire-branches":
