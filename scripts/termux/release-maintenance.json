@@ -1,7 +1,7 @@
 {
   "format_version": 1,
-  "request_id": "alpha15411-export-20260910-1",
-  "operation": "export-upstream",
+  "request_id": "alpha15411-import-20260910-1",
+  "operation": "import-upstream",
   "upstream_tag": "rust-v0.154.0-alpha.11",
   "upstream_tag_object": "aa8cc8f5d523a5c67e7032aa3bee930b05ed83af",
   "upstream_commit": "4236f50b7cef42a74bf69e4b8f8fd18fd3ad97c6"
