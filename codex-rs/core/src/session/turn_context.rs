@@ -6,7 +6,9 @@ use crate::config::TokenBudgetConfig;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
+use crate::shell_snapshot::ShellSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
+use crate::shell_snapshot::ShellSnapshotSandbox;
 use crate::tools::sandboxing::executor_windows_sandbox_level;
 use arc_swap::ArcSwap;
 use codex_core_plugins::PluginCommandAttribution;
@@ -37,11 +39,22 @@ use codex_utils_path_uri::PathUri;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::Shared;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
 
 pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSnapshotFile>>>>;
+pub(crate) type ShellSnapshotCache =
+    Arc<Mutex<HashMap<ShellSnapshotCacheKey, Arc<ShellSnapshotFile>>>>;
+
+#[derive(Eq, Hash, PartialEq)]
+pub(crate) struct ShellSnapshotCacheKey {
+    cwd: AbsolutePathBuf,
+    shell_path: PathBuf,
+    allow_login_shell: bool,
+    sandbox: String,
+}
 
 #[derive(Clone)]
 pub(crate) struct TurnEnvironment {
@@ -56,6 +69,8 @@ pub(crate) struct TurnEnvironment {
     /// OS reported by the selected executor; `None` for legacy executors.
     pub(crate) executor_platform_os: Option<String>,
     pub(crate) shell_snapshot: ShellSnapshotTask,
+    pub(crate) shell_snapshot_builder: Option<Box<ShellSnapshot>>,
+    pub(crate) shell_snapshot_cache: ShellSnapshotCache,
     pub(crate) shell_snapshot_v2_supported: bool,
 }
 
@@ -76,6 +91,8 @@ impl TurnEnvironment {
             shell,
             executor_platform_os: None,
             shell_snapshot: futures::future::ready(None).boxed().shared(),
+            shell_snapshot_builder: None,
+            shell_snapshot_cache: Arc::default(),
             shell_snapshot_v2_supported: false,
         }
     }
@@ -99,14 +116,85 @@ impl TurnEnvironment {
         config
     }
 
-    pub(crate) fn shell_snapshot(&self, cwd: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
-        if self.selection.cwd != PathUri::from_abs_path(cwd) {
+    pub(crate) async fn shell_snapshot(
+        &self,
+        cwd: &AbsolutePathBuf,
+        command: &[String],
+        shell: &shell::Shell,
+        config: &Config,
+        sandbox: Option<ShellSnapshotSandbox>,
+    ) -> Option<Arc<ShellSnapshotFile>> {
+        let credential_broker_enabled = config
+            .permissions
+            .network
+            .as_ref()
+            .is_some_and(|spec| spec.enabled() && spec.credential_broker_enabled());
+        let cwd_matches_selection = self.selection.cwd == PathUri::from_abs_path(cwd);
+        if !config.features.enabled(Feature::ShellSnapshot)
+            || (!cwd_matches_selection && !credential_broker_enabled)
+            || command.len() < 3
+            || !matches!(command[1].as_str(), "-lc" | "-c")
+            || (command[1] == "-c" && !credential_broker_enabled)
+        {
             return None;
         }
-        self.shell_snapshot
-            .peek()?
-            .as_deref()
-            .map(ShellSnapshotFile::path)
+        if credential_broker_enabled {
+            let sandbox = sandbox?;
+            let use_login_shell = command[1] == "-lc";
+            let shell_snapshot_builder = self.shell_snapshot_builder.as_ref()?;
+            let key = ShellSnapshotCacheKey {
+                cwd: cwd.clone(),
+                shell_path: shell.shell_path.clone(),
+                allow_login_shell: use_login_shell,
+                sandbox: sandbox
+                    .cache_key()
+                    .inspect_err(|err| {
+                        tracing::warn!("Failed to identify shell snapshot sandbox: {err:?}");
+                    })
+                    .ok()?,
+            };
+            if let Some(snapshot) = self
+                .shell_snapshot_cache
+                .lock()
+                .await
+                .get(&key)
+                .filter(|snapshot| {
+                    snapshot.path().as_path().is_file()
+                        && snapshot.is_brokered_for(self.shell_environment_policy())
+                })
+                .cloned()
+            {
+                return Some(snapshot);
+            }
+            // Captures keep this command's cancellation token. Retry once if brokerage
+            // changes during startup, without retrying failed or cancelled captures.
+            for _ in 0..2 {
+                let snapshot = shell_snapshot_builder
+                    .as_ref()
+                    .clone()
+                    .build(
+                        Arc::clone(&self.environment),
+                        PathUri::from_abs_path(cwd),
+                        Some(shell.clone()),
+                        use_login_shell,
+                        self.shell_environment_policy().clone(),
+                        Some(sandbox.clone()),
+                    )
+                    .await?;
+                if !snapshot.is_brokered_for(self.shell_environment_policy()) {
+                    continue;
+                }
+                let mut snapshots = self.shell_snapshot_cache.lock().await;
+                if snapshots.len() >= 32 && !snapshots.contains_key(&key) {
+                    snapshots.clear();
+                }
+                snapshots.insert(key, Arc::clone(&snapshot));
+                return Some(snapshot);
+            }
+            None
+        } else {
+            self.shell_snapshot.peek()?.clone()
+        }
     }
 
     pub(crate) fn cwd(&self) -> &PathUri {
@@ -602,7 +690,7 @@ impl TurnContext {
             realtime_active: Some(self.realtime_active),
             cyber_access_program: self.cyber_access_program,
             effort: self.reasoning_effort().cloned(),
-            summary: ReasoningSummaryConfig::Auto,
+            summary: self.reasoning_summary(),
         }
     }
 
@@ -959,6 +1047,17 @@ impl Session {
             .plugins_manager
             .plugins_for_config(&plugins_input)
             .await;
+        // Cache changes from another process do not notify this session's hook runtime.
+        if !self.hooks().matches_plugin_hooks(
+            plugin_outcome.iter_effective_plugin_hook_sources(),
+            plugin_outcome.iter_effective_plugin_hook_warnings(),
+        ) {
+            // Keep the refresh state out of the enclosing turn-construction future.
+            Box::pin(self.refresh_hooks(Arc::clone(
+                &session_configuration.original_config_do_not_use,
+            )))
+            .await;
+        }
         let trusted_plugin_roots = TrustedPluginRoots::from_plugin_load_outcome(
             &plugin_outcome,
             per_turn_config.codex_home.as_path(),

@@ -14,11 +14,12 @@ fn server_feature(name: &str) -> ExperimentalFeature {
 }
 
 #[test]
-fn experimental_features_discovery_preserves_server_order_and_limits_writes() {
+fn experimental_features_discovery_preserves_server_order_and_accepts_new_keys() {
     let (app_tx, mut app_rx) = tokio::sync::mpsc::unbounded_channel();
     let (catalog_tx, catalog_rx) = oneshot::channel();
     let mut view = ExperimentalFeaturesView::new(
         Vec::new(),
+        ThreadId::new(),
         Some(catalog_rx),
         AppEventSender::new(app_tx),
         crate::keymap::RuntimeKeymap::defaults().list,
@@ -38,12 +39,12 @@ fn experimental_features_discovery_preserves_server_order_and_limits_writes() {
     assert_eq!(
         view.features
             .iter()
-            .map(|item| (item.feature, item.enabled))
+            .map(|item| (item.key.as_str(), item.enabled))
             .collect::<Vec<_>>(),
         vec![
-            (Some(Feature::NetworkProxy), true),
-            (None, true),
-            (Some(Feature::PreventIdleSleep), true),
+            ("network_proxy", true),
+            ("future_feature", true),
+            ("prevent_idle_sleep", true)
         ]
     );
     let area = Rect::new(
@@ -58,25 +59,72 @@ fn experimental_features_discovery_preserves_server_order_and_limits_writes() {
         "experimental_features_server_discovery",
         buffer_text(&buffer)
     );
-    // Read-only entries retain their configured checkmark when Space is pressed.
+    // New server features are writable without a local Feature enum variant.
     view.state.selected_idx = Some(1);
     view.toggle_selected();
-    assert!(view.features[1].enabled);
+    assert!(!view.features[1].enabled);
     view.state.selected_idx = Some(0);
     view.toggle_selected();
-    view.state.selected_idx = Some(2);
-    view.toggle_selected();
-    view.on_ctrl_c();
-    let AppEvent::UpdateFeatureFlags { updates } = app_rx.try_recv().unwrap() else {
+    view.features[2].enabled = false;
+    view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(
+        matches!(app_rx.try_recv().unwrap(), AppEvent::UpdateFeatureFlags { updates }
+        if updates == vec![(Feature::PreventIdleSleep, false)])
+    );
+    let AppEvent::SaveExperimentalFeatures {
+        updates,
+        response_tx,
+        ..
+    } = app_rx.try_recv().unwrap()
+    else {
         panic!("expected feature edits");
     };
     assert_eq!(
         updates,
         vec![
-            (Feature::NetworkProxy, false),
-            (Feature::PreventIdleSleep, false)
+            ("network_proxy".to_string(), false),
+            ("future_feature".to_string(), false)
         ]
     );
+    snapshot_view("experimental_features_saving", &view);
+    response_tx
+        .send(Err("Saved but readback failed".to_string()))
+        .unwrap();
+    view.pre_draw_tick(Instant::now());
+    snapshot_view("experimental_features_save_failed", &view);
+
+    // Reverting uncertain saves to their original values must still write them.
+    view.features[0].enabled = true;
+    view.features[1].enabled = true;
+    view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let AppEvent::SaveExperimentalFeatures {
+        updates,
+        response_tx,
+        ..
+    } = app_rx.try_recv().unwrap()
+    else {
+        panic!("expected corrective save without repeating special controls");
+    };
+    assert_eq!(
+        updates,
+        vec![
+            ("network_proxy".to_string(), true),
+            ("future_feature".to_string(), true)
+        ]
+    );
+    response_tx
+        .send(Err("Persistent write rejection".to_string()))
+        .unwrap();
+    view.pre_draw_tick(Instant::now());
+    // Cancel saves new special edits without retrying the failed generic write.
+    view.features[2].enabled = true;
+    view.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    assert!(view.is_complete());
+    assert!(
+        matches!(app_rx.try_recv().unwrap(), AppEvent::UpdateFeatureFlags { updates }
+        if updates == vec![(Feature::PreventIdleSleep, true)])
+    );
+    assert!(app_rx.try_recv().is_err());
 }
 
 #[test]
@@ -98,6 +146,7 @@ fn experimental_features_empty_error_and_cancel_remain_usable() {
         let (catalog_tx, catalog_rx) = oneshot::channel();
         let mut view = ExperimentalFeaturesView::new(
             Vec::new(),
+            ThreadId::new(),
             Some(catalog_rx),
             AppEventSender::new(app_tx),
             crate::keymap::RuntimeKeymap::defaults().list,
@@ -115,7 +164,6 @@ fn experimental_features_empty_error_and_cancel_remain_usable() {
         let mut buffer = Buffer::empty(area);
         view.render(area, &mut buffer);
         insta::assert_snapshot!(snapshot, buffer_text(&buffer));
-        view.toggle_selected();
         view.on_ctrl_c();
         assert!(view.is_complete());
         assert!(app_rx.try_recv().is_err());
@@ -124,6 +172,7 @@ fn experimental_features_empty_error_and_cancel_remain_usable() {
     let (catalog_tx, catalog_rx) = oneshot::channel();
     let view = ExperimentalFeaturesView::new(
         Vec::new(),
+        ThreadId::new(),
         Some(catalog_rx),
         AppEventSender::new(app_tx),
         crate::keymap::RuntimeKeymap::defaults().list,
@@ -145,4 +194,16 @@ fn buffer_text(buffer: &Buffer) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn snapshot_view(name: &str, view: &ExperimentalFeaturesView) {
+    let area = Rect::new(
+        /*x*/ 0,
+        /*y*/ 0,
+        /*width*/ 80,
+        view.desired_height(/*width*/ 80),
+    );
+    let mut buffer = Buffer::empty(area);
+    view.render(area, &mut buffer);
+    insta::assert_snapshot!(name, buffer_text(&buffer));
 }

@@ -561,6 +561,7 @@ fn map_browser_use_requirements_to_api(
     browser_use: codex_config::BrowserUseRequirementsToml,
 ) -> BrowserUseRequirements {
     BrowserUseRequirements {
+        allow_webmcp: browser_use.allow_webmcp,
         allow_history_access: browser_use.allow_history_access,
         disable_auto_review: browser_use.disable_auto_review,
         allow_global_persistent_approval: browser_use.allow_global_persistent_approval,
@@ -940,6 +941,7 @@ mod tests {
         let mapped = map_requirements_toml_to_api(ConfigRequirementsToml {
             allow_browser_and_computer_use: Some(false),
             browser_use: Some(BrowserUseRequirementsToml {
+                allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
                 allow_global_persistent_approval: Some(false),
@@ -997,6 +999,7 @@ mod tests {
         assert_eq!(
             mapped.browser_use,
             Some(BrowserUseRequirements {
+                allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
                 allow_global_persistent_approval: Some(false),

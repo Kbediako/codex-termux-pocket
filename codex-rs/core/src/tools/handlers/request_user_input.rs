@@ -1,3 +1,4 @@
+use crate::context::GuardianContextMode;
 use crate::context::GuardianReviewEvidence;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
@@ -85,7 +86,7 @@ impl RequestUserInputHandler {
             auto_resolution_ms: None,
         };
         let questions = args.questions.clone();
-        let response = session
+        let accepted = session
             .request_user_input(turn.as_ref(), call_id.clone(), args)
             .await
             .ok_or_else(|| {
@@ -93,6 +94,8 @@ impl RequestUserInputHandler {
                     "{REQUEST_USER_INPUT_TOOL_NAME} was cancelled before receiving a response"
                 ))
             })?;
+
+        let response = accepted.response;
 
         let content = serde_json::to_string(&response).map_err(|err| {
             FunctionCallError::Fatal(format!(
@@ -109,7 +112,7 @@ impl RequestUserInputHandler {
         // Capture and consumption use the same fixed thread feature setting. Legacy
         // threads must not construct retained answers, persist them, or advance their revision.
         if turn.config.features.enabled(Feature::GuardianApproval)
-            && session.enabled(Feature::GuardianThreadContext)
+            && session.guardian_context_mode == GuardianContextMode::ThreadOwned
         {
             let user_input = questions
                 .iter()
@@ -142,11 +145,14 @@ impl RequestUserInputHandler {
                 .collect::<Vec<_>>();
             if !user_input.is_empty() {
                 session
-                    .record_retained_context(RetainedContextEvent::VerifiedAnswer(VerifiedAnswer {
-                        turn_id: turn.sub_id.clone(),
-                        call_id,
-                        questions: user_input,
-                    }))
+                    .record_retained_context(RetainedContextEvent::VerifiedAnswer {
+                        answer: VerifiedAnswer {
+                            turn_id: turn.sub_id.clone(),
+                            call_id,
+                            questions: user_input,
+                        },
+                        acceptance_order: accepted.acceptance_order,
+                    })
                     .await;
             }
         }

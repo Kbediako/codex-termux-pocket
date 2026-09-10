@@ -9,7 +9,7 @@ import sys
 
 # Import only this script's siblings, including under PYTHONSAFEPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime import Binary, PLUGINS, RuntimeFormat, prepare
+from runtime import Binary, PLUGINS, RuntimeFormat, prepare, required_library_paths
 
 SYSTEM_IMPORTS = frozenset(
     {
@@ -138,6 +138,9 @@ def project(prefix, receipts, target, output):
         inspect,
         finalize_copy,
         plugin_dir="lib/gstreamer-1.0",
+        required_libraries=tuple(
+            Path(path).name for path in required_library_paths(target)
+        ),
     )
     prepare(prefix, receipts, target, output, format)
 

@@ -4,6 +4,8 @@ mod browser_computer_use_requirements;
 mod browser_use;
 mod cloud_config_bundle;
 mod cloud_config_layers;
+#[cfg(target_os = "macos")]
+mod codex_home_symlink;
 mod computer_use;
 mod config_layer_source;
 mod config_requirements;
@@ -66,6 +68,8 @@ pub use cloud_config_layers::CloudConfigFragmentSource;
 pub use cloud_config_layers::CloudConfigLayerError;
 pub use cloud_config_layers::cloud_config_layers_from_fragments;
 pub use codex_execpolicy::RequirementsExecPolicy;
+#[cfg(target_os = "macos")]
+pub use codex_home_symlink::allowed_symlinked_codex_home;
 pub use codex_protocol::config_types::ProfileV2Name;
 pub use codex_protocol::config_types::ProfileV2NameParseError;
 pub use codex_protocol::config_types::ToolExposureSurface;

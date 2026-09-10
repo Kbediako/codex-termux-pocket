@@ -20,6 +20,17 @@ PLUGINS = (
 )
 
 
+def required_library_paths(target: str) -> tuple[str, ...]:
+    """Libraries needed by the bindings even when no selected plugin imports them."""
+    if target.endswith("-apple-darwin"):
+        return ("lib/libgio-2.0.0.dylib",)
+    if target.endswith("-unknown-linux-gnu"):
+        return ("lib/libgio-2.0.so.0",)
+    if target.endswith("-pc-windows-msvc"):
+        return ("bin/gio-2.0-0.dll",)
+    raise ValueError("unsupported native runtime target")
+
+
 @dataclass(frozen=True)
 class Binary:
     identity: str
@@ -37,6 +48,7 @@ class RuntimeFormat:
     finalize_copy: Callable
     library_dir: str = "lib"
     plugin_dir: str = "plugins"
+    required_libraries: tuple[str, ...] = ()
 
 
 def digest(path):
@@ -118,7 +130,14 @@ def prepare(prefix, receipts, target, output, format):
         binaries[relative] = (record, metadata)
         identities[metadata.identity] = relative
         destinations[relative] = destination
-    pending, selected = list(format.plugins), set()
+    libraries = {path.name: relative for relative, path in destinations.items()}
+    if any(name not in libraries for name in format.required_libraries):
+        raise ValueError("missing required native library")
+    pending = [
+        *format.plugins,
+        *(libraries[name] for name in format.required_libraries),
+    ]
+    selected = set()
     while pending:
         relative = pending.pop()
         if relative in selected:

@@ -121,15 +121,23 @@ impl App {
     }
 
     fn active_keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
-        if self.overlay.is_some() {
-            return crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::Pager);
-        }
+        use crate::keymap::KeymapContext;
+        use crate::keymap::KeymapContextSet;
 
+        if self.overlay.is_some() {
+            return KeymapContextSet::new(KeymapContext::Pager);
+        }
+        let voice_available = self.chat_widget.realtime_microphone_shortcut_available();
         let contexts = self.chat_widget.keymap_contexts();
         if self.chat_widget.no_modal_or_popup_active() {
-            contexts
-                .with(crate::keymap::KeymapContext::Global)
-                .with(crate::keymap::KeymapContext::Chat)
+            let contexts = contexts
+                .with(KeymapContext::Global)
+                .with(KeymapContext::Chat);
+            if voice_available {
+                contexts.with(KeymapContext::Voice)
+            } else {
+                contexts
+            }
         } else {
             contexts
         }
@@ -218,6 +226,10 @@ impl App {
         } else {
             self.chat_widget.set_raw_output_mode(enabled);
         }
+        if self.overlay.is_some() {
+            self.schedule_immediate_resize_reflow(tui);
+            return;
+        }
         let terminal_width = tui.terminal.last_known_screen_size.into();
         if let Err(err) = self.reflow_transcript_now(tui, terminal_width) {
             tracing::warn!(error = %err, "failed to reflow transcript after raw output mode toggle");
@@ -233,6 +245,44 @@ impl App {
         app_server: &mut AppServerSession,
         key_event: KeyEvent,
     ) {
+        if self.chat_widget.is_external_writer_view()
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+            && key_event.kind == KeyEventKind::Press
+        {
+            let modifiers = key_event.modifiers;
+            let quit = match key_event.code {
+                KeyCode::Esc => modifiers == KeyModifiers::NONE,
+                KeyCode::Char('q' | 'Q') => {
+                    modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT
+                }
+                KeyCode::Char('c' | 'C') => {
+                    modifiers == KeyModifiers::CONTROL
+                        || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                }
+                _ => false,
+            };
+            if quit {
+                self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+                return;
+            }
+            if matches!(key_event.code, KeyCode::Char('r' | 'R'))
+                && (modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT)
+                && let Some(thread_id) = self.current_displayed_thread_id()
+            {
+                let target = SessionTarget {
+                    path: self
+                        .primary_session_configured
+                        .as_ref()
+                        .and_then(|session| session.rollout_path.clone()),
+                    thread_id,
+                    cwd: None,
+                    history_mode: None,
+                };
+                let _ = self.resume_target_session(tui, app_server, target).await;
+                return;
+            }
+        }
         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
         // agent-switch shortcuts when the composer is empty so we never steal the expected
@@ -373,6 +423,13 @@ impl App {
                 .thread_id()
                 .is_some_and(|thread_id| app_server.has_older_history(thread_id));
             self.open_transcript_overlay(tui);
+            return;
+        }
+
+        if self.chat_widget.is_external_writer_view()
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+        {
             return;
         }
 

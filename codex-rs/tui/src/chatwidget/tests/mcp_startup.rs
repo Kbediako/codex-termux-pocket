@@ -534,6 +534,7 @@ async fn mcp_startup_complete_preserves_review_status() {
     );
 
     chat.on_guardian_assessment(GuardianAssessmentEvent {
+        review_reason: None,
         id: "guardian-1".to_string(),
         target_item_id: Some("guardian-target-1".to_string()),
         plugin_id: None,
@@ -549,7 +550,7 @@ async fn mcp_startup_complete_preserves_review_status() {
         action: GuardianAssessmentAction::Command {
             source: GuardianCommandSource::Shell,
             command: "rm -rf '/tmp/guardian target'".to_string(),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
         },
     });
 

@@ -73,8 +73,6 @@ use codex_protocol::protocol::McpStartupFailureReason;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -190,9 +188,6 @@ pub(crate) struct McpConnectionSet {
     protocol_mode: crate::McpProtocolMode,
     required_servers: Vec<String>,
     optional_startup_deadline: OnceLock<tokio::time::Instant>,
-    tool_catalog_revision: Arc<RwLock<u64>>,
-    codex_apps_tools_override: RwLock<Option<Vec<ToolInfo>>>,
-    codex_apps_refresh_lock: Mutex<()>,
     tool_plugin_provenance: Arc<ToolPluginProvenance>,
     prefix_mcp_tool_names: bool,
     non_prefixed_mcp_tool_servers: Vec<String>,
@@ -293,6 +288,11 @@ impl McpConnectionSet {
             .filter(|(_, server)| server.enabled())
         {
             let registration = config.mcp_server_catalog.server(&server_name);
+            let client_mcp_extensions = crate::client_capabilities::server_mcp_extensions(
+                &client_mcp_extensions,
+                &server_name,
+                registration,
+            );
             let is_host_owned_codex_apps = registration.is_some_and(|server| {
                 server
                     .source()
@@ -336,8 +336,28 @@ impl McpConnectionSet {
             let shares_codex_apps_tools_cache = is_host_owned_codex_apps
                 && should_share_codex_apps_tools_cache(&server_name, uses_env_bearer_token);
             let codex_apps_tools_cache_context = shares_codex_apps_tools_cache.then(|| {
+                // Tools/list has no thread selection or UI capabilities. Only equivalent
+                // transport/auth and listing settings may share executable Apps tools.
+                let mut transport = configured_config.transport.clone();
+                if let McpServerTransportConfig::StreamableHttp {
+                    http_headers: Some(headers),
+                    ..
+                } = &mut transport
+                {
+                    // mcp_server_config_for_url in codex-rs/codex-mcp/src/mcp/mod.rs
+                    // adds thread attribution that threadless discovery does not carry.
+                    headers.retain(|name, _| !name.eq_ignore_ascii_case("originator"));
+                }
+                let mut scope = serde_json::json!([
+                    transport,
+                    &configured_config.auth,
+                    protocol_mode.preferred_protocol_version().as_str(),
+                    catalog_item_limit,
+                ]);
+                scope.sort_all_objects();
                 codex_apps_tools_cache
                     .context(codex_home.clone(), codex_apps_tools_cache_key.clone())
+                    .with_live_scope(scope.to_string())
             });
             // The reserved Codex Apps registration follows the shared
             // AuthManager across refreshes. In the hosted-plugin path, this
@@ -553,6 +573,15 @@ impl McpConnectionSet {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 client_mcp_extensions.clone(),
+                auth_manager
+                    .as_ref()
+                    .filter(|_| {
+                        matches!(
+                            &configured_config.transport,
+                            McpServerTransportConfig::Stdio { .. }
+                        )
+                    })
+                    .map(|manager| manager.auth_change_state_receiver()),
                 protocol_mode,
                 catalog_item_limit,
             );
@@ -711,9 +740,6 @@ impl McpConnectionSet {
             protocol_mode,
             required_servers,
             optional_startup_deadline: OnceLock::new(),
-            tool_catalog_revision: Arc::new(RwLock::new(0)),
-            codex_apps_tools_override: RwLock::new(None),
-            codex_apps_refresh_lock: Mutex::new(()),
             tool_plugin_provenance,
             prefix_mcp_tool_names,
             non_prefixed_mcp_tool_servers,
@@ -773,9 +799,6 @@ impl McpConnectionSet {
             protocol_mode: crate::McpProtocolMode::Legacy,
             required_servers: Vec::new(),
             optional_startup_deadline: OnceLock::new(),
-            tool_catalog_revision: Arc::new(RwLock::new(0)),
-            codex_apps_tools_override: RwLock::new(None),
-            codex_apps_refresh_lock: Mutex::new(()),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             prefix_mcp_tool_names,
             non_prefixed_mcp_tool_servers: Vec::new(),
@@ -993,4 +1016,4 @@ impl McpConnectionSet {
 
 #[cfg(test)]
 #[path = "connection_manager_tests.rs"]
-mod tests;
+pub(crate) mod tests;

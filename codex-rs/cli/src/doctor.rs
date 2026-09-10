@@ -35,8 +35,8 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
-use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::LoaderOverrides;
 use codex_core::config::find_codex_home;
 use codex_features::FEATURES;
 use codex_http_client::ClientRouteClass;
@@ -358,7 +358,9 @@ async fn build_report(
     checks.push(run_sync_check("search", progress.clone(), search_check));
 
     progress.begin("config");
+    let config_started = Instant::now();
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
+    let config_duration = config_started.elapsed();
     let cwd = config_result
         .as_ref()
         .map(|config| config.cwd.as_path().to_path_buf())
@@ -403,7 +405,14 @@ async fn build_report(
                 background_server_check,
                 reachability_check,
             ) = tokio::join!(
-                async { run_sync_check("config", progress.clone(), || config_check(config)) },
+                async {
+                    run_sync_check("config", progress.clone(), || {
+                        config_check(config).detail(format!(
+                            "configuration load ms: {}",
+                            config_duration.as_millis()
+                        ))
+                    })
+                },
                 async {
                     run_sync_check("auth", progress.clone(), || match &auth_manager_result {
                         Ok(_) => auth_check(config),
@@ -562,18 +571,14 @@ async fn build_report(
 }
 
 async fn load_config(
-    root_config_overrides: CliConfigOverrides,
+    mut root_config_overrides: CliConfigOverrides,
     interactive: &TuiCli,
     arg0_paths: &Arg0DispatchPaths,
 ) -> anyhow::Result<Config> {
-    let mut cli_kv_overrides = root_config_overrides
-        .parse_overrides()
-        .map_err(anyhow::Error::msg)?;
     if interactive.web_search {
-        cli_kv_overrides.push((
-            "web_search".to_string(),
-            toml::Value::String("live".to_string()),
-        ));
+        root_config_overrides
+            .raw_overrides
+            .push("web_search=\"live\"".to_string());
     }
 
     let overrides = ConfigOverrides {
@@ -581,12 +586,15 @@ async fn load_config(
         ..config_overrides_from_interactive(interactive, arg0_paths)
     };
 
-    ConfigBuilder::default()
-        .cli_overrides(cli_kv_overrides)
-        .harness_overrides(overrides)
-        .build()
-        .await
-        .context("failed to load Codex config")
+    crate::cloud_config::config_builder(
+        &root_config_overrides,
+        LoaderOverrides::default(),
+        overrides,
+    )
+    .await?
+    .build()
+    .await
+    .context("failed to load Codex config")
 }
 
 fn config_overrides_from_interactive(
@@ -1053,6 +1061,9 @@ fn codex_path_entries() -> Vec<String> {
 
 fn config_check(config: &Config) -> DoctorCheck {
     let mut details = Vec::new();
+    details
+        .push("configuration scope: invocation config, including cloud-managed policy".to_string());
+    details.push("active thread overrides: not inspected".to_string());
     details.push(format!("CODEX_HOME: {}", config.codex_home.display()));
     details.push(format!("cwd: {}", config.cwd.display()));
     details.push(format!(

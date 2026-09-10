@@ -276,22 +276,6 @@ impl ConfigManager {
             {
                 segments[2] = pattern;
             }
-            if cfg!(windows)
-                && let [policy, field, key] = segments.as_slice()
-                && policy == "shell_environment_policy"
-                && field == "set"
-                && let Some(existing) = user_config
-                    .get(policy)
-                    .and_then(|policy| policy.get(field))
-                    .and_then(TomlValue::as_table)
-                    .and_then(|overrides| {
-                        overrides
-                            .keys()
-                            .find(|candidate| candidate.eq_ignore_ascii_case(key))
-                    })
-            {
-                segments[2].clone_from(existing);
-            }
             if !value.is_null() {
                 match segments.as_slice() {
                     [segment] if segment == "profile" => {
@@ -318,7 +302,10 @@ impl ConfigManager {
                     let has_broker_settings = |config: &TomlValue| {
                         value_at_path(config, &segments)
                             .and_then(TomlValue::as_table)
-                            .is_some_and(|feature| feature.contains_key("credential_broker"))
+                            .is_some_and(|feature| {
+                                feature.contains_key("credential_broker")
+                                    || feature.contains_key("credentials")
+                            })
                     };
                     has_broker_settings(&user_config)
                         || !has_broker_settings(&user_layer.config)
@@ -782,19 +769,6 @@ fn value_at_path<'a>(root: &'a TomlValue, segments: &[String]) -> Option<&'a Tom
 fn value_at_semantic_path<'a>(root: &'a TomlValue, segments: &[String]) -> Option<&'a TomlValue> {
     shell_environment_filter_entry(root, segments)
         .map(|(_, value)| value)
-        .or_else(|| match segments {
-            [policy, field, key]
-                if cfg!(windows) && policy == "shell_environment_policy" && field == "set" =>
-            {
-                root.get(policy)?
-                    .get(field)?
-                    .as_table()?
-                    .iter()
-                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-                    .map(|(_, value)| value)
-            }
-            _ => None,
-        })
         .or_else(|| value_at_path(root, segments))
         .or_else(|| {
             let (field, parents) = segments.split_last()?;

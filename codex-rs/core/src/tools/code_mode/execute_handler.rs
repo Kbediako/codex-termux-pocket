@@ -87,9 +87,10 @@ impl CodeModeExecuteHandler {
                 call_id: call_id.clone(),
                 cell_id: cell_id.to_string(),
             });
-        if let Some(executed_tool_calls) = exec.session.services.executed_tool_calls.as_ref() {
-            executed_tool_calls.start_cell(&cell_id, &call_id);
-        }
+        exec.session
+            .services
+            .executed_tool_calls
+            .start_cell(&cell_id, &call_id);
         let runtime_cell_id = cell_id.to_string();
         let code_cell_trace = exec
             .session

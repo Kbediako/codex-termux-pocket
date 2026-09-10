@@ -3,6 +3,7 @@ use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::app::tests::session_lifecycle_requests::recorded_params;
 use crate::app::tests::session_lifecycle_requests::start_recording_remote_app_server;
 use crate::app_event::RecapTrigger;
+use codex_model_provider_info::ModelProviderInfo;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -38,6 +39,7 @@ fn prepare_eligible_recap(app: &mut App, thread_id: ThreadId) {
     app.transcript_cells
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Finish the recap implementation".to_string(),
+            spoken: false,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
@@ -199,6 +201,7 @@ async fn manual_recap_works_when_auto_recap_disabled() -> Result<()> {
     app.transcript_cells
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Summarize this conversation".to_string(),
+            spoken: false,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
@@ -378,6 +381,7 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
     app.transcript_cells
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Finish the recap implementation".to_string(),
+            spoken: false,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),

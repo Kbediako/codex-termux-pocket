@@ -1322,6 +1322,29 @@ async fn structured_feature_toggle_ignores_unrelated_managed_settings() -> Resul
             .and_then(|features| features.get("network_proxy"))
             .is_none()
     );
+
+    let configured_provider = "[features.network_proxy]\nenabled = true\n\n\
+         [features.network_proxy.credentials.vendor]\n\
+         env = ['VENDOR_TOKEN']\n\
+         patterns = ['token_[a-z]{24}']\n\
+         url_prefixes = ['https://api.vendor.example']\n";
+    std::fs::write(&user_path, configured_provider)?;
+    service
+        .write_value(ConfigValueWriteParams {
+            file_path: Some(user_path.display().to_string()),
+            key_path: "features.network_proxy".to_string(),
+            value: serde_json::Value::Null,
+            merge_strategy: MergeStrategy::Replace,
+            expected_version: None,
+        })
+        .await?;
+    let updated: TomlValue = toml::from_str(&std::fs::read_to_string(&user_path)?)?;
+    let feature = &updated["features"]["network_proxy"];
+    assert_eq!(
+        feature.get("enabled").and_then(TomlValue::as_bool),
+        Some(false)
+    );
+    assert!(feature.get("credentials").is_some());
     Ok(())
 }
 
@@ -1715,28 +1738,32 @@ exclude = [
 set = { KEEP = "1", OTHER = "2", GH_HOST = "github.stale.example" } # keep this inline table
 "#
     );
-    #[cfg(windows)]
-    {
-        service
+    for (value, expected_set) in [
+        (
+            serde_json::json!("github.trusted.example"),
+            "KEEP='1'\nOTHER='2'\nGH_HOST='github.stale.example'\ngh_host='github.trusted.example'",
+        ),
+        (
+            serde_json::Value::Null,
+            "KEEP='1'\nOTHER='2'\nGH_HOST='github.stale.example'",
+        ),
+    ] {
+        let response = service
             .write_value(ConfigValueWriteParams {
                 file_path: Some(path.display().to_string()),
                 key_path: "shell_environment_policy.set.gh_host".to_string(),
-                value: serde_json::json!("github.trusted.example"),
+                value,
                 merge_strategy: MergeStrategy::Upsert,
                 expected_version: None,
             })
             .await?;
+        assert_eq!(response.status, WriteStatus::Ok);
+        assert_eq!(response.overridden_metadata, None);
         let config: TomlValue = toml::from_str(&std::fs::read_to_string(&path)?)?;
-        let overrides = config
-            .get("shell_environment_policy")
-            .and_then(|policy| policy.get("set"))
-            .and_then(TomlValue::as_table)
-            .expect("environment overrides");
         assert_eq!(
-            overrides.get("GH_HOST").and_then(TomlValue::as_str),
-            Some("github.trusted.example")
+            config["shell_environment_policy"]["set"],
+            toml::from_str::<TomlValue>(expected_set)?
         );
-        assert!(!overrides.contains_key("gh_host"));
     }
     service
         .read(ConfigReadParams {
@@ -1846,7 +1873,7 @@ exclude = ["AWS_*"]
 "#,
             "shell_environment_policy.filters.AWS_*",
             serde_json::json!("include"),
-            serde_json::Value::Null,
+            Some(serde_json::Value::Null),
         ),
         (
             r#"[shell_environment_policy.filters]
@@ -1854,21 +1881,42 @@ exclude = ["AWS_*"]
 "#,
             "shell_environment_policy.exclude",
             serde_json::json!(["AWS_*"]),
-            serde_json::Value::Null,
+            Some(serde_json::Value::Null),
         ),
-        #[cfg(windows)]
+        (
+            "[shell_environment_policy.set]\nGH_HOST = 'github.managed.example'\n",
+            "shell_environment_policy.set.GH_HOST",
+            serde_json::json!("github.user.example"),
+            Some(serde_json::json!("github.managed.example")),
+        ),
         (
             "[shell_environment_policy.set]\nGH_HOST = 'github.managed.example'\n",
             "shell_environment_policy.set.gh_host",
             serde_json::json!("github.user.example"),
-            serde_json::json!("github.managed.example"),
+            None,
+        ),
+        (
+            "[shell_environment_policy.set]\ngh_host = 'github.managed.example'\n",
+            "shell_environment_policy.set.gh_host",
+            serde_json::json!("github.user.example"),
+            Some(serde_json::json!("github.managed.example")),
+        ),
+        (
+            "[shell_environment_policy.set]\ngh_host = 'github.managed.example'\n",
+            "shell_environment_policy.set.GH_HOST",
+            serde_json::json!("github.user.example"),
+            None,
         ),
     ];
 
     for (managed, key_path, value, expected_effective_value) in cases {
         let tmp = tempdir()?;
         let path = tmp.path().join(CONFIG_TOML_FILE);
-        std::fs::write(&path, "")?;
+        std::fs::write(
+            &path,
+            "[shell_environment_policy.set]\n\
+             GH_HOST = 'github.original.example'\ngh_host = 'github.original-lower.example'\n",
+        )?;
         let managed_path = tmp.path().join("managed_config.toml");
         std::fs::write(&managed_path, managed)?;
         let managed_file = AbsolutePathBuf::try_from(managed_path.clone())?;
@@ -1889,15 +1937,20 @@ exclude = ["AWS_*"]
             })
             .await?;
 
-        assert_eq!(response.status, WriteStatus::OkOverridden);
-        let overridden = response
-            .overridden_metadata
-            .expect("managed representation should override the user edit");
-        assert_eq!(
-            overridden.overriding_layer.name,
-            ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
-        );
-        assert_eq!(overridden.effective_value, expected_effective_value);
+        if let Some(expected_effective_value) = expected_effective_value {
+            assert_eq!(response.status, WriteStatus::OkOverridden);
+            let overridden = response
+                .overridden_metadata
+                .expect("managed setting should override the user edit");
+            assert_eq!(
+                overridden.overriding_layer.name,
+                ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+            );
+            assert_eq!(overridden.effective_value, expected_effective_value);
+        } else {
+            assert_eq!(response.status, WriteStatus::Ok);
+            assert_eq!(response.overridden_metadata, None);
+        }
         service
             .read(ConfigReadParams {
                 include_layers: false,

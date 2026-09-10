@@ -21,9 +21,9 @@ const ACCOUNT_TOKEN_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/
 const THREAD_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
 const ACCOUNT_WORKSPACE_MESSAGES_FETCH_TIMEOUT: Duration =
     Duration::from_millis(/*millis*/ 1000);
-// Login overrides are intentionally available only in debug builds.
-#[cfg(debug_assertions)]
+// Packaged clients use this together with the OAuth client ID override for staging login.
 const LOGIN_ISSUER_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+// The development success-page redirect remains debug-only.
 #[cfg(debug_assertions)]
 const LOGIN_OPEN_APP_URL_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_DEV_OPEN_APP_URL";
 
@@ -561,7 +561,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let opts = LoginServerOptions {
+        let mut opts = LoginServerOptions {
             open_browser: false,
             codex_streamlined_login,
             login_success_page,
@@ -574,24 +574,20 @@ impl AccountRequestProcessor {
                 config.auth_route_config(),
             )
         };
+        if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
+            && !issuer.trim().is_empty()
+        {
+            opts.issuer = issuer;
+        }
         #[cfg(debug_assertions)]
-        let opts = {
-            let mut opts = opts;
-            if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
-                && !issuer.trim().is_empty()
-            {
-                opts.issuer = issuer;
-            }
-            if let LoginSuccessPage::Hosted { url, .. } = &mut opts.login_success_page
-                && let Ok(open_app_url) = std::env::var(LOGIN_OPEN_APP_URL_OVERRIDE_ENV_VAR)
-                && !open_app_url.trim().is_empty()
-            {
-                *url = open_app_url
-                    .parse()
-                    .map_err(|err| internal_error(format!("invalid Codex open app URL: {err}")))?;
-            }
-            opts
-        };
+        if let LoginSuccessPage::Hosted { url, .. } = &mut opts.login_success_page
+            && let Ok(open_app_url) = std::env::var(LOGIN_OPEN_APP_URL_OVERRIDE_ENV_VAR)
+            && !open_app_url.trim().is_empty()
+        {
+            *url = open_app_url
+                .parse()
+                .map_err(|err| internal_error(format!("invalid Codex open app URL: {err}")))?;
+        }
 
         Ok(opts)
     }

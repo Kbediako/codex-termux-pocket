@@ -112,6 +112,7 @@ mod tests {
                 failure: None,
                 saved_path: Some(test_path_buf("/tmp/ig-1.png").abs()),
                 imagegen_request_id: None,
+                generation_id: None,
             }),
         ]);
 
@@ -210,6 +211,7 @@ mod tests {
             section: None,
             section_entered_at: None,
             project_id: None,
+            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: "mock_provider".to_string(),
             model: None,

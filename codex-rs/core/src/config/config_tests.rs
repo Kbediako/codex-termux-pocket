@@ -334,6 +334,8 @@ consolidation_model = "gpt-5.2"
         toml::from_str::<ConfigToml>(memories).expect("TOML deserialization should succeed");
     assert_eq!(
         Some(MemoriesToml {
+            dual_write: None,
+            version: None,
             disable_on_external_context: Some(true),
             generate_memories: Some(false),
             use_memories: Some(false),
@@ -360,6 +362,8 @@ consolidation_model = "gpt-5.2"
     assert_eq!(
         config.memories,
         MemoriesConfig {
+            dual_write: false,
+            version: codex_protocol::MemoryVersion::V1,
             disable_on_external_context: true,
             generate_memories: false,
             use_memories: false,
@@ -1237,7 +1241,7 @@ supports_websockets = true
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, and `aws.auth_refresh`; other non-default provider fields are not supported"
+        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, `aws.credential_export`, and `aws.auth_refresh`; other non-default provider fields are not supported"
     ));
 }
 
@@ -1256,10 +1260,13 @@ fn config_toml_deserializes_model_availability_nux() {
         Tui {
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
+            whimsy: true,
             show_tooltips: true,
+            show_server_version_notice: true,
             auto_recap: true,
             disable_paste_burst: None,
             vim_mode_default: false,
+            question_esc_back: true,
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
@@ -4269,10 +4276,13 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
         Tui {
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
+            whimsy: true,
             show_tooltips: true,
+            show_server_version_notice: true,
             auto_recap: true,
             disable_paste_burst: None,
             vim_mode_default: false,
+            question_esc_back: true,
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,

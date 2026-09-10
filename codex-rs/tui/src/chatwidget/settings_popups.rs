@@ -101,6 +101,7 @@ impl ChatWidget {
         });
         let view = ExperimentalFeaturesView::new(
             Vec::new(),
+            thread_id,
             Some(response_rx),
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),

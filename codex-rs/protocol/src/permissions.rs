@@ -24,6 +24,15 @@ use crate::protocol::NetworkAccess;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::WritableRoot;
 
+mod deny_read_validator;
+mod target;
+mod windows_glob;
+
+pub use deny_read_validator::DenyReadValidator;
+pub use deny_read_validator::DenyReadViolation;
+pub use windows_glob::WindowsDenyReadGlobScan;
+pub use windows_glob::windows_deny_read_glob_scan;
+
 const PROTECTED_METADATA_GIT_PATH_NAME: &str = ".git";
 const PROTECTED_METADATA_AGENTS_PATH_NAME: &str = ".agents";
 const PROTECTED_METADATA_CODEX_PATH_NAME: &str = ".codex";
@@ -273,6 +282,11 @@ pub struct FileSystemSandboxPolicyContext<'a> {
 struct ResolvedFileSystemEntry {
     path: AbsolutePathBuf,
     access: FileSystemAccessMode,
+}
+
+struct PreparedFileSystemEntry<'a> {
+    entry: &'a ResolvedFileSystemEntry,
+    effective_path: AbsolutePathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1489,18 +1503,47 @@ impl FileSystemSandboxPolicy {
         }
 
         let resolved_entries = self.resolved_entries_with_cwd(cwd);
-        let writable_entries: Vec<AbsolutePathBuf> = resolved_entries
+        if !resolved_entries
             .iter()
-            .filter(|entry| entry.access.can_write())
-            .filter(|entry| self.can_write_local_path_with_cwd(entry.path.as_path(), cwd))
-            .map(|entry| entry.path.clone())
+            .any(|entry| entry.access.can_write())
+        {
+            return Vec::new();
+        }
+        // Resolve precedence and filesystem aliases once per entry, rather than repeating
+        // that work for every writable root while collecting its read-only carveouts.
+        let effective_entries: Vec<&ResolvedFileSystemEntry> = resolved_entries
+            .iter()
+            .filter(|entry| {
+                entry.access.can_write()
+                    == self.can_write_local_path_with_cwd(entry.path.as_path(), cwd)
+            })
             .collect();
+        if !effective_entries
+            .iter()
+            .any(|entry| entry.access.can_write())
+        {
+            return Vec::new();
+        }
+        let prepared_entries: Vec<PreparedFileSystemEntry<'_>> = effective_entries
+            .into_iter()
+            .map(|entry| PreparedFileSystemEntry {
+                entry,
+                effective_path: path_resolution.resolve(entry.path.clone()),
+            })
+            .collect();
+        let writable_entries: Vec<&PreparedFileSystemEntry<'_>> = prepared_entries
+            .iter()
+            .filter(|entry| entry.entry.access.can_write())
+            .collect();
+
+        let effective_cwd = AbsolutePathBuf::from_absolute_path(cwd)
+            .ok()
+            .map(|cwd| path_resolution.resolve(cwd));
 
         dedup_absolute_paths(
             writable_entries
                 .iter()
-                .cloned()
-                .map(|root| path_resolution.resolve(root))
+                .map(|entry| entry.effective_path.clone())
                 .collect(),
             /*normalize_effective_paths*/ false,
         )
@@ -1516,13 +1559,12 @@ impl FileSystemSandboxPolicy {
             let preserve_raw_carveout_paths = root.as_path().parent().is_some();
             let raw_writable_roots: Vec<&AbsolutePathBuf> = writable_entries
                 .iter()
-                .filter(|path| path_resolution.resolve((*path).clone()) == root)
+                .filter(|entry| entry.effective_path == root)
+                .map(|entry| &entry.entry.path)
                 .collect();
             let protected_metadata_names =
                 protected_metadata_names_for_writable_root(self, &root, &raw_writable_roots, cwd);
-            let protect_missing_dot_codex = AbsolutePathBuf::from_absolute_path(cwd)
-                .ok()
-                .is_some_and(|cwd| path_resolution.resolve(cwd) == root);
+            let protect_missing_dot_codex = effective_cwd.as_ref() == Some(&root);
             let mut read_only_subpaths: Vec<AbsolutePathBuf> =
                 default_read_only_subpaths_for_writable_root(&root, protect_missing_dot_codex)
                     .into_iter()
@@ -1536,12 +1578,12 @@ impl FileSystemSandboxPolicy {
             // Example: if `<root>/.codex -> <root>/decoy`, bwrap must still see
             // `<root>/.codex`, not only the resolved `<root>/decoy`.
             read_only_subpaths.extend(
-                resolved_entries
+                prepared_entries
                     .iter()
-                    .filter(|entry| !entry.access.can_write())
-                    .filter(|entry| !self.can_write_local_path_with_cwd(entry.path.as_path(), cwd))
-                    .filter_map(|entry| {
-                        let effective_path = path_resolution.resolve(entry.path.clone());
+                    .filter(|entry| !entry.entry.access.can_write())
+                    .filter_map(|prepared| {
+                        let entry = prepared.entry;
+                        let effective_path = &prepared.effective_path;
                         // Preserve the literal in-root path whenever the
                         // carveout itself lives under this writable root, even
                         // if following symlinks would resolve back to the root
@@ -1577,13 +1619,13 @@ impl FileSystemSandboxPolicy {
                             return Some(raw_carveout_path);
                         }
 
-                        if effective_path == root
+                        if effective_path == &root
                             || !effective_path.as_path().starts_with(root.as_path())
                         {
                             return None;
                         }
 
-                        Some(effective_path)
+                        Some(effective_path.clone())
                     }),
             );
             WritableRoot {

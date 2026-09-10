@@ -13,6 +13,7 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line_for_keymap;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::chatwidget::UserMessage;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
@@ -20,7 +21,10 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::models::snapshot_local_user_input;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::user_input::UserInput as CoreUserInput;
 
 pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
 
@@ -281,6 +285,11 @@ impl App {
             rows,
             selected_thread_id,
             self.primary_thread_id.is_none(),
+            self.config.features.enabled(Feature::Worktrees)
+                && !crate::uses_remote_workspace_or_environment(
+                    &self.app_server_target,
+                    self.environment_manager.as_ref(),
+                ),
             self.app_event_tx.clone(),
             self.keymap.clone(),
             Arc::clone(&self.agents_overview.view_state),
@@ -298,7 +307,6 @@ impl App {
         {
             return Ok(AppRunControl::Continue);
         }
-
         if self.primary_thread_id != Some(root_thread_id) {
             let previous_displayed_thread_id = self.current_displayed_thread_id();
             let mut previous_thread_ids =
@@ -365,6 +373,7 @@ impl App {
                 let target_session = SessionTarget {
                     path: target_thread.path.clone(),
                     thread_id: root_thread_id,
+                    cwd: Some(target_thread.cwd.to_path_buf()),
                     history_mode: Some(target_thread.history_mode),
                 };
                 match self
@@ -393,6 +402,9 @@ impl App {
                     }
                 }
             };
+            if unloaded && self.reject_remote_resume_permission_override(&resume_config) {
+                return Ok(AppRunControl::Continue);
+            }
             let baseline_approval = resume_config.permissions.approval_policy.value();
             let baseline_permissions =
                 RuntimePermissionProfileOverride::from_config(&resume_config);
@@ -486,6 +498,7 @@ impl App {
                             == RuntimePermissionProfileTurnOverride::LegacySandbox
                 });
             self.local_settings = local_settings;
+            self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
             self.config = resume_config;
             tui.set_notification_settings(
                 self.local_settings.tui.notification_settings.method,
@@ -606,7 +619,7 @@ impl App {
     pub(super) async fn dispatch_agents_overview_task(
         &mut self,
         app_server: &mut AppServerSession,
-        prompt: String,
+        prompt: UserMessage,
         cwd: Option<AbsolutePathBuf>,
     ) {
         self.refresh_in_memory_config_from_disk_best_effort("starting a background task")
@@ -644,17 +657,143 @@ impl App {
                 .add_error_message("Permission profile has different settings.".to_string());
         }
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
+        let defaults_cwd = match app_server.thread_params_mode() {
+            crate::app_server_session::ThreadParamsMode::Embedded => config.cwd.as_path(),
+            crate::app_server_session::ThreadParamsMode::Remote => remote_cwd
+                .as_deref()
+                .or_else(|| app_server.remote_cwd_override())
+                .unwrap_or(Path::new(".")),
+        };
+        let mut server_model_cleared = false;
+        match super::new_session::read_new_session_defaults(app_server, defaults_cwd).await {
+            Ok(Some(defaults)) => {
+                server_model_cleared = defaults.model.is_none();
+                let use_server_provider = matches!(
+                    app_server.thread_params_mode(),
+                    crate::app_server_session::ThreadParamsMode::Embedded
+                ) && self.harness_overrides.model.is_none()
+                    && !super::new_session::has_launch_setting(
+                        &config,
+                        &self.cli_kv_overrides,
+                        "model",
+                    )
+                    && self.harness_overrides.model_provider.is_none()
+                    && !super::new_session::has_launch_setting(
+                        &config,
+                        &self.cli_kv_overrides,
+                        "model_provider",
+                    );
+                super::new_session::overlay_new_session_defaults(
+                    &mut config,
+                    &defaults,
+                    &self.cli_kv_overrides,
+                    &self.harness_overrides,
+                );
+                // Embedded thread/start sends a provider ID alongside the selected model.
+                if use_server_provider {
+                    config.model_provider_id = defaults
+                        .model_provider
+                        .unwrap_or_else(|| "openai".to_string());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.restore_agents_overview_prompt(prompt);
+                return self.chat_widget.add_error_message(format!(
+                    "Failed to load background task settings: {error}"
+                ));
+            }
+        }
         apply_managed_new_thread_defaults(
             &mut config,
             app_server.managed_new_thread_defaults(),
             &self.cli_kv_overrides,
             &self.harness_overrides,
         );
+        if server_model_cleared
+            && config.model.is_none()
+            && config.features.enabled(Feature::FastMode)
+        {
+            // Bootstrap's fallback model may be seeded from the client. Resolve tiers
+            // against the server catalog when config/read cleared the model.
+            config.model = self
+                .model_catalog
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .or_else(|| self.model_catalog.models.first())
+                .map(|model| model.model.clone());
+        }
+        let model = config.model.as_deref().or_else(|| {
+            self.model_catalog
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .or_else(|| self.model_catalog.models.first())
+                .map(|model| model.model.as_str())
+        });
+        if !prompt.local_images.is_empty()
+            && let Some(model) = model
+            && self.model_catalog.models.iter().any(|preset| {
+                preset.model == model && !preset.input_modalities.contains(&InputModality::Image)
+            })
+        {
+            let message = format!(
+                "Model {model} does not support image inputs. Remove images or switch models."
+            );
+            self.restore_agents_overview_prompt(prompt);
+            self.chat_widget.add_error_message(message);
+            return;
+        }
+        let images = prompt
+            .local_images
+            .iter()
+            .map(|image| {
+                Ok(CoreUserInput::LocalImage {
+                    path: std::path::absolute(&image.path)?,
+                    detail: None,
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>();
+        let images = match images {
+            Ok(images) => images,
+            Err(error) => {
+                self.restore_agents_overview_prompt(prompt);
+                self.chat_widget
+                    .add_error_message(format!("Failed to prepare image: {error}"));
+                return;
+            }
+        };
+        let images = if app_server.uses_remote_workspace() && !images.is_empty() {
+            match tokio::task::spawn_blocking(move || {
+                let mut images = images;
+                for image in &mut images {
+                    snapshot_local_user_input(image)?;
+                }
+                Ok::<_, std::io::Error>(images)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|result| result)
+            {
+                Ok(images) => images,
+                Err(error) => {
+                    self.restore_agents_overview_prompt(prompt);
+                    self.chat_widget
+                        .add_error_message(format!("Failed to prepare image: {error}"));
+                    return;
+                }
+            }
+        } else {
+            images
+        };
         match app_server
             .start_thread_with_session_start_source(
+                &self.local_settings,
                 &config,
                 /*session_start_source*/ None,
                 remote_cwd.as_deref(),
+                /*selected_profile*/ None,
             )
             .await
         {
@@ -663,8 +802,13 @@ impl App {
                 self.agents_overview
                     .dispatched_requests
                     .insert(thread_id, Vec::new());
-                self.submit_agents_overview_prompt(app_server, thread_id, prompt)
-                    .await;
+                self.submit_agents_overview_prompt(
+                    app_server,
+                    thread_id,
+                    prompt,
+                    images.into_iter().map(Into::into).collect(),
+                )
+                .await;
             }
             Err(error) => {
                 self.restore_agents_overview_prompt(prompt);
@@ -678,18 +822,27 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
-        prompt: String,
+        prompt: UserMessage,
+        mut input: Vec<UserInput>,
     ) {
+        if !prompt.text.is_empty() {
+            input.push(UserInput::Text {
+                text: prompt.text.clone(),
+                text_elements: prompt
+                    .text_elements
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
+            });
+        }
         let result = app_server
             .request_handle()
             .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
                 request_id: RequestId::String(Uuid::new_v4().to_string()),
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
-                    input: vec![UserInput::Text {
-                        text: prompt.clone(),
-                        text_elements: Vec::new(),
-                    }],
+                    input,
                     ..Default::default()
                 },
             })

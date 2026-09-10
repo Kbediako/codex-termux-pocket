@@ -25,6 +25,9 @@ mod update_thread_metadata;
 mod writer_lock;
 
 #[cfg(test)]
+#[path = "daybreak_metadata_tests.rs"]
+mod daybreak_metadata_tests;
+#[cfg(test)]
 #[path = "pending_thread_metadata_tests.rs"]
 mod pending_thread_metadata_tests;
 #[cfg(test)]
@@ -1960,6 +1963,7 @@ mod tests {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }
     }

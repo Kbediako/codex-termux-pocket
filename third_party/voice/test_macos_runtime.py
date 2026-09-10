@@ -47,6 +47,13 @@ class RuntimeTests(unittest.TestCase):
             capture_output=True,
         )
         (self.prefix / "lib/libfixture.1.dylib").symlink_to(self.library.name)
+        gio = self.prefix / "lib/libgio-2.0.0.dylib"
+        shutil.copy2(self.library, gio)
+        subprocess.run(
+            ["/usr/bin/install_name_tool", "-id", "@rpath/" + gio.name, str(gio)],
+            check=True,
+            capture_output=True,
+        )
         source.write_text(
             "extern int voice_fixture(void); int voice_plugin(void) { return voice_fixture(); }\n"
         )
@@ -120,6 +127,7 @@ class RuntimeTests(unittest.TestCase):
             {r["path"] for r in manifest["libraries"]},
             {
                 "lib/libfixture.1.dylib",
+                "lib/libgio-2.0.0.dylib",
                 *(f"plugins/libgst{name}.dylib" for name in PLUGINS),
             },
         )
@@ -205,6 +213,12 @@ class RuntimeTests(unittest.TestCase):
     def test_missing_dependency_and_duplicate_identity_fail_before_output_creation(
         self,
     ):
+        self.inventory_path.write_text(
+            json.dumps([r for r in self.inventory if "libgio" not in r["path"]])
+        )
+        with self.assertRaisesRegex(ValueError, "missing required native library"):
+            project(self.prefix, self.receipts, self.target, self.output)
+        self.assertFalse(self.output.exists())
         self.inventory_path.write_text(
             json.dumps([r for r in self.inventory if "libfixture" not in r["path"]])
         )

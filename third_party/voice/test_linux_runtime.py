@@ -46,6 +46,40 @@ class RuntimeTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
+        source.write_text("int voice_gio_dependency(void) { return 84; }\n")
+        gio_dependency = self.prefix / "lib/libgiofixture.so.1.2"
+        subprocess.run(
+            [
+                "cc",
+                "-shared",
+                "-fPIC",
+                str(source),
+                "-o",
+                str(gio_dependency),
+                "-Wl,-soname,libgiofixture.so.1",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        source.write_text(
+            "extern int voice_gio_dependency(void); "
+            "int voice_gio_fixture(void) { return voice_gio_dependency(); }\n"
+        )
+        subprocess.run(
+            [
+                "cc",
+                "-shared",
+                "-fPIC",
+                str(source),
+                str(gio_dependency),
+                "-Wl,-rpath,$ORIGIN",
+                "-o",
+                str(self.prefix / "lib/libgio-2.0.so.0.8800.3"),
+                "-Wl,-soname,libgio-2.0.so.0",
+            ],
+            check=True,
+            capture_output=True,
+        )
         source.write_text(
             "extern int voice_fixture(void); int voice_plugin(void) { return voice_fixture(); }\n"
         )
@@ -122,7 +156,8 @@ class RuntimeTests(unittest.TestCase):
                 "-c",
                 "import ctypes,json,pathlib,sys; root=pathlib.Path(sys.argv[1]); "
                 "manifest=json.loads((root/'runtime.json').read_text()); "
-                "print([ctypes.CDLL(str(root/p)).voice_plugin() for p in manifest['plugins']])",
+                "print([ctypes.CDLL(str(root/p)).voice_plugin() for p in manifest['plugins']] + "
+                "[ctypes.CDLL(str(root/'lib/libgio-2.0.so.0')).voice_gio_fixture()])",
                 str(moved),
             ],
             check=True,
@@ -131,9 +166,17 @@ class RuntimeTests(unittest.TestCase):
             env=environment,
             cwd=self.root,
         )
-        self.assertEqual(json.loads(result.stdout), [42] * len(PLUGINS))
+        self.assertEqual(json.loads(result.stdout), [42] * len(PLUGINS) + [84])
         manifest = json.loads((moved / "runtime.json").read_text())
-        self.assertEqual(len(manifest["libraries"]), len(PLUGINS) + 1)
+        self.assertEqual(
+            {record["path"] for record in manifest["libraries"]},
+            {
+                "lib/libfixture.so.1",
+                "lib/libgio-2.0.so.0",
+                "lib/libgiofixture.so.1",
+                *(f"lib/gstreamer-1.0/libgst{name}.so" for name in PLUGINS),
+            },
+        )
         for record in manifest["libraries"]:
             path = moved / record["path"]
             expected = (
@@ -141,6 +184,8 @@ class RuntimeTests(unittest.TestCase):
                 if path.parent.name == "gstreamer-1.0"
                 else ()
             )
+            if path.name == "libgio-2.0.so.0":
+                expected = ("29=$ORIGIN",)
             self.assertEqual(inspect(path, self.target).rpaths, expected)
             self.assertEqual(digest(path), record["sourceSha256"])
             self.assertEqual(record["sha256"], record["sourceSha256"])
@@ -161,7 +206,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_missing_dependency_and_digest_mismatch_leave_no_output(self):
         for records in (
+            [r for r in self.inventory if "libgio" not in r["path"]],
             [r for r in self.inventory if "libfixture" not in r["path"]],
+            [r for r in self.inventory if "libgiofixture" not in r["path"]],
             [{**r, "sha256": "b" * 64} for r in self.inventory],
         ):
             with self.subTest(records=records), self.assertRaises(ValueError):

@@ -550,6 +550,24 @@ impl PermissionProfile {
         }
     }
 
+    /// Legacy workspace-write settings interpreted for executor-owned paths.
+    pub fn workspace_write_with_path_uris(
+        writable_roots: &[PathUri],
+        network: NetworkSandboxPolicy,
+        exclude_tmpdir_env_var: bool,
+        exclude_slash_tmp: bool,
+    ) -> Self {
+        let file_system = FileSystemSandboxPolicy::workspace_write_with_path_uris(
+            writable_roots,
+            exclude_tmpdir_env_var,
+            exclude_slash_tmp,
+        );
+        Self::Managed {
+            file_system: ManagedFileSystemPermissions::from_sandbox_policy(&file_system),
+            network,
+        }
+    }
+
     pub fn materialize_project_roots_with_workspace_roots(
         self,
         workspace_roots: &[AbsolutePathBuf],

@@ -1481,3 +1481,6 @@ async fn request_preference_activation_keeps_admitted_model_metadata() -> Result
 
     Ok(())
 }
+
+#[path = "step_settings_compaction.rs"]
+mod compaction;

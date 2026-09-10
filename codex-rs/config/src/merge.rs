@@ -1,6 +1,5 @@
 use crate::key_aliases::normalize_key_aliases;
 use crate::key_aliases::normalized_with_key_aliases;
-use codex_network_proxy::credential_broker_provider_context_env_keys;
 use codex_network_proxy::normalize_host;
 use toml::Value as TomlValue;
 
@@ -106,19 +105,6 @@ fn merge_toml_values_at_path(base: &mut TomlValue, overlay: &TomlValue, path: &m
             normalize_case_insensitive_keys(base_table);
             normalize_case_insensitive_keys(&mut overlay_table);
         }
-        if cfg!(windows)
-            && matches!(path.as_slice(), [policy, field] if policy == "shell_environment_policy" && field == "set")
-        {
-            for key in overlay_table.keys().filter(|key| {
-                credential_broker_provider_context_env_keys()
-                    .any(|binding_key| key.eq_ignore_ascii_case(binding_key))
-            }) {
-                base_table.retain(|candidate, _| {
-                    candidate == key || !candidate.eq_ignore_ascii_case(key)
-                });
-            }
-        }
-
         for (key, value) in overlay_table {
             path.push(key.clone());
             if let Some(existing) = base_table.get_mut(&key) {

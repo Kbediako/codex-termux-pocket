@@ -53,6 +53,7 @@ class RuntimeTests(unittest.TestCase):
             capture_output=True,
             cwd=self.root,
         )
+        shutil.copy2(self.library, self.prefix / "bin/gio-2.0-0.dll")
         source = self.root / "plugin.c"
         source.write_text(
             "__declspec(dllimport) int voice_fixture(void); "
@@ -166,12 +167,20 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout), [42] * len(PLUGINS))
         manifest = json.loads((moved / "runtime.json").read_text())
-        self.assertEqual(len(manifest["libraries"]), len(PLUGINS) + 1)
+        self.assertEqual(
+            {record["path"] for record in manifest["libraries"]},
+            {
+                "bin/fixture.dll",
+                "bin/gio-2.0-0.dll",
+                *(f"bin/gst{name}.dll" for name in PLUGINS),
+            },
+        )
         for record in manifest["libraries"]:
             self.assertEqual(digest(moved / record["path"]), record["sourceSha256"])
 
     def test_missing_dependency_and_digest_mismatch_leave_no_output(self):
         for records in (
+            [r for r in self.inventory if "gio-2.0" not in r["path"]],
             [r for r in self.inventory if "fixture.dll" not in r["path"]],
             [{**r, "sha256": "b" * 64} for r in self.inventory],
         ):

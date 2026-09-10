@@ -8,7 +8,7 @@ import sys
 
 # Import only this script's siblings, including under PYTHONSAFEPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime import Binary, PLUGINS, RuntimeFormat, prepare
+from runtime import Binary, PLUGINS, RuntimeFormat, prepare, required_library_paths
 
 # VCRUNTIME140 is a development prerequisite, not a guaranteed Windows component.
 EXTERNAL_IMPORTS = frozenset(
@@ -131,6 +131,9 @@ def project(prefix, receipts, target, output):
         finalize_copy,
         library_dir="bin",
         plugin_dir="bin",
+        required_libraries=tuple(
+            Path(path).name for path in required_library_paths(target)
+        ),
     )
     prepare(prefix, receipts, target, output, format)
 

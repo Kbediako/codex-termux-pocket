@@ -450,8 +450,10 @@ impl SetupMarker {
         if !network_identity.uses_offline_identity() {
             return None;
         }
-        if self.proxy_ports == offline_proxy_settings.proxy_ports
-            && self.allow_local_binding == offline_proxy_settings.allow_local_binding
+        // Local-binding mode has no port-specific loopback rules, so changing proxy
+        // listeners does not require a firewall update while that mode stays enabled.
+        if self.allow_local_binding == offline_proxy_settings.allow_local_binding
+            && (self.allow_local_binding || self.proxy_ports == offline_proxy_settings.proxy_ports)
         {
             return None;
         }

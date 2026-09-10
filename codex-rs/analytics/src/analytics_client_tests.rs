@@ -254,6 +254,7 @@ fn sample_thread_with_metadata(
         section: None,
         section_entered_at: None,
         project_id: None,
+        daybreak_enabled: None,
         history_mode: Default::default(),
         model_provider: "openai".to_string(),
         model: None,
@@ -1673,6 +1674,7 @@ fn thread_initialized_event_serializes_expected_shape() {
             },
             model: "gpt-5".to_string(),
             ephemeral: true,
+            is_worktree: Some(true),
             thread_source: Some(ThreadSource::Feature("automation".to_string())),
             initialization_mode: ThreadInitializationMode::New,
             subagent_source: None,
@@ -1706,6 +1708,7 @@ fn thread_initialized_event_serializes_expected_shape() {
                 },
                 "model": "gpt-5",
                 "ephemeral": true,
+                "is_worktree": true,
                 "thread_source": "automation",
                 "initialization_mode": "new",
                 "subagent_source": null,
@@ -1715,6 +1718,65 @@ fn thread_initialized_event_serializes_expected_shape() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn thread_initialized_classifies_validated_linked_worktrees() {
+    let root = std::env::temp_dir().join(format!(
+        "codex-analytics-worktree-{}",
+        codex_protocol::ThreadId::new()
+    ));
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let admin = primary.join(".git/worktrees/linked");
+    std::fs::create_dir_all(&admin).expect("worktree administrative directory");
+    std::fs::create_dir_all(&linked).expect("linked checkout");
+    std::fs::write(primary.join(".git/HEAD"), "ref: refs/heads/main\n")
+        .expect("primary repository HEAD");
+    std::fs::write(admin.join("commondir"), "../..\n").expect("common directory");
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", linked.join(".git").display()),
+    )
+    .expect("linked checkout backlink");
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .expect("linked checkout git file");
+
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+    ingest_initialize(&mut reducer, &mut events).await;
+    for (cwd, expected) in [
+        (primary.as_path(), json!(false)),
+        (linked.as_path(), json!(true)),
+        (root.as_path(), serde_json::Value::Null),
+    ] {
+        events.clear();
+        let mut response =
+            sample_thread_start_response("thread-1", /*ephemeral*/ false, "gpt-5");
+        let ClientResponsePayload::ThreadStart(start) = &mut response else {
+            panic!("expected thread/start response");
+        };
+        start.thread.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(cwd)
+            .expect("absolute checkout path");
+        reducer
+            .ingest(
+                AnalyticsFact::ClientResponse {
+                    connection_id: 7,
+                    request_id: RequestId::Integer(1),
+                    response: Box::new(response),
+                    thread_originator: None,
+                },
+                &mut events,
+            )
+            .await;
+        let payload = serde_json::to_value(&events).expect("serialize thread event");
+        assert_eq!(payload[0]["event_params"]["is_worktree"], expected);
+    }
+
+    std::fs::remove_dir_all(root).expect("remove test checkout");
 }
 
 #[test]
@@ -2938,6 +3000,92 @@ fn sampling_response(
 }
 
 #[tokio::test]
+async fn collaborator_tool_events_keep_response_ids_when_completion_races_sampling() {
+    for response_first in [false, true] {
+        let mut reducer = AnalyticsReducer::default();
+        let mut events = Vec::new();
+        ingest_review_prerequisites(&mut reducer, &mut events).await;
+        reducer
+            .ingest(
+                AnalyticsFact::Notification(Box::new(sample_turn_started_notification(
+                    "thread-1", "turn-1",
+                ))),
+                &mut events,
+            )
+            .await;
+        let item = ThreadItem::CollabAgentToolCall {
+            id: "call-1".into(),
+            tool: CollabAgentTool::SendMessage,
+            status: CollabAgentToolCallStatus::Failed,
+            sender_thread_id: "thread-1".into(),
+            receiver_thread_ids: Vec::new(),
+            prompt: None,
+            model: None,
+            reasoning_effort: None,
+            agents_states: Default::default(),
+        };
+        reducer
+            .ingest(
+                AnalyticsFact::Notification(Box::new(ServerNotification::ItemStarted(
+                    ItemStartedNotification {
+                        thread_id: "thread-1".into(),
+                        turn_id: "turn-1".into(),
+                        started_at_ms: 1_000,
+                        item: item.clone(),
+                    },
+                ))),
+                &mut events,
+            )
+            .await;
+        let response = AnalyticsFact::Custom(CustomAnalyticsFact::CodeModeToolCall(
+            sampling_response("turn-1", "response-1", &["call-1"]),
+        ));
+        let completion = AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                thread_id: "thread-1".into(),
+                turn_id: "turn-1".into(),
+                completed_at_ms: 1_010,
+                item,
+            },
+        )));
+        let facts = if response_first {
+            [response, completion]
+        } else {
+            [completion, response]
+        };
+        for fact in facts {
+            reducer.ingest(fact, &mut events).await;
+            assert!(events.is_empty(), "emitted before response correlation");
+        }
+        ingest_code_mode_facts(
+            &mut reducer,
+            &mut events,
+            [sampling_response("turn-1", "response-2", &[])],
+        )
+        .await;
+        let payload = serde_json::to_value(&events).expect("serialize collaborator event");
+        assert_eq!(payload.as_array().expect("events array").len(), 1);
+        let params = &payload[0]["event_params"];
+        assert_eq!(
+            json!({
+                "type": payload[0]["event_type"],
+                "item": params["item_id"],
+                "origin": params["originating_response_id"],
+                "subsequent": params["subsequent_response_id"],
+                "status": params["terminal_status"],
+            }),
+            json!({
+                "type": "codex_collab_agent_tool_call_event",
+                "item": "call-1",
+                "origin": "response-1",
+                "subsequent": "response-2",
+                "status": "failed",
+            }),
+        );
+    }
+}
+
+#[tokio::test]
 async fn code_mode_exec_wait_and_child_events_share_cell_and_response_ids() {
     let mut reducer = AnalyticsReducer::default();
     let mut events = Vec::new();
@@ -3187,7 +3335,7 @@ async fn guardian_completed_notification_publishes_review_event_with_thread_meta
                 GuardianApprovalReviewAction::Command {
                     source: AppServerGuardianCommandSource::Shell,
                     command: "echo hi".to_string(),
-                    cwd: test_path_buf("/tmp").abs(),
+                    cwd: test_path_buf("/tmp").abs().into(),
                 },
             ))),
             &mut events,
@@ -5188,6 +5336,7 @@ async fn image_generation_events_preserve_transparent_background_metadata() {
             failure: None,
             saved_path: None,
             imagegen_request_id: None,
+            generation_id: None,
         });
 
         reducer
@@ -5333,6 +5482,7 @@ async fn turn_event_counts_completed_tool_items() {
             failure: None,
             saved_path: None,
             imagegen_request_id: Some("req-imagegen-123".to_string()),
+            generation_id: Some("gen-image-123".to_string()),
         }),
     ];
 
@@ -5413,9 +5563,9 @@ async fn turn_event_counts_completed_tool_items() {
             "codex_file_change_event",
             "codex_mcp_tool_call_event",
             "codex_dynamic_tool_call_event",
-            "codex_collab_agent_tool_call_event",
             "codex_web_search_event",
             "codex_image_generation_event",
+            "codex_collab_agent_tool_call_event",
             "codex_control_tool_call_event",
         ]
         .map(|event_type| (event_type, "session-thread-2", "turn-2", "root-ancestor"))
@@ -5431,6 +5581,10 @@ async fn turn_event_counts_completed_tool_items() {
     assert_eq!(
         payload["event_params"]["imagegen_request_id"],
         json!("req-imagegen-123")
+    );
+    assert_eq!(
+        payload["event_params"]["generation_id"],
+        json!("gen-image-123")
     );
 
     let mcp_tool_call_event = out

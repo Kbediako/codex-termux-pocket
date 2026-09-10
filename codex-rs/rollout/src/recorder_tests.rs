@@ -196,6 +196,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             cwd: home.path().to_path_buf(),
+            runtime_workspace_roots: None,
             originator: "test".to_string(),
             cli_version: "test".to_string(),
             source: SessionSource::Cli,
@@ -1600,6 +1601,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         first_user_message: Some("filesystem message".to_string()),
         preview: Some("filesystem preview".to_string()),
         project_id: None,
+        daybreak_enabled: None,
         section: None,
         cwd: None,
         git_branch: Some("filesystem-branch".to_string()),
@@ -1628,6 +1630,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         first_user_message: Some("state message".to_string()),
         preview: Some("state preview".to_string()),
         project_id: None,
+        daybreak_enabled: Some(true),
         section: Some(codex_state::ThreadSection {
             id: codex_state::PINNED_THREAD_SECTION_ID.to_string(),
             name: codex_state::PINNED_THREAD_SECTION_NAME.to_string(),
@@ -1658,6 +1661,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
 
     assert_eq!(item.path, filesystem_path);
     assert_eq!(item.thread_id, Some(filesystem_thread_id));
+    assert_eq!(item.daybreak_enabled, Some(true));
     assert_eq!(
         item.section,
         Some(codex_state::ThreadSection {

@@ -67,7 +67,10 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing::Level;
 use tracing_test::internal::MockWriter;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
@@ -1264,14 +1267,17 @@ async fn grandchild_full_fork_preserves_context_baseline(
         ]),
     )
     .await;
-    let _parent_followups = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![ev_completed("baseline-parent-finished-1")]),
-            sse(vec![ev_completed("baseline-parent-finished-2")]),
-        ],
-    )
-    .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(|req: &wiremock::Request| {
+            body_contains(req, ROOT_CALL) || body_contains(req, CHILD_CALL)
+        })
+        .respond_with(sse_response(sse(vec![ev_completed(
+            "baseline-parent-finished",
+        )])))
+        .with_priority(/*p*/ 6)
+        .mount(&server)
+        .await;
     let test = test_codex()
         .with_history_mode(history_mode)
         .with_config(move |config| {
@@ -1337,6 +1343,12 @@ async fn grandchild_full_fork_preserves_context_baseline(
             }
         })
         .await?;
+        if agent_name == "/root/child/grandchild" {
+            assert_eq!(
+                thread.agent_status().await,
+                AgentStatus::Completed(Some("done".to_string()))
+            );
+        }
         descendant_requests.push(request);
     }
     let context_counts = [

@@ -376,6 +376,84 @@ exclude = ["HIGH_*"]
 }
 
 #[test]
+fn shell_environment_policy_set_overlay_preserves_case_distinct_keys() {
+    let mut base = parse_toml(
+        r#"
+[features.network_proxy.credentials.stripe]
+env = ["STRIPE_API_KEY"]
+patterns = ["stripe_[a-z]+"]
+url_prefix_from_env = "STRIPE_HOST"
+
+[shell_environment_policy.set]
+stripe_api_key = "stale"
+stripe_host = "stale.example"
+foo = "lowercase"
+"#,
+    );
+    let overlay = parse_toml(
+        r#"
+[shell_environment_policy.set]
+STRIPE_API_KEY = "trusted"
+STRIPE_HOST = "trusted.example"
+FOO = "uppercase"
+"#,
+    );
+
+    merge_toml_values(&mut base, &overlay);
+
+    let values = base["shell_environment_policy"]["set"]
+        .as_table()
+        .expect("shell environment overrides");
+    assert_eq!(
+        values.get("foo").and_then(TomlValue::as_str),
+        Some("lowercase")
+    );
+    assert_eq!(
+        values.get("FOO").and_then(TomlValue::as_str),
+        Some("uppercase")
+    );
+    assert_eq!(values.len(), 6);
+}
+
+#[test]
+fn later_credential_provider_preserves_case_distinct_environment_overrides() {
+    let mut base = parse_toml(
+        "[shell_environment_policy.set]\n\
+         stripe_api_key = 'stale'\n\
+         stripe_host = 'stale.example'",
+    );
+    let override_layer = parse_toml(
+        "[shell_environment_policy.set]\n\
+         STRIPE_API_KEY = 'previous'\n\
+         STRIPE_HOST = 'previous.example'",
+    );
+    let final_override_layer = parse_toml(
+        "[shell_environment_policy.set]\n\
+         stripe_api_key = 'trusted'\n\
+         stripe_host = 'current.example'",
+    );
+    let provider_layer = parse_toml(
+        "[features.network_proxy.credentials.stripe]\n\
+         env = ['STRIPE_API_KEY']\n\
+         url_prefix_from_env = 'STRIPE_HOST'",
+    );
+
+    merge_toml_values(&mut base, &override_layer);
+    merge_toml_values(&mut base, &final_override_layer);
+    merge_toml_values(&mut base, &provider_layer);
+
+    assert_eq!(
+        base["shell_environment_policy"]["set"],
+        parse_toml(
+            "stripe_api_key = 'trusted'\n\
+             stripe_host = 'current.example'\n\
+             STRIPE_API_KEY = 'previous'\n\
+             STRIPE_HOST = 'previous.example'",
+        )
+    );
+}
+
+#[test]
 fn shell_environment_policy_filters_overlay_merges_by_key_case_insensitively() {
     let mut base = parse_toml(
         r#"

@@ -3,6 +3,10 @@
 
 use super::*;
 use crate::bottom_pane::InputResult;
+use crate::chatwidget::UserMessage;
+use crate::clipboard_paste::paste_image_to_temp_png;
+use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 
 impl AgentsOverviewView {
     pub(super) fn handle_composer_key(&mut self, key: KeyEvent) {
@@ -16,6 +20,20 @@ impl AgentsOverviewView {
         let Some(composer) = state.composer.as_mut() else {
             return;
         };
+        if key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('v' | 'V'))
+            && key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            match paste_image_to_temp_png() {
+                Ok((path, _)) => composer.attach_image(path),
+                Err(error) => self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    crate::history_cell::new_error_event(format!("Failed to paste image: {error}")),
+                ))),
+            }
+            return;
+        }
         if offline
             && !composer.popup_active()
             && (self.composer_keymap.submit.is_pressed(key)
@@ -27,11 +45,26 @@ impl AgentsOverviewView {
             return;
         }
         let (result, _) = composer.handle_key_event(key);
+        let prompt = if let InputResult::Submitted {
+            text,
+            text_elements,
+        } = result
+        {
+            Some(UserMessage {
+                text,
+                text_elements,
+                local_images: composer.take_recent_submission_images_with_placeholders(),
+                remote_image_urls: Vec::new(),
+                mention_bindings: Vec::new(),
+            })
+        } else {
+            None
+        };
         drop(state);
-        if let InputResult::Submitted { text, .. } = result {
+        if let Some(prompt) = prompt {
             self.app_event_tx
                 .send(AppEvent::DispatchAgentsOverviewTask {
-                    prompt: text,
+                    prompt,
                     cwd: (!status_grouping)
                         .then(|| self.selected_row().map(|row| row.thread.cwd.clone()))
                         .flatten(),
@@ -39,6 +72,16 @@ impl AgentsOverviewView {
         }
     }
     pub(super) fn layout_areas(&self, area: Rect) -> [Rect; 7] {
+        let header_height = self
+            .state()
+            .server_version_notice
+            .as_deref()
+            .map(|notice| {
+                textwrap::wrap(notice, usize::from(area.width.saturating_sub(4).max(1))).len()
+                    as u16
+            })
+            .unwrap_or(1)
+            .min(area.height.saturating_sub(7).max(1));
         let footer_height = if self.state().composing() {
             0
         } else {
@@ -79,7 +122,7 @@ impl AgentsOverviewView {
             3
         };
         Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(header_height),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
