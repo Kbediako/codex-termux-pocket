@@ -206,7 +206,7 @@ codex --termux-launcher-check
 codex --help >/dev/null
 codex login --help >/dev/null
 codex mcp --help >/dev/null
-codex mcp-server --help >/dev/null
+codex app-server --help >/dev/null
 codex plugin --help >/dev/null
 codex sandbox --help >/dev/null
 
@@ -265,13 +265,15 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' |
   grep -F '"id":1' >/dev/null
 
 set +e
-timeout 5 codex mcp-server </dev/null >"\${HOME}/codex-mcp-server.log" 2>&1
-mcp_server_status=\$?
+# Upstream removed the mcp-server CLI in 0.154.0-alpha.11. Exercise the
+# supported stdio app server; MCP management and transport remain checked above.
+timeout 5 codex app-server --listen stdio:// </dev/null >"\${HOME}/codex-app-server.log" 2>&1
+app_server_status=\$?
 set -e
-case "\${mcp_server_status}" in
+case "\${app_server_status}" in
   0|124) ;;
   *)
-    cat "\${HOME}/codex-mcp-server.log" >&2
+    cat "\${HOME}/codex-app-server.log" >&2
     exit 1
     ;;
 esac
@@ -388,7 +390,7 @@ for file in \
   login-status.log \
   device-auth.log \
   github-network.txt \
-  codex-mcp-server.log \
+  codex-app-server.log \
   sandbox-read-only.log \
   sandbox-workspace-write.log \
   installed-releases.log \

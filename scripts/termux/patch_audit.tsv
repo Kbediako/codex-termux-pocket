@@ -220,3 +220,4 @@ subject	release: request validated Termux 0.154.0-alpha.11 publication	tooling	R
 subject	ci: format release helpers for alpha preparation	tooling	Applies AST-equivalent Python formatting required by the upstream formatter; preserves all preparation and publication guards.
 subject	ci: audit release installer update	tooling	Classifies the reviewed installer-action pin update without changing runtime source or publication gates.
 subject	ci: refresh pinned release installer (#118)	tooling	Updates installer-action pins in permanent sandbox and preparation jobs, retaining explicit tool versions and release validation.
+subject	ci: align Android server smoke test with upstream	tooling	Replaces the removed mcp-server invocation with supported app-server stdio startup, preserving MCP management/transport, failure criteria, sandbox and updater checks.
