@@ -10,12 +10,29 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .common import (
-    ARCHIVE, ARTIFACT_ASSETS, CHECKSUMS, EXPECTED_CHECKSUM_ENTRIES,
-    MANIFEST_FIELDS, METADATA, METADATA_FIELDS, PACKAGE_RE, RELEASE_MANIFEST,
-    SBOM, SHA256_RE, SHA_RE, TAG_RE, TARGET, fail, file_sha256,
-    package_version_from_tag, parse_env, parse_positive_int, parse_sha256sums,
+    ARCHIVE,
+    ARTIFACT_ASSETS,
+    CHECKSUMS,
+    EXPECTED_CHECKSUM_ENTRIES,
+    MANIFEST_FIELDS,
+    METADATA,
+    METADATA_FIELDS,
+    PACKAGE_RE,
+    RELEASE_MANIFEST,
+    SBOM,
+    SHA256_RE,
+    SHA_RE,
+    TAG_RE,
+    TARGET,
+    fail,
+    file_sha256,
+    package_version_from_tag,
+    parse_env,
+    parse_positive_int,
+    parse_sha256sums,
     verify_sha256sums,
 )
+
 
 def validate_sbom(
     path: Path,
@@ -29,7 +46,9 @@ def validate_sbom(
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"invalid SPDX SBOM {path}: {exc}")
-    expected_namespace = f"https://github.com/{repo}/attestations/codex-termux/{source_sha}"
+    expected_namespace = (
+        f"https://github.com/{repo}/attestations/codex-termux/{source_sha}"
+    )
     expected_document_name = f"codex-termux-runtime-{source_sha[:12]}"
     checks = {
         "spdxVersion": "SPDX-2.3",
@@ -51,12 +70,19 @@ def validate_sbom(
             fail("SBOM package entry is not an object")
         name = package.get("name")
         identifier = package.get("SPDXID")
-        if not isinstance(name, str) or not isinstance(identifier, str) or identifier in by_id:
+        if (
+            not isinstance(name, str)
+            or not isinstance(identifier, str)
+            or identifier in by_id
+        ):
             fail("SBOM package identity is malformed or duplicated")
         by_name.setdefault(name, []).append(package)
         by_id[identifier] = package
     runtime_packages = by_name.get("codex-termux-runtime", [])
-    if len(runtime_packages) != 1 or runtime_packages[0].get("versionInfo") != codex_version:
+    if (
+        len(runtime_packages) != 1
+        or runtime_packages[0].get("versionInfo") != codex_version
+    ):
         fail("SBOM runtime package identity mismatch")
     for shipped in (
         "codex-cli",
@@ -100,6 +126,7 @@ def validate_sbom(
     if not expected_generated.issubset(generated_ids):
         fail("SBOM is missing GENERATED_FROM relationships for shipped packages")
 
+
 def safe_member_name(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -107,6 +134,7 @@ def safe_member_name(name: str) -> PurePosixPath:
     if path.parts[0] != "codex-termux-runtime":
         fail(f"archive path is outside codex-termux-runtime: {name!r}")
     return path
+
 
 def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -> None:
     required = {
@@ -161,7 +189,9 @@ def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -
             if name != "codex-termux-runtime/runtime-files.sha256"
         }
         if set(internal) != expected_internal:
-            fail("runtime-files.sha256 does not cover exactly the shipped runtime files")
+            fail(
+                "runtime-files.sha256 does not cover exactly the shipped runtime files"
+            )
         for relative, expected in internal.items():
             candidate = PurePosixPath(relative)
             if candidate.is_absolute() or ".." in candidate.parts:
@@ -171,7 +201,9 @@ def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -
                 fail(f"runtime checksum mismatch for {relative}")
 
         try:
-            package = json.loads((runtime / "codex-package.json").read_text(encoding="utf-8"))
+            package = json.loads(
+                (runtime / "codex-package.json").read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError) as exc:
             fail(f"invalid codex-package.json: {exc}")
         expected_package = {
@@ -184,6 +216,7 @@ def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -
         }
         if package != expected_package:
             fail("codex-package.json does not match the release metadata")
+
 
 def validate_manifest(values: dict[str, str], *, repo: str) -> None:
     if values["format_version"] != "2":
@@ -201,6 +234,7 @@ def validate_manifest(values: dict[str, str], *, repo: str) -> None:
     parse_positive_int(values["archive_size_bytes"], "archive_size_bytes")
     parse_positive_int(values["runtime_size_bytes"], "runtime_size_bytes")
     package_version_from_tag(values["release_tag"], values["head_sha"])
+
 
 def validate_local_bundle(
     root: Path,
@@ -231,8 +265,12 @@ def validate_local_bundle(
     for key, expected in checks.items():
         if metadata[key] != expected:
             fail(f"metadata {key} mismatch: {metadata[key]!r} != {expected!r}")
-    archive_size = parse_positive_int(metadata["archive_size_bytes"], "archive_size_bytes")
-    runtime_size = parse_positive_int(metadata["runtime_size_bytes"], "runtime_size_bytes")
+    archive_size = parse_positive_int(
+        metadata["archive_size_bytes"], "archive_size_bytes"
+    )
+    runtime_size = parse_positive_int(
+        metadata["runtime_size_bytes"], "runtime_size_bytes"
+    )
     actual_archive_size = (root / ARCHIVE).stat().st_size
     if actual_archive_size != archive_size:
         fail(f"archive size mismatch: {actual_archive_size} != {archive_size}")
@@ -241,7 +279,9 @@ def validate_local_bundle(
         fail("archive digest disagrees with SHA256SUMS")
     if checksum_entries[METADATA] != file_sha256(root / METADATA):
         fail("metadata digest disagrees with SHA256SUMS")
-    verify_archive(root / ARCHIVE, runtime_size_bytes=runtime_size, codex_version=codex_version)
+    verify_archive(
+        root / ARCHIVE, runtime_size_bytes=runtime_size, codex_version=codex_version
+    )
     validate_sbom(
         root / SBOM,
         repo=repo,

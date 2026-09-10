@@ -51,8 +51,16 @@ def main() -> int:
             cwd=workspace,
         )
     )
-    commit_epoch = int(command_output(["git", "show", "-s", "--format=%ct", args.commit], cwd=workspace))
-    created = datetime.fromtimestamp(commit_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+    commit_epoch = int(
+        command_output(
+            ["git", "show", "-s", "--format=%ct", args.commit], cwd=workspace
+        )
+    )
+    created = (
+        datetime.fromtimestamp(commit_epoch, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
     packages_by_id = {package["id"]: package for package in metadata["packages"]}
     ordered_packages = sorted(
@@ -119,7 +127,9 @@ def main() -> int:
         source = spdx_by_cargo_id.get(node["id"])
         if source is None:
             continue
-        dependency_ids = sorted({dependency["pkg"] for dependency in node.get("deps", [])})
+        dependency_ids = sorted(
+            {dependency["pkg"] for dependency in node.get("deps", [])}
+        )
         for dependency_id in dependency_ids:
             target = spdx_by_cargo_id.get(dependency_id)
             if target is not None:

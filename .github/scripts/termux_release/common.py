@@ -75,9 +75,11 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PACKAGE_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+(?:\.[0-9]+)*")
 TAG_RE = re.compile(r"termux-v[0-9A-Za-z._-]+")
 
+
 def fail(message: str) -> NoReturn:
     print(f"termux-release-control: {message}", file=sys.stderr)
     raise SystemExit(1)
+
 
 def require_repo() -> str:
     repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -85,11 +87,13 @@ def require_repo() -> str:
         fail("GITHUB_REPOSITORY must contain owner/repository")
     return repo
 
+
 def require_token() -> str:
     token = os.environ.get("GH_TOKEN", "")
     if not token:
         fail("GH_TOKEN is required for authenticated GitHub operations")
     return token
+
 
 def append_summary(lines: list[str]) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -97,6 +101,7 @@ def append_summary(lines: list[str]) -> None:
         return
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines).rstrip() + "\n")
+
 
 def write_output(key: str, value: str | int) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
@@ -107,6 +112,7 @@ def write_output(key: str, value: str | int) -> None:
         fail(f"refusing multiline workflow output for {key}")
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(f"{key}={text}\n")
+
 
 def run(
     args: list[str],
@@ -128,8 +134,11 @@ def run(
         detail = ""
         if capture:
             detail = (completed.stderr or completed.stdout or "").strip()
-        fail(f"command failed ({completed.returncode}): {' '.join(args)}{': ' + detail if detail else ''}")
+        fail(
+            f"command failed ({completed.returncode}): {' '.join(args)}{': ' + detail if detail else ''}"
+        )
     return completed.stdout.strip() if capture and completed.stdout else ""
+
 
 def parse_env(
     path: Path,
@@ -160,10 +169,12 @@ def parse_env(
         fail(f"{path}: missing keys: {', '.join(sorted(missing))}")
     return values
 
+
 def parse_positive_int(value: str, label: str) -> int:
     if not value.isdigit() or int(value) <= 0:
         fail(f"invalid positive integer for {label}: {value!r}")
     return int(value)
+
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -172,16 +183,23 @@ def file_sha256(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 def parse_sha256sums(path: Path, *, allow_paths: bool = False) -> dict[str, str]:
     entries: dict[str, str] = {}
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
         match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
         if not match:
             fail(f"{path}:{line_number}: malformed SHA256SUMS entry")
         digest, name = match.groups()
         if allow_paths:
             candidate = PurePosixPath(name)
-            if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+            if (
+                candidate.is_absolute()
+                or ".." in candidate.parts
+                or not candidate.parts
+            ):
                 fail(f"{path}:{line_number}: unsafe checksum path {name!r}")
         elif not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             fail(f"{path}:{line_number}: unsafe checksum filename {name!r}")
@@ -189,6 +207,7 @@ def parse_sha256sums(path: Path, *, allow_paths: bool = False) -> dict[str, str]
             fail(f"{path}:{line_number}: duplicate SHA256SUMS entry for {name}")
         entries[name] = digest
     return entries
+
 
 def verify_sha256sums(root: Path, *, expected_names: set[str]) -> dict[str, str]:
     entries = parse_sha256sums(root / CHECKSUMS)
@@ -207,6 +226,7 @@ def verify_sha256sums(root: Path, *, expected_names: set[str]) -> dict[str, str]
             fail(f"SHA256SUMS digest mismatch for {name}: {actual} != {expected}")
     return entries
 
+
 def workspace_package_version(text: str) -> str:
     in_package = False
     for raw in text.splitlines():
@@ -222,6 +242,7 @@ def workspace_package_version(text: str) -> str:
                 return match.group(1)
     fail("cannot resolve [workspace.package] version")
 
+
 def package_version_from_tag(tag: str, source_sha: str) -> str:
     suffix = f"-{source_sha[:10]}"
     if not tag.startswith("termux-v") or not tag.endswith(suffix):
@@ -230,6 +251,7 @@ def package_version_from_tag(tag: str, source_sha: str) -> str:
     if not PACKAGE_RE.fullmatch(version):
         fail(f"release tag contains an invalid package version: {version!r}")
     return version
+
 
 def validate_request_values(values: dict[str, str]) -> None:
     if values["format_version"] != "2":

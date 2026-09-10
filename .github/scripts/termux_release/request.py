@@ -8,12 +8,28 @@ from pathlib import Path
 
 from .artifact import validate_local_bundle
 from .common import (
-    ARCHIVE, ARTIFACT_ASSETS, ARTIFACT_NAME, CHECKSUMS, PACKAGE_RE,
-    RELEASE_MANIFEST, REQUEST_FIELDS, RUN_PATHS, SHA_RE, append_summary,
-    file_sha256, parse_env, parse_sha256sums, require_repo, require_token, run,
-    validate_request_values, workspace_package_version, write_output,
+    ARCHIVE,
+    ARTIFACT_ASSETS,
+    ARTIFACT_NAME,
+    CHECKSUMS,
+    PACKAGE_RE,
+    RELEASE_MANIFEST,
+    REQUEST_FIELDS,
+    RUN_PATHS,
+    SHA_RE,
+    append_summary,
+    file_sha256,
+    parse_env,
+    parse_sha256sums,
+    require_repo,
+    require_token,
+    run,
+    validate_request_values,
+    workspace_package_version,
+    write_output,
 )
 from .github import api_url, paginated_items, verify_run
+
 
 def validate_request(args: argparse.Namespace) -> int:
     repo = require_repo()
@@ -71,6 +87,7 @@ def validate_request(args: argparse.Namespace) -> int:
     )
     return 0
 
+
 def prepare(args: argparse.Namespace) -> int:
     repo = require_repo()
     root = Path(args.dist)
@@ -78,7 +95,9 @@ def prepare(args: argparse.Namespace) -> int:
     unexpected = actual_files - set(ARTIFACT_ASSETS)
     missing = set(ARTIFACT_ASSETS) - actual_files
     if missing or unexpected:
-        fail(f"artifact file set mismatch; missing={sorted(missing)}, unexpected={sorted(unexpected)}")
+        fail(
+            f"artifact file set mismatch; missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
     if not SHA_RE.fullmatch(args.source_sha):
         fail("invalid --source-sha")
     if not PACKAGE_RE.fullmatch(args.package_version):
@@ -125,6 +144,7 @@ def prepare(args: argparse.Namespace) -> int:
     )
     return 0
 
+
 def self_test(_: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="termux-release-self-test-") as temp_name:
         root = Path(temp_name)
@@ -148,7 +168,12 @@ def self_test(_: argparse.Namespace) -> int:
         )
         parsed = parse_env(request_path, allowed=REQUEST_FIELDS)
         validate_request_values(parsed)
-        if workspace_package_version('[workspace.package]\nversion = "0.152.0-alpha.7.2"\n') != "0.152.0-alpha.7.2":
+        if (
+            workspace_package_version(
+                '[workspace.package]\nversion = "0.152.0-alpha.7.2"\n'
+            )
+            != "0.152.0-alpha.7.2"
+        ):
             fail("workspace version parser self-test failed")
         payload = root / "payload"
         payload.write_text("payload\n", encoding="utf-8")

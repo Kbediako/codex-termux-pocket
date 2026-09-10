@@ -82,7 +82,9 @@ def validate_names(actual: set[str]) -> None:
         display_name = match.group(1).strip("\"'")
         previous = display_names.get(display_name)
         if previous:
-            fail(f"duplicate workflow display name {display_name!r}: {previous} and {filename}")
+            fail(
+                f"duplicate workflow display name {display_name!r}: {previous} and {filename}"
+            )
         display_names[display_name] = filename
 
         run_match = re.search(r"(?m)^run-name:\s*(.+?)\s*$", text)
@@ -99,7 +101,9 @@ def validate_names(actual: set[str]) -> None:
             fail(f"{filename} contains generic run-name token {forbidden!r}")
         previous_run = run_names.get(run_name)
         if previous_run:
-            fail(f"duplicate workflow run-name {run_name!r}: {previous_run} and {filename}")
+            fail(
+                f"duplicate workflow run-name {run_name!r}: {previous_run} and {filename}"
+            )
         run_names[run_name] = filename
 
 
@@ -134,7 +138,9 @@ def validate_release_ownership(actual: set[str]) -> None:
         "--latest=false",
     ):
         if forbidden in artifact:
-            fail(f"termux-mobile-artifact.yml contains forbidden publisher token {forbidden!r}")
+            fail(
+                f"termux-mobile-artifact.yml contains forbidden publisher token {forbidden!r}"
+            )
 
     channel = read_workflow("termux-release-channel.yml")
     for forbidden in (
@@ -189,7 +195,9 @@ def validate_executable_contract() -> None:
         ),
     )
     require_tokens(github, ("gh", "attestation", "verify"))
-    require_tokens(control, ("validate-request", "prepare", "publish", "audit", "promote"))
+    require_tokens(
+        control, ("validate-request", "prepare", "publish", "audit", "promote")
+    )
     require_tokens(
         publisher,
         (

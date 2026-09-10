@@ -8,12 +8,15 @@ import argparse
 from termux_release.publication import audit, promote, publish
 from termux_release.request import prepare, self_test, validate_request
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser("validate-request")
-    validate_parser.add_argument("--request", default="scripts/termux/release-publication.env")
+    validate_parser.add_argument(
+        "--request", default="scripts/termux/release-publication.env"
+    )
     validate_parser.set_defaults(func=validate_request)
 
     prepare_parser = subparsers.add_parser("prepare")
@@ -44,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     self_test_parser = subparsers.add_parser("self-test")
     self_test_parser.set_defaults(func=self_test)
     return parser
+
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)

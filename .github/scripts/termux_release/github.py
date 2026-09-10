@@ -15,12 +15,23 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
-    API_VERSION, ARTIFACT_NAME, PUBLISHER_WORKFLOW_PATH, RELEASE_ASSETS,
-    REQUIRED_RUN_JOBS, RUN_PATHS, SHA_RE, fail, file_sha256, require_token, run,
+    API_VERSION,
+    ARTIFACT_NAME,
+    PUBLISHER_WORKFLOW_PATH,
+    RELEASE_ASSETS,
+    REQUIRED_RUN_JOBS,
+    RUN_PATHS,
+    SHA_RE,
+    fail,
+    file_sha256,
+    require_token,
+    run,
 )
+
 
 def api_url(repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{repo}{path}"
+
 
 def request_bytes(
     url: str,
@@ -49,7 +60,10 @@ def request_bytes(
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", "replace")
             last_error = f"HTTP {exc.code}: {error_body[:1000]}"
-            if exc.code not in {404, 409, 429, 500, 502, 503, 504} or attempt == attempts:
+            if (
+                exc.code not in {404, 409, 429, 500, 502, 503, 504}
+                or attempt == attempts
+            ):
                 fail(f"GitHub request failed for {url}: {last_error}")
         except urllib.error.URLError as exc:
             last_error = str(exc)
@@ -57,6 +71,7 @@ def request_bytes(
                 fail(f"GitHub request failed for {url}: {last_error}")
         time.sleep(min(2 * attempt, 10))
     fail(f"GitHub request failed for {url}: {last_error}")
+
 
 def request_json(
     url: str,
@@ -78,6 +93,7 @@ def request_json(
     except json.JSONDecodeError as exc:
         fail(f"GitHub returned invalid JSON for {url}: {exc}")
 
+
 def request_json_optional(url: str, *, authenticated: bool = False) -> Any | None:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -98,6 +114,7 @@ def request_json_optional(url: str, *, authenticated: bool = False) -> Any | Non
     except urllib.error.URLError as exc:
         fail(f"GitHub request failed for {url}: {exc}")
 
+
 def download_anonymous(url: str, output: Path, *, attempts: int = 8) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.name + ".part")
@@ -109,7 +126,10 @@ def download_anonymous(url: str, output: Path, *, attempts: int = 8) -> None:
             headers={"User-Agent": "codex-termux-anonymous-release-audit"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+            with (
+                urllib.request.urlopen(request, timeout=300) as response,
+                partial.open("wb") as handle,
+            ):
                 shutil.copyfileobj(response, handle, length=1024 * 1024)
             partial.replace(output)
             return
@@ -119,6 +139,7 @@ def download_anonymous(url: str, output: Path, *, attempts: int = 8) -> None:
                 fail(f"anonymous download failed for {url}: {last_error}")
             time.sleep(min(2 * attempt, 10))
     fail(f"anonymous download failed for {url}: {last_error}")
+
 
 def paginated_items(repo: str, path: str, key: str) -> list[dict[str, Any]]:
     page = 1
@@ -136,6 +157,7 @@ def paginated_items(repo: str, path: str, key: str) -> list[dict[str, Any]]:
         if len(batch) < 100:
             return items
         page += 1
+
 
 def verify_run(
     repo: str,
@@ -179,8 +201,11 @@ def verify_run(
             if sum(1 for job in jobs if job.get("name") == name) != 1
         }
         if duplicates:
-            fail(f"{field} {run_id} has duplicate or ambiguous required jobs: {sorted(duplicates)}")
+            fail(
+                f"{field} {run_id} has duplicate or ambiguous required jobs: {sorted(duplicates)}"
+            )
     return run_data
+
 
 def release_assets_by_name(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
     assets = release.get("assets")
@@ -194,6 +219,7 @@ def release_assets_by_name(release: dict[str, Any]) -> dict[str, dict[str, Any]]
         result[name] = asset
     return result
 
+
 def validate_release_object(
     release: dict[str, Any],
     *,
@@ -205,7 +231,9 @@ def validate_release_object(
         fail("release tag identity mismatch")
     if release.get("target_commitish") != source_sha:
         fail("release target_commitish mismatch")
-    if require_public and (release.get("draft") is not False or release.get("prerelease") is not False):
+    if require_public and (
+        release.get("draft") is not False or release.get("prerelease") is not False
+    ):
         fail("release is not a final public release")
     assets = release_assets_by_name(release)
     if set(assets) != set(RELEASE_ASSETS):
@@ -215,6 +243,7 @@ def validate_release_object(
             f"unexpected={sorted(assets.keys() - set(RELEASE_ASSETS))}"
         )
     return assets
+
 
 def upload_release_asset(upload_url: str, path: Path) -> None:
     token = require_token()
@@ -237,6 +266,7 @@ def upload_release_asset(upload_url: str, path: Path) -> None:
         env=env,
     )
 
+
 def public_release_ready(repo: str, tag: str) -> tuple[dict[str, Any], dict[str, Any]]:
     encoded = urllib.parse.quote(tag, safe="")
     last_problem = ""
@@ -246,7 +276,9 @@ def public_release_ready(repo: str, tag: str) -> tuple[dict[str, Any], dict[str,
             authenticated=True,
             attempts=3,
         )
-        latest = request_json(api_url(repo, "/releases/latest"), authenticated=True, attempts=3)
+        latest = request_json(
+            api_url(repo, "/releases/latest"), authenticated=True, attempts=3
+        )
         try:
             assets = release_assets_by_name(release)
             complete = set(assets) == set(RELEASE_ASSETS)
@@ -257,20 +289,23 @@ def public_release_ready(repo: str, tag: str) -> tuple[dict[str, Any], dict[str,
                 and asset["size"] > 0
                 for asset in assets.values()
             )
-            latest_ready = latest.get("tag_name") == tag and latest.get("id") == release.get("id")
+            latest_ready = latest.get("tag_name") == tag and latest.get(
+                "id"
+            ) == release.get("id")
             if complete and digests_ready and latest_ready:
                 return release, latest
-            last_problem = (
-                f"complete={complete}, digests_ready={digests_ready}, latest_ready={latest_ready}"
-            )
+            last_problem = f"complete={complete}, digests_ready={digests_ready}, latest_ready={latest_ready}"
         except (KeyError, TypeError) as exc:
             last_problem = str(exc)
         time.sleep(min(2 * attempt, 10))
     fail(f"public release metadata did not become complete: {last_problem}")
 
+
 def peel_tag_ref(repo: str, tag: str) -> str:
     encoded = urllib.parse.quote(tag, safe="")
-    ref = request_json(api_url(repo, f"/git/ref/tags/{encoded}"), authenticated=True, attempts=4)
+    ref = request_json(
+        api_url(repo, f"/git/ref/tags/{encoded}"), authenticated=True, attempts=4
+    )
     obj = ref.get("object")
     for _ in range(8):
         if not isinstance(obj, dict):
@@ -285,6 +320,7 @@ def peel_tag_ref(repo: str, tag: str) -> str:
         tag_object = request_json(obj["url"], authenticated=True, attempts=4)
         obj = tag_object.get("object")
     fail("release tag contains an unexpectedly deep tag-object chain")
+
 
 def verify_attestations(root: Path, *, repo: str) -> None:
     signer = f"{repo}/{PUBLISHER_WORKFLOW_PATH}"

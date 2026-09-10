@@ -22,10 +22,13 @@ def safe_path(path):
     if not isinstance(path, str):
         return False
     parts = PurePosixPath(path).parts
-    return (path == "AGENTS.md" or (
-        path.startswith("codex-rs/") and path.endswith((".rs", ".toml", ".md"))
+    return path == "AGENTS.md" or (
+        path.startswith("codex-rs/")
+        and path.endswith((".rs", ".toml", ".md"))
         and all(part not in (".", "..", ".git", ".github") for part in parts)
-        and str(PurePosixPath(path)) == path and "\\" not in path))
+        and str(PurePosixPath(path)) == path
+        and "\\" not in path
+    )
 
 
 def validate(value):
@@ -37,7 +40,12 @@ def validate(value):
         raise ValueError("expected at most ten reviewed text edits")
     paths = set()
     for edit in edits:
-        if not isinstance(edit, dict) or set(edit) != {"path", "before", "after", "replacements"}:
+        if not isinstance(edit, dict) or set(edit) != {
+            "path",
+            "before",
+            "after",
+            "replacements",
+        }:
             raise ValueError("invalid reviewed edit")
         path = edit["path"]
         if not safe_path(path) or path in paths:
@@ -50,9 +58,12 @@ def validate(value):
         if not isinstance(replacements, list) or not 1 <= len(replacements) <= 20:
             raise ValueError("expected 1-20 exact replacements")
         for pair in replacements:
-            if (not isinstance(pair, dict) or set(pair) != {"old", "new"}
-                    or not all(isinstance(pair[key], str) for key in ("old", "new"))
-                    or not pair["old"]):
+            if (
+                not isinstance(pair, dict)
+                or set(pair) != {"old", "new"}
+                or not all(isinstance(pair[key], str) for key in ("old", "new"))
+                or not pair["old"]
+            ):
                 raise ValueError("replacement needs nonempty old and literal new text")
     updates = value["package_updates"]
     if not isinstance(updates, list) or not 0 <= len(updates) <= 20:
@@ -62,9 +73,15 @@ def validate(value):
         if not isinstance(item, dict) or set(item) != {"name", "version"}:
             raise ValueError("invalid package update")
         name = item["name"]
-        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*(?:@[0-9]+\.[0-9]+\.[0-9]+)?", name)
-                or name in names or not isinstance(item["version"], str)
-                or not VERSION.fullmatch(item["version"])):
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_-]*(?:@[0-9]+\.[0-9]+\.[0-9]+)?", name
+            )
+            or name in names
+            or not isinstance(item["version"], str)
+            or not VERSION.fullmatch(item["version"])
+        ):
             raise ValueError("unsafe or repeated package update")
         names.add(name)
 
@@ -92,8 +109,14 @@ def execute(request, repo, source, api, live_main):
 
     def run(*args, cwd=root):
         print("source-preparation:", " ".join(args), flush=True)
-        result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, check=False)
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
         if result.returncode:
             (folder / "failure.log").write_text(result.stdout)
             print(result.stdout, flush=True)
@@ -102,17 +125,25 @@ def execute(request, repo, source, api, live_main):
 
     base, prepared = request["base_main"], request["prepared_commit"]
     run("git", "merge-base", "--is-ancestor", base, source)
-    if set(run("git", "diff", "--name-only", base, source).splitlines()) != {"scripts/termux/release-maintenance.json"}:
+    if set(run("git", "diff", "--name-only", base, source).splitlines()) != {
+        "scripts/termux/release-maintenance.json"
+    }:
         raise ValueError("only the request may change after the approved base main")
     run("git", "fetch", "--no-tags", "origin", prepared)
     run("git", "merge-base", "--is-ancestor", base, prepared)
     for path in (".github/workflows", ".github/scripts/termux_release"):
-        if run("git", "rev-parse", f"{source}:{path}") != run("git", "rev-parse", f"{prepared}:{path}"):
+        if run("git", "rev-parse", f"{source}:{path}") != run(
+            "git", "rev-parse", f"{prepared}:{path}"
+        ):
             raise ValueError("prepared workflows or release controls differ from main")
     run("git", "worktree", "add", "--detach", str(work), prepared)
     for edit in request["edits"]:
         path = work / edit["path"]
-        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(work.resolve()):
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not path.resolve().is_relative_to(work.resolve())
+        ):
             raise ValueError("edit target must be a tracked regular file")
         path.write_bytes(apply_edit(path.read_bytes(), edit))
         run("git", "add", "--", edit["path"], cwd=work)
@@ -122,12 +153,21 @@ def execute(request, repo, source, api, live_main):
     # Resolve the complete graph, including target-specific and git dependencies.
     run("cargo", "metadata", "--format-version=1", cwd=cargo)
     for item in request["package_updates"]:
-        run("cargo", "update", "--package", item["name"], "--precise", item["version"], cwd=cargo)
+        run(
+            "cargo",
+            "update",
+            "--package",
+            item["name"],
+            "--precise",
+            item["version"],
+            cwd=cargo,
+        )
     run("cargo", "metadata", "--locked", "--format-version=1", cwd=cargo)
     run("just", "fmt", cwd=cargo)
     run("just", "bazel-lock-update", cwd=work)
     run("cargo", "metadata", "--locked", "--format-version=1", cwd=cargo)
     import tomllib
+
     lock = tomllib.loads((cargo / "Cargo.lock").read_text())
     versions = {(item["name"], item["version"]) for item in lock["package"]}
     for item in request["package_updates"]:
@@ -135,8 +175,12 @@ def execute(request, repo, source, api, live_main):
             raise ValueError("requested package version is absent from generated lock")
     changed = set(run("git", "diff", "--name-only", prepared, cwd=work).splitlines())
     allowed = LOCKS | {edit["path"] for edit in request["edits"]}
-    if not changed <= allowed or run("git", "ls-files", "--others", "--exclude-standard", cwd=work):
-        raise ValueError(f"generation changed unapproved paths: {sorted(changed - allowed)}")
+    if not changed <= allowed or run(
+        "git", "ls-files", "--others", "--exclude-standard", cwd=work
+    ):
+        raise ValueError(
+            f"generation changed unapproved paths: {sorted(changed - allowed)}"
+        )
     run("git", "diff", "--check", cwd=work)
     run("git", "add", "--", *sorted(changed), cwd=work)
     output_tree = run("git", "write-tree", cwd=work)
@@ -148,17 +192,25 @@ def execute(request, repo, source, api, live_main):
             raise ValueError("generated output must be a regular file")
         data = path.read_bytes()
         identity = blob_sha(data)
-        result = api(f"repos/{repo}/git/blobs", method="POST",
-                     payload={"content": base64.b64encode(data).decode(), "encoding": "base64"})
+        result = api(
+            f"repos/{repo}/git/blobs",
+            method="POST",
+            payload={"content": base64.b64encode(data).decode(), "encoding": "base64"},
+        )
         if result["sha"] != identity:
             raise ValueError("uploaded blob identity differs from generated bytes")
         destination = folder / "files" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
         records.append({"path": name, "sha": identity, "size": len(data)})
-    receipt = {"request_sha": source, "prepared_commit": prepared,
-               "input_tree": request["expected_input_tree"], "output_tree": output_tree,
-               "package_updates": request["package_updates"], "files": records}
+    receipt = {
+        "request_sha": source,
+        "prepared_commit": prepared,
+        "input_tree": request["expected_input_tree"],
+        "output_tree": output_tree,
+        "package_updates": request["package_updates"],
+        "files": records,
+    }
     (folder / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, sort_keys=True), flush=True)
     # No ref, issue, publication, or manifest promotion mutation is performed.

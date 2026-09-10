@@ -13,16 +13,36 @@ from typing import Any
 
 from .artifact import validate_local_bundle, validate_manifest
 from .common import (
-    ARCHIVE, MANIFEST_FIELDS, PACKAGE_RE, PUBLISHER_WORKFLOW_PATH,
-    RELEASE_ASSETS, RELEASE_MANIFEST, SHA_RE, append_summary, fail,
-    file_sha256, package_version_from_tag, parse_env, require_repo,
-    require_token, write_output,
+    ARCHIVE,
+    MANIFEST_FIELDS,
+    PACKAGE_RE,
+    PUBLISHER_WORKFLOW_PATH,
+    RELEASE_ASSETS,
+    RELEASE_MANIFEST,
+    SHA_RE,
+    append_summary,
+    fail,
+    file_sha256,
+    package_version_from_tag,
+    parse_env,
+    require_repo,
+    require_token,
+    write_output,
 )
 from .github import (
-    api_url, download_anonymous, peel_tag_ref, public_release_ready,
-    release_assets_by_name, request_bytes, request_json, request_json_optional,
-    upload_release_asset, validate_release_object, verify_attestations,
+    api_url,
+    download_anonymous,
+    peel_tag_ref,
+    public_release_ready,
+    release_assets_by_name,
+    request_bytes,
+    request_json,
+    request_json_optional,
+    upload_release_asset,
+    validate_release_object,
+    verify_attestations,
 )
+
 
 def publish(args: argparse.Namespace) -> int:
     repo = require_repo()
@@ -49,7 +69,9 @@ def publish(args: argparse.Namespace) -> int:
     if matching:
         existing = matching[0]
         if existing.get("draft") is False and existing.get("prerelease") is False:
-            assets = validate_release_object(existing, tag=tag, source_sha=source_sha, require_public=True)
+            assets = validate_release_object(
+                existing, tag=tag, source_sha=source_sha, require_public=True
+            )
             for name, asset in assets.items():
                 if asset.get("size") != (root / name).stat().st_size:
                     fail(f"existing public asset size mismatch for {name}")
@@ -61,9 +83,14 @@ def publish(args: argparse.Namespace) -> int:
                 fail("existing exact release is not GitHub Latest")
             write_output("release_id", existing["id"])
             write_output("html_url", existing["html_url"])
-            append_summary([f"Reused already-public exact release `{tag}` without modifying it."])
+            append_summary(
+                [f"Reused already-public exact release `{tag}` without modifying it."]
+            )
             return 0
-        if existing.get("draft") is True and existing.get("target_commitish") == source_sha:
+        if (
+            existing.get("draft") is True
+            and existing.get("target_commitish") == source_sha
+        ):
             request_bytes(
                 api_url(repo, f"/releases/{existing['id']}"),
                 method="DELETE",
@@ -99,14 +126,20 @@ def publish(args: argparse.Namespace) -> int:
     )
     release_id = created.get("id")
     upload_url = str(created.get("upload_url", "")).split("{", 1)[0]
-    if not isinstance(release_id, int) or not upload_url or created.get("draft") is not True:
+    if (
+        not isinstance(release_id, int)
+        or not upload_url
+        or created.get("draft") is not True
+    ):
         fail("GitHub did not create the expected draft release")
 
     for name in RELEASE_ASSETS:
         upload_release_asset(upload_url, root / name)
 
     draft = request_json(api_url(repo, f"/releases/{release_id}"), authenticated=True)
-    assets = validate_release_object(draft, tag=tag, source_sha=source_sha, require_public=False)
+    assets = validate_release_object(
+        draft, tag=tag, source_sha=source_sha, require_public=False
+    )
     if draft.get("draft") is not True:
         fail("release left draft state before the complete asset set was verified")
     for name, asset in assets.items():
@@ -122,10 +155,16 @@ def publish(args: argparse.Namespace) -> int:
         payload={"draft": False, "prerelease": False, "make_latest": "true"},
         authenticated=True,
     )
-    validate_release_object(published, tag=tag, source_sha=source_sha, require_public=True)
-    latest = request_json(api_url(repo, "/releases/latest"), authenticated=True, attempts=5)
+    validate_release_object(
+        published, tag=tag, source_sha=source_sha, require_public=True
+    )
+    latest = request_json(
+        api_url(repo, "/releases/latest"), authenticated=True, attempts=5
+    )
     if latest.get("id") != release_id or latest.get("tag_name") != tag:
-        fail("the initial draft-to-public transaction did not make the release GitHub Latest")
+        fail(
+            "the initial draft-to-public transaction did not make the release GitHub Latest"
+        )
     write_output("release_id", release_id)
     write_output("html_url", published.get("html_url", ""))
     append_summary(
@@ -140,6 +179,7 @@ def publish(args: argparse.Namespace) -> int:
         ]
     )
     return 0
+
 
 def audit_public_release(
     *,
@@ -156,7 +196,9 @@ def audit_public_release(
     package_version = package_version_from_tag(tag, source_sha)
 
     release, latest = public_release_ready(repo, tag)
-    assets = validate_release_object(release, tag=tag, source_sha=source_sha, require_public=True)
+    assets = validate_release_object(
+        release, tag=tag, source_sha=source_sha, require_public=True
+    )
     if latest.get("id") != release.get("id"):
         fail("public /releases/latest does not resolve to the audited release")
 
@@ -173,7 +215,9 @@ def audit_public_release(
             size = path.stat().st_size
             digest = file_sha256(path)
             if size != asset.get("size"):
-                fail(f"GitHub asset size mismatch for {name}: {size} != {asset.get('size')}")
+                fail(
+                    f"GitHub asset size mismatch for {name}: {size} != {asset.get('size')}"
+                )
             if asset.get("digest") != f"sha256:{digest}":
                 fail(f"GitHub asset digest mismatch for {name}")
             asset_evidence[name] = {"size": size, "digest": f"sha256:{digest}"}
@@ -182,11 +226,15 @@ def audit_public_release(
                 if not local.is_file() or local.is_symlink():
                     fail(f"local candidate file is missing or unsafe: {name}")
                 if local.read_bytes() != path.read_bytes():
-                    fail(f"anonymous public bytes differ from the attested local candidate: {name}")
+                    fail(
+                        f"anonymous public bytes differ from the attested local candidate: {name}"
+                    )
 
         if (public_dir / RELEASE_MANIFEST).read_bytes() != manifest_path.read_bytes():
             fail("published release-manifest.env differs from the audited manifest")
-        public_manifest = parse_env(public_dir / RELEASE_MANIFEST, allowed=MANIFEST_FIELDS)
+        public_manifest = parse_env(
+            public_dir / RELEASE_MANIFEST, allowed=MANIFEST_FIELDS
+        )
         if public_manifest != manifest:
             fail("published release manifest values differ from the audited manifest")
         archive_sha, archive_size, runtime_size = validate_local_bundle(
@@ -222,7 +270,9 @@ def audit_public_release(
     }
     if receipt_path is not None:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        receipt_path.write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     write_output("release_id", release["id"])
     write_output("release_tag", tag)
     write_output("head_sha", source_sha)
@@ -242,6 +292,7 @@ def audit_public_release(
     )
     return receipt
 
+
 def audit(args: argparse.Namespace) -> int:
     audit_public_release(
         manifest_path=Path(args.manifest),
@@ -250,6 +301,7 @@ def audit(args: argparse.Namespace) -> int:
         receipt_path=Path(args.receipt) if args.receipt else None,
     )
     return 0
+
 
 def validate_receipt_live(receipt: dict[str, Any], manifest_path: Path) -> None:
     repo = require_repo()
@@ -262,28 +314,41 @@ def validate_receipt_live(receipt: dict[str, Any], manifest_path: Path) -> None:
     tag = receipt.get("release_tag")
     source_sha = receipt.get("head_sha")
     release_id = receipt.get("release_id")
-    if not isinstance(tag, str) or not isinstance(source_sha, str) or not isinstance(release_id, int):
+    if (
+        not isinstance(tag, str)
+        or not isinstance(source_sha, str)
+        or not isinstance(release_id, int)
+    ):
         fail("audit receipt release identity is malformed")
     release = request_json(
         api_url(repo, f"/releases/{release_id}"),
         authenticated=True,
         attempts=4,
     )
-    latest = request_json(api_url(repo, "/releases/latest"), authenticated=True, attempts=4)
-    assets = validate_release_object(release, tag=tag, source_sha=source_sha, require_public=True)
+    latest = request_json(
+        api_url(repo, "/releases/latest"), authenticated=True, attempts=4
+    )
+    assets = validate_release_object(
+        release, tag=tag, source_sha=source_sha, require_public=True
+    )
     if latest.get("id") != release_id or latest.get("tag_name") != tag:
         fail("GitHub Latest changed after the anonymous audit")
     expected_assets = receipt.get("assets")
-    if not isinstance(expected_assets, dict) or set(expected_assets) != set(RELEASE_ASSETS):
+    if not isinstance(expected_assets, dict) or set(expected_assets) != set(
+        RELEASE_ASSETS
+    ):
         fail("audit receipt asset evidence is malformed")
     for name, asset in assets.items():
         evidence = expected_assets.get(name)
         if not isinstance(evidence, dict):
             fail(f"audit receipt has no evidence for {name}")
-        if asset.get("size") != evidence.get("size") or asset.get("digest") != evidence.get("digest"):
+        if asset.get("size") != evidence.get("size") or asset.get(
+            "digest"
+        ) != evidence.get("digest"):
             fail(f"public asset metadata changed after the anonymous audit: {name}")
     if peel_tag_ref(repo, tag) != source_sha:
         fail("release tag ref changed after the anonymous audit")
+
 
 def promote(args: argparse.Namespace) -> int:
     repo = require_repo()
@@ -298,7 +363,9 @@ def promote(args: argparse.Namespace) -> int:
         fail(f"invalid audit receipt: {exc}")
     validate_receipt_live(receipt, manifest_path)
 
-    contents_url = api_url(repo, "/contents/scripts/termux/release-manifest.env?ref=main")
+    contents_url = api_url(
+        repo, "/contents/scripts/termux/release-manifest.env?ref=main"
+    )
     current = request_json(contents_url, authenticated=True)
     blob_sha = current.get("sha")
     encoded = current.get("content")
@@ -308,7 +375,9 @@ def promote(args: argparse.Namespace) -> int:
     candidate = manifest_path.read_bytes()
     if current_bytes == candidate:
         write_output("promotion_commit_sha", "unchanged")
-        append_summary([f"Promoted manifest already identifies `{manifest['release_tag']}`."])
+        append_summary(
+            [f"Promoted manifest already identifies `{manifest['release_tag']}`."]
+        )
         return 0
 
     response = request_json(
@@ -322,7 +391,7 @@ def promote(args: argparse.Namespace) -> int:
         },
         authenticated=True,
     )
-    commit_sha = ((response.get("commit") or {}).get("sha"))
+    commit_sha = (response.get("commit") or {}).get("sha")
     if not isinstance(commit_sha, str) or not SHA_RE.fullmatch(commit_sha):
         fail("manifest promotion did not return a commit SHA")
     write_output("promotion_commit_sha", commit_sha)
@@ -337,6 +406,7 @@ def promote(args: argparse.Namespace) -> int:
         ]
     )
     return 0
+
 
 def public_audit_main() -> int:
     audit_public_release(

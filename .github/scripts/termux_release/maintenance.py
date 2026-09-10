@@ -21,24 +21,48 @@ REQUEST = "scripts/termux/release-maintenance.json"
 PUBLICATION = "scripts/termux/release-publication.env"
 SHA = re.compile(r"[0-9a-f]{40}")
 TAG = re.compile(r"rust-v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+(?:\.[0-9]+)*")
-PRE = ("blocking-ci.yml", "termux-control-plane.yml", "termux-linux-sandbox.yml",
-       "termux-mobile-artifact.yml", "termux-android-emulator.yml")
-POST = ("termux-release-channel.yml", "termux-governance.yml",
-        "termux-control-plane.yml", "blocking-ci.yml")
+PRE = (
+    "blocking-ci.yml",
+    "termux-control-plane.yml",
+    "termux-linux-sandbox.yml",
+    "termux-mobile-artifact.yml",
+    "termux-android-emulator.yml",
+)
+POST = (
+    "termux-release-channel.yml",
+    "termux-governance.yml",
+    "termux-control-plane.yml",
+    "blocking-ci.yml",
+)
 FIELDS = {
     "export-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit"},
     "import-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit"},
-    "record-upstream": {"upstream_tag", "upstream_tag_object", "upstream_commit", "prepared_commit"},
-    "prepare-source": {"base_main", "prepared_commit", "expected_input_tree", "edits", "package_updates"},
+    "record-upstream": {
+        "upstream_tag",
+        "upstream_tag_object",
+        "upstream_commit",
+        "prepared_commit",
+    },
+    "prepare-source": {
+        "base_main",
+        "prepared_commit",
+        "expected_input_tree",
+        "edits",
+        "package_updates",
+    },
     "dispatch-checks": {"phase"},
     "retire-branches": {"branches"},
 }
 
 
 def command(*args, data=None):
-    result = subprocess.run(args, input=data, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        args, input=data, text=True, capture_output=True, check=False
+    )
     if result.returncode:
-        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
+        raise RuntimeError(
+            f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}"
+        )
     return result.stdout.strip()
 
 
@@ -51,22 +75,34 @@ def api(path, *, method="GET", payload=None):
 
 
 def validate_request(value):
-    if not isinstance(value, dict) or type(value.get("format_version")) is not int or value["format_version"] != 1:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("format_version")) is not int
+        or value["format_version"] != 1
+    ):
         raise ValueError("maintenance request must be a format-1 object")
     operation = value.get("operation")
     if operation not in FIELDS:
         raise ValueError("unknown maintenance operation")
     if set(value) != {"format_version", "request_id", "operation"} | FIELDS[operation]:
         raise ValueError("missing or unexpected maintenance fields")
-    if not isinstance(value["request_id"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value["request_id"]):
+    if not isinstance(value["request_id"], str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]{1,80}", value["request_id"]
+    ):
         raise ValueError("invalid request_id")
     for key in ("upstream_commit", "upstream_tag_object", "prepared_commit"):
-        if key in value and (not isinstance(value[key], str) or not SHA.fullmatch(value[key])):
+        if key in value and (
+            not isinstance(value[key], str) or not SHA.fullmatch(value[key])
+        ):
             raise ValueError(f"invalid {key}")
-    if "upstream_tag" in value and (not isinstance(value["upstream_tag"], str) or not TAG.fullmatch(value["upstream_tag"])):
+    if "upstream_tag" in value and (
+        not isinstance(value["upstream_tag"], str)
+        or not TAG.fullmatch(value["upstream_tag"])
+    ):
         raise ValueError("invalid official alpha tag")
     if operation == "prepare-source":
         from source_preparation import validate
+
         validate(value)
     if operation == "dispatch-checks" and value["phase"] not in ("pre", "post"):
         raise ValueError("phase must be pre or post")
@@ -79,9 +115,18 @@ def validate_request(value):
             if not isinstance(item, dict) or set(item) != {"name", "sha", "pr_number"}:
                 raise ValueError("branch retirement needs name, sha, and pr_number")
             name = item["name"]
-            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", name) or name in ("main", "master"):
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", name)
+                or name in ("main", "master")
+            ):
                 raise ValueError("unsafe branch name")
-            if ".." in name or name.endswith(("/", ".lock")) or "//" in name or name in names:
+            if (
+                ".." in name
+                or name.endswith(("/", ".lock"))
+                or "//" in name
+                or name in names
+            ):
                 raise ValueError("unsafe or repeated branch")
             names.add(name)
             if not isinstance(item["sha"], str) or not SHA.fullmatch(item["sha"]):
@@ -112,9 +157,17 @@ def fetch_upstream(request):
     release = api(f"repos/openai/codex/releases/tags/{quote(tag, safe='')}")
     if release["draft"] or not release["prerelease"] or release["tag_name"] != tag:
         raise RuntimeError("upstream alpha is not an official public prerelease")
-    command("git", "fetch", "--no-tags", "https://github.com/openai/codex.git",
-            f"refs/tags/{tag}:refs/tags/{tag}")
-    if command("git", "rev-parse", f"refs/tags/{tag}") != request["upstream_tag_object"]:
+    command(
+        "git",
+        "fetch",
+        "--no-tags",
+        "https://github.com/openai/codex.git",
+        f"refs/tags/{tag}:refs/tags/{tag}",
+    )
+    if (
+        command("git", "rev-parse", f"refs/tags/{tag}")
+        != request["upstream_tag_object"]
+    ):
         raise RuntimeError("upstream annotated tag object changed")
     peeled = command("git", "rev-parse", f"refs/tags/{tag}^{{}}")
     if peeled != commit or command("git", "cat-file", "-t", commit) != "commit":
@@ -131,8 +184,14 @@ def export_upstream(request, source):
     command("git", "bundle", "verify", str(bundle))
     with bundle.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    receipt = {"source_sha": source, "upstream_tag": tag, "upstream_commit": commit, "upstream_tag_object": request["upstream_tag_object"],
-               "bundle_sha256": digest, "bundle_size": bundle.stat().st_size}
+    receipt = {
+        "source_sha": source,
+        "upstream_tag": tag,
+        "upstream_commit": commit,
+        "upstream_tag_object": request["upstream_tag_object"],
+        "bundle_sha256": digest,
+        "bundle_size": bundle.stat().st_size,
+    }
     (folder / "identity.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, sort_keys=True), flush=True)
     if request["operation"] == "import-upstream":
@@ -147,7 +206,10 @@ def export_upstream(request, source):
             raise RuntimeError("imported official tag identity did not verify")
         if api(f"repos/{repo}/git/commits/{commit}")["sha"] != commit:
             raise RuntimeError("imported official source object is not retrievable")
-        print(json.dumps({"imported_upstream_tag": tag, "upstream_commit": commit}), flush=True)
+        print(
+            json.dumps({"imported_upstream_tag": tag, "upstream_commit": commit}),
+            flush=True,
+        )
 
 
 def dispatch_checks(repo, source, phase):
@@ -156,29 +218,68 @@ def dispatch_checks(repo, source, phase):
         live_main(repo, source)
         endpoint = f"repos/{repo}/actions/workflows/{workflow}/runs?head_sha={source}&per_page=100"
         runs = api(endpoint)["workflow_runs"]
-        exact = [run for run in runs if run["head_sha"] == source and
-                 run["path"].split("@", 1)[0] == f".github/workflows/{workflow}"]
-        reusable = [run for run in exact if run["status"] != "completed" or run["conclusion"] == "success"]
+        exact = [
+            run
+            for run in runs
+            if run["head_sha"] == source
+            and run["path"].split("@", 1)[0] == f".github/workflows/{workflow}"
+        ]
+        reusable = [
+            run
+            for run in exact
+            if run["status"] != "completed" or run["conclusion"] == "success"
+        ]
         if reusable:
-            print(json.dumps({"workflow": workflow, "reused_run_id": reusable[0]["id"],
-                              "status": reusable[0]["status"], "source_sha": source}))
+            print(
+                json.dumps(
+                    {
+                        "workflow": workflow,
+                        "reused_run_id": reusable[0]["id"],
+                        "status": reusable[0]["status"],
+                        "source_sha": source,
+                    }
+                )
+            )
             continue
         if exact:
-            raise RuntimeError(f"{workflow} has failed/cancelled exact-source evidence; inspect it before retry")
-        inputs = {"source_ref": source} if workflow in ("termux-linux-sandbox.yml", "termux-mobile-artifact.yml") else {}
-        api(f"repos/{repo}/actions/workflows/{workflow}/dispatches", method="POST",
-            payload={"ref": "main", "inputs": inputs})
+            raise RuntimeError(
+                f"{workflow} has failed/cancelled exact-source evidence; inspect it before retry"
+            )
+        inputs = (
+            {"source_ref": source}
+            if workflow in ("termux-linux-sandbox.yml", "termux-mobile-artifact.yml")
+            else {}
+        )
+        api(
+            f"repos/{repo}/actions/workflows/{workflow}/dispatches",
+            method="POST",
+            payload={"ref": "main", "inputs": inputs},
+        )
         for attempt in range(20):
             time.sleep(2)
             live_main(repo, source)
             runs = api(endpoint)["workflow_runs"]
-            found = [run for run in runs if run["head_sha"] == source and
-                     run["path"].split("@", 1)[0] == f".github/workflows/{workflow}"]
+            found = [
+                run
+                for run in runs
+                if run["head_sha"] == source
+                and run["path"].split("@", 1)[0] == f".github/workflows/{workflow}"
+            ]
             if found:
-                print(json.dumps({"workflow": workflow, "run_id": found[0]["id"], "source_sha": source}))
+                print(
+                    json.dumps(
+                        {
+                            "workflow": workflow,
+                            "run_id": found[0]["id"],
+                            "source_sha": source,
+                        }
+                    )
+                )
                 break
         else:
-            raise RuntimeError(f"dispatch accepted but {workflow} run not yet visible; do not blindly redispatch")
+            raise RuntimeError(
+                f"dispatch accepted but {workflow} run not yet visible; do not blindly redispatch"
+            )
 
 
 def record_upstream(request, repo, source):
@@ -186,26 +287,57 @@ def record_upstream(request, repo, source):
     command("git", "merge-base", "--is-ancestor", prepared, source)
     changed = set(command("git", "diff", "--name-only", prepared, source).splitlines())
     if changed != {REQUEST}:
-        raise RuntimeError("only the maintenance request may differ from the reviewed prepared commit")
+        raise RuntimeError(
+            "only the maintenance request may differ from the reviewed prepared commit"
+        )
     tag, commit = fetch_upstream(request)
     import tomllib
-    package = tomllib.loads(Path("codex-rs/Cargo.toml").read_text())["workspace"]["package"]["version"]
+
+    package = tomllib.loads(Path("codex-rs/Cargo.toml").read_text())["workspace"][
+        "package"
+    ]["version"]
     if package != tag.removeprefix("rust-v"):
-        raise RuntimeError("prepared source package version differs from the approved upstream alpha")
-    command("cargo", "metadata", "--locked", "--format-version=1", "--manifest-path", "codex-rs/Cargo.toml")
+        raise RuntimeError(
+            "prepared source package version differs from the approved upstream alpha"
+        )
+    command(
+        "cargo",
+        "metadata",
+        "--locked",
+        "--format-version=1",
+        "--manifest-path",
+        "codex-rs/Cargo.toml",
+    )
     tree = command("git", "rev-parse", "HEAD^{tree}")
     command("git", "config", "user.name", "github-actions[bot]")
-    command("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+    command(
+        "git",
+        "config",
+        "user.email",
+        "41898282+github-actions[bot]@users.noreply.github.com",
+    )
     message = f"termux: record reviewed upstream ancestry\n\nReviewed prepared source: {prepared}\nUpstream tag: {tag}\nUpstream commit: {commit}\n"
-    merged = command("git", "commit-tree", tree, "-p", source, "-p", commit, data=message)
+    merged = command(
+        "git", "commit-tree", tree, "-p", source, "-p", commit, data=message
+    )
     command("git", "merge-base", "--is-ancestor", commit, merged)
     if command("git", "diff", "--name-only", source, merged):
-        raise RuntimeError("ancestry recording must not change any reviewed source bytes")
+        raise RuntimeError(
+            "ancestry recording must not change any reviewed source bytes"
+        )
     live_main(repo, source)
     command("gh", "auth", "setup-git")
     command("git", "push", "origin", f"{merged}:refs/heads/main")
     live_main(repo, merged)
-    print(json.dumps({"source_sha": merged, "upstream_commit": commit, "prepared_commit": prepared}))
+    print(
+        json.dumps(
+            {
+                "source_sha": merged,
+                "upstream_commit": commit,
+                "prepared_commit": prepared,
+            }
+        )
+    )
     dispatch_checks(repo, merged, "pre")
 
 
@@ -214,21 +346,36 @@ def retire_branches(request, repo):
     # work, a moved head, an open PR's branch, or a branch belonging to a fork.
     for item in request["branches"]:
         pr = api(f"repos/{repo}/pulls/{item['pr_number']}")
-        if pr["state"] != "closed" or pr["head"]["ref"] != item["name"] or pr["head"]["sha"] != item["sha"]:
-            raise RuntimeError("branch does not match the explicitly closed PR and expected head")
+        if (
+            pr["state"] != "closed"
+            or pr["head"]["ref"] != item["name"]
+            or pr["head"]["sha"] != item["sha"]
+        ):
+            raise RuntimeError(
+                "branch does not match the explicitly closed PR and expected head"
+            )
         if pr["head"]["repo"] is None or pr["head"]["repo"]["full_name"] != repo:
             raise RuntimeError("refusing to delete a branch from another repository")
-        branches = api(f"repos/{repo}/git/matching-refs/heads/{quote(item['name'], safe='')}")
+        branches = api(
+            f"repos/{repo}/git/matching-refs/heads/{quote(item['name'], safe='')}"
+        )
         exact = [ref for ref in branches if ref["ref"] == f"refs/heads/{item['name']}"]
         if exact and exact[0]["object"]["sha"] != item["sha"]:
             raise RuntimeError("branch moved after review")
     for item in request["branches"]:
-        endpoint = f"repos/{repo}/git/matching-refs/heads/{quote(item['name'], safe='')}"
-        exact = [ref for ref in api(endpoint) if ref["ref"] == f"refs/heads/{item['name']}"]
+        endpoint = (
+            f"repos/{repo}/git/matching-refs/heads/{quote(item['name'], safe='')}"
+        )
+        exact = [
+            ref for ref in api(endpoint) if ref["ref"] == f"refs/heads/{item['name']}"
+        ]
         if exact:
             if exact[0]["object"]["sha"] != item["sha"]:
                 raise RuntimeError("branch moved before deletion")
-            api(f"repos/{repo}/git/refs/heads/{quote(item['name'], safe='')}", method="DELETE")
+            api(
+                f"repos/{repo}/git/refs/heads/{quote(item['name'], safe='')}",
+                method="DELETE",
+            )
         if any(ref["ref"] == f"refs/heads/{item['name']}" for ref in api(endpoint)):
             raise RuntimeError("branch deletion was not confirmed")
         print(json.dumps({"absent_branch": item["name"], "expected_sha": item["sha"]}))
@@ -240,7 +387,9 @@ def main():
     if os.environ["GITHUB_REF"] != "refs/heads/main":
         raise ValueError("maintenance and publication controls require main")
     source, repo = os.environ["GITHUB_SHA"], os.environ["GITHUB_REPOSITORY"]
-    if not SHA.fullmatch(source) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+    if not SHA.fullmatch(source) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo
+    ):
         raise ValueError("invalid Actions source or repository")
     if command("git", "rev-parse", "HEAD") != source:
         raise ValueError("checkout differs from triggering source")
@@ -252,7 +401,9 @@ def main():
             if not SHA.fullmatch(before) or before == "0" * 40:
                 raise ValueError("a normal main push is required")
             command("git", "merge-base", "--is-ancestor", before, source)
-            changed = set(command("git", "diff", "--name-only", before, source).splitlines())
+            changed = set(
+                command("git", "diff", "--name-only", before, source).splitlines()
+            )
         mode = route(os.environ["GITHUB_EVENT_NAME"], changed)
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             output.write(f"mode={mode}\n")
@@ -273,6 +424,7 @@ def main():
         record_upstream(request, repo, source)
     elif operation == "prepare-source":
         from source_preparation import execute
+
         execute(request, repo, source, api, live_main)
     elif operation == "dispatch-checks":
         dispatch_checks(repo, source, request["phase"])
