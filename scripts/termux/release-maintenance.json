@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha15539-export-20260911",
+  "request_id": "alpha15539-export-objects-20260911",
   "operation": "export-upstream",
   "upstream_tag": "rust-v0.155.0-alpha.3.9",
   "upstream_tag_object": "cf2d064941ff2bb9249f1ea3719e7e9dd62fad9b",

@@ -194,6 +194,12 @@ def export_upstream(request, source):
     }
     (folder / "identity.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, sort_keys=True), flush=True)
+    if request["operation"] == "export-upstream":
+        from source_objects import stage
+
+        objects = stage(os.environ["GITHUB_REPOSITORY"], source, commit, api, live_main)
+        (folder / "source-objects.json").write_text(json.dumps(objects, indent=2) + "\n")
+        print(json.dumps({"staged_upstream_blobs": objects["blob_count"]}), flush=True)
     if request["operation"] == "import-upstream":
         # Transfer the unmodified official tag and original Git objects only.
         # This does not check out, rewrite, or update any workflow on main.

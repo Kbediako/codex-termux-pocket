@@ -20,8 +20,24 @@ set is running.
 `export-upstream` requires `upstream_tag`, `upstream_tag_object`, and
 `upstream_commit`. It checks the official public alpha release, fetches the exact
 annotated tag, peels it, and retains a Git bundle plus identity/checksum receipt
-as `termux-source-export`. It does not modify remote refs. `import-upstream` does
-the same and additionally pushes only the unmodified official tag to the fork;
+as `termux-source-export`. It also stages original non-workflow file blobs that
+are not reachable from the triggering main, using bounded Git-data writes with
+independently computed blob and batch-tree hashes. `source-objects.json` records
+the exact staged objects. UTF-8 blobs are batched in unreferenced flat trees;
+binary blobs use the blob endpoint. No commit, ref, checkout, workflow file,
+publication or promoted manifest is changed. The limits are 2,000 blobs, 8 MiB
+per blob and 64 MiB total; a moved main or mismatched hash fails closed.
+
+These stored objects are transport only, not an integrated or validated source.
+A maintainer must review the actual merge, construct its complete tree through
+direct Git writes and use the ordinary preparation process. `record-upstream`
+still records the original upstream commit only after source review. A retry may
+recreate identical unreferenced objects but must never substitute this receipt
+for the five exact-source gates. This path avoids requiring permission to push
+an upstream tag containing foreign workflow YAML.
+
+`export-upstream` does not modify remote refs. `import-upstream` retains the
+bundle and additionally pushes only the unmodified official tag to the fork;
 it fails rather than forcing a conflicting tag or weakening permissions. Neither
 operation rewrites workflow files or changes the runtime on `main`.
 

@@ -255,5 +255,152 @@ class SourcePreparationTests(unittest.TestCase):
             subject.validate_request(value)
 
 
+class SourceObjectTests(unittest.TestCase):
+    def fixture(self):
+        import source_objects as objects
+
+        files = {
+            "codex-rs/new.rs": b"new text\n",
+            "codex-rs/other.rs": b"other text\n",
+            "codex-rs/same.rs": b"unchanged\n",
+            "codex-rs/fixture.bin": b"\xff\x00\x80",
+            ".github/workflows/foreign.yml": b"do not stage workflows\n",
+        }
+        ids = {path: objects.object_sha("blob", data) for path, data in files.items()}
+        self.content = {ids[path]: data for path, data in files.items()}
+
+        def git(*args):
+            if args[0] == "rev-list":
+                return (ids["codex-rs/same.rs"] + "\n").encode()
+            if args[0] == "ls-tree":
+                return b"".join(
+                    f"100644 blob {ids[path]}\t{path}\0".encode() for path in files
+                )
+            if args[:2] == ("cat-file", "blob"):
+                return self.content[args[2]]
+            self.fail(f"unexpected Git operation: {args}")
+
+        return objects, git, ids
+
+    def api(self, path, *, method, payload):
+        import base64
+        import source_objects as objects
+
+        self.assertEqual(method, "POST")
+        if path == "repos/owner/repo/git/blobs":
+            self.assertEqual(payload["encoding"], "base64")
+            data = base64.b64decode(payload["content"], validate=True)
+            return {"sha": objects.object_sha("blob", data)}
+        self.assertEqual(path, "repos/owner/repo/git/trees")
+        self.assertEqual(set(payload), {"tree"})
+        entries = sorted(payload["tree"], key=lambda entry: entry["path"])
+        raw = b""
+        result = []
+        for entry in entries:
+            sha = objects.object_sha("blob", entry["content"].encode())
+            self.assertEqual(entry["path"], sha)
+            self.assertEqual(entry["content"].encode(), self.content[sha])
+            raw += b"100644 " + sha.encode() + b"\0" + bytes.fromhex(sha)
+            result.append({"path": sha, "sha": sha, "mode": "100644", "type": "blob"})
+        return {"sha": objects.object_sha("tree", raw), "tree": result}
+
+    def test_exact_text_binary_and_workflow_exclusion(self):
+        objects, git, ids = self.fixture()
+        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
+            objects, "MAX_BATCH_BLOBS", 1
+        ), patch.object(subject, "api", side_effect=self.api) as api, patch.object(
+            subject, "live_main"
+        ) as live:
+            result = objects.stage("owner/repo", "a" * 40, "b" * 40, api, live)
+        self.assertEqual(result["blob_count"], 3)
+        self.assertEqual(len(result["unreferenced_batch_trees"]), 2)
+        self.assertEqual(api.call_count, 3)
+        self.assertEqual(
+            {item["sha"] for item in result["blobs"]},
+            {
+                ids["codex-rs/new.rs"],
+                ids["codex-rs/other.rs"],
+                ids["codex-rs/fixture.bin"],
+            },
+        )
+        self.assertEqual(live.call_count, 4)
+        live.assert_called_with("owner/repo", "a" * 40)
+
+    def test_wrong_git_bytes_fail_before_any_write(self):
+        objects, git, ids = self.fixture()
+        self.content[ids["codex-rs/new.rs"]] = b"changed bytes"
+        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
+            subject, "api"
+        ) as api, self.assertRaises(ValueError):
+            objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
+        api.assert_not_called()
+
+    def test_limits_fail_before_any_write(self):
+        objects, git, _ = self.fixture()
+        for limit in ("MAX_BLOBS", "MAX_BLOB_BYTES", "MAX_TOTAL_BYTES"):
+            with self.subTest(limit=limit), patch.object(
+                objects, "git_bytes", side_effect=git
+            ), patch.object(objects, limit, 1), patch.object(
+                subject, "api"
+            ) as api, self.assertRaises(ValueError):
+                objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
+            api.assert_not_called()
+
+    def test_stale_main_refuses_first_write(self):
+        objects, git, _ = self.fixture()
+        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
+            subject, "api"
+        ) as api, patch.object(
+            subject, "live_main", side_effect=RuntimeError("main moved")
+        ) as live, self.assertRaises(RuntimeError):
+            objects.stage("owner/repo", "a" * 40, "b" * 40, api, live)
+        api.assert_not_called()
+
+    def test_remote_identity_mismatch_is_rejected(self):
+        objects, git, _ = self.fixture()
+        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
+            subject, "api", return_value={"sha": "0" * 40, "tree": []}
+        ) as api, self.assertRaises(ValueError):
+            objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
+
+    def test_bad_tree_receipts_are_rejected(self):
+        objects, _, ids = self.fixture()
+        sha = ids["codex-rs/new.rs"]
+        entry = {
+            "path": sha,
+            "mode": "100644",
+            "type": "blob",
+            "content": self.content[sha].decode(),
+        }
+        valid = self.api(
+            "repos/owner/repo/git/trees", method="POST", payload={"tree": [entry]}
+        )
+        wrong_entry = copy.deepcopy(valid)
+        wrong_entry["tree"][0]["sha"] = "0" * 40
+        for response in (
+            valid | {"sha": "0" * 40},
+            valid | {"truncated": True},
+            valid | {"tree": []},
+            wrong_entry,
+        ):
+            with self.subTest(response=response), patch.object(
+                subject, "api", return_value=response
+            ) as api, self.assertRaises(ValueError):
+                objects.upload_batch(
+                    "owner/repo", "a" * 40, [entry], api, lambda *_: None
+                )
+
+    def test_exact_blob_retry_is_idempotent(self):
+        objects, git, _ = self.fixture()
+        with patch.object(objects, "git_bytes", side_effect=git):
+            first = objects.stage(
+                "owner/repo", "a" * 40, "b" * 40, self.api, lambda *_: None
+            )
+            second = objects.stage(
+                "owner/repo", "a" * 40, "b" * 40, self.api, lambda *_: None
+            )
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -224,3 +224,5 @@ subject	ci: align Android server smoke test with upstream	tooling	Replaces the r
 subject	ci: import official alpha source	tooling	Imports only the verified unmodified upstream alpha tag through the permanent maintenance request, preserving runtime and release controls.
 subject	termux: update to 0.155.0-alpha.1	runtime-critical	Integrates original upstream alpha.1 with reviewed Termux patch preservation and regenerated coherent Cargo/Bazel dependency locks.
 subject	release: request validated Termux 0.155.0-alpha.1 publication	tooling	Records only the five successful exact-source alpha.1 release gates for the sole permanent publisher.
+subject	ci: export pinned official alpha source	tooling	Requests export of exact original upstream Git objects through the permanent maintenance interface; no runtime, ref or release mutation.
+subject	ci: stage verified upstream source objects	security-critical	Extends the permanent exporter with bounded hash-verified non-workflow blob transport; preserves main, original ancestry recording, source review and every release gate.
