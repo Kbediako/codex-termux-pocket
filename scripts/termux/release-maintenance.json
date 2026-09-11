@@ -1,8 +1,22 @@
 {
   "format_version": 1,
-  "request_id": "alpha15539-export-objects-20260911",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.3.9",
-  "upstream_tag_object": "cf2d064941ff2bb9249f1ea3719e7e9dd62fad9b",
-  "upstream_commit": "25b92859c1adcc8031959f17d52f27e579c3e094"
+  "request_id": "alpha15539-prepare-20260911",
+  "operation": "prepare-source",
+  "base_main": "2f69dc03a89f15777027b75c6fdc8bf08461e877",
+  "prepared_commit": "0c2290a76854f3532737972f548b4b3faaf5af43",
+  "expected_input_tree": "21f3069d46876de95d92f3c6edc60c7abe998b77",
+  "edits": [
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": "22e016a3ce9e3173b61740256e8432aeda945a46",
+      "after": "a2f2a83d49bd93eb6926d7adb7ea99745290e548",
+      "replacements": [
+        {
+          "old": "mod mcp_cmd;\n",
+          "new": "mod mcp_cmd;\nmod mcp_login;\n"
+        }
+      ]
+    }
+  ],
+  "package_updates": []
 }
