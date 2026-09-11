@@ -1,10 +1,10 @@
 {
   "format_version": 1,
-  "request_id": "alpha15539-prepare-20260911",
+  "request_id": "alpha15539-prepare-formatted-20260911",
   "operation": "prepare-source",
-  "base_main": "2f69dc03a89f15777027b75c6fdc8bf08461e877",
-  "prepared_commit": "0c2290a76854f3532737972f548b4b3faaf5af43",
-  "expected_input_tree": "21f3069d46876de95d92f3c6edc60c7abe998b77",
+  "base_main": "31ffa02e4abde4b7772be43adc382345eaf7bbfb",
+  "prepared_commit": "2dc744e4d21e53b9f115a5ee82804a2e9194ebe9",
+  "expected_input_tree": "0fcc77ad20e05b37b56fa765597e06dde8e473b3",
   "edits": [
     {
       "path": "codex-rs/cli/src/main.rs",
