@@ -1,1 +1,8 @@
-{"format_version":1,"request_id":"alpha1551-final-post-20260910","operation":"dispatch-checks","phase":"post"}
+{
+  "format_version": 1,
+  "request_id": "alpha15539-export-20260911",
+  "operation": "export-upstream",
+  "upstream_tag": "rust-v0.155.0-alpha.3.9",
+  "upstream_tag_object": "cf2d064941ff2bb9249f1ea3719e7e9dd62fad9b",
+  "upstream_commit": "25b92859c1adcc8031959f17d52f27e579c3e094"
+}
