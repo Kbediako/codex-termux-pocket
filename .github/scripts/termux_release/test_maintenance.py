@@ -306,11 +306,12 @@ class SourceObjectTests(unittest.TestCase):
 
     def test_exact_text_binary_and_workflow_exclusion(self):
         objects, git, ids = self.fixture()
-        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
-            objects, "MAX_BATCH_BLOBS", 1
-        ), patch.object(subject, "api", side_effect=self.api) as api, patch.object(
-            subject, "live_main"
-        ) as live:
+        with (
+            patch.object(objects, "git_bytes", side_effect=git),
+            patch.object(objects, "MAX_BATCH_BLOBS", 1),
+            patch.object(subject, "api", side_effect=self.api) as api,
+            patch.object(subject, "live_main") as live,
+        ):
             result = objects.stage("owner/repo", "a" * 40, "b" * 40, api, live)
         self.assertEqual(result["blob_count"], 3)
         self.assertEqual(len(result["unreferenced_batch_trees"]), 2)
@@ -329,38 +330,49 @@ class SourceObjectTests(unittest.TestCase):
     def test_wrong_git_bytes_fail_before_any_write(self):
         objects, git, ids = self.fixture()
         self.content[ids["codex-rs/new.rs"]] = b"changed bytes"
-        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
-            subject, "api"
-        ) as api, self.assertRaises(ValueError):
+        with (
+            patch.object(objects, "git_bytes", side_effect=git),
+            patch.object(subject, "api") as api,
+            self.assertRaises(ValueError),
+        ):
             objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
         api.assert_not_called()
 
     def test_limits_fail_before_any_write(self):
         objects, git, _ = self.fixture()
         for limit in ("MAX_BLOBS", "MAX_BLOB_BYTES", "MAX_TOTAL_BYTES"):
-            with self.subTest(limit=limit), patch.object(
-                objects, "git_bytes", side_effect=git
-            ), patch.object(objects, limit, 1), patch.object(
-                subject, "api"
-            ) as api, self.assertRaises(ValueError):
+            with (
+                self.subTest(limit=limit),
+                patch.object(objects, "git_bytes", side_effect=git),
+                patch.object(objects, limit, 1),
+                patch.object(subject, "api") as api,
+                self.assertRaises(ValueError),
+            ):
                 objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
             api.assert_not_called()
 
     def test_stale_main_refuses_first_write(self):
         objects, git, _ = self.fixture()
-        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
-            subject, "api"
-        ) as api, patch.object(
-            subject, "live_main", side_effect=RuntimeError("main moved")
-        ) as live, self.assertRaises(RuntimeError):
+        with (
+            patch.object(objects, "git_bytes", side_effect=git),
+            patch.object(subject, "api") as api,
+            patch.object(
+                subject, "live_main", side_effect=RuntimeError("main moved")
+            ) as live,
+            self.assertRaises(RuntimeError),
+        ):
             objects.stage("owner/repo", "a" * 40, "b" * 40, api, live)
         api.assert_not_called()
 
     def test_remote_identity_mismatch_is_rejected(self):
         objects, git, _ = self.fixture()
-        with patch.object(objects, "git_bytes", side_effect=git), patch.object(
-            subject, "api", return_value={"sha": "0" * 40, "tree": []}
-        ) as api, self.assertRaises(ValueError):
+        with (
+            patch.object(objects, "git_bytes", side_effect=git),
+            patch.object(
+                subject, "api", return_value={"sha": "0" * 40, "tree": []}
+            ) as api,
+            self.assertRaises(ValueError),
+        ):
             objects.stage("owner/repo", "a" * 40, "b" * 40, api, lambda *_: None)
 
     def test_bad_tree_receipts_are_rejected(self):
@@ -383,9 +395,11 @@ class SourceObjectTests(unittest.TestCase):
             valid | {"tree": []},
             wrong_entry,
         ):
-            with self.subTest(response=response), patch.object(
-                subject, "api", return_value=response
-            ) as api, self.assertRaises(ValueError):
+            with (
+                self.subTest(response=response),
+                patch.object(subject, "api", return_value=response) as api,
+                self.assertRaises(ValueError),
+            ):
                 objects.upload_batch(
                     "owner/repo", "a" * 40, [entry], api, lambda *_: None
                 )

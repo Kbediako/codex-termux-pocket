@@ -226,3 +226,4 @@ subject	termux: update to 0.155.0-alpha.1	runtime-critical	Integrates original u
 subject	release: request validated Termux 0.155.0-alpha.1 publication	tooling	Records only the five successful exact-source alpha.1 release gates for the sole permanent publisher.
 subject	ci: export pinned official alpha source	tooling	Requests export of exact original upstream Git objects through the permanent maintenance interface; no runtime, ref or release mutation.
 subject	ci: stage verified upstream source objects	security-critical	Extends the permanent exporter with bounded hash-verified non-workflow blob transport; preserves main, original ancestry recording, source review and every release gate.
+subject	ci: format source-object transport helpers	tooling	Applies AST-equivalent layout fixes to the permanent exporter and its guard tests after preparation rejected formatter drift; preserves all source and publication checks.
