@@ -274,6 +274,10 @@ pub(crate) enum AppEvent {
     CloseMisalignmentReview,
     /// Open the daemon-wide overview of recent and locally retained root sessions.
     OpenAgentsOverview,
+    /// Present a failed command-center action above the retained dashboard.
+    AgentsOverviewError(String),
+    /// Show a failed draft without replacing newer composer input.
+    ViewAgentsOverviewUnsentPrompt(String),
     /// Update the daemon-wide overview after a background thread listing finishes.
     AgentsOverviewThreadsLoaded {
         request_id: Uuid,
@@ -1137,6 +1141,14 @@ pub(crate) enum AppEvent {
 
     /// Show the cyber auto-review notice after the model selection confirmation.
     CyberModelAutoReviewNotice,
+
+    /// Read the owning server preference before showing the voice picker.
+    OpenRealtimeSettings,
+
+    /// Save the voice for subsequent conversations through the app server.
+    PersistRealtimeVoiceSelection {
+        voice: codex_protocol::protocol::RealtimeVoice,
+    },
 
     /// Persist the selected personality to the appropriate config.
     PersistPersonalitySelection {

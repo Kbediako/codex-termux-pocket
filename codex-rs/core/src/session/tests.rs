@@ -6,6 +6,7 @@ pub(crate) use super::step_settings::tests::update_selected_settings_for_test;
 use super::turn_context::TurnEnvironment;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
+use crate::agents_md_manager::SessionInstructions;
 use crate::compact::InitialContextInjection;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
@@ -97,6 +98,7 @@ use std::collections::BTreeMap;
 use tracing::Span;
 
 use crate::connectors::AppInfo;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::rollout::recorder::RolloutRecorder;
 use crate::state::ActiveTurn;
 use crate::state::TaskKind;
@@ -618,6 +620,7 @@ async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_start
     };
     assert_eq!(turn_started.turn_id, tc.sub_id);
     assert_eq!(turn_started.trace_id, tc.trace_id);
+    assert_eq!(turn_started.root_turn_id, Some(tc.sub_id.clone()));
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
@@ -3119,11 +3122,19 @@ async fn record_token_usage_info_notifies_extension_contributors() {
     };
 
     session
-        .record_token_usage_info(&turn_context, Some(&first_usage))
+        .record_token_usage_info(
+            &turn_context,
+            &turn_context.initial_settings,
+            Some(&first_usage),
+        )
         .await
         .expect("first usage should be recorded");
     session
-        .record_token_usage_info(&turn_context, Some(&second_usage))
+        .record_token_usage_info(
+            &turn_context,
+            &turn_context.initial_settings,
+            Some(&second_usage),
+        )
         .await
         .expect("second usage should be recorded");
 
@@ -3839,6 +3850,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4046,6 +4058,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: first_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4077,6 +4090,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: rolled_back_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4170,6 +4184,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: first_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4199,6 +4214,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: compact_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4236,6 +4252,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: rolled_back_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4319,6 +4336,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: "turn-1".to_string(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4348,6 +4366,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: "turn-2".to_string(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -4377,6 +4396,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: "turn-3".to_string(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),
@@ -6412,7 +6432,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         session_configuration,
         /*environment_selections*/ &[],
         Arc::clone(&config),
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
@@ -6480,6 +6500,23 @@ pub(crate) async fn build_world_state_from_turn_context(
         .build_world_state_for_step(&step_context)
         .await
         .expect("world state should build")
+}
+
+#[tokio::test]
+async fn responses_metadata_uses_selected_harness_analytics_client() {
+    let (mut session, mut turn_context) = make_session_and_context().await;
+    for enabled in [true, false] {
+        session.services.analytics_events_client = AnalyticsEventsClient::new(
+            Arc::clone(&session.services.auth_manager),
+            turn_context.config.chatgpt_base_url.clone(),
+            Some(enabled),
+        );
+        Arc::make_mut(&mut turn_context.config).analytics_enabled = Some(!enabled);
+        let metadata = session
+            .responses_metadata(&turn_context, CodexResponsesRequestKind::Turn)
+            .await;
+        assert_eq!(metadata.analytics_enabled, Some(enabled));
+    }
 }
 
 // todo: use online model info
@@ -6635,10 +6672,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         models_manager: Arc::clone(&models_manager),
         git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
-        guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
         runtime_handle: tokio::runtime::Handle::current(),
         skills_service,
-        agents_md_manager: Arc::new(AgentsMdManager::new(/*user_instructions*/ None)),
+        agents_md_manager: Arc::new(AgentsMdManager::new(SessionInstructions::default())),
         plugins_manager,
         mcp_manager,
         extensions: Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
@@ -6683,6 +6719,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         executed_tool_calls: executed_tool_calls.clone(),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
+            thread_id,
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
             &config.code_mode,
             executed_tool_calls,
@@ -6701,6 +6738,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
         guardian_context_mode: GuardianContextMode::from_features(&config.features),
+        isolation: codex_extension_api::SessionIsolation::Inherit,
         windows_sandbox_proxy_settings_mode:
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),
@@ -6875,7 +6913,7 @@ async fn make_session_with_config_and_rx(
         session_configuration,
         &default_environments,
         Arc::clone(&config),
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
@@ -7004,7 +7042,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         session_configuration,
         &default_environments,
         Arc::clone(&config),
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
@@ -8808,10 +8846,9 @@ where
         models_manager: Arc::clone(&models_manager),
         git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
-        guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
         runtime_handle: tokio::runtime::Handle::current(),
         skills_service,
-        agents_md_manager: Arc::new(AgentsMdManager::new(/*user_instructions*/ None)),
+        agents_md_manager: Arc::new(AgentsMdManager::new(SessionInstructions::default())),
         plugins_manager,
         mcp_manager,
         extensions: Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
@@ -8856,6 +8893,7 @@ where
         ),
         executed_tool_calls: executed_tool_calls.clone(),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
+            thread_id,
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
             &config.code_mode,
             executed_tool_calls,
@@ -8874,6 +8912,7 @@ where
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
         guardian_context_mode: GuardianContextMode::from_features(&config.features),
+        isolation: codex_extension_api::SessionIsolation::Inherit,
         windows_sandbox_proxy_settings_mode:
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),

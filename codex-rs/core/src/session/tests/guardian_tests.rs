@@ -1257,10 +1257,12 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         /*state_db*/ None,
     ));
 
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
+    thread_extension_init.insert(codex_extension_api::SessionIsolation::Isolated);
     let (session, io) = Session::spawn(SessionSpawnArgs {
         config,
         allow_provider_model_fallback: false,
-        user_instructions: Default::default(),
+        instructions: Default::default(),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
@@ -1291,7 +1293,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         user_shell_override: None,
         parent_trace: None,
         environment_selections: Vec::new(),
-        thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+        thread_extension_init,
         client_mcp_extensions: ClientMcpExtensions::default(),
         reserved_thread_id: None,
         analytics_events_client: None,
@@ -1321,4 +1323,49 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         }
     );
     drop(io);
+}
+
+#[test_case(TerminalEventKind::TurnComplete; "completion")]
+#[test_case(TerminalEventKind::TurnAborted; "interruption")]
+#[tokio::test]
+async fn terminal_turn_clears_extension_owned_denials(terminal: TerminalEventKind) {
+    let (session, turn, events) = make_session_and_context_with_rx().await;
+    let finish = Arc::new(tokio::sync::Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            HeldStepTask {
+                kind: TaskKind::Regular,
+                finish: Arc::clone(&finish),
+            },
+        )
+        .await;
+    let denials =
+        codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data);
+    for _ in 0..2 {
+        assert_eq!(
+            denials.record_denial(&turn.sub_id, turn.model_info()).await,
+            None
+        );
+    }
+    match terminal {
+        TerminalEventKind::TurnComplete => finish.notify_one(),
+        TerminalEventKind::TurnAborted => {
+            session.abort_all_tasks(TurnAbortReason::Interrupted).await
+        }
+    }
+    recv_terminal_event(&events, terminal).await;
+    // Delivery precedes accounting cleanup. Wait for the runtime to finish the turn.
+    timeout(Duration::from_secs(/*secs*/ 5), async {
+        while session.active_turn.lock().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn becomes idle");
+    assert_eq!(
+        denials.record_denial(&turn.sub_id, turn.model_info()).await,
+        None
+    );
 }

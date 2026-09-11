@@ -151,7 +151,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.155.0-alpha.1"
+version = "0.155.0-alpha.3.9"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -451,6 +451,7 @@ sha1 = "0.10.6"
 scopeguard = "1.2.0"
 sha2 = "0.10"
 shlex = "1.3.0"
+signal-hook = "0.3.18"
 similar = "2.7.0"
 symphonia = { version = "0.6.0", default-features = false, features = [
     "isomp4",

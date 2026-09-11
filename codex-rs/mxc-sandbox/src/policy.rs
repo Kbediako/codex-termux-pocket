@@ -7,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_protocol::protocol::FileSystemPath;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::FileSystemSpecialPath;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -43,8 +44,8 @@ pub enum PolicyError {
     RelativePolicyCwd,
     #[error("MXC requires an absolute command working directory")]
     RelativeCommandCwd,
-    #[error("MXC symbolic filesystem roots are not implemented")]
-    SymbolicRoots,
+    #[error("MXC policy contains an unresolved symbolic filesystem path")]
+    UnsupportedSymbolicPath,
     #[error("MXC requires a Unicode command working directory")]
     NonUnicodeCommandCwd,
     #[error("MXC requires Unicode filesystem policy paths")]
@@ -68,7 +69,7 @@ pub fn build_request(
     command_cwd: &Path,
     env: Vec<String>,
     volume_roots: &[PathBuf],
-    _platform_read_roots: &[PathBuf],
+    platform_read_roots: &[PathBuf],
 ) -> Result<ExecutionRequest, PolicyError> {
     if command.command.is_empty() {
         return Err(PolicyError::EmptyCommand);
@@ -81,19 +82,67 @@ pub fn build_request(
     if !command_cwd.is_absolute() {
         return Err(PolicyError::RelativeCommandCwd);
     }
-    let fs = permissions.file_system_sandbox_policy();
-    if fs.has_full_disk_write_access()
-        || fs.entries.iter().any(|entry| match &entry.path {
-            FileSystemPath::Path { .. } | FileSystemPath::GlobPattern { .. } => false,
-            FileSystemPath::Special { value } => {
-                !matches!(value, FileSystemSpecialPath::Unknown { .. })
+    let mut policy = permissions.file_system_sandbox_policy();
+    // Resolve Windows temporary directories from the filtered command
+    // environment, including case-insensitive names.
+    let mut temp_values = HashMap::new();
+    for (key, value) in env.iter().filter_map(|entry| entry.split_once('=')) {
+        if key.eq_ignore_ascii_case("TEMP") || key.eq_ignore_ascii_case("TMP") {
+            temp_values.insert(key.to_ascii_uppercase(), value);
+        }
+    }
+    let temp_paths = ["TEMP", "TMP"]
+        .into_iter()
+        .filter_map(|key| temp_values.get(key).copied())
+        .filter(|path| Path::new(path).is_absolute())
+        .map(AbsolutePathBuf::from_absolute_path)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    policy.entries = policy
+        .entries
+        .into_iter()
+        .flat_map(|entry| {
+            match &entry.path {
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Tmpdir,
+                } => temp_paths
+                    .iter()
+                    .map(|path| {
+                        let mut entry = entry.clone();
+                        entry.path = path.clone().into();
+                        entry
+                    })
+                    .collect(),
+                // /tmp has no special meaning on the Windows executor.
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::SlashTmp,
+                } => Vec::new(),
+                _ => vec![entry],
             }
         })
-    {
-        return Err(PolicyError::SymbolicRoots);
-    }
-    let roots = fs.get_writable_roots_with_cwd_preserving_mutable_paths(cwd);
+        .collect();
+    let full_disk_write = policy.has_full_disk_write_access();
+    let volumes = volume_roots
+        .iter()
+        .map(PathUri::from_host_native_path)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let fs = materialize_volume_roots(policy.clone(), &volumes)?;
+    let roots = if full_disk_write {
+        Vec::new()
+    } else {
+        fs.get_writable_roots_with_cwd_preserving_mutable_paths(cwd)
+    };
     let mut write = collect_paths(roots.iter().map(|root| root.root.to_path_buf()))?;
+    if full_disk_write {
+        write.extend(collect_paths(volume_roots.iter().cloned())?);
+        // Explicit grants may name unmapped shares outside the enumerated volumes.
+        for entry in &policy.entries {
+            if entry.access.can_write()
+                && let FileSystemPath::Path { path } = &entry.path
+            {
+                write.insert(path.clone(), path.to_abs_path()?.into_path_buf());
+            }
+        }
+    }
     let mut read = collect_paths(
         fs.get_readable_roots_with_cwd(cwd)
             .into_iter()
@@ -102,8 +151,10 @@ pub fn build_request(
     )?;
     let absolute_cwd = AbsolutePathBuf::from_absolute_path(cwd)
         .map_err(|error| PolicyError::PolicyResolution(error.to_string()))?;
+    // A symbolic root deny is the default, not a recursive native mask that
+    // should erase narrower grants. Only materialize grants and carveouts.
     let deny = collect_paths(
-        resolve_windows_deny_read_paths(&fs, &absolute_cwd)
+        resolve_windows_deny_read_paths(&policy, &absolute_cwd)
             .map_err(PolicyError::PolicyResolution)?
             .into_iter()
             .map(AbsolutePathBuf::into_path_buf),
@@ -126,6 +177,9 @@ pub fn build_request(
             .filter(|(_, path)| fs.can_read_local_path_with_cwd(path.as_path(), cwd))
             .map(|(key, path)| (key.clone(), path.clone())),
     );
+    if policy.include_platform_defaults() {
+        read.extend(collect_paths(platform_read_roots.iter().cloned())?);
+    }
     write.retain(|key, _| !carveouts.contains_key(key) && !deny.contains_key(key));
     read.retain(|key, _| !write.contains_key(key) && !deny.contains_key(key));
     let volume_roots = volume_roots
@@ -234,6 +288,39 @@ fn prune_unavailable_volume_roots(paths: &mut NativePaths, volume_roots: &HashSe
             Err(error) => !inaccessible_volume(&error),
         }
     });
+}
+
+// Bind :root to every executor volume before canonical precedence and carveout
+// resolution. This is purely lexical; native volume enumeration happens later.
+pub(super) fn materialize_volume_roots(
+    mut fs: FileSystemSandboxPolicy,
+    volume_roots: &[PathUri],
+) -> Result<FileSystemSandboxPolicy, PolicyError> {
+    let mut entries = Vec::new();
+    for entry in fs.entries {
+        match &entry.path {
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            } => entries.extend(volume_roots.iter().map(|path| {
+                let mut entry = entry.clone();
+                entry.path = path.clone().into();
+                entry
+            })),
+            FileSystemPath::Special {
+                value:
+                    FileSystemSpecialPath::ProjectRoots { .. }
+                    | FileSystemSpecialPath::Tmpdir
+                    | FileSystemSpecialPath::SlashTmp,
+            } => return Err(PolicyError::UnsupportedSymbolicPath),
+            FileSystemPath::Path { .. }
+            | FileSystemPath::GlobPattern { .. }
+            | FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. },
+            } => entries.push(entry),
+        }
+    }
+    fs.entries = entries;
+    Ok(fs)
 }
 
 // MXC volume-root grants are nonrecursive, so snapshot each root's current

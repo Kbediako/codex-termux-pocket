@@ -6,6 +6,7 @@ use super::step_settings::StepSettingsConstraints;
 use super::step_settings::StepSettingsUpdate;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
+use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConstraintError;
 use crate::context::GuardianContextMode;
 use crate::environment_selection::ThreadEnvironments;
@@ -58,6 +59,7 @@ pub(crate) struct Session {
     /// session.
     pub(super) features: ManagedFeatures,
     pub(crate) guardian_context_mode: GuardianContextMode,
+    pub(super) isolation: codex_extension_api::SessionIsolation,
     pub(crate) windows_sandbox_proxy_settings_mode:
         codex_sandboxing::WindowsSandboxProxySettingsMode,
     pub(super) multi_agent_version: OnceLock<MultiAgentVersion>,
@@ -646,6 +648,7 @@ impl Session {
         CodexResponsesMetadata {
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
+            analytics_enabled: Some(self.services.analytics_events_client.is_enabled()),
             history_ingest_requested: turn_context
                 .config
                 .token_budget
@@ -665,7 +668,7 @@ impl Session {
         mut session_configuration: SessionConfiguration,
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
-        user_instructions: Option<codex_extension_api::Instructions>,
+        instructions: SessionInstructions,
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
@@ -860,6 +863,10 @@ impl Session {
         // Publish the already resolved model before extensions make startup decisions.
         // Turn construction refreshes this attachment when the selected model changes.
         thread_extension_init.insert(model_info);
+        let isolation = thread_extension_init
+            .get::<codex_extension_api::SessionIsolation>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
@@ -990,6 +997,7 @@ impl Session {
         let thread_extension_data_for_mcp = &thread_extension_data;
         let mcp_originator = session_configuration.originator.clone();
         let mcp_session_source = session_configuration.session_source.clone();
+        let mcp_disabled_plugin_ids = session_configuration.disabled_plugin_ids.clone();
         let mcp_runtime_cwd = environment_selections
             .first()
             .and_then(|environment| environment.cwd.to_abs_path().ok())
@@ -1019,6 +1027,7 @@ impl Session {
                     McpThreadIdentity {
                         session_source: &mcp_session_source,
                         originator: &mcp_originator,
+                        disabled_plugin_ids: &mcp_disabled_plugin_ids,
                         environments: McpEnvironmentScope::Initial(environment_selections),
                     },
                     /*ready_selected_capability_roots*/ &[],
@@ -1292,7 +1301,7 @@ impl Session {
                 &session_configuration.inferred_environment_config(),
             );
             let resolved_environments = turn_environments.snapshot().await;
-            let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
+            let agents_md_manager = Arc::new(AgentsMdManager::new(instructions));
             let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
                 Arc::clone(&config),
                 Arc::clone(&plugins_manager),
@@ -1310,13 +1319,20 @@ impl Session {
                         "session_init.thread_name_lookup",
                         otel.name = "session_init.thread_name_lookup",
                     ));
-            let (agents_md_result, plugin_skill_errors, thread_name) = tokio::join!(
+            let (instruction_refresh, plugin_skill_errors, thread_name) = tokio::join!(
                 agents_md_manager.refresh(config.as_ref(), &resolved_environments),
                 plugin_skill_warmup,
                 thread_name_lookup,
             );
+            let (agents_md_result, instruction_warnings) = instruction_refresh;
             // TODO(anp): Present AGENTS.md discovery errors more clearly to the user.
             agents_md_result?;
+            post_session_configured_events.extend(
+                instruction_warnings.into_iter().map(|message| Event {
+                    id: INITIAL_SUBMIT_ID.to_owned(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                }),
+            );
             for err in &plugin_skill_errors {
                 error!(
                     "failed to load skill {}: {}",
@@ -1334,6 +1350,7 @@ impl Session {
                 ),
             );
             state.base_instructions_provenance = base_instructions_provenance.clone();
+            state.active_disabled_plugin_ids = session_configuration.disabled_plugin_ids.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack
                 .requirements_toml()
@@ -1413,6 +1430,7 @@ impl Session {
                 &config,
                 plugins_manager.as_ref(),
                 resolved_environments.single_local_environment(),
+                &session_configuration.disabled_plugin_ids,
             )
             .await;
             let (hooks, async_hook_results) = Hooks::new(
@@ -1432,13 +1450,17 @@ impl Session {
                 });
             }
 
-            let analytics_events_client = analytics_events_client.unwrap_or_else(|| {
-                AnalyticsEventsClient::new(
-                    Arc::clone(&auth_manager),
-                    config.chatgpt_base_url.trim_end_matches('/').to_string(),
-                    config.analytics_enabled,
-                )
-            });
+            let analytics_events_client = if config.analytics_enabled == Some(false) {
+                AnalyticsEventsClient::disabled()
+            } else {
+                analytics_events_client.unwrap_or_else(|| {
+                    AnalyticsEventsClient::new(
+                        Arc::clone(&auth_manager),
+                        config.chatgpt_base_url.trim_end_matches('/').to_string(),
+                        config.analytics_enabled,
+                    )
+                })
+            };
             for item in initial_history.get_rollout_items() {
                 match item {
                     RolloutItem::Compacted(compacted) => {
@@ -1509,7 +1531,6 @@ impl Session {
                 models_manager: Arc::clone(&models_manager),
                 git_root_discovery,
                 tool_approvals: Mutex::new(ApprovalStore::default()),
-                guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
                 runtime_handle: tokio::runtime::Handle::current(),
                 skills_service,
                 agents_md_manager,
@@ -1564,6 +1585,7 @@ impl Session {
                 ),
                 executed_tool_calls: executed_tool_calls.clone(),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
+                    thread_id,
                     Arc::clone(&code_mode_session_provider),
                     &config.code_mode,
                     executed_tool_calls,
@@ -1582,6 +1604,7 @@ impl Session {
                 managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
                 features: config.features.clone(),
                 guardian_context_mode,
+                isolation,
                 windows_sandbox_proxy_settings_mode,
                 multi_agent_version,
                 mcp_refresh: McpRefresh::new(),
@@ -1662,6 +1685,7 @@ impl Session {
                         McpThreadIdentity {
                             session_source: &session_configuration.session_source,
                             originator: &session_configuration.originator,
+                            disabled_plugin_ids: &session_configuration.disabled_plugin_ids,
                             environments: McpEnvironmentScope::Live(
                                 &sess.services.turn_environments,
                             ),

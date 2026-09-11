@@ -227,3 +227,216 @@ subject	release: request validated Termux 0.155.0-alpha.1 publication	tooling	Re
 subject	ci: export pinned official alpha source	tooling	Requests export of exact original upstream Git objects through the permanent maintenance interface; no runtime, ref or release mutation.
 subject	ci: stage verified upstream source objects	security-critical	Extends the permanent exporter with bounded hash-verified non-workflow blob transport; preserves main, original ancestry recording, source review and every release gate.
 subject	ci: format source-object transport helpers	tooling	Applies AST-equivalent layout fixes to the permanent exporter and its guard tests after preparation rejected formatter drift; preserves all source and publication checks.
+subject	termux: promote termux-v0.155.0-alpha.1-547655deb1	security-critical	Retained security/release/build control change; conservatively critical. See commit f046f1724bfc.
+subject	Release 0.155.0-alpha.1	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	termux: promote termux-v0.154.0-alpha.11-6b0b1c8878	security-critical	Retained security/release/build control change; conservatively critical. See commit 4d41cdfffa75.
+subject	Release 0.154.0-alpha.11	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	docs: update README hero image	docs	Documentation/artwork only: termux-codex-screenshot.jpg, termux-codex-screenshot.webp.
+subject	Release 0.154.0-alpha.4	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.154.0-alpha.3	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.154.0-alpha.1	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.153.0-alpha.6	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.153.0-alpha.4	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.153.0-alpha.2	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	ci: run exact alpha integration on ARM64	security-critical	Retained security/release/build control change; conservatively critical. See commit 87db00b55e9e.
+subject	ci: simulate Termux interpreter for integration gate	security-critical	Retained security/release/build control change; conservatively critical. See commit fcbf910315ef.
+subject	ci: preserve Termux launcher in hosted integration tests	security-critical	Retained security/release/build control change; conservatively critical. See commit f12492930ff7.
+subject	ci: repair hosted integration fixtures	security-critical	Retained security/release/build control change; conservatively critical. See commit 0ffef9260bbe.
+subject	ci: harden exact alpha conflict resolution	security-critical	Retained security/release/build control change; conservatively critical. See commit 851ba247a0d8.
+subject	ci: arm exact 0.152.0-alpha.7.2 integration	security-critical	Retained security/release/build control change; conservatively critical. See commit 9d4fc0490cb4.
+subject	Release 0.152.0-alpha.7.2	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Increase Guardian message transcript limits (#41931)	runtime-critical	Retained runtime change; requires fork gates. See commit daf14d91c16d.
+subject	Start fresh Vim drafts in Insert mode (#41921)	runtime-critical	Retained runtime change; requires fork gates. See commit 772fc234a32f.
+subject	chore: restore permanent Fork CI workflow	security-critical	Retained security/release/build control change; conservatively critical. See commit 9af8db878ed0.
+subject	ci: repair temporary branch cleanup trigger	security-critical	Retained security/release/build control change; conservatively critical. See commit 82176977cdb7.
+subject	ci: stage temporary branch cleanup	security-critical	Retained security/release/build control change; conservatively critical. See commit 760b99b41447.
+subject	Release 0.151.0-alpha.12	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	chore: complete alpha1516 direct cleanup	security-critical	Retained security/release/build control change; conservatively critical. See commit 2b9e7bdf3c6c.
+subject	ci: isolate alpha1516 bootstrap workspace	security-critical	Retained security/release/build control change; conservatively critical. See commit 560dd843f02a.
+subject	ci: expose alpha1516 generated transaction failure	security-critical	Retained security/release/build control change; conservatively critical. See commit 7e8a11033a2a.
+subject	ci: fix alpha1516 wrapper quoting	security-critical	Retained security/release/build control change; conservatively critical. See commit 084d25f8ae07.
+subject	termux: finalize 0.151.0-alpha.5 publication cleanup	security-critical	Retained security/release/build control change; conservatively critical. See commit 814f01b5c3f5.
+subject	ci: make exact release publication retry-safe	security-critical	Retained security/release/build control change; conservatively critical. See commit e8104b629ba3.
+subject	ci: run post-promotion release verification	security-critical	Retained security/release/build control change; conservatively critical. See commit 13cbfe28c0f1.
+subject	termux: promote termux-v0.151.0-alpha.5-07bf4da8b1	security-critical	Retained security/release/build control change; conservatively critical. See commit b84d646901c3.
+subject	termux: request 0.151.0-alpha.5 publication	security-critical	Retained security/release/build control change; conservatively critical. See commit 35e7530c8625.
+subject	ci: retire corrupted governance workflow identity	security-critical	Retained security/release/build control change; conservatively critical. See commit a2e0ecdfd4c1.
+subject	ci: reset stale workflow state through REST	security-critical	Retained security/release/build control change; conservatively critical. See commit f5d631d99b4b.
+subject	ci: reset workflow state for irrecoverable queued runs	security-critical	Retained security/release/build control change; conservatively critical. See commit e43286dcbe7a.
+subject	ci: delete irrecoverable stale queued workflow records	security-critical	Retained security/release/build control change; conservatively critical. See commit a5b3d6405dcd.
+subject	ci: force-cancel unresponsive queued governance runs	security-critical	Retained security/release/build control change; conservatively critical. See commit 3a7165f64afc.
+subject	ci: cancel stale queued governance runs	security-critical	Retained security/release/build control change; conservatively critical. See commit b20b14db66d0.
+subject	Release 0.151.0-alpha.6	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	ci: use corrected alpha1515 transaction	security-critical	Retained security/release/build control change; conservatively critical. See commit 41531620d1ac.
+subject	ci: stage corrected alpha1515 transaction	security-critical	Retained security/release/build control change; conservatively critical. See commit 3b94c6f2b081.
+subject	ci: isolate alpha1515 proxy compatibility patch	security-critical	Retained security/release/build control change; conservatively critical. See commit a1123b1405ea.
+subject	ci: adapt alpha1515 proxy lifecycle API	security-critical	Retained security/release/build control change; conservatively critical. See commit 0f25353ea4c6.
+subject	ci: capture alpha1515 maintenance diagnostics	security-critical	Retained security/release/build control change; conservatively critical. See commit 25b09db0a7e4.
+subject	Release 0.151.0-alpha.5	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.150.0-alpha.13	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Release 0.150.0-alpha.12	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	termux: promote termux-v0.150.0-alpha.8-5915ffa287	security-critical	Retained security/release/build control change; conservatively critical. See commit 7a48e22ba117.
+subject	Release 0.150.0-alpha.8	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	ci: execute alpha 0.150.0-alpha.6	security-critical	Retained security/release/build control change; conservatively critical. See commit a4052f5c9166.
+subject	Release 0.150.0-alpha.6	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	termux: promote termux-v2026.08.21-alpha.7.1-6795630b06	security-critical	Retained security/release/build control change; conservatively critical. See commit b6cb727b3c62.
+subject	Release 0.149.0-alpha.7.1	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	Use Responses compaction for Amazon Bedrock (#39825)	runtime-critical	Retained runtime change; requires fork gates. See commit 1e0ad41f8bfc.
+subject	Use multi-agent V1 for Amazon Bedrock models (#39804)	runtime-critical	Retained runtime change; requires fork gates. See commit 86ba987b544c.
+subject	docs: pin streamlined Termux installer	docs	Documentation/artwork only: README.md.
+subject	Release 0.149.0-alpha.1	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	chore: remove one-time branch cleanup workflow	security-critical	Retained security/release/build control change; conservatively critical. See commit 5797ea1be011.
+subject	ci: retry transient GitHub API failures during branch cleanup	security-critical	Retained security/release/build control change; conservatively critical. See commit 523bd07b61fe.
+subject	chore: prune obsolete development branches	security-critical	Retained security/release/build control change; conservatively critical. See commit bacf1687a2f5.
+subject	ci(termux): promote validated releases to Latest	security-critical	Retained security/release/build control change; conservatively critical. See commit 2391a3148dea.
+subject	termux: promote termux-v2026.08.17-alpha.20-fb052f4aa8	security-critical	Retained security/release/build control change; conservatively critical. See commit 8e727334ab96.
+subject	fix(termux): publish releases from validated workflow head	security-critical	Retained security/release/build control change; conservatively critical. See commit fb052f4aa863.
+subject	termux: request validated alpha.20 release	security-critical	Retained security/release/build control change; conservatively critical. See commit cf488a19b010.
+subject	ci(termux): validate native script changes on Android	security-critical	Retained security/release/build control change; conservatively critical. See commit 261b46cd5578.
+subject	ci(termux): allow expected native probe failures	security-critical	Retained security/release/build control change; conservatively critical. See commit c9565e1edd14.
+subject	ci(termux): self-validate emulator workflow changes	security-critical	Retained security/release/build control change; conservatively critical. See commit 3d95521306af.
+subject	fix(termux): detect direct Landlock ENOSYS errors	security-critical	Retained security/release/build control change; conservatively critical. See commit e9be1202ffd9.
+subject	style(termux): format read-only seccomp fallback	security-critical	Retained security/release/build control change; conservatively critical. See commit c047993995ef.
+subject	fix(termux): wrap Landlock ENOSYS fallback cleanly	security-critical	Retained security/release/build control change; conservatively critical. See commit f50f27422b18.
+subject	fix(termux): enforce read-only sandbox without Landlock	security-critical	Retained security/release/build control change; conservatively critical. See commit 6c739ce8947e.
+subject	ci: prune inherited workflows and gate device validation	security-critical	Retained security/release/build control change; conservatively critical. See commit 4d8f73d035b5.
+subject	ci: remove non-Termux workflow noise	docs	Documentation/artwork only: README.md.
+subject	style: format Termux Landlock diagnostic	security-critical	Retained security/release/build control change; conservatively critical. See commit 9aa043f12201.
+subject	fix(termux): adapt raw Landlock rules to kernel ABI	security-critical	Retained security/release/build control change; conservatively critical. See commit 94e7f5df3cca.
+subject	ci: focus routine checks on the Termux fork	security-critical	Retained security/release/build control change; conservatively critical. See commit 6c8437181bb4.
+subject	ci(termux): separate native compiler from Rust linker	security-critical	Retained security/release/build control change; conservatively critical. See commit a5bbd3a717e0.
+subject	ci(termux): validate shared emulator build helpers	security-critical	Retained security/release/build control change; conservatively critical. See commit 0ba063195391.
+subject	ci(termux): expose same-step Zig to musl tooling	security-critical	Retained security/release/build control change; conservatively critical. See commit dfad7fc3556f.
+subject	ci(termux): build native fixture from triggering source	security-critical	Retained security/release/build control change; conservatively critical. See commit d658e00012e8.
+subject	fix(termux): add Android read roots without fstat	security-critical	Retained security/release/build control change; conservatively critical. See commit 701d1a60ccf0.
+subject	ci: fall back when hosted KVM is unavailable	security-critical	Retained security/release/build control change; conservatively critical. See commit ffe67c9bfa51.
+subject	fix(termux): validate resolved active runtime in native CI	security-critical	Retained security/release/build control change; conservatively critical. See commit 1d165b95ece3.
+subject	ci: preserve GitHub remote identity in Termux emulator	security-critical	Retained security/release/build control change; conservatively critical. See commit 334acd27ee06.
+subject	ci: run native Termux validation without prompts	security-critical	Retained security/release/build control change; conservatively critical. See commit 3e2b224381ab.
+subject	ci: make native Termux package setup noninteractive	security-critical	Retained security/release/build control change; conservatively critical. See commit c5cd7ed6775b.
+subject	ci: record alpha.20 Android validation cancelled	security-critical	Retained security/release/build control change; conservatively critical. See commit 1e93cc545faf.
+subject	ci: make native Termux validation reproducible	security-critical	Retained security/release/build control change; conservatively critical. See commit e917d5108260.
+subject	ci: persist exact alpha.20 Android validation evidence	security-critical	Retained security/release/build control change; conservatively critical. See commit a5b4fe45d3bc.
+subject	ci: publish alpha.20 only after exact Android validation	security-critical	Retained security/release/build control change; conservatively critical. See commit 28a25f11ddb2.
+subject	ci: remove completed native validation dispatcher	security-critical	Retained security/release/build control change; conservatively critical. See commit a6bee9d11f7b.
+subject	ci: dispatch corrected native Termux validation	security-critical	Retained security/release/build control change; conservatively critical. See commit 0ef41d0da522.
+subject	ci: remove completed readiness-probe patch helper	security-critical	Retained security/release/build control change; conservatively critical. See commit 9eee1f6ee532.
+subject	ci: use a quote-safe Termux readiness probe	security-critical	Retained security/release/build control change; conservatively critical. See commit 3e626d1f69cd.
+subject	ci: make readiness-probe patch workflow valid	security-critical	Retained security/release/build control change; conservatively critical. See commit 983da0b73a00.
+subject	ci: fix native Termux bootstrap readiness probe	security-critical	Retained security/release/build control change; conservatively critical. See commit 04a55c6efb4c.
+subject	ci: rerun native Termux validation with stable bootstrap	security-critical	Retained security/release/build control change; conservatively critical. See commit 0c9aafb580b3.
+subject	ci: remove completed Termux bootstrap patch helper	security-critical	Retained security/release/build control change; conservatively critical. See commit 6723ed6a69dd.
+subject	ci: stabilize official Termux first-run bootstrap	security-critical	Retained security/release/build control change; conservatively critical. See commit 88bf0e68320b.
+subject	ci: make bootstrap-race patch workflow valid	security-critical	Retained security/release/build control change; conservatively critical. See commit 1b4eba5bf4ff.
+subject	ci: harden Termux emulator bootstrap against activity relaunches	security-critical	Retained security/release/build control change; conservatively critical. See commit c6a5731eb1a6.
+subject	ci: reuse verified surrogate for native Android retry	security-critical	Retained security/release/build control change; conservatively critical. See commit d89b20fd9418.
+subject	ci: make native Android validation maintainable and reproducible	security-critical	Retained security/release/build control change; conservatively critical. See commit 1b568eb9e15e.
+subject	ci: extract deterministic Android emulator fixture build	security-critical	Retained security/release/build control change; conservatively critical. See commit 6e3f07a174de.
+subject	ci: remove completed alpha.20 release dispatcher	security-critical	Retained security/release/build control change; conservatively critical. See commit 1222eaf1c0dc.
+subject	ci: dispatch exact-SHA alpha.20 release publisher	security-critical	Retained security/release/build control change; conservatively critical. See commit be2f305a2301.
+subject	ci: remove completed governance audit repair helper	security-critical	Retained security/release/build control change; conservatively critical. See commit e35f42a55719.
+subject	ci: compare legacy release manifests semantically	security-critical	Retained security/release/build control change; conservatively critical. See commit c9f272015f5e.
+subject	ci: make audit repair resilient to concurrent main updates	security-critical	Retained security/release/build control change; conservatively critical. See commit 49afc83eabc9.
+subject	chore: record repository governance capability	security-critical	Retained security/release/build control change; conservatively critical. See commit c6b6daf4668e.
+subject	ci: attempt owner-scoped main protection automatically	security-critical	Retained security/release/build control change; conservatively critical. See commit 35bc65f1d9e2.
+subject	ci: make one-shot audit repair valid workflow YAML	security-critical	Retained security/release/build control change; conservatively critical. See commit 387aea7ae19d.
+subject	ci: fix one-shot audit repair expression	security-critical	Retained security/release/build control change; conservatively critical. See commit bfecb7d0b5a4.
+subject	ci: repair legacy release-manifest audit	security-critical	Retained security/release/build control change; conservatively critical. See commit 6c45de61f3c0.
+subject	ci: continuously audit the public Termux release channel	security-critical	Retained security/release/build control change; conservatively critical. See commit 546f14427477.
+subject	ci: deduplicate and cache native Android validation	security-critical	Retained security/release/build control change; conservatively critical. See commit b5c86283b1dd.
+subject	ci: prepare Android workflow queue and cache repair	security-critical	Retained security/release/build control change; conservatively critical. See commit 9b7f18eae656.
+subject	dev: add one-shot Android workflow patcher	security-critical	Retained security/release/build control change; conservatively critical. See commit b752bf5d9276.
+subject	ci: make native Termux validation deterministic	security-critical	Retained security/release/build control change; conservatively critical. See commit d891a49216b5.
+subject	ci: pin Android helper checkout to control commit	security-critical	Retained security/release/build control change; conservatively critical. See commit 5d144291a728.
+subject	ci: remove completed repository-hardening probe	security-critical	Retained security/release/build control change; conservatively critical. See commit 81f9bad23e19.
+subject	ci: attempt repository-admin hardening	security-critical	Retained security/release/build control change; conservatively critical. See commit 938d9d428511.
+subject	ci: use Landlock surrogate in native Android validation	security-critical	Retained security/release/build control change; conservatively critical. See commit 720c273941cb.
+subject	ci: simplify one-shot Android gate repair	security-critical	Retained security/release/build control change; conservatively critical. See commit 1725d14558e4.
+subject	dev: add one-shot Android gate patcher	security-critical	Retained security/release/build control change; conservatively critical. See commit b5b0bdbbf72e.
+subject	ci: repair Android surrogate gate	security-critical	Retained security/release/build control change; conservatively critical. See commit 939ffca7857a.
+subject	ci: use a consistent x86 musl linker for Android validation	security-critical	Retained security/release/build control change; conservatively critical. See commit 4ad04ec1fb00.
+subject	termux: gate alpha.20 release on native Android validation	security-critical	Retained security/release/build control change; conservatively critical. See commit e5c9f297b1c0.
+subject	termux: publish verified alpha.20 runtime	security-critical	Retained security/release/build control change; conservatively critical. See commit 976d1798cd03.
+subject	ci: simulate Termux bash in control-plane tests	security-critical	Retained security/release/build control change; conservatively critical. See commit e038dfd93ebe.
+subject	termux: finalize alpha.20 release workflows	security-critical	Retained security/release/build control change; conservatively critical. See commit ac321bd46d12.
+subject	termux: add deterministic releases and rollback controls	security-critical	Retained security/release/build control change; conservatively critical. See commit e1fcc1b077ee.
+subject	ci: format migrated release manifest validation	security-critical	Retained security/release/build control change; conservatively critical. See commit c64db2a0054a.
+subject	ci: run optimisation migration from standalone helper	security-critical	Retained security/release/build control change; conservatively critical. See commit 78b62c72d100.
+subject	dev: isolate optimisation migration helpers	security-critical	Retained security/release/build control change; conservatively critical. See commit b605a4ffdd28.
+subject	ci: preserve explicit rollback activation history	security-critical	Retained security/release/build control change; conservatively critical. See commit 22e1ff5108df.
+subject	ci: preserve release asset continuations in optimisation patch	security-critical	Retained security/release/build control change; conservatively critical. See commit baf0d7010466.
+subject	ci: normalize legacy release asset formatting	security-critical	Retained security/release/build control change; conservatively critical. See commit b91a2b0e53be.
+subject	ci: report unmatched optimisation template	security-critical	Retained security/release/build control change; conservatively critical. See commit 60eaa927e30f.
+subject	ci: normalize legacy updater formatting before optimisation	security-critical	Retained security/release/build control change; conservatively critical. See commit 64a55b2bd1d8.
+subject	ci: apply and validate Termux release optimisations	security-critical	Retained security/release/build control change; conservatively critical. See commit dcac1483907e.
+subject	dev: stage Termux release optimisations	security-critical	Retained security/release/build control change; conservatively critical. See commit e139cd8e6897.
+subject	termux: add deterministic Cargo SBOM generator	security-critical	Retained security/release/build control change; conservatively critical. See commit 48b80cd14df1.
+subject	Merge upstream rust-v0.148.0-alpha.20 for Termux	security-critical	Retained security/release/build control change; conservatively critical. See commit 8134b34c0fda.
+subject	ci: resolve alpha.20 CLI conflict by hunk	security-critical	Retained security/release/build control change; conservatively critical. See commit d05981f56c0b.
+subject	ci: merge and validate upstream alpha.20 on ARM	security-critical	Retained security/release/build control change; conservatively critical. See commit ab0fd5571062.
+subject	ci: pin Termux build inputs and runtime manifest	security-critical	Retained security/release/build control change; conservatively critical. See commit 9ad0b2388dca.
+subject	termux: harden artifact integrity and update locking	security-critical	Retained security/release/build control change; conservatively critical. See commit ff0493f98448.
+subject	ci: publish validated hardening without workflow token writes	security-critical	Retained security/release/build control change; conservatively critical. See commit 1551c8c29476.
+subject	ci: preserve backslashes in generated hardening patch	security-critical	Retained security/release/build control change; conservatively critical. See commit 15a5aab2ceb8.
+subject	ci: keep runtime verification output out of paths	security-critical	Retained security/release/build control change; conservatively critical. See commit 871cfaa14095.
+subject	ci: simulate Termux bash in hardening tests	security-critical	Retained security/release/build control change; conservatively critical. See commit e0aa272fbd9d.
+subject	ci: apply and validate Termux hardening patch	security-critical	Retained security/release/build control change; conservatively critical. See commit 0e632bc921e8.
+subject	dev: stage Termux integrity hardening	security-critical	Retained security/release/build control change; conservatively critical. See commit 120806363f60.
+subject	repo: own Termux security surface	security-critical	Retained security/release/build control change; conservatively critical. See commit df6bfefa8b8a.
+subject	ci: pin Termux Rusty V8 inputs	security-critical	Retained security/release/build control change; conservatively critical. See commit 79faa961fe37.
+subject	ci: validate Termux control plane	security-critical	Retained security/release/build control change; conservatively critical. See commit ae0726eee86d.
+subject	ci: resolve known alpha.20 merge conflicts	security-critical	Retained security/release/build control change; conservatively critical. See commit 275863db13eb.
+subject	ci: report alpha.20 merge conflicts	security-critical	Retained security/release/build control change; conservatively critical. See commit 4a0a899776e3.
+subject	ci: prepare alpha.20 Termux rebase	security-critical	Retained security/release/build control change; conservatively critical. See commit c4406ea9fbcb.
+subject	Release 0.148.0-alpha.20	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	docs: centralize Termux agent safety rules	docs	Documentation/artwork only: AGENTS.md, termux-agent-safety.md.
+subject	ci: pin Linux sandbox nextest version	security-critical	Retained security/release/build control change; conservatively critical. See commit 2d279d53f5b4.
+subject	termux: pin alpha.148.0-alpha.10 release	security-critical	Retained security/release/build control change; conservatively critical. See commit 6380da8470f4.
+subject	docs: refresh Termux screenshot	docs	Documentation/artwork only: termux-codex-screenshot.jpg.
+subject	docs: tighten Termux README	docs	Documentation/artwork only: README.md.
+subject	docs: add easy Termux setup	docs	Documentation/artwork only: README.md.
+subject	docs: focus README on Termux fork	docs	Documentation/artwork only: termux-codex-screenshot.jpg, README.md.
+subject	docs: backfill 2026-07-03 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-07-02 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-07-01 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-29 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-28 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-27 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-26 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-24 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-23 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-22 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-21 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-20 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-19 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-15 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-14 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: backfill 2026-06-13 codex status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: record 2026-06-15 alpha status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: record 2026-06-14 alpha status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: record 2026-06-13 alpha status	docs	Documentation/artwork only: termux-alpha-log.md.
+subject	docs: note Termux final wrapper checks	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact failure triage	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux docs-only artifact reuse	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux post-build alpha check	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux remote ref audit	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux docs-only artifact trace	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact reuse summary	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact workflow links	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux alpha check output	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact ancestry	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact traceability	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux remote run inspection	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact cleanup	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact verification	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux artifact retry	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	docs: note Termux lockfile recovery	docs	Documentation/artwork only: termux-mobile-update.md.
+subject	termux: guard empty remote artifact run ids	security-critical	Retained security/release/build control change; conservatively critical. See commit 4ff8c388d36c.
+subject	Fix fork clippy and Linux CI deps	runtime-critical	Retained runtime change; requires fork gates. See commit cc99bfa47125.
+subject	Fix repo Prettier drift	tooling	Metadata/formatting configuration only. See commit c3da20311792.
+subject	Fix fork CI fallbacks and formatting drift	runtime-critical	Retained runtime change; requires fork gates. See commit e35c85264367.
+subject	docs: tighten Termux update guidance	docs	Documentation/artwork only: AGENTS.md, README.md.
+subject	termux: audit helper metadata	security-critical	Retained security/release/build control change; conservatively critical. See commit 9e23d6e6e4bf.
+subject	termux: audit patch audit maintenance	tooling	Metadata/formatting configuration only. See commit 532e49f97664.
+subject	Release 0.148.0-alpha.5	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
+subject	termux: update to 0.155.0-alpha.3.9	runtime-critical	Integrates reviewed official alpha.3.9 source and supported generated lock bytes while preserving maintained Termux patches; requires original upstream ancestry and all five exact-source release gates.

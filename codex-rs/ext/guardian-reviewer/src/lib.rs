@@ -5,11 +5,16 @@ mod assessment;
 mod circuit_breaker;
 mod completion;
 mod deadline;
+mod execution;
+mod feedback;
+mod metrics;
 mod model;
 mod outcome;
 mod pool;
+mod reporting;
 mod retry;
 mod review;
+mod settings;
 
 pub use assessment::GuardianAssessment;
 pub use assessment::guardian_output_contract_prompt;
@@ -44,3 +49,17 @@ pub use review::SynchronousReview;
 pub use completion::ReviewCompletion;
 pub use completion::complete_review;
 pub use completion::guardian_timeout_message;
+
+pub use execution::ReviewerRuntime;
+pub use execution::start_review_turn;
+pub use execution::wait_for_guardian_review;
+pub use settings::ReviewerConfigOverrides;
+pub use settings::ReviewerTurn;
+pub use settings::reviewer_config_overrides;
+
+pub use feedback::FailedReviewFeedback;
+pub use feedback::ReviewFeedbackContext;
+pub use feedback::ReviewFeedbackSettings;
+pub use reporting::ReviewDenials;
+pub use reporting::ReviewMetadata;
+pub use reporting::ReviewReport;

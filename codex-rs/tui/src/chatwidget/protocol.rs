@@ -241,6 +241,9 @@ impl ChatWidget {
                 if self.warning_display_state.startup_complete {
                     self.on_warning(message);
                 } else if self.warning_display_state.should_display(&message) {
+                    self.warning_display_state
+                        .startup_config_warnings
+                        .insert(message.clone());
                     self.add_to_history(history_cell::StartupWarningsCell::new(vec![message]));
                     self.request_redraw();
                 }
@@ -313,6 +316,7 @@ impl ChatWidget {
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadDeleted(_)
             | ServerNotification::ThreadUnarchived(_)
+            | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::RawResponseCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)

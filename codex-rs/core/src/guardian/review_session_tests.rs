@@ -1,7 +1,11 @@
 use super::super::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 use super::super::prompt::guardian_policy_prompt_with_config_and_template;
 use super::*;
+use crate::agents_md_manager::AgentsMdManager;
 use crate::context_manager::ContextManager;
+use codex_guardian_reviewer::ReviewerRequest;
+use codex_guardian_reviewer::ReviewerSession;
+use codex_guardian_reviewer::ReviewerSessionFactory;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::openai_models::AutoReviewMessages;
@@ -35,6 +39,8 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
         /*live_network_config*/ None,
         &params.model,
         params.reasoning_effort.clone(),
+        params.reasoning_summary,
+        params.personality,
         /*model_messages*/ None,
     )
     .unwrap();
@@ -54,7 +60,7 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
     let (mut reviewer, tx_event, rx_sub) = test_review_session().await;
     reviewer.reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &params.spawn_config,
-        parent.user_instructions().await,
+        parent.inherited_instructions().await,
         params.parent_history.history_version(),
         parent.guardian_context_mode,
     )
@@ -136,7 +142,7 @@ async fn test_review_session() -> (
     let (_agent_status_tx, agent_status) = tokio::sync::watch::channel(AgentStatus::PendingInit);
     let reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         session.get_config().await.as_ref(),
-        session.user_instructions().await,
+        session.inherited_instructions().await,
         session.clone_history().await.history_version(),
         GuardianContextMode::Legacy,
     );
@@ -210,6 +216,8 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         /*live_network_config*/ None,
         model.as_str(),
         reasoning_effort.clone(),
+        reasoning_summary,
+        personality,
         /*model_messages*/ None,
     )
     .expect("guardian config");
@@ -272,6 +280,60 @@ async fn spawned_guardian_session_preserves_windows_sandbox_proxy_settings() {
 }
 
 #[tokio::test]
+async fn spawned_guardian_reuse_key_matches_inherited_instructions() {
+    let mut params = test_review_params().await;
+    let latest = Some(Instructions {
+        text: "latest thread instructions".to_string(),
+        source: None,
+    });
+    let latest_global = Some(Instructions {
+        text: "latest global instructions".to_string(),
+        source: None,
+    });
+    let parent = Arc::get_mut(&mut params.parent_session).expect("unshared parent session");
+    parent.services.agents_md_manager = Arc::new(AgentsMdManager::new(SessionInstructions {
+        user: latest_global.clone(),
+        thread: latest.clone(),
+        ..Default::default()
+    }));
+    // Reproduce an update between reuse-key capture and reviewer creation.
+    let stale_key = GuardianReviewSessionReuseKey::from_spawn_config(
+        &params.spawn_config,
+        SessionInstructions {
+            thread: Some(Instructions {
+                text: "previous thread instructions".to_string(),
+                source: None,
+            }),
+            ..Default::default()
+        },
+        /*parent_history_version*/ 0,
+        parent.guardian_context_mode,
+    );
+    let expected_key = GuardianReviewSessionReuseKey {
+        user_instructions: latest_global,
+        thread_instructions: latest.clone(),
+        ..stale_key.clone()
+    };
+    let prepared = factory::prepare_review(params)
+        .await
+        .expect("prepare review");
+    let review = prepared
+        .factory()
+        .spawn(
+            stale_key,
+            GuardianReviewSessionKind::TrunkNew,
+            /*snapshot*/ None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn reviewer after instruction update");
+
+    assert_eq!(review.reuse_key, expected_key);
+    assert_eq!(review.session.inherited_instructions().await.thread, latest);
+    review.shutdown().await;
+}
+
+#[tokio::test]
 async fn guardian_review_session_config_change_invalidates_cached_session() {
     let parent_config = crate::config::test_config().await;
     let cached_spawn_config = build_guardian_review_session_config(
@@ -279,12 +341,14 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("cached guardian config");
     let cached_reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &cached_spawn_config,
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         /*parent_history_version*/ 0,
         GuardianContextMode::Legacy,
     );
@@ -297,12 +361,14 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("next guardian config");
     let next_reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &next_spawn_config,
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         /*parent_history_version*/ 0,
         GuardianContextMode::Legacy,
     );
@@ -316,7 +382,7 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         cached_reuse_key,
         GuardianReviewSessionReuseKey::from_spawn_config(
             &cached_spawn_config,
-            /*user_instructions*/ None,
+            SessionInstructions::default(),
             /*parent_history_version*/ 0,
             GuardianContextMode::Legacy,
         )
@@ -326,10 +392,21 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         cached_reuse_key,
         GuardianReviewSessionReuseKey::from_spawn_config(
             &cached_spawn_config,
-            /*user_instructions*/ None,
+            SessionInstructions::default(),
             /*parent_history_version*/ 1,
             GuardianContextMode::Legacy,
         )
+    );
+    assert_ne!(
+        cached_reuse_key.clone(),
+        GuardianReviewSessionReuseKey {
+            thread_instructions: Some(Instructions {
+                text: "updated thread instructions".to_string(),
+                source: None,
+            }),
+            ..cached_reuse_key.clone()
+        },
+        "changing thread instructions must invalidate reviewer history"
     );
     assert_ne!(
         cached_reuse_key
@@ -362,13 +439,13 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
     assert_ne!(
         GuardianReviewSessionReuseKey::from_spawn_config(
             &compaction_enabled_config,
-            /*user_instructions*/ None,
+            SessionInstructions::default(),
             /*parent_history_version*/ 0,
             GuardianContextMode::Legacy,
         ),
         GuardianReviewSessionReuseKey::from_spawn_config(
             &compaction_enabled_config,
-            /*user_instructions*/ None,
+            SessionInstructions::default(),
             /*parent_history_version*/ 1,
             GuardianContextMode::Legacy,
         )
@@ -474,12 +551,14 @@ async fn guardian_review_session_compact_scope_change_invalidates_cached_session
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("cached guardian config");
     let cached_reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &cached_spawn_config,
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         /*parent_history_version*/ 0,
         GuardianContextMode::Legacy,
     );
@@ -492,12 +571,14 @@ async fn guardian_review_session_compact_scope_change_invalidates_cached_session
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("next guardian config");
     let next_reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &next_spawn_config,
-        /*user_instructions*/ None,
+        SessionInstructions::default(),
         /*parent_history_version*/ 0,
         GuardianContextMode::Legacy,
     );
@@ -518,6 +599,8 @@ async fn guardian_review_session_config_disables_hooks() {
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("guardian config");
@@ -535,6 +618,8 @@ async fn guardian_review_session_config_disables_skill_instructions() {
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         /*model_messages*/ None,
     )
     .expect("guardian config");
@@ -574,6 +659,8 @@ async fn guardian_review_session_config_prefers_managed_policy_and_uses_catalog_
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         Some(&model_messages),
     )
     .expect("guardian config");
@@ -616,6 +703,8 @@ async fn guardian_review_session_config_preserves_explicit_empty_catalog_policy(
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         Some(&model_messages),
     )
     .expect("guardian config");
@@ -666,6 +755,8 @@ async fn guardian_review_session_config_preserves_explicit_empty_catalog_templat
         /*live_network_config*/ None,
         "active-model",
         /*reasoning_effort*/ None,
+        ReasoningSummaryConfig::default(),
+        /*personality*/ None,
         Some(&model_messages),
     )
     .expect("guardian config");
@@ -887,10 +978,22 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
 #[tokio::test]
 async fn run_review_removes_trunk_when_event_stream_is_broken() {
     let (mut review_session, tx_event, rx_sub) = test_review_session().await;
-    let params = test_review_params().await;
+    let mut params = test_review_params().await;
+    let parent = Arc::get_mut(&mut params.parent_session).expect("unshared parent session");
+    parent.services.agents_md_manager = Arc::new(AgentsMdManager::new(SessionInstructions {
+        user: Some(Instructions {
+            text: "parent global instructions".to_string(),
+            source: None,
+        }),
+        thread: Some(Instructions {
+            text: "parent thread instructions".to_string(),
+            source: None,
+        }),
+        ..Default::default()
+    }));
     review_session.reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &params.spawn_config,
-        params.parent_session.user_instructions().await,
+        params.parent_session.inherited_instructions().await,
         params
             .parent_session
             .clone_history()
@@ -1157,9 +1260,17 @@ async fn interrupt_and_drain_turn_ignores_prior_turn_completion() {
         .await
         .expect("queue current turn abort");
 
-    interrupt_and_drain_turn(&review_session, "current-turn")
-        .await
-        .expect("drain current turn");
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let (_, reusable, _) = wait_for_guardian_review(
+        &review_session,
+        "current-turn",
+        tokio::time::Instant::now(),
+        Some(&cancellation),
+        &mut GuardianReviewAnalyticsResult::without_session(),
+    )
+    .await;
+    assert!(reusable);
 
     assert!(review_session.io.rx_event.try_recv().is_err());
 }

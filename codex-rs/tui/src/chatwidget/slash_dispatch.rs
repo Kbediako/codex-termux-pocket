@@ -227,7 +227,12 @@ impl ChatWidget {
                             ..Default::default()
                         },
                         SelectionItem {
-                            name: "Yes, delete and exit".to_string(),
+                            name: if self.remote_connection.is_some() {
+                                "Yes, delete and return to command center"
+                            } else {
+                                "Yes, delete and exit"
+                            }
+                            .to_string(),
                             description: Some("Permanently delete this session now".to_string()),
                             actions: vec![Box::new(|tx| {
                                 tx.send(AppEvent::DeleteCurrentThread);
@@ -755,9 +760,10 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
+                "settings" => self.app_event_tx.send(AppEvent::OpenRealtimeSettings),
                 "mute" => self.toggle_realtime_microphone(),
                 "stop" => self.stop_realtime_conversation(),
-                _ => self.add_error_message("Usage: /voice [mute|stop]".to_string()),
+                _ => self.add_error_message("Usage: /voice [settings|mute|stop]".to_string()),
             },
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);

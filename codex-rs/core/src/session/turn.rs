@@ -321,8 +321,13 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
     if crate::guardian::is_basic_session_source(&turn_context.session_source)
-        && let Err(error) =
-            crate::guardian::finalize_guardian_input(&sess, &first_step_context, &mut input).await
+        && let Err(error) = crate::guardian::finalize_guardian_input(
+            &sess,
+            &first_step_context,
+            &mut input,
+            codex_guardian_context::HistoryTruncation::Preserve,
+        )
+        .await
     {
         // Token-budget compaction resets history, which can discard the evidence
         // referenced by a pending delta review. Leave budget failures unreusable.
@@ -333,6 +338,9 @@ pub(crate) async fn run_turn(
         }
         // Incoming evidence can overflow even below the normal history
         // threshold. Keep it pending while compacting, then select once more.
+        sess.services
+            .thread_extension_data
+            .insert(crate::guardian::ExhaustedReviewBudget::Compacting);
         run_auto_compact(
             &sess,
             Arc::clone(&first_step_context),
@@ -346,7 +354,13 @@ pub(crate) async fn run_turn(
         world_state = sess
             .record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
             .await?;
-        crate::guardian::finalize_guardian_input(&sess, &first_step_context, &mut input).await?;
+        crate::guardian::finalize_guardian_input(
+            &sess,
+            &first_step_context,
+            &mut input,
+            codex_guardian_context::HistoryTruncation::Allow,
+        )
+        .await?;
     }
     let mut can_drain_pending_input = input.is_empty();
     if run_hooks_and_record_inputs(
@@ -704,6 +718,9 @@ pub(crate) async fn run_turn(
                 // token-budget resets must fail closed and retire the reviewer.
                 // Retry once per model step, so ineffective compaction cannot loop.
                 guardian_budget_compacted = true;
+                sess.services
+                    .thread_extension_data
+                    .insert(crate::guardian::ExhaustedReviewBudget::Compacting);
                 run_auto_compact(
                     &sess,
                     Arc::clone(&step_context),
@@ -861,7 +878,8 @@ async fn required_mcp_servers_for_input(
         .services
         .plugins_manager
         .plugins_for_config(&turn_context.config.plugins_config_input())
-        .await;
+        .await
+        .without_plugins(&turn_context.disabled_plugin_ids);
     let current_config = sess.services.mcp_runtime.current_config();
     let mentioned_plugins =
         collect_explicit_plugin_mentions(user_input, loaded_plugins.capability_summaries());
@@ -1644,7 +1662,8 @@ pub(crate) async fn prepare_tool_recommendations(
         .plugins_manager
         .plugins_for_config(&turn_context.config.plugins_config_input())
         .instrument(trace_span!("built_tools.load_plugins"))
-        .await;
+        .await
+        .without_plugins(&turn_context.disabled_plugin_ids);
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
     let auth = if tool_suggest_is_enabled {
         sess.services.auth_manager.auth().await
@@ -2792,7 +2811,11 @@ async fn try_run_sampling_request(
                 )
                 .await;
                 let budget_result = sess
-                    .record_token_usage_info(&turn_context, token_usage.as_ref())
+                    .record_token_usage_info(
+                        &turn_context,
+                        &step_context.settings,
+                        token_usage.as_ref(),
+                    )
                     .await;
                 should_emit_token_count = true;
                 should_emit_turn_diff = true;

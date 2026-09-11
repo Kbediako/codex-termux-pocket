@@ -3,6 +3,7 @@
 //! This module contains the exhaustive `AppEvent` dispatcher and exit-mode handling. Large domain
 //! actions are delegated to focused app submodules so the central match remains the routing layer.
 
+use super::agents_overview_view::AgentsOverviewFocus;
 use super::rate_limit_refresh::RateLimitReadStatus;
 use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
@@ -34,6 +35,8 @@ impl App {
             && !matches!(
                 &event,
                 AppEvent::InsertHistoryCell(_)
+                    | AppEvent::AgentsOverviewError(_)
+                    | AppEvent::ViewAgentsOverviewUnsentPrompt(_)
                     | AppEvent::ResetTranscriptForThreadSwitch
                     | AppEvent::ManagedWorktreeCreated(_)
                     | AppEvent::AppendMessageHistoryEntry { .. }
@@ -386,7 +389,7 @@ impl App {
                 return self.archive_current_thread(tui, app_server).await;
             }
             AppEvent::DeleteCurrentThread => {
-                return Ok(self.delete_current_thread(app_server).await);
+                return self.delete_current_thread(tui, app_server).await;
             }
             AppEvent::ForkCurrentSession { name } => {
                 self.session_telemetry.counter(
@@ -2405,6 +2408,12 @@ impl App {
                 }
                 self.chat_widget.on_plugin_mentions_loaded(plugins);
             }
+            AppEvent::OpenRealtimeSettings => {
+                self.open_realtime_settings(app_server).await;
+            }
+            AppEvent::PersistRealtimeVoiceSelection { voice } => {
+                self.persist_realtime_voice(app_server, voice).await;
+            }
             AppEvent::PersistPersonalitySelection { personality } => {
                 match crate::config_update::write_config_batch(
                     app_server.request_handle(),
@@ -2704,7 +2713,19 @@ impl App {
                 }
             }
             AppEvent::OpenAgentsOverview => {
-                self.open_agents_overview(app_server);
+                self.open_agents_overview(app_server, AgentsOverviewFocus::List);
+            }
+            AppEvent::AgentsOverviewError(message) => {
+                self.add_agents_overview_error(message);
+            }
+            AppEvent::ViewAgentsOverviewUnsentPrompt(text) => {
+                let _ = tui.enter_alt_screen();
+                self.overlay = Some(Overlay::new_static_with_lines(
+                    text.lines().map(|line| Line::from(line.to_string())).collect(),
+                    "Unsent task".to_string(),
+                    self.keymap.pager.clone(),
+                ));
+                tui.frame_requester().schedule_frame();
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
                 self.apply_agents_overview_thread_refresh(app_server, request_id, result);
@@ -2714,8 +2735,10 @@ impl App {
                     .select_agents_overview_thread(tui, app_server, thread_id)
                     .await?
                 {
-                    AppRunControl::Continue if self.primary_thread_id.is_none() => {
-                        self.open_agents_overview(app_server);
+                    AppRunControl::Continue
+                        if self.primary_thread_id.is_none()
+                            && self.chat_widget.selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID).is_none() => {
+                        self.open_agents_overview(app_server, AgentsOverviewFocus::List);
                     }
                     AppRunControl::Continue => {}
                     AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
@@ -2733,8 +2756,7 @@ impl App {
                             state.input = name;
                             state.renaming = true;
                         }
-                        self.chat_widget
-                            .add_error_message(format!("Failed to rename task: {error}"));
+                        self.add_agents_overview_error(format!("Failed to rename task: {error}"));
                     }
                 }
             }
@@ -3505,7 +3527,7 @@ impl App {
                     /*initial_user_message*/ None,
                 );
                 self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-                self.open_agents_overview(app_server);
+                self.open_agents_overview(app_server, AgentsOverviewFocus::List);
                 AppRunControl::Continue
             }
             Err(err) => {
@@ -3518,28 +3540,61 @@ impl App {
 
     pub(super) async fn delete_current_thread(
         &mut self,
+        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-    ) -> AppRunControl {
+    ) -> Result<AppRunControl> {
         let Some(thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) else {
             self.chat_widget
                 .add_error_message("A thread must start before it can be deleted.".to_string());
-            return AppRunControl::Continue;
+            return Ok(AppRunControl::Continue);
         };
         if self.side_threads.contains_key(&thread_id) {
             self.chat_widget.add_error_message(
                 "'/delete' is unavailable in side conversations. Press Ctrl+C to return to the main thread first."
                     .to_string(),
             );
-            return AppRunControl::Continue;
+            return Ok(AppRunControl::Continue);
         }
 
-        match app_server.thread_delete(thread_id).await {
-            Ok(()) => AppRunControl::Exit(ExitReason::ThreadRemoved),
+        if !matches!(self.app_server_target, AppServerTarget::Embedded) {
+            self.shutdown_side_threads(app_server).await;
+            if !self.side_threads.is_empty() {
+                return Ok(AppRunControl::Continue);
+            }
+        }
+
+        Ok(match app_server.thread_delete(thread_id).await {
+            Ok(()) if matches!(self.app_server_target, AppServerTarget::Embedded) => {
+                AppRunControl::Exit(ExitReason::ThreadRemoved)
+            }
+            Ok(()) => {
+                self.track_agents_overview_notification(&ServerNotification::ThreadDeleted(
+                    codex_app_server_protocol::ThreadDeletedNotification {
+                        thread_id: thread_id.to_string(),
+                    },
+                ));
+                self.discard_thread_local_state(thread_id).await;
+                self.agents_overview.input_states.remove(&thread_id);
+                self.agents_overview.dispatched_requests.remove(&thread_id);
+                self.reset_for_thread_switch(tui)?;
+                self.pending_thread_switch_resets += 1;
+                self.app_event_tx
+                    .send(AppEvent::ResetTranscriptForThreadSwitch);
+                self.reset_thread_event_state();
+                let init = self.chatwidget_init_for_forked_or_resumed_thread(
+                    tui,
+                    self.config.clone(),
+                    /*initial_user_message*/ None,
+                );
+                self.replace_chat_widget(ChatWidget::new_with_app_event(init));
+                self.open_agents_overview(app_server, AgentsOverviewFocus::List);
+                AppRunControl::Continue
+            }
             Err(err) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to delete current thread: {err}"));
                 AppRunControl::Continue
             }
-        }
+        })
     }
 }

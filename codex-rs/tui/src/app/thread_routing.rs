@@ -938,11 +938,14 @@ impl App {
                     .config_ref()
                     .experimental_realtime_ws_model
                     .clone();
+                let voices = self.realtime_voices(app_server).await;
+                let voice = self.effective_realtime_voice(app_server, &voices).await?;
                 app_server
                     .thread_realtime_start(
                         *realtime_thread_id,
                         String::from(offer_sdp.clone()),
                         model,
+                        voice,
                     )
                     .await?;
                 Ok(true)
@@ -1166,7 +1169,9 @@ impl App {
         }
         if matches!(
             notification,
-            ServerNotification::ThreadSettingsUpdated(_) | ServerNotification::ThreadArchived(_)
+            ServerNotification::ThreadSettingsUpdated(_)
+                | ServerNotification::ThreadArchived(_)
+                | ServerNotification::ThreadAttachmentUpdated(_)
         ) && self.primary_thread_id.is_some()
             && self.primary_thread_id != Some(thread_id)
             && !self.thread_event_channels.contains_key(&thread_id)
