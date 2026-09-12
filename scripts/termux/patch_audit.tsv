@@ -440,3 +440,4 @@ subject	termux: audit helper metadata	security-critical	Retained security/releas
 subject	termux: audit patch audit maintenance	tooling	Metadata/formatting configuration only. See commit 532e49f97664.
 subject	Release 0.148.0-alpha.5	runtime-critical	Retained upstream release-version commit; changes workspace package identity.
 subject	termux: update to 0.155.0-alpha.3.9	runtime-critical	Integrates reviewed official alpha.3.9 source and supported generated lock bytes while preserving maintained Termux patches; requires original upstream ancestry and all five exact-source release gates.
+subject	termux: promote termux-v0.155.0-alpha.3.9-6d3f958ff4	tooling	Promotes only the complete public alpha.3.9 manifest after the permanent publisher verified anonymous asset bytes, source identity and attestations in run 34665599531.
