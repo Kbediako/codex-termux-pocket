@@ -1,27 +1,9 @@
 {
   "format_version": 1,
-  "request_id": "alpha1554-prepare-20260915",
-  "operation": "prepare-source",
-  "base_main": "9e173cc924f5a0ba1d4c623e3f87dd88b8c2e812",
-  "prepared_commit": "0d87e7b4778621015d6aa4e59ac68bb1ed5bcdbf",
-  "expected_input_tree": "05b24827afff56d3bec69742d3760a635e7d2dea",
-  "edits": [
-    {
-      "path": "codex-rs/arg0/src/lib.rs",
-      "before": "eee23afeae61d634dbf934ce5165284805c4b59e",
-      "after": "cb2e3fd6f27fc0e8bca0fa7564e5445ffd5efbab",
-      "replacements": [
-        {
-          "old": "    let argv1 = args.next().unwrap_or_default();\n",
-          "new": "    let argv1 = args.next().unwrap_or_default();\n    if argv1 == codex_sandboxing::CODEX_WINDOWS_MXC_ARG1 {\n        codex_sandboxing::run_windows_mxc_main();\n    }\n"
-        }
-      ]
-    }
-  ],
-  "package_updates": [
-    {
-      "name": "quinn-proto",
-      "version": "0.11.15"
-    }
-  ]
+  "request_id": "alpha1554-record-20260915",
+  "operation": "record-upstream",
+  "upstream_tag": "rust-v0.155.0-alpha.4",
+  "upstream_tag_object": "93a65ab0c789e315a4f4b26b8c7fcb061fe1270d",
+  "upstream_commit": "66eab8ece44141ff92707868269e1d53b40c4ac5",
+  "prepared_commit": "299da8940bd594e8ff7f3ff0353ff729020528b9"
 }
