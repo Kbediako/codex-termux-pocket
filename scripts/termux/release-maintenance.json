@@ -1,8 +1,162 @@
 {
   "format_version": 1,
-  "request_id": "alpha1556-export-20260916",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.6",
-  "upstream_tag_object": "56dbd6745c5b12455da5ec586ddb052b9bdb8075",
-  "upstream_commit": "d70f254f499592e8626eb31059f026529cd63a4a"
+  "request_id": "alpha1556-prepare-20260916",
+  "operation": "prepare-source",
+  "base_main": "dce1ef2de7c82526521976ba12d1df166b6ff5d8",
+  "prepared_commit": "d5ffe42e184d3375fe28d88785bccf53c1c23abd",
+  "expected_input_tree": "0724420c4618cfe6f3b1805bcc00974b2822b156",
+  "edits": [
+    {
+      "path": "codex-rs/Cargo.toml",
+      "before": "984f9d4fdc8b8a5b5f696ee7ecc9d3fec0880192",
+      "after": "1e0807013a4e6d78095a4f6bd1cc155c0d076d0a",
+      "replacements": [
+        {
+          "old": "\n[workspace.package]\nversion = \"0.155.0-alpha.4\"\n# Track the edition for all workspace crates in one place. Individual\n# crates can still override this value, but keeping it here means new\n",
+          "new": "\n[workspace.package]\nversion = \"0.155.0-alpha.6\"\n# Track the edition for all workspace crates in one place. Individual\n# crates can still override this value, but keeping it here means new\n"
+        },
+        {
+          "old": "runfiles = { git = \"https://github.com/dzbarsky/rules_rust\", rev = \"b56cbaa8465e74127f1ea216f813cd377295ad81\" }\nrustix = { version = \"1.1.4\", features = [\"net\"] }\nrustls = { version = \"0.23\", default-features = false, features = [\n    \"aws_lc_rs\",\n    \"std\",\n",
+          "new": "runfiles = { git = \"https://github.com/dzbarsky/rules_rust\", rev = \"b56cbaa8465e74127f1ea216f813cd377295ad81\" }\nrustix = { version = \"1.1.4\", features = [\"net\"] }\nrustls = { version = \"0.23.45\", default-features = false, features = [\n    \"aws_lc_rs\",\n    \"std\",\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": "a2f2a83d49bd93eb6926d7adb7ea99745290e548",
+      "after": "1fce43cfd159fedc32f3dc69a826a6da95e02c67",
+      "replacements": [
+        {
+          "old": "    /// [internal] Run the detached pid-backed standalone updater loop.\n    #[clap(hide = true)]\n    PidUpdateLoop,\n}\n\n",
+          "new": "    /// [internal] Run the detached pid-backed standalone updater loop.\n    #[clap(hide = true)]\n    PidUpdateLoop {\n        /// Check support for daemon-owned packages without starting the updater.\n        #[arg(long, hide = true)]\n        check_package_ownership: bool,\n    },\n}\n\n"
+        },
+        {
+          "old": "                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;\n                    }\n                    AppServerDaemonSubcommand::Update => {\n                        let output = codex_app_server_daemon::update().await?;\n                        println!(\"{}\", serde_json::to_string(&output)?);\n                    }\n                    AppServerDaemonSubcommand::EnableRemoteControl => {\n                        print_app_server_remote_control_output(AppServerRemoteControlMode::Enabled)\n",
+          "new": "                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;\n                    }\n                    AppServerDaemonSubcommand::EnableRemoteControl => {\n                        print_app_server_remote_control_output(AppServerRemoteControlMode::Enabled)\n"
+        },
+        {
+          "old": "                        print_app_server_daemon_output(AppServerLifecycleCommand::Version).await?;\n                    }\n                    AppServerDaemonSubcommand::PidUpdateLoop => {\n                        let cli_overrides = root_config_overrides\n                            .parse_overrides()\n",
+          "new": "                        print_app_server_daemon_output(AppServerLifecycleCommand::Version).await?;\n                    }\n                    AppServerDaemonSubcommand::PidUpdateLoop {\n                        check_package_ownership: true,\n                    } => return Ok(()),\n                    AppServerDaemonSubcommand::Update\n                    | AppServerDaemonSubcommand::PidUpdateLoop {\n                        check_package_ownership: false,\n                    } => {\n                        let cli_overrides = root_config_overrides\n                            .parse_overrides()\n"
+        },
+        {
+          "old": "                            .map_err(anyhow::Error::from);\n                        let http_client_factory = updater_http_client_factory(config);\n                        codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;\n                    }\n                },\n",
+          "new": "                            .map_err(anyhow::Error::from);\n                        let http_client_factory = updater_http_client_factory(config);\n                        if matches!(daemon_cli.subcommand, AppServerDaemonSubcommand::Update) {\n                            let output =\n                                codex_app_server_daemon::update(http_client_factory).await?;\n                            println!(\"{}\", serde_json::to_string(&output)?);\n                        } else {\n                            codex_app_server_daemon::run_pid_update_loop(http_client_factory)\n                                .await?;\n                        }\n                    }\n                },\n"
+        },
+        {
+          "old": "            AppServerDaemonSubcommand::Stop => \"app-server daemon stop\",\n            AppServerDaemonSubcommand::Version => \"app-server daemon version\",\n            AppServerDaemonSubcommand::PidUpdateLoop => \"app-server daemon pid-update-loop\",\n        },\n        Some(AppServerSubcommand::Proxy(_)) => \"app-server proxy\",\n",
+          "new": "            AppServerDaemonSubcommand::Stop => \"app-server daemon stop\",\n            AppServerDaemonSubcommand::Version => \"app-server daemon version\",\n            AppServerDaemonSubcommand::PidUpdateLoop { .. } => \"app-server daemon pid-update-loop\",\n        },\n        Some(AppServerSubcommand::Proxy(_)) => \"app-server proxy\",\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/landlock.rs",
+      "before": "8a48e6dadb71b3597a85ed2bb0046249b16d4cac",
+      "after": "21eadec9d62a236ca3ed2dec071e99af1b9f7bc1",
+      "replacements": [
+        {
+          "old": "use std::path::PathBuf;\n\nuse codex_protocol::error::CodexErr;\nuse codex_protocol::error::Result;\n",
+          "new": "use std::path::PathBuf;\n\nuse codex_network_proxy::ManagedNetworkSandboxContext;\nuse codex_protocol::error::CodexErr;\nuse codex_protocol::error::Result;\n"
+        },
+        {
+          "old": "    cwd: &Path,\n    apply_landlock_fs: bool,\n    allow_network_for_proxy: bool,\n    proxy_routed_network: bool,\n) -> Result<()> {\n    let (file_system_sandbox_policy, network_sandbox_policy) =\n",
+          "new": "    cwd: &Path,\n    apply_landlock_fs: bool,\n    managed_network: Option<&ManagedNetworkSandboxContext>,\n    proxy_routing_active: bool,\n) -> Result<()> {\n    let (file_system_sandbox_policy, network_sandbox_policy) =\n"
+        },
+        {
+          "old": "    let network_seccomp_mode = network_seccomp_mode(\n        network_sandbox_policy,\n        allow_network_for_proxy,\n        proxy_routed_network,\n    )\n    .or_else(|| {\n",
+          "new": "    let network_seccomp_mode = network_seccomp_mode(\n        network_sandbox_policy,\n        managed_network.is_some(),\n        proxy_routing_active,\n    )\n    .or_else(|| {\n"
+        },
+        {
+          "old": "\n    if let Some(mode) = network_seccomp_mode {\n        install_network_seccomp_filter_on_current_thread(mode)?;\n    }\n\n",
+          "new": "\n    if let Some(mode) = network_seccomp_mode {\n        install_network_seccomp_filter_on_current_thread(mode, managed_network)?;\n    }\n\n"
+        },
+        {
+          "old": "fn install_network_seccomp_filter_on_current_thread(\n    mode: NetworkSeccompMode,\n) -> std::result::Result<(), SandboxErr> {\n    fn deny_syscall(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, nr: i64) {\n",
+          "new": "fn install_network_seccomp_filter_on_current_thread(\n    mode: NetworkSeccompMode,\n    managed_network: Option<&ManagedNetworkSandboxContext>,\n) -> std::result::Result<(), SandboxErr> {\n    fn deny_syscall(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, nr: i64) {\n"
+        },
+        {
+          "old": "        NetworkSeccompMode::ProxyRouted => {\n            // In proxy-routed mode we allow IP sockets in the isolated\n            // namespace (used to reach the local TCP bridge) but deny socket()\n            // for all other families, including AF_UNIX. Only AF_UNIX\n            // socketpair() remains available for process-local IPC because it\n            // cannot connect to a socket outside the sandbox or bypass the\n            // bridge.\n            let deny_non_ip_socket = SeccompRule::new(vec![\n                SeccompCondition::new(\n                    0,\n",
+          "new": "        NetworkSeccompMode::ProxyRouted => {\n            // In proxy-routed mode we allow IP sockets in the isolated\n            // namespace (used to reach the local TCP bridge). Standalone Unix\n            // sockets require an explicit managed-policy grant; all other\n            // socket families remain denied.\n            let mut denied_socket_conditions = vec![\n                SeccompCondition::new(\n                    0,\n"
+        },
+        {
+          "old": "                    libc::AF_INET6 as u64,\n                )?,\n            ])?;\n            let deny_non_unix_socketpair = SeccompRule::new(vec![SeccompCondition::new(\n                0,\n",
+          "new": "                    libc::AF_INET6 as u64,\n                )?,\n            ];\n            if managed_network.is_some_and(|context| context.dangerously_allow_all_unix_sockets) {\n                denied_socket_conditions.push(SeccompCondition::new(\n                    0,\n                    SeccompCmpArgLen::Dword,\n                    SeccompCmpOp::Ne,\n                    libc::AF_UNIX as u64,\n                )?);\n            }\n            let deny_non_ip_socket = SeccompRule::new(denied_socket_conditions)?;\n            let deny_non_unix_socketpair = SeccompRule::new(vec![SeccompCondition::new(\n                0,\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/linux_run_main.rs",
+      "before": "10f545ff2e77be912e7aec4f29eef42f20086de9",
+      "after": "5310c9b077953629b54ec0d26406b05bb7a26754",
+      "replacements": [
+        {
+          "old": "use crate::proxy_routing::activate_proxy_routes_in_netns;\nuse crate::proxy_routing::prepare_host_proxy_route_spec;\nuse codex_protocol::error::Result as CodexResult;\nuse codex_protocol::models::PermissionProfile;\n",
+          "new": "use crate::proxy_routing::activate_proxy_routes_in_netns;\nuse crate::proxy_routing::prepare_host_proxy_route_spec;\nuse codex_network_proxy::ManagedNetworkSandboxContext;\nuse codex_protocol::error::Result as CodexResult;\nuse codex_protocol::models::PermissionProfile;\n"
+        },
+        {
+          "old": "    pub apply_seccomp_then_exec: bool,\n\n    /// Internal compatibility flag.\n    ///\n    /// By default, restricted-network sandboxing uses isolated networking.\n    /// If set, sandbox setup switches to proxy-only network mode with\n    /// managed routing bridges.\n    #[arg(long = \"allow-network-for-proxy\", hide = true, default_value_t = false)]\n    pub allow_network_for_proxy: bool,\n\n    /// Internal route spec used for managed proxy routing in bwrap mode.\n",
+          "new": "    pub apply_seccomp_then_exec: bool,\n\n    /// Effective managed-network policy prepared for this command launch.\n    #[arg(\n        long,\n        hide = true,\n        value_parser = parse_managed_network\n    )]\n    pub managed_network: Option<ManagedNetworkSandboxContext>,\n\n    /// Internal route spec used for managed proxy routing in bwrap mode.\n"
+        },
+        {
+          "old": "        mut use_legacy_landlock,\n        apply_seccomp_then_exec,\n        allow_network_for_proxy,\n        proxy_route_spec,\n        verify_fd_mounts,\n",
+          "new": "        mut use_legacy_landlock,\n        apply_seccomp_then_exec,\n        managed_network,\n        proxy_route_spec,\n        verify_fd_mounts,\n"
+        },
+        {
+          "old": "        command,\n    } = LandlockCommand::parse();\n\n    if command.is_empty() {\n",
+          "new": "        command,\n    } = LandlockCommand::parse();\n    let allow_network_for_proxy = managed_network.is_some();\n\n    if command.is_empty() {\n"
+        },
+        {
+          "old": "            &sandbox_policy_cwd,\n            /*apply_landlock_fs*/ false,\n            allow_network_for_proxy,\n            proxy_routing_active,\n        ) {\n",
+          "new": "            &sandbox_policy_cwd,\n            /*apply_landlock_fs*/ false,\n            managed_network.as_ref(),\n            proxy_routing_active,\n        ) {\n"
+        },
+        {
+          "old": "            &sandbox_policy_cwd,\n            /*apply_landlock_fs*/ false,\n            allow_network_for_proxy,\n            /*proxy_routed_network*/ false,\n        ) {\n            panic!(\"error applying Linux sandbox restrictions: {e:?}\");\n",
+          "new": "            &sandbox_policy_cwd,\n            /*apply_landlock_fs*/ false,\n            managed_network.as_ref(),\n            /*proxy_routing_active*/ false,\n        ) {\n            panic!(\"error applying Linux sandbox restrictions: {e:?}\");\n"
+        },
+        {
+          "old": "            command_cwd: command_cwd.as_deref(),\n            permission_profile: &permission_profile,\n            allow_network_for_proxy,\n            proxy_route_spec,\n            command,\n",
+          "new": "            command_cwd: command_cwd.as_deref(),\n            permission_profile: &permission_profile,\n            managed_network,\n            proxy_route_spec,\n            command,\n"
+        },
+        {
+          "old": "        &sandbox_policy_cwd,\n        /*apply_landlock_fs*/ true,\n        allow_network_for_proxy,\n        /*proxy_routed_network*/ false,\n    ) {\n        panic!(\"error applying legacy Linux sandbox restrictions: {e:?}\");\n",
+          "new": "        &sandbox_policy_cwd,\n        /*apply_landlock_fs*/ true,\n        managed_network.as_ref(),\n        /*proxy_routing_active*/ false,\n    ) {\n        panic!(\"error applying legacy Linux sandbox restrictions: {e:?}\");\n"
+        },
+        {
+          "old": "fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {\n    serde_json::from_str(value).map_err(|err| format!(\"invalid permission profile JSON: {err}\"))\n}\n\n",
+          "new": "fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfile, String> {\n    serde_json::from_str(value).map_err(|err| format!(\"invalid permission profile JSON: {err}\"))\n}\n\nfn parse_managed_network(value: &str) -> std::result::Result<ManagedNetworkSandboxContext, String> {\n    serde_json::from_str(value)\n        .map_err(|err| format!(\"invalid managed network context JSON: {err}\"))\n}\n\n"
+        },
+        {
+          "old": "    command_cwd: Option<&'a Path>,\n    permission_profile: &'a PermissionProfile,\n    allow_network_for_proxy: bool,\n    proxy_route_spec: Option<String>,\n    command: Vec<String>,\n",
+          "new": "    command_cwd: Option<&'a Path>,\n    permission_profile: &'a PermissionProfile,\n    managed_network: Option<ManagedNetworkSandboxContext>,\n    proxy_route_spec: Option<String>,\n    command: Vec<String>,\n"
+        },
+        {
+          "old": "        command_cwd,\n        permission_profile,\n        allow_network_for_proxy,\n        proxy_route_spec,\n        command,\n",
+          "new": "        command_cwd,\n        permission_profile,\n        managed_network,\n        proxy_route_spec,\n        command,\n"
+        },
+        {
+          "old": "        \"--apply-seccomp-then-exec\".to_string(),\n    ]);\n    if allow_network_for_proxy {\n        inner.push(\"--allow-network-for-proxy\".to_string());\n        let proxy_route_spec = proxy_route_spec\n            .unwrap_or_else(|| panic!(\"managed proxy mode requires a proxy route spec\"));\n",
+          "new": "        \"--apply-seccomp-then-exec\".to_string(),\n    ]);\n    if let Some(managed_network) = managed_network {\n        inner.push(\"--managed-network\".to_string());\n        inner.push(\n            serde_json::to_string(&managed_network)\n                .unwrap_or_else(|err| panic!(\"failed to serialize managed network context: {err}\")),\n        );\n        let proxy_route_spec = proxy_route_spec\n            .unwrap_or_else(|| panic!(\"managed proxy mode requires a proxy route spec\"));\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/landlock_wrapper.rs",
+      "before": "50bad45b4b66acff690c19f095cf9c5d031eaab8",
+      "after": "21fe0a81161a512daaf07bb467cdd1ed017651c4",
+      "replacements": [
+        {
+          "old": "use std::path::Path;\n\nuse codex_protocol::error::CodexErr;\nuse codex_protocol::error::CodexErrorDetails;\n",
+          "new": "use std::path::Path;\n\nuse codex_network_proxy::ManagedNetworkSandboxContext;\nuse codex_protocol::error::CodexErr;\nuse codex_protocol::error::CodexErrorDetails;\n"
+        },
+        {
+          "old": "    cwd: &Path,\n    apply_landlock_fs: bool,\n    allow_network_for_proxy: bool,\n    proxy_routed_network: bool,\n) -> Result<()> {\n    match original::apply_permission_profile_to_current_thread(\n",
+          "new": "    cwd: &Path,\n    apply_landlock_fs: bool,\n    managed_network: Option<&ManagedNetworkSandboxContext>,\n    proxy_routing_active: bool,\n) -> Result<()> {\n    match original::apply_permission_profile_to_current_thread(\n"
+        },
+        {
+          "old": "        cwd,\n        apply_landlock_fs,\n        allow_network_for_proxy,\n        proxy_routed_network,\n    ) {\n        Err(error)\n",
+          "new": "        cwd,\n        apply_landlock_fs,\n        managed_network,\n        proxy_routing_active,\n    ) {\n        Err(error)\n"
+        }
+      ]
+    }
+  ],
+  "package_updates": []
 }
