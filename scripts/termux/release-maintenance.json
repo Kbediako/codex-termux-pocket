@@ -1,9 +1,15 @@
 {
   "format_version": 1,
-  "request_id": "alpha1554-record-20260915",
-  "operation": "record-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.4",
-  "upstream_tag_object": "93a65ab0c789e315a4f4b26b8c7fcb061fe1270d",
-  "upstream_commit": "66eab8ece44141ff92707868269e1d53b40c4ac5",
-  "prepared_commit": "299da8940bd594e8ff7f3ff0353ff729020528b9"
+  "request_id": "alpha1554-rustls-prepare-20260915",
+  "operation": "prepare-source",
+  "base_main": "967d18fd603ee91a6535f1127f3d9628d1b34b41",
+  "prepared_commit": "967d18fd603ee91a6535f1127f3d9628d1b34b41",
+  "expected_input_tree": "0a03b34433b9aafc5675025ebd2411131b7e464b",
+  "edits": [],
+  "package_updates": [
+    {
+      "name": "rustls",
+      "version": "0.23.45"
+    }
+  ]
 }
