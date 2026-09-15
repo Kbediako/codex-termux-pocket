@@ -14,35 +14,38 @@ use serde::Serialize;
 use windows_sys::Win32::Foundation as foundation;
 use windows_sys::Win32::System::Registry as registry;
 
+use crate::runtime_ownership::RuntimeRegistration;
 use crate::winutil::to_wide;
 
 // Package updates can replace the service key, so keep this record outside it.
-const INSTALLATION_KEY: &str = r"SOFTWARE\OpenAI\Codex\WindowsSandboxService";
-const INSTALLATION_VALUE: &str = "ProvisionedInstallation";
+pub const INSTALLATION_KEY: &str = r"SOFTWARE\OpenAI\Codex\WindowsSandboxService";
+pub const INSTALLATION_VALUE: &str = "ProvisionedInstallation";
 const MAX_VALUE_UNITS: usize = 4096;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DesktopInstallation {
     pub created_codex_home: bool,
     pub cache_home: PathBuf,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InstallationRecord {
     pub user_sid: String,
     pub codex_home: PathBuf,
     pub session_id: u32,
     #[serde(default)]
     pub desktop_installation: Option<DesktopInstallation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeRegistration>,
 }
 
-pub fn load() -> Result<Option<InstallationRecord>> {
+pub(crate) fn load_from(key: &str) -> Result<Option<InstallationRecord>> {
     let mut value = [0_u16; MAX_VALUE_UNITS];
     let mut value_length = std::mem::size_of_val(&value) as u32;
     let status = unsafe {
         registry::RegGetValueW(
             registry::HKEY_LOCAL_MACHINE,
-            to_wide(INSTALLATION_KEY).as_ptr(),
+            to_wide(key).as_ptr(),
             to_wide(INSTALLATION_VALUE).as_ptr(),
             registry::RRF_RT_REG_SZ,
             ptr::null_mut(),
@@ -71,7 +74,7 @@ pub fn load() -> Result<Option<InstallationRecord>> {
     Ok(Some(record))
 }
 
-pub fn save(record: &InstallationRecord) -> Result<()> {
+pub(crate) fn save_to(key: &str, record: &InstallationRecord) -> Result<()> {
     let value = to_wide(
         serde_json::to_string(record).context("serialize protected sandbox installation record")?,
     );
@@ -82,7 +85,7 @@ pub fn save(record: &InstallationRecord) -> Result<()> {
     let status = unsafe {
         registry::RegSetKeyValueW(
             registry::HKEY_LOCAL_MACHINE,
-            to_wide(INSTALLATION_KEY).as_ptr(),
+            to_wide(key).as_ptr(),
             to_wide(INSTALLATION_VALUE).as_ptr(),
             registry::REG_SZ,
             value.as_ptr().cast(),
@@ -94,21 +97,5 @@ pub fn save(record: &InstallationRecord) -> Result<()> {
     } else {
         Err(io::Error::from_raw_os_error(status as i32))
             .context("persist protected sandbox installation record")
-    }
-}
-
-pub fn remove() -> Result<()> {
-    let status = unsafe {
-        registry::RegDeleteKeyW(
-            registry::HKEY_LOCAL_MACHINE,
-            to_wide(INSTALLATION_KEY).as_ptr(),
-        )
-    };
-    match status {
-        foundation::ERROR_SUCCESS
-        | foundation::ERROR_FILE_NOT_FOUND
-        | foundation::ERROR_PATH_NOT_FOUND => Ok(()),
-        status => Err(io::Error::from_raw_os_error(status as i32))
-            .context("remove protected sandbox installation record"),
     }
 }

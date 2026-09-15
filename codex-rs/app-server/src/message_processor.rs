@@ -13,7 +13,6 @@ use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
 use crate::extensions::ThreadExtensionDependencies;
 use crate::extensions::app_server_extension_event_sink;
-use crate::extensions::guardian_agent_spawner;
 use crate::extensions::thread_extensions;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessor;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessorArgs;
@@ -335,23 +334,20 @@ impl MessageProcessor {
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
-                thread_extensions(
-                    guardian_agent_spawner(thread_manager.clone()),
-                    ThreadExtensionDependencies {
-                        event_sink: Arc::clone(&extension_event_sink),
-                        auth_manager: auth_manager.clone(),
-                        state_db: state_db.clone(),
-                        analytics_events_client: analytics_events_client.clone(),
-                        thread_manager: thread_manager.clone(),
-                        goal_service: Arc::clone(&goal_service),
-                        environment_manager: Arc::clone(&environment_manager_for_extensions),
-                        executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        git_attribution_base_url: config.chatgpt_base_url.clone(),
-                        http_client_factory: config.http_client_factory(),
-                        queue_service: queue_service.clone(),
-                        turn_start_admission: Some(Arc::clone(&turn_start_admission)),
-                    },
-                ),
+                thread_extensions(ThreadExtensionDependencies {
+                    event_sink: Arc::clone(&extension_event_sink),
+                    auth_manager: auth_manager.clone(),
+                    state_db: state_db.clone(),
+                    analytics_events_client: analytics_events_client.clone(),
+                    thread_manager: thread_manager.clone(),
+                    goal_service: Arc::clone(&goal_service),
+                    environment_manager: Arc::clone(&environment_manager_for_extensions),
+                    executor_skill_provider: Arc::clone(&executor_skill_provider),
+                    git_attribution_base_url: config.chatgpt_base_url.clone(),
+                    http_client_factory: config.http_client_factory(),
+                    queue_service: queue_service.clone(),
+                    turn_start_admission: Some(Arc::clone(&turn_start_admission)),
+                }),
                 Arc::new(CodexHomeUserInstructionsProvider::new(
                     config.codex_home.clone(),
                 )),
@@ -807,6 +803,8 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         request_attestation: bool,
     ) {
+        self.account_processor
+            .notify_workspace_routing_to_connection(connection_id);
         self.thread_processor
             .connection_initialized(
                 connection_id,
@@ -936,13 +934,7 @@ impl MessageProcessor {
                 )
                 .await?;
             if connection_initialized {
-                self.thread_processor
-                    .connection_initialized(
-                        connection_id,
-                        ConnectionCapabilities {
-                            request_attestation: session.request_attestation(),
-                        },
-                    )
+                self.connection_initialized(connection_id, session.request_attestation())
                     .await;
             }
             return Ok(());
@@ -1128,11 +1120,11 @@ impl MessageProcessor {
                 .read(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::WindowsSandboxReadiness { .. } => self
-                .windows_sandbox_processor
-                .windows_sandbox_readiness()
-                .await
-                .map(|response| Some(response.into())),
+            ClientRequest::WindowsSandboxReadiness { .. } => {
+                self.windows_sandbox_processor
+                    .windows_sandbox_readiness(&request_id)
+                    .await
+            }
             ClientRequest::ExternalAgentConfigDetect { params, .. } => self
                 .external_agent_config_processor
                 .detect(params)
