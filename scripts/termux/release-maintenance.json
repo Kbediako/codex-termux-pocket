@@ -1,15 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha1554-rustls-prepare-20260915",
-  "operation": "prepare-source",
-  "base_main": "967d18fd603ee91a6535f1127f3d9628d1b34b41",
-  "prepared_commit": "967d18fd603ee91a6535f1127f3d9628d1b34b41",
-  "expected_input_tree": "0a03b34433b9aafc5675025ebd2411131b7e464b",
-  "edits": [],
-  "package_updates": [
-    {
-      "name": "rustls",
-      "version": "0.23.45"
-    }
-  ]
+  "request_id": "alpha1554-rustls-gates-20260915",
+  "operation": "dispatch-checks",
+  "phase": "pre"
 }
