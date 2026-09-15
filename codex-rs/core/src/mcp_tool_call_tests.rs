@@ -14,7 +14,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::state::ActiveTurn;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::hook_names::HookToolName;
-use crate::turn_metadata::McpTurnMetadataContext;
+use crate::turn_metadata::ExecutionMetadata;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::config_toml::ConfigToml;
 use codex_config::types::AppConfig;
@@ -189,11 +189,16 @@ fn non_apps_tool_does_not_require_account_metadata(meta: JsonValue) {
     );
 }
 
-fn mcp_turn_metadata_context(turn_context: &TurnContext) -> McpTurnMetadataContext<'_> {
-    McpTurnMetadataContext {
+fn mcp_turn_metadata_context(turn_context: &TurnContext) -> ExecutionMetadata<'_> {
+    ExecutionMetadata {
         model: turn_context.model_info().slug.as_str(),
         reasoning_effort: turn_context.effective_reasoning_effort(),
         node_repl_disabled: turn_context.model_info().node_repl_disabled,
+        auto_review_enabled: crate::guardian::routes_approval_policy_to_guardian(
+            turn_context.approval_policy(),
+            turn_context.config.approvals_reviewer,
+        ),
+        node_repl_auto_review_required: turn_context.model_info().node_repl_auto_review_required,
     }
 }
 
@@ -1160,21 +1165,27 @@ async fn mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server() {
         turn_metadata
             .get("model")
             .and_then(serde_json::Value::as_str),
-        Some(turn_context.model_info().slug.as_str())
+        Some(step_context.settings.model_info.slug.as_str())
     );
     assert_eq!(
         turn_metadata["node_repl_auto_review_required"],
-        serde_json::Value::Bool(turn_context.model_info().node_repl_auto_review_required),
+        serde_json::Value::Bool(
+            step_context
+                .settings
+                .model_info
+                .node_repl_auto_review_required
+        ),
     );
     assert_eq!(
         turn_metadata["node_repl_disabled"],
-        serde_json::Value::Bool(turn_context.model_info().node_repl_disabled),
+        serde_json::Value::Bool(step_context.settings.model_info.node_repl_disabled),
     );
     assert_eq!(
         turn_metadata
             .get("reasoning_effort")
             .and_then(serde_json::Value::as_str),
-        turn_context
+        step_context
+            .settings
             .effective_reasoning_effort()
             .map(|effort| effort.to_string())
             .as_deref()
@@ -1214,7 +1225,7 @@ async fn mcp_tool_call_request_meta_uses_the_issuing_step(
     model.slug = "model-b".to_string();
     model.default_reasoning_level = Some(ReasoningEffortConfig::High);
     model.node_repl_disabled = true;
-    // This separate policy remains turn-owned in this migration.
+    // Node review requirements are captured with the issuing step.
     model.node_repl_auto_review_required =
         !turn_context.model_info().node_repl_auto_review_required;
 
@@ -1222,6 +1233,8 @@ async fn mcp_tool_call_request_meta_uses_the_issuing_step(
     expected["model"] = serde_json::json!("model-b");
     expected["reasoning_effort"] = serde_json::json!(expected_effort);
     expected["node_repl_disabled"] = serde_json::json!(true);
+    expected["node_repl_auto_review_required"] =
+        serde_json::json!(step_b.settings.model_info.node_repl_auto_review_required);
     assert_eq!(
         build_mcp_tool_call_request_meta(&step_b, "node_repl", "call-b", /*metadata*/ None),
         Some(serde_json::json!({
@@ -1233,18 +1246,6 @@ async fn mcp_tool_call_request_meta_uses_the_issuing_step(
     assert_eq!(
         build_mcp_tool_call_request_meta(&step_a, "node_repl", "call-a", /*metadata*/ None),
         original_meta,
-    );
-    assert_eq!(
-        turn_context
-            .turn_metadata_state
-            .to_responses_metadata(
-                "installation".to_string(),
-                "window".to_string(),
-                crate::responses_metadata::CodexResponsesRequestKind::Turn,
-            )
-            .turn_metadata_value()
-            .expect("Responses turn metadata")["node_repl_disabled"],
-        serde_json::json!(false),
     );
 }
 
@@ -3308,4 +3309,64 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
 
         assert_eq!(decision, None);
     }
+}
+
+#[tokio::test]
+async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
+    let (session, _) = crate::session::tests::make_session_and_context().await;
+    let invocation = McpInvocation {
+        server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        tool: "write_record".to_string(),
+        arguments: Some(serde_json::json!({"value": 42})),
+    };
+    let metadata = approval_metadata(
+        Some("connector"),
+        /*connector_name*/ None,
+        /*connector_description*/ None,
+        /*tool_title*/ None,
+        /*tool_description*/ None,
+    );
+    let mut call = Box::pin(async {
+        let _approval_metadata =
+            session.register_mcp_tool_approval_metadata("call", &invocation, metadata.clone());
+        std::future::pending::<()>().await;
+    });
+    assert!(futures::poll!(call.as_mut()).is_pending());
+    let _other_metadata =
+        session.register_mcp_tool_approval_metadata("other-call", &invocation, metadata.clone());
+    assert_eq!(
+        session
+            .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
+            .map(|(invocation, metadata)| (invocation, metadata.connector_id)),
+        Some((Some(invocation.clone()), Some("connector".to_string()))),
+    );
+    assert!(
+        session
+            .mcp_tool_approval_metadata("another-server", "call")
+            .is_none()
+    );
+    drop(call);
+    assert!(
+        session
+            .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
+            .is_none()
+    );
+    let _next_metadata =
+        session.register_mcp_tool_approval_metadata("next-call", &invocation, metadata);
+    let registry = session.mcp_tool_approval_metadata.lock().unwrap();
+    let mut keys = registry.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            (
+                CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                "next-call".to_string()
+            ),
+            (
+                CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                "other-call".to_string()
+            ),
+        ],
+    );
 }

@@ -908,6 +908,7 @@ impl App {
                 let name = name.to_string();
                 app_server.thread_set_name(thread_id, name.clone()).await?;
                 self.chat_widget.expect_manual_thread_name(thread_id, name);
+                self.cancel_thread_title_generation(thread_id);
                 Ok(true)
             }
             AppCommand::Review { target } => {
@@ -1545,6 +1546,8 @@ impl App {
         let should_buffer_initial_replay = !turns.is_empty();
         let replayed_final_items = realtime_delivery::completed_agent_items_from_turns(&turns);
         let replayed_voice_texts = realtime_delivery::replayed_voice_texts_from_turns(&turns);
+        let retained_assistant_captions =
+            self.prepare_realtime_transcript_replay(replayed_voice_texts);
         if should_buffer_initial_replay {
             self.app_event_tx
                 .send(AppEvent::BeginInitialHistoryReplayBuffer);
@@ -1562,7 +1565,7 @@ impl App {
         }
         self.restore_realtime_replay_state_after_replay(
             &replayed_final_items,
-            replayed_voice_texts,
+            retained_assistant_captions,
         );
         if matches!(presentation, ThreadAttachPresentation::PromptEdit) {
             self.chat_widget.emit_prompt_edit_thread_event();
@@ -1824,6 +1827,8 @@ impl App {
                 self.chat_widget.handle_thread_session(session);
             }
         }
+        let retained_assistant_captions =
+            self.prepare_realtime_transcript_replay(replayed_voice_texts);
         for turn_id in &snapshot.delegated_turns {
             self.chat_widget
                 .remember_realtime_delegated_reasoning_turn(turn_id);
@@ -1866,7 +1871,7 @@ impl App {
         }
         self.restore_realtime_replay_state_after_replay(
             &replayed_final_items,
-            replayed_voice_texts,
+            retained_assistant_captions,
         );
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ false);

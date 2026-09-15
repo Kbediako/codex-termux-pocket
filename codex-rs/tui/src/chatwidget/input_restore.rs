@@ -3,11 +3,20 @@
 use std::collections::HashSet;
 
 use crate::bottom_pane::ComposerDraftSnapshot;
+use crate::bottom_pane::KillBufferSnapshot;
 
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+        self.bottom_pane.take_kill_buffer_snapshot()
+    }
+
+    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+        self.bottom_pane.restore_kill_buffer_snapshot(snapshot);
+    }
+
     /// Restore the exact draft entered before the fully initialized composer became available.
     pub(crate) fn restore_startup_draft(&mut self, draft: ComposerDraftSnapshot) {
         let existing_draft = self.bottom_pane.composer_draft_snapshot();
@@ -109,7 +118,9 @@ impl ChatWidget {
             return;
         }
         #[cfg(any(target_os = "windows", test))]
-        if self.elevated_windows_sandbox_setup_required() {
+        if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Local
+            && self.elevated_windows_sandbox_setup_required()
+        {
             return;
         }
         if let Some(draft) = pending_draft.take() {
@@ -127,7 +138,18 @@ impl ChatWidget {
             return;
         }
         #[cfg(any(target_os = "windows", test))]
-        if self.elevated_windows_sandbox_setup_required() {
+        if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Local
+            && self.elevated_windows_sandbox_setup_required()
+        {
+            return;
+        }
+        #[cfg(any(target_os = "windows", test))]
+        if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Mixed
+            && self.elevated_windows_sandbox_setup_required()
+        {
+            if let Some(user_message) = self.initial_user_message.take() {
+                self.restore_user_message_to_composer(user_message);
+            }
             return;
         }
         if self.blocks_direct_input {

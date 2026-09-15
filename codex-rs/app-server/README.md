@@ -65,7 +65,7 @@ ChatGPT account identity.
 | Method | Params | Result |
 | --- | --- | --- |
 | `userVerification/status` | `{}` | `{credentialId, unavailableReason, unavailableMessage}` |
-| `userVerification/enroll` | `{}` | `{credentialId}` |
+| `userVerification/enroll` | `{}` | `{credentialId, algorithm?, publicKey?}` |
 | `userVerification/delete` | `{}` | `{}` |
 | `userVerification/verify` | `{challenge, title, description}` | `{proof: {credentialId, signature}}` |
 | `userVerification/cancel` | `{requestId}` | `{}` |
@@ -74,9 +74,17 @@ Status reads local readiness without prompting or contacting a backend. A null
 `unavailableReason` means local checks passed, not that registration is valid.
 Unsupported platforms and missing account identity are reported in the status
 response's `unavailableReason` field.
-The initial enrollment creates or reuses the local key only. Backend
-registration and revocation are integration TODOs; local success is not server
-enrollment. Deletion currently removes that local key synchronously.
+Enrollment creates or reuses the local key and returns its public metadata. The
+`publicKey` is unpadded base64url SPKI-DER; `algorithm` is `ecdsaP256Sha256X962`.
+During the experimental rollout, `algorithm` and `publicKey` are optional for
+compatibility with older app-servers. Current servers populate both fields;
+callers must check that both are present and non-null before backend registration.
+The trusted UI host owns backend registration: obtain an enrollment challenge,
+sign it with `userVerification/verify`, check that the proof's `credentialId`
+matches this response, and submit the public metadata and proof to the backend.
+Local success is not server enrollment. The caller must preserve the authenticated
+account across this flow and reconcile uncertain registration before retrying.
+Deletion removes the local key; the caller owns backend revocation.
 Enrollment and deletion coordinate credential lifecycle; callers do not issue
 separate generate or rotate commands. Identity comes from the authenticated
 account; this API exposes no caller-selected scope.
@@ -104,6 +112,15 @@ until that worker exits.
 Failures use the normal JSON-RPC error envelope with closed `{type, reason}` data:
 `invalidRequest`, `unavailable`, `cancelled`, or `failed`. UI clients branch on
 these values rather than message text. Native diagnostic payloads stay private.
+
+## Managed model provider requirements
+
+Existing threads retain their provider configuration. Input RPCs reject requests when managed
+`model_provider` or `model_providers` requirements no longer match that configuration, or cannot
+be loaded. This covers turn start/steer, review, compaction, manual queue start, and active goal
+updates. Realtime connections use separate routing configuration and are not checked here.
+Interrupt, realtime stop, and goal pause/clear remain available. User and project
+configuration changes alone do not invalidate existing threads.
 
 # Amazon Bedrock authentication
 
@@ -174,3 +191,36 @@ Attachments record the resources currently associated with a thread, independent
 `thread/attachment/list` accepts one `threadId` and returns at most 100 attachments per page, ordered by creation time and attachment id. Continue with `nextCursor` and the same `threadId` until the cursor is `null`. Each thread can retain up to 100 attachments. Removing an attachment frees a slot for a new attachment.
 
 Attachment creation and deletion requests using the same thread ID are serialized across connections. The requesting client receives its response before the compact update is broadcast, and duplicate creates or absent deletes do not emit updates. Deleting the owning thread removes its attachments under the same lifecycle exclusion; queued attachment mutations then report that the thread was not found.
+
+# Thread plugin settings
+
+`thread/settings/update` and `turn/start` accept `disabledPluginIds`, a list of
+`PluginSummary.id` values from `plugin/list`, in the
+`<plugin-name>@<marketplace-name>` format. A supplied list replaces the selection;
+omission or `null` preserves it, and `[]` clears it. Saving this selection does
+not yet filter plugin capabilities.
+
+Read the selection from `threadSettings.disabledPluginIds` in
+`thread/settings/updated` notifications, or from `disabledPluginIds` in
+`thread/start`, `thread/resume`, and `thread/fork` responses. Selections persist
+across resume. Forks restore the selection from the history retained at the
+requested fork boundary.
+
+# MCP server capabilities
+
+`mcpServerStatus/list` returns `serverCapabilities` for each initialized MCP server
+in both `full` and `toolsAndAuthOnly` detail modes, including thread-scoped reads.
+This is the server's advertised MCP capabilities object, including its `extensions`
+map. It is null when the connection has not initialized successfully; capabilities
+are never inferred from tools or copied from a shared catalog cache.
+
+# Thread rollback
+
+`thread/rollback` has been removed from the API, including its request and response
+types. Requests use the generic unknown-method rejection path. Use `thread/revert`
+for paginated threads instead.
+
+Existing rollouts may contain historical `ThreadRolledBack` events. Their replay
+and migration remain supported so resuming, reading, and forking those threads
+preserves the surviving history. This disk compatibility does not require restoring
+support for new `thread/rollback` requests.

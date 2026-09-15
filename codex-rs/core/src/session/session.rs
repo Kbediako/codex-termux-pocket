@@ -1,5 +1,6 @@
 use super::input_queue::InputQueue;
 use super::mcp_refresh::McpRefresh;
+use super::step_context::StepContext;
 use super::step_settings::ModelInfoOverrides;
 use super::step_settings::StepSettings;
 use super::step_settings::StepSettingsConstraints;
@@ -12,11 +13,14 @@ use crate::context::GuardianContextMode;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
+use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
+use crate::responses_metadata::CompactionTurnMetadata;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::shell_snapshot::SnapshotCredentialBrokerState;
 use crate::state::ActiveTurn;
+use crate::turn_metadata::ExecutionMetadata;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
@@ -30,6 +34,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::HookCompletedEvent;
+use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -39,6 +44,9 @@ use codex_utils_git_discovery::GitRootDiscovery;
 use codex_utils_path::replace_path_and_deduplicate;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
+
+type McpToolApprovalMetadataMap =
+    HashMap<(String, String), std::sync::Weak<(Option<McpInvocation>, McpToolApprovalMetadata)>>;
 
 /// Context for an initialized model agent
 ///
@@ -65,6 +73,8 @@ pub(crate) struct Session {
     pub(super) multi_agent_version: OnceLock<MultiAgentVersion>,
     /// Owns invalidation and serializes refreshes without blocking captured calls.
     pub(super) mcp_refresh: McpRefresh,
+    /// Non-owning lookup for approval data retained by running MCP invocations.
+    pub(crate) mcp_tool_approval_metadata: std::sync::Mutex<McpToolApprovalMetadataMap>,
     pub(super) mcp_elicitation_reviewer_handle: OnceLock<codex_mcp::ElicitationReviewerHandle>,
     pub(super) mcp_elicitation_lifecycle_handle: OnceLock<codex_mcp::ElicitationLifecycle>,
     pub(super) mcp_prewarm_tx: async_channel::Sender<()>,
@@ -284,6 +294,7 @@ impl SessionConfiguration {
             parent_thread_id: self.parent_thread_id,
             thread_source: self.thread_source.clone(),
             originator: self.originator.clone(),
+            disabled_plugin_ids: self.disabled_plugin_ids.clone(),
         }
     }
 
@@ -636,15 +647,64 @@ impl Session {
 
     pub(crate) async fn responses_metadata(
         &self,
-        turn_context: &TurnContext,
+        step_context: &StepContext,
         request_kind: CodexResponsesRequestKind,
+    ) -> CodexResponsesMetadata {
+        let (window_id, window_number, context_window_id) = self.current_window().await;
+        let mut responses_metadata = step_context.turn.turn_metadata_state.to_responses_metadata(
+            self.installation_id.clone(),
+            window_id,
+            request_kind,
+        );
+        ExecutionMetadata::from_settings(&step_context.settings).apply_to(&mut responses_metadata);
+        responses_metadata.tool_namespaces_info = if step_context
+            .turn
+            .config
+            .tool_registry
+            .turn_metadata_includes_tool_info
+            && step_context.settings.model_info.use_responses_lite
+        {
+            step_context.tool_router.tool_namespaces_info().cloned()
+        } else {
+            None
+        };
+        self.with_window_and_fork_metadata(
+            &step_context.turn,
+            responses_metadata,
+            window_number,
+            context_window_id,
+        )
+    }
+
+    // TODO(CDXENT-454): Build the compaction request and metadata from the captured execution.
+    // Remote compaction currently attaches only finalized tool inventory because the rest of the
+    // request remains turn-backed; local compaction does not have a finalized request inventory.
+    pub(crate) async fn compaction_responses_metadata(
+        &self,
+        turn_context: &TurnContext,
+        compaction_metadata: CompactionTurnMetadata,
     ) -> CodexResponsesMetadata {
         let (window_id, window_number, context_window_id) = self.current_window().await;
         let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
             self.installation_id.clone(),
             window_id,
-            request_kind,
+            CodexResponsesRequestKind::Compaction(compaction_metadata),
         );
+        self.with_window_and_fork_metadata(
+            turn_context,
+            responses_metadata,
+            window_number,
+            context_window_id,
+        )
+    }
+
+    fn with_window_and_fork_metadata(
+        &self,
+        turn_context: &TurnContext,
+        responses_metadata: CodexResponsesMetadata,
+        window_number: u64,
+        context_window_id: uuid::Uuid,
+    ) -> CodexResponsesMetadata {
         CodexResponsesMetadata {
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
@@ -798,6 +858,22 @@ impl Session {
                     "reserved thread ID cannot be used when resuming a thread"
                 ));
             }
+        };
+        // Ephemeral forks reuse cache routing, without sharing storage or lifecycle identity.
+        let fork_cache_key = match &initial_history {
+            InitialHistory::Forked(items)
+                if config.ephemeral
+                    && !session_configuration.session_source.is_non_root_agent() =>
+            {
+                items.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta) => Some(meta.meta.session_id.to_string()),
+                    _ => None,
+                })
+            }
+            InitialHistory::New
+            | InitialHistory::Cleared
+            | InitialHistory::Resumed(_)
+            | InitialHistory::Forked(_) => None,
         };
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
@@ -1580,7 +1656,8 @@ impl Session {
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
                         session_configuration.parent_thread_id,
-                    ),
+                    )
+                    .or(fork_cache_key),
                     tx_event.clone(),
                 ),
                 executed_tool_calls: executed_tool_calls.clone(),
@@ -1608,7 +1685,8 @@ impl Session {
                 windows_sandbox_proxy_settings_mode,
                 multi_agent_version,
                 mcp_refresh: McpRefresh::new(),
-                mcp_elicitation_reviewer_handle: OnceLock::new(),
+                mcp_tool_approval_metadata: Default::default(),
+        mcp_elicitation_reviewer_handle: OnceLock::new(),
                 mcp_elicitation_lifecycle_handle: OnceLock::new(),
                 mcp_prewarm_tx,
                 mcp_prewarm_shutdown: CancellationToken::new(),

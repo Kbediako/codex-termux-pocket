@@ -27,6 +27,18 @@ fi
 # layering compatibility fixes around the shared helper.
 bash "$core_script"
 
+# Upstream alpha.4 builds the pinned OpenSSL security release for musl targets.
+# Keep the established libcap/Zig/linker setup above and use the target musl GCC
+# for OpenSSL, matching upstream while leaving host build dependencies alone.
+openssl_apt_args=()
+if [[ -n "${APT_INSTALL_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  openssl_apt_args=(${APT_INSTALL_ARGS})
+fi
+sudo apt-get install -y "${openssl_apt_args[@]}" perl make
+openssl_cc="$(command -v "${TARGET%%-*}-linux-musl-gcc" || command -v musl-gcc)"
+OPENSSL_CC="$openssl_cc" bash "${script_dir}/install-musl-openssl.sh"
+
 if [[ "${TARGET:-}" == "x86_64-unknown-linux-musl" ]]; then
   runner_temp="${RUNNER_TEMP:-/tmp}"
   tool_root="${runner_temp}/codex-musl-tools-${TARGET}"
