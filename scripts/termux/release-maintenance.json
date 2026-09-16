@@ -1,8 +1,12 @@
 {
   "format_version": 1,
-  "request_id": "alpha1554-export-20260914",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.4",
-  "upstream_tag_object": "93a65ab0c789e315a4f4b26b8c7fcb061fe1270d",
-  "upstream_commit": "66eab8ece44141ff92707868269e1d53b40c4ac5"
+  "request_id": "pr134-retire-abandoned-readme-20260916",
+  "operation": "retire-branches",
+  "branches": [
+    {
+      "name": "docs/readme-hero-renderer",
+      "sha": "7c217c81fd89d014e28080492f975320f8c891e7",
+      "pr_number": 109
+    }
+  ]
 }

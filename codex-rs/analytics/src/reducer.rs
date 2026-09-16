@@ -60,6 +60,7 @@ use crate::events::ThreadArchiveEvent;
 use crate::events::ThreadArchiveEventParams;
 use crate::events::ThreadInitializedEvent;
 use crate::events::ThreadInitializedEventParams;
+use crate::events::ToolEventType;
 use crate::events::ToolItemFailureKind;
 use crate::events::ToolItemTerminalStatus;
 use crate::events::TrackEventRequest;
@@ -159,6 +160,7 @@ use codex_login::default_client::originator;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::items::is_safe_plugin_relative_path;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SessionSource;
@@ -203,7 +205,7 @@ pub(crate) struct AnalyticsReducer {
     turns: HashMap<String, TurnState>,
     connections: HashMap<u64, ConnectionState>,
     threads: HashMap<String, ThreadAnalyticsState>,
-    tool_items_started_at_ms: HashMap<ToolItemKey, u64>,
+    tool_items_started_at_ms: HashMap<ToolItemKey, (u64, Option<ModelInvocationContext>)>,
     tool_response_states: HashMap<(String, String), ToolResponseState>,
     code_mode_cells: HashMap<String, HashMap<String, CodeModeCellState>>,
     pending_reviews: HashMap<RequestId, PendingReviewState>,
@@ -1891,14 +1893,18 @@ impl AnalyticsReducer {
                 else {
                     return;
                 };
-                self.tool_items_started_at_ms.insert(
-                    ToolItemKey {
+                let model_context = match &notification.item {
+                    ThreadItem::CommandExecution { model_context, .. } => model_context.clone(),
+                    _ => None,
+                };
+                self.tool_items_started_at_ms
+                    .entry(ToolItemKey {
                         thread_id: notification.thread_id,
                         turn_id: notification.turn_id,
                         item_id: item_id.to_string(),
-                    },
-                    started_at_ms,
-                );
+                    })
+                    .and_modify(|(timestamp, _)| *timestamp = started_at_ms)
+                    .or_insert((started_at_ms, model_context));
             }
             ServerNotification::ItemCompleted(notification) => {
                 if matches!(notification.item, ThreadItem::SubAgentActivity { .. }) {
@@ -1931,7 +1937,9 @@ impl AnalyticsReducer {
                     turn_id: notification.turn_id.clone(),
                     item_id: item_id.to_string(),
                 };
-                let Some(started_at_ms) = self.tool_items_started_at_ms.remove(&key) else {
+                let Some((started_at_ms, model_context)) =
+                    self.tool_items_started_at_ms.remove(&key)
+                else {
                     tracing::warn!(
                         thread_id = %notification.thread_id,
                         turn_id = %notification.turn_id,
@@ -1953,6 +1961,7 @@ impl AnalyticsReducer {
                     thread_id: &notification.thread_id,
                     turn_id: &notification.turn_id,
                     item: &notification.item,
+                    model_context: model_context.as_ref(),
                     started_at_ms,
                     completed_at_ms,
                     connection_state,
@@ -2063,6 +2072,8 @@ impl AnalyticsReducer {
             turn_id,
             item_id,
             originator,
+            model_slug,
+            reasoning_effort,
             plugin_id,
             execution_id,
             operation,
@@ -2079,6 +2090,8 @@ impl AnalyticsReducer {
                             turn_id: turn_id.clone(),
                             item_id: item_id.clone(),
                             originator: originator.clone(),
+                            model_slug: model_slug.clone(),
+                            reasoning_effort: reasoning_effort.clone(),
                             plugin_id: plugin_id.clone(),
                             execution_id: execution_id.clone(),
                             operation: operation.clone(),
@@ -2557,6 +2570,16 @@ fn enrich_tool_response_event(
     let Some(base) = tool_event_base_mut(event) else {
         return;
     };
+    // A cell association can also describe a separately sampled wait call. Classify
+    // only from evidence about this exact call ID, not its parent or response lineage.
+    base.tool_event_type = match (
+        state.response_ids_by_call_id.contains_key(&base.item_id),
+        state.cell_ids_by_child_call_id.contains_key(&base.item_id),
+    ) {
+        (true, false) => Some(ToolEventType::ModelToolCall),
+        (false, true) => Some(ToolEventType::InnerToolCall),
+        (false, false) | (true, true) => None,
+    };
     if base.cell_id.is_none() {
         base.cell_id = state.cell_ids_by_child_call_id.get(&base.item_id).cloned();
     }
@@ -2598,6 +2621,7 @@ struct ToolItemEventInput<'a> {
     thread_id: &'a str,
     turn_id: &'a str,
     item: &'a ThreadItem,
+    model_context: Option<&'a ModelInvocationContext>,
     started_at_ms: u64,
     completed_at_ms: u64,
     connection_state: &'a ConnectionState,
@@ -2611,6 +2635,7 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
         thread_id,
         turn_id,
         item,
+        model_context,
         started_at_ms,
         completed_at_ms,
         connection_state,
@@ -2655,6 +2680,9 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
                 CodexCommandExecutionEventRequest {
                     event_type: "codex_command_execution_event",
                     event_params: CodexCommandExecutionEventParams {
+                        model_slug: model_context.map(|context| context.model_slug.clone()),
+                        reasoning_effort: model_context
+                            .and_then(|context| context.reasoning_effort.clone()),
                         base,
                         plugin_id: plugin_id.clone(),
                         script_path: safe_plugin_relative_script_path(
@@ -3017,6 +3045,7 @@ fn tool_item_base(
         subagent_source: thread_metadata.subagent_source.clone(),
         parent_thread_id: thread_metadata.parent_thread_id.clone(),
         tool_name,
+        tool_event_type: None,
         started_at_ms: context.started_at_ms,
         completed_at_ms: context.completed_at_ms,
         // duration_ms reflects item lifecycle observed by app-server. For web

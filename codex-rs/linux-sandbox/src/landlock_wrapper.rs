@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::path::Path;
 
+use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
@@ -23,15 +24,15 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     permission_profile: &PermissionProfile,
     cwd: &Path,
     apply_landlock_fs: bool,
-    allow_network_for_proxy: bool,
-    proxy_routed_network: bool,
+    managed_network: Option<&ManagedNetworkSandboxContext>,
+    proxy_routing_active: bool,
 ) -> Result<()> {
     match original::apply_permission_profile_to_current_thread(
         permission_profile,
         cwd,
         apply_landlock_fs,
-        allow_network_for_proxy,
-        proxy_routed_network,
+        managed_network,
+        proxy_routing_active,
     ) {
         Err(error)
             if apply_landlock_fs

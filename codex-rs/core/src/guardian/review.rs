@@ -102,21 +102,6 @@ pub(crate) fn new_guardian_review_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Whether this turn should route allowed approval prompts through the guardian
-/// reviewer instead of surfacing them to the user. ARC may still block actions
-/// earlier in the flow.
-pub(crate) fn routes_approval_to_guardian(turn: &TurnContext) -> bool {
-    routes_approval_to_guardian_with_reviewer(turn, turn.config.approvals_reviewer)
-}
-
-/// Whether an approval with its own reviewer selection should be routed through guardian.
-pub(crate) fn routes_approval_to_guardian_with_reviewer(
-    turn: &TurnContext,
-    approvals_reviewer: ApprovalsReviewer,
-) -> bool {
-    routes_approval_policy_to_guardian(turn.approval_policy(), approvals_reviewer)
-}
-
 /// Whether an exact approval policy and reviewer should route through Guardian.
 pub(crate) fn routes_approval_policy_to_guardian(
     approval_policy: AskForApproval,
@@ -136,13 +121,28 @@ pub(crate) fn is_basic_session_source(session_source: &SessionSource) -> bool {
     }
 }
 
-pub(super) async fn record_guardian_non_denial(session: &Arc<Session>, turn_id: &str) {
+pub(super) async fn record_guardian_non_denial(session: &Arc<Session>) {
+    let turn_id = {
+        let active = session.active_turn.lock().await;
+        let Some(task) = active.as_ref().and_then(|active| active.task.as_ref()) else {
+            return;
+        };
+        task.turn_context.sub_id.clone()
+    };
     codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data)
-        .record_non_denial(turn_id)
+        .record_non_denial(&turn_id)
         .await;
 }
 
-async fn record_guardian_denial(session: &Arc<Session>, turn: &Arc<TurnContext>, turn_id: &str) {
+async fn record_guardian_denial(session: &Arc<Session>) {
+    let turn = {
+        let active = session.active_turn.lock().await;
+        let Some(task) = active.as_ref().and_then(|active| active.task.as_ref()) else {
+            return;
+        };
+        Arc::clone(&task.turn_context)
+    };
+    let turn_id = &turn.sub_id;
     let Some(message) =
         codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data)
             .record_denial(turn_id, turn.model_info())
@@ -180,12 +180,8 @@ async fn record_guardian_denial(session: &Arc<Session>, turn: &Arc<TurnContext>,
 }
 
 #[cfg(test)]
-pub(crate) async fn record_guardian_denial_for_test(
-    session: &Arc<Session>,
-    turn: &Arc<TurnContext>,
-    turn_id: &str,
-) {
-    record_guardian_denial(session, turn, turn_id).await;
+pub(crate) async fn record_guardian_denial_for_test(session: &Arc<Session>) {
+    record_guardian_denial(session).await;
 }
 
 #[derive(Clone)]
@@ -322,6 +318,14 @@ async fn run_guardian_review_session_before_deadline(
     external_cancel: Option<CancellationToken>,
     deadline: Instant,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
+    let Some(pool) = session.guardian_review_session() else {
+        return (
+            GuardianReviewOutcome::Error(GuardianReviewError::prompt_build(anyhow::anyhow!(
+                "Guardian extension is not installed for this thread"
+            ))),
+            GuardianReviewAnalyticsResult::without_session(),
+        );
+    };
     let session_config = match guardian_review_session_config(session.as_ref(), &context).await {
         Ok(session_config) => session_config,
         Err(err) => {
@@ -333,7 +337,7 @@ async fn run_guardian_review_session_before_deadline(
     };
     let (session_outcome, session_analytics_result) =
         Box::pin(super::review_session::run_guardian_review_session(
-            session.guardian_review_session(),
+            pool,
             GuardianReviewSessionParams {
                 parent_session: Arc::clone(&session),
                 parent_context: context.clone(),

@@ -16,11 +16,12 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::ApprovalContext;
+use crate::tools::context::ToolCallOrigin;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::lifecycle::process_mcp_tool_result;
 use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ToolError;
-use crate::turn_metadata::McpTurnMetadataContext;
+use crate::turn_metadata::ExecutionMetadata;
 use codex_analytics::AppInvocation;
 use codex_analytics::InvocationType;
 use codex_analytics::build_track_events_context;
@@ -41,7 +42,6 @@ use codex_mcp::ToolInfo;
 use codex_mcp::auth_elicitation_completed_result;
 use codex_mcp::build_auth_elicitation_plan;
 use codex_mcp::mcp_permission_prompt_is_auto_approved;
-use codex_protocol::ResponseItemId;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::items::McpToolCallError;
 use codex_protocol::items::McpToolCallItem;
@@ -123,7 +123,7 @@ pub(crate) async fn handle_mcp_tool_call(
     step_context: &Arc<StepContext>,
     cancellation_token: &CancellationToken,
     call_id: String,
-    originating_item_id: Option<ResponseItemId>,
+    originating_call: Option<ToolCallOrigin>,
     tool_info: &ToolInfo,
     prepared_call: Option<PreparedMcpCall>,
     hook_tool_name: HookToolName,
@@ -253,8 +253,8 @@ pub(crate) async fn handle_mcp_tool_call(
                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
         };
     }
-    sess.register_mcp_tool_approval_metadata(turn_context, &call_id, &invocation, metadata.clone())
-        .await;
+    let _approval_metadata =
+        sess.register_mcp_tool_approval_metadata(&call_id, &invocation, metadata.clone());
     notify_mcp_tool_call_started(
         sess.as_ref(),
         turn_context.as_ref(),
@@ -294,7 +294,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     &sess,
                     step_context.as_ref(),
                     &call_id,
-                    originating_item_id.as_ref(),
+                    originating_call.as_ref(),
                     invocation,
                     prepared_call,
                     metadata,
@@ -368,7 +368,7 @@ pub(crate) async fn handle_mcp_tool_call(
         &sess,
         step_context.as_ref(),
         &call_id,
-        originating_item_id.as_ref(),
+        originating_call.as_ref(),
         invocation,
         prepared_call,
         metadata,
@@ -431,7 +431,7 @@ async fn handle_approved_mcp_tool_call(
     sess: &Arc<Session>,
     step_context: &StepContext,
     call_id: &str,
-    originating_item_id: Option<&ResponseItemId>,
+    originating_call: Option<&ToolCallOrigin>,
     invocation: McpInvocation,
     prepared_call: PreparedMcpCall,
     metadata: McpToolApprovalMetadata,
@@ -512,7 +512,8 @@ async fn handle_approved_mcp_tool_call(
                     let request_meta = with_mcp_tool_call_ids_meta(
                         request_meta,
                         &sess.thread_id.to_string(),
-                        originating_item_id,
+                        &sess.session_id().to_string(),
+                        originating_call,
                     );
                     let request_meta = augment_mcp_tool_request_meta_with_sandbox_state(
                         step_context,
@@ -1139,40 +1140,41 @@ pub(crate) struct McpToolApprovalMetadata {
 }
 
 impl Session {
-    async fn register_mcp_tool_approval_metadata(
+    fn register_mcp_tool_approval_metadata(
         &self,
-        turn_context: &TurnContext,
         call_id: &str,
         invocation: &McpInvocation,
         metadata: McpToolApprovalMetadata,
-    ) {
-        let Some(turn_state) = self
-            .input_queue
-            .turn_state_for_sub_id(&self.active_turn, &turn_context.sub_id)
-            .await
-        else {
-            return;
-        };
-        turn_state.lock().await.insert_mcp_tool_approval_metadata(
-            call_id.to_string(),
+    ) -> Arc<(Option<McpInvocation>, McpToolApprovalMetadata)> {
+        let key = (invocation.server.clone(), call_id.to_string());
+        let metadata = Arc::new((
             (invocation.server == CODEX_APPS_MCP_SERVER_NAME
                 || is_node_repl_backed_server(&invocation.server))
             .then(|| invocation.clone()),
             metadata,
-        );
+        ));
+        let mut registry = self
+            .mcp_tool_approval_metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep approval details available while a tool is running, even across turns.
+        // When a new call starts, clean up entries left by finished calls.
+        registry.retain(|_, entry| entry.strong_count() != 0);
+        registry.insert(key, Arc::downgrade(&metadata));
+        metadata
     }
 
-    pub(crate) async fn mcp_tool_approval_metadata(
+    pub(crate) fn mcp_tool_approval_metadata(
         &self,
-        sub_id: &str,
+        server: &str,
         call_id: &str,
     ) -> Option<(Option<McpInvocation>, McpToolApprovalMetadata)> {
-        let turn_state = self
-            .input_queue
-            .turn_state_for_sub_id(&self.active_turn, sub_id)
-            .await?;
-
-        turn_state.lock().await.mcp_tool_approval_metadata(call_id)
+        self.mcp_tool_approval_metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(server.to_string(), call_id.to_string()))
+            .and_then(std::sync::Weak::upgrade)
+            .map(|metadata| (*metadata).clone())
     }
 }
 
@@ -1182,6 +1184,8 @@ const MCP_TOOL_LINK_ID_META_KEY: &str = "link_id";
 const MCP_TOOL_LINK_IS_IMPLICIT_META_KEY: &str = "link_is_implicit";
 const MCP_TOOL_PLUGIN_ID_META_KEY: &str = "plugin_id";
 const MCP_TOOL_ITEM_ID_META_KEY: &str = "itemId";
+const MCP_TOOL_SESSION_ID_META_KEY: &str = "sessionId";
+const MCP_TOOL_WINDOW_ID_META_KEY: &str = "windowId";
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
 const MCP_TOOL_CONNECTED_ACCOUNT_EMAIL_META_KEY: &str = "connected_account_email";
 const MCP_TOOL_RESOURCE_URI_META_KEY: &str = "resource_uri";
@@ -1251,11 +1255,9 @@ fn build_mcp_tool_call_request_meta(
     if let Some(turn_metadata) = step_context
         .turn
         .turn_metadata_state
-        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
-            model: step_context.settings.model_info.slug.as_str(),
-            reasoning_effort: step_context.settings.effective_reasoning_effort(),
-            node_repl_disabled: step_context.settings.model_info.node_repl_disabled,
-        })
+        .current_meta_value_for_mcp_request(ExecutionMetadata::from_settings(
+            &step_context.settings,
+        ))
     {
         request_meta.insert(
             crate::X_CODEX_TURN_METADATA_HEADER.to_string(),
@@ -1329,7 +1331,8 @@ fn build_confirmation_policies_request_meta(
 fn with_mcp_tool_call_ids_meta(
     meta: Option<serde_json::Value>,
     thread_id: &str,
-    originating_item_id: Option<&ResponseItemId>,
+    session_id: &str,
+    originating_call: Option<&ToolCallOrigin>,
 ) -> Option<serde_json::Value> {
     let mut map = match meta {
         Some(serde_json::Value::Object(map)) => map,
@@ -1340,7 +1343,17 @@ fn with_mcp_tool_call_ids_meta(
         MCP_TOOL_THREAD_ID_META_KEY.to_string(),
         serde_json::Value::String(thread_id.to_string()),
     );
-    if let Some(item_id) = originating_item_id {
+    map.insert(
+        MCP_TOOL_SESSION_ID_META_KEY.to_string(),
+        serde_json::Value::String(session_id.to_string()),
+    );
+    if let Some(origin) = originating_call {
+        map.insert(
+            MCP_TOOL_WINDOW_ID_META_KEY.to_string(),
+            serde_json::Value::String(origin.window_id.clone()),
+        );
+    }
+    if let Some(item_id) = originating_call.and_then(|origin| origin.item_id.as_ref()) {
         map.insert(
             MCP_TOOL_ITEM_ID_META_KEY.to_string(),
             serde_json::Value::String(item_id.to_string()),
@@ -1571,8 +1584,7 @@ pub(crate) async fn request_mcp_tool_user_approval(
     );
     if tool_call_mcp_elicitation_enabled {
         let link_id = sess
-            .mcp_tool_approval_metadata(&turn_context.sub_id, id)
-            .await
+            .mcp_tool_approval_metadata(server, id)
             .and_then(|(_, metadata)| metadata.link_id);
         let metadata = McpToolApprovalMetadata {
             annotations: None,
