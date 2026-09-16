@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "pr134-runtime-gates-20260916",
+  "request_id": "pr134-final-main-20260917",
   "operation": "dispatch-checks",
-  "phase": "pre"
+  "phase": "post"
 }
