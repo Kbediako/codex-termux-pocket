@@ -1,6 +1,12 @@
 {
   "format_version": 1,
-  "request_id": "alpha1556-post-20260916",
-  "operation": "dispatch-checks",
-  "phase": "post"
+  "request_id": "pr134-retire-abandoned-readme-20260916",
+  "operation": "retire-branches",
+  "branches": [
+    {
+      "name": "docs/readme-hero-renderer",
+      "sha": "7c217c81fd89d014e28080492f975320f8c891e7",
+      "pr_number": 109
+    }
+  ]
 }
