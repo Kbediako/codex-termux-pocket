@@ -1,8 +1,31 @@
 {
   "format_version": 1,
-  "request_id": "alpha1554-export-20260914",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.4",
-  "upstream_tag_object": "93a65ab0c789e315a4f4b26b8c7fcb061fe1270d",
-  "upstream_commit": "66eab8ece44141ff92707868269e1d53b40c4ac5"
+  "request_id": "pr134-cargo-prepare-20260916",
+  "operation": "prepare-source",
+  "base_main": "d6b734ad64327e5a8922887cd34bc65a3653272a",
+  "prepared_commit": "20c96deda016b79941a698c3b0c4bbed40ca9ef9",
+  "expected_input_tree": "fd5359b98b8328ab3b934d6808014efc6d160b26",
+  "edits": [],
+  "package_updates": [
+    {
+      "name": "http-body-util",
+      "version": "0.1.5"
+    },
+    {
+      "name": "insta",
+      "version": "1.48.0"
+    },
+    {
+      "name": "system-configuration@0.8.0",
+      "version": "0.8.0"
+    },
+    {
+      "name": "indexmap@2.14.0",
+      "version": "2.14.2"
+    },
+    {
+      "name": "native-tls",
+      "version": "0.2.18"
+    }
+  ]
 }
