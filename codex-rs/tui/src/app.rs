@@ -143,8 +143,6 @@ use codex_config::LoaderOverrides;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::MemoriesToml;
 use codex_config::types::ModelAvailabilityNuxConfig;
-#[cfg(target_os = "windows")]
-use codex_config::types::WindowsToml;
 use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
@@ -216,6 +214,7 @@ mod backend_banner_fallback;
 mod background_requests;
 mod config_persistence;
 mod connector_mentions;
+mod daemon_menu;
 mod event_dispatch;
 mod exit_summary;
 mod experimental_features;
@@ -572,8 +571,9 @@ pub(crate) struct App {
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
     pub(crate) pending_thread_usage_history_refresh: bool,
 
-    // Pager overlay state (Transcript or Static like Diff)
+    // Alternate-screen overlays: transcript, diff, and analytics.
     pub(crate) overlay: Option<Overlay>,
+    pub(crate) retained_analytics: Option<Box<crate::analytics::AnalyticsView>>,
     pub(crate) deferred_history_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     has_emitted_history_lines: bool,
     transcript_reflow: TranscriptReflowState,
@@ -606,6 +606,7 @@ pub(crate) struct App {
     app_server_target: AppServerTarget,
     reconnect: reconnect::ReconnectState,
     /// Set when the user confirms an update; propagated on exit.
+    daemon_cli_executable: Option<AbsolutePathBuf>,
     pub(crate) pending_update_action: Option<UpdateAction>,
 
     /// Tracks the thread we intentionally shut down while exiting the app.

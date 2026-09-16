@@ -39,6 +39,7 @@ mod guardian;
 pub use guardian::GuardianModelPolicy;
 pub use guardian::GuardianReviewMode;
 pub use guardian::GuardianScope;
+pub use guardian::GuardianUnscoredAction;
 
 #[path = "openai_models/guardian_v2.rs"]
 mod guardian_v2;
@@ -403,7 +404,7 @@ const fn is_true(value: &bool) -> bool {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelInfo {
     /// Model-owned approval coverage. Absent preserves legacy settings; an empty map disables
-    /// ordinary Guardian review. Keys are computer_use, shell, code_mode, file_changes, mcp, network,
+    /// ordinary Guardian review. Keys are computer_use, shell, file_changes, mcp, network,
     /// and permissions. This does not override mandatory safety or administrator requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian: Option<GuardianModelPolicy>,

@@ -7,6 +7,8 @@ mod client;
 mod install_lock;
 mod managed_install;
 mod prepare_install;
+pub use prepare_install::InstallRequest;
+pub use prepare_install::update_from_cli;
 mod remote_control_client;
 mod settings;
 mod thread_recovery;
@@ -266,11 +268,12 @@ pub async fn set_remote_control(mode: RemoteControlMode) -> Result<RemoteControl
 
 pub async fn run_pid_update_loop(
     http_client_factory: codex_http_client::HttpClientFactory,
+    restore_release: Option<String>,
 ) -> Result<()> {
     ensure_supported_platform()?;
     #[cfg(windows)]
     backend::windows::ensure_not_elevated()?;
-    update_loop::run(http_client_factory).await
+    update_loop::run(http_client_factory, restore_release).await
 }
 
 pub async fn update(

@@ -1,10 +1,12 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
+use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::role::apply_role_to_config;
 use crate::codex_thread::CodexThread;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
+use crate::context::CurrentTimeUnavailable;
 use crate::context::DeveloperInstructions;
 use crate::context::GuardianContextMode;
 use crate::context::ManagedDeveloperInstructions;
@@ -12,7 +14,6 @@ use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::world_state::PersistentModeState;
 use crate::session::multi_agents::resolve_usage_hints;
-use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ExtensionDataInit;
@@ -135,6 +136,7 @@ fn retain_forked_developer_message(
                 ))
             || MultiAgentModeInstructions::matches_text(text)
             || CurrentTimeReminder::matches_text(text)
+            || CurrentTimeUnavailable::matches_text(text)
             || usage_hint_texts
                 .iter()
                 .any(|usage_hint_text| usage_hint_text == text))

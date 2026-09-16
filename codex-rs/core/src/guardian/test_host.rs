@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use codex_extension_api::SessionIsolation;
 use codex_home::CodexHomeUserInstructionsProvider;
-use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
@@ -13,9 +12,19 @@ use codex_protocol::protocol::ThreadSource;
 use super::GuardianReviewSessionManager;
 use crate::config::Config;
 use crate::config::Constrained;
+use crate::config::TokenBudgetConfig;
 use crate::session::session::Session;
 
+// Compile the extension's actual setup with this test crate's Config type, rather
+// than keeping a second settings implementation in the context-adapter test host.
+#[path = "../../../ext/guardian-v2/src/sync_reviewer/reviewer_config.rs"]
+mod reviewer_config;
+pub(super) use reviewer_config::build_reviewer_config;
+
 pub(crate) fn install(session: &Session, config: &Config) {
+    session.services.thread_extension_data.insert(
+        codex_guardian_reviewer::ReviewerConfig::<Config>(build_reviewer_config),
+    );
     let manager = Arc::new(crate::ThreadManager::new(
         config,
         Arc::clone(&session.services.auth_manager),
@@ -35,12 +44,18 @@ pub(crate) fn install(session: &Session, config: &Config) {
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     ));
+    let runtime = session
+        .services
+        .thread_extension_data
+        .get_or_init(codex_guardian_reviewer::ReviewerTasks::default);
     session
         .services
         .thread_extension_data
         .insert(GuardianReviewSessionManager::new(
+            Arc::clone(&runtime),
             move |context, key, kind, snapshot, cancel| {
                 let manager = Arc::clone(&manager);
+                let runtime = Arc::clone(&runtime);
                 Box::pin(async move {
                     let history_reset = context.history_reset.clone();
                     let (mut options, state) = context.thread_options(snapshot).await;
@@ -50,14 +65,15 @@ pub(crate) fn install(session: &Session, config: &Config) {
                     ) {
                         options.config.ephemeral = true;
                     }
-                    options.config.permissions.approval_policy =
-                        Constrained::allow_only(AskForApproval::Never);
                     options.session_source =
                         Some(SessionSource::Internal(InternalSessionSource::Guardian));
                     options.thread_source = Some(ThreadSource::GuardianReview);
                     options
                         .thread_extension_init
                         .insert(SessionIsolation::Isolated);
+                    options
+                        .thread_extension_init
+                        .insert(codex_guardian_reviewer::reviewer_allowed_tools());
                     let session_cancel = cancel.clone();
                     let until = async move {
                         let _cancel_on_exit = cancel.clone().drop_guard();
@@ -67,7 +83,7 @@ pub(crate) fn install(session: &Session, config: &Config) {
                         }
                     };
                     let spawned = manager
-                        .start_thread_until(options, until, &tokio_util::task::TaskTracker::new())
+                        .start_thread_until(options, until, &runtime.tasks)
                         .await?;
                     Ok(context
                         .bind_thread(&spawned.thread, key, state, session_cancel)

@@ -1,3 +1,15 @@
+# MCP App UI
+
+`mcpToolCall.mcpAppUi` records the invoked descriptor's `resourceUri`
+and `preferredModelDisplayMode` (`inline` or `fullscreen`). Descriptors with a widget
+URI default to `inline` when the preference is missing or unsupported. The
+UI information is preserved in tool-call events and saved history so clients can
+render without waiting for the full MCP catalog.
+
+The field is null for older history and tools that declare widgets only in
+result metadata; clients retain catalog discovery for those calls. Existing
+resource URI fields remain available for older clients.
+
 # Initial Daybreak choice (experimental)
 
 Persistent threads accept `daybreakEnabled` on `thread/start` with the
@@ -201,6 +213,8 @@ Attachments record the resources currently associated with a thread, independent
 
 `thread/attachment/list` accepts one `threadId` and returns at most 100 attachments per page, ordered by creation time and attachment id. Continue with `nextCursor` and the same `threadId` until the cursor is `null`. Each thread can retain up to 100 attachments. Removing an attachment frees a slot for a new attachment.
 
+A non-ephemeral fork copies the source thread's current attachments, even when forking at an earlier turn. The copies have new attachment IDs and creation timestamps, but retain the same resource identities and payloads. Clients use `forkedFromId` on `thread/started` to detect forks and call `thread/attachment/list` with the new thread ID to load their attachments. Fork copying does not emit per-attachment updates; explicit add/remove operations still do. Copying is awaited before publishing the fork, but is best effort: a copy failure is logged and the conversation fork succeeds without attachments. Membership can then change independently on either thread; the referenced resources themselves are not copied. Resuming a fork does not repeat the copy.
+
 Attachment creation and deletion requests using the same thread ID are serialized across connections. The requesting client receives its response before the compact update is broadcast, and duplicate creates or absent deletes do not emit updates. Deleting the owning thread removes its attachments under the same lifecycle exclusion; queued attachment mutations then report that the thread was not found.
 
 # Thread plugin settings
@@ -216,6 +230,19 @@ Read the selection from `threadSettings.disabledPluginIds` in
 `thread/start`, `thread/resume`, and `thread/fork` responses. Selections persist
 across resume. Forks restore the selection from the history retained at the
 requested fork boundary.
+
+# Deprecated thread personality setting
+
+`thread/start`, `thread/resume`, `thread/settings/update`, and `turn/start` still
+accept `personality`, but `friendly` and `pragmatic` no longer select a style.
+`model/list` returns `supportsPersonality: false` for every model.
+
+`none` removes the literal `# Personality` section when Codex prepares
+instructions from the model catalog, for example when starting a thread or
+switching models. Setting `friendly` or `pragmatic` can replace a previous
+`none` setting for that purpose. Changing the setting does not rewrite the
+thread's existing instructions or change explicitly supplied base instructions.
+The old `features.personality` flag is ignored.
 
 # MCP server capabilities
 
@@ -243,3 +270,16 @@ The experimental `account/read.workspaceRouting` response field returns the sele
 App-server discovers routing for saved ChatGPT logins at startup and for new logins or workspace switches. After requirements and routing are ready, it sends the existing `account/updated` notification. Newly initialized connections also receive this notification once saved-workspace routing is ready, including when discovery finished before the connection initialized. Clients then reread `configRequirements/read` and `account/read`. Saved ChatGPT credentials without a selected workspace ID retain their account information and return `workspaceRouting: null`; app-server does not guess a workspace from the backend's default account. Discovery failures for a selected workspace, including missing or null fields from older backends, return an `account/read` error. They never produce a successful unrestricted result. A later read retries failed discovery. Logout clears the cached routing, and results from earlier authentication owners are discarded. Token refreshes for the same known user and workspace invalidate cached routing without cancelling discovery or failing sign-in. Configuration is reloaded after discovery; a changed backend, model provider, or required backend rejects the result so the next read discovers against current configuration. Account notifications recheck the auth owner generation after waiting for outbound queue capacity. Superseded sign-in attempts emit a failed `account/login/completed` event instead of silently dropping completion. Notifications remain snapshots: clients reread current account and requirements state rather than treating a queued notification as authorization.
 
 The origin of a required `chatgpt_base_url` must match the discovered origin by scheme, host, and effective port. The base URL's API path is not part of this comparison. Either origin alone is sufficient. If requirements specify no base URL and discovery explicitly returns `NO_CONSTRAINT`, the effective `chatgpt_base_url` supplies the origin, including its existing default. `backendOrigin` is always a resolved origin; `accountRoutingOverride` preserves `NO_CONSTRAINT` when the backend explicitly returns it. Discovering an origin does not change API paths or apply routing headers to requests.
+
+## Windows sandbox implementation selection
+
+`windowsSandbox/setupStart` and `windowsSandbox/readiness` apply only to the
+legacy `elevated` and `unelevated` backends. Clients resolve the desired sandbox
+implementation from configuration. When it is `mxc`, they skip both methods;
+`allowedWindowsSandboxImplementations` can allow `mxc` independently of the
+legacy setup modes. Non-Windows hosts report `notConfigured` for the legacy
+readiness API.
+
+MXC uses the standard `command/exec` streaming and process-control path, including
+ConPTY when `tty` is enabled. The buffered legacy Windows sandbox restrictions on
+process control and custom output caps do not apply to MXC.

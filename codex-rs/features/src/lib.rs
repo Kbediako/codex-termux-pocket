@@ -91,6 +91,8 @@ impl Stage {
 /// Unique features toggled via configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
+    /// Preview consumer five-hour and weekly allowance history.
+    AnalyticsPlanHistory,
     /// Discover model catalogs for OpenAI API-key authentication.
     ApiKeyModelDiscovery,
     /// Enable the interactive transcript composer and turn-selection UI.
@@ -322,7 +324,7 @@ pub enum Feature {
     GuardianNodeReplTranscriptImages,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
-    /// Enable the extension-owned synchronous Guardian reviewer.
+    /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
@@ -336,13 +338,15 @@ pub enum Feature {
     ReasoningEffortOverride,
     /// Add current-time reminders to model-visible context.
     CurrentTimeReminder,
+    /// Report failed clock reads to the model without failing the turn.
+    NonfatalClockReadErrors,
     /// Route MCP tool approval prompts through the MCP elicitation request path.
     ToolCallMcpElicitation,
     /// Prompt Codex Apps connector auth failures through MCP URL elicitations.
     AuthElicitation,
     /// Offer Amazon Bedrock setup during TUI sign-in onboarding.
     BedrockSetupWizard,
-    /// Enable personality selection in the TUI.
+    /// Removed compatibility flag retained as a no-op.
     Personality,
     /// Enable native artifact tools.
     Artifact,
@@ -608,7 +612,7 @@ impl Features {
                 "image_detail_original" | "resize_all_images" | "item_ids" => {
                     continue;
                 }
-                "plugin_hooks" => {
+                "personality" | "plugin_hooks" => {
                     continue;
                 }
                 "skill_env_var_dependency_prompt" => {
@@ -906,6 +910,16 @@ pub struct FeatureSpec {
 }
 
 pub const FEATURES: &[FeatureSpec] = &[
+    FeatureSpec {
+        id: Feature::AnalyticsPlanHistory,
+        key: "analytics_plan_history",
+        stage: Stage::Experimental {
+            name: "Analytics plan history",
+            menu_description: "Preview five-hour and weekly allowance history for consumer accounts in /analytics.",
+            announcement: "",
+        },
+        default_enabled: false,
+    },
     FeatureSpec {
         id: Feature::TranscriptV2,
         key: "transcript_v2",
@@ -1610,7 +1624,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianExt,
         key: "guardian_ext",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1650,6 +1664,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::NonfatalClockReadErrors,
+        key: "nonfatal_clock_read_errors",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::CollaborationModes,
         key: "collaboration_modes",
         stage: Stage::Removed,
@@ -1676,8 +1696,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Personality,
         key: "personality",
-        stage: Stage::Stable,
-        default_enabled: true,
+        stage: Stage::Removed,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::Artifact,

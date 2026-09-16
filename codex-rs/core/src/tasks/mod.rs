@@ -278,6 +278,10 @@ impl Session {
         self.start_task(turn_context, input, task).await;
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "record the started turn atomically with its active reservation"
+    )]
     pub(crate) async fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
@@ -306,15 +310,10 @@ impl Session {
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
 
-        codex_guardian_reviewer::ReviewDenials::clear_turn(
-            &self.services.thread_extension_data,
-            &turn_context.sub_id,
-        )
-        .await;
-
         let (pending_items, _) = self.input_queue.drain_mailbox_input_items().await;
         let turn_state = {
             let mut active = self.active_turn.lock().await;
+            self.record_started_turn(&turn_context.sub_id).await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
             debug_assert!(turn.task.is_none());
             Arc::clone(&turn.turn_state)
@@ -812,11 +811,6 @@ impl Session {
             })
         };
         self.send_event(turn_context.as_ref(), event).await;
-        codex_guardian_reviewer::ReviewDenials::clear_turn(
-            &self.services.thread_extension_data,
-            &turn_context.sub_id,
-        )
-        .await;
 
         let cleared_active_turn = {
             let mut active = self.active_turn.lock().await;
@@ -968,11 +962,6 @@ impl Session {
             duration_ms,
         });
         self.send_event(task.turn_context.as_ref(), event).await;
-        codex_guardian_reviewer::ReviewDenials::clear_turn(
-            &self.services.thread_extension_data,
-            &task.turn_context.sub_id,
-        )
-        .await;
         // Regular items were flushed before this terminal event was appended; buffering
         // thread writers may not flush it without another explicit barrier.
         if let Err(err) = self.flush_rollout().await {

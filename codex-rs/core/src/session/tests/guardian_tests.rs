@@ -40,6 +40,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile as PermissionProfile;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::protocol::AskForApproval;
@@ -235,7 +236,9 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
         .thread_extension_data
         .get_or_init(crate::context::NodeReplReviewEvidence::default);
     let image = UserInput::Image {
-        image_url: image_url.to_string(),
+        image: ImageReference::Inline {
+            image_url: image_url.to_string(),
+        },
         detail: None,
     };
     evidence.record("js", "cell", "image", vec![image]);
@@ -389,8 +392,18 @@ async fn request_permissions_uses_issuing_step_policy_and_reviewer() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum ReviewCancellationSource {
+    Action,
+    ParentShutdown,
+}
+
+#[test_case::test_case(ReviewCancellationSource::Action; "action")]
+#[test_case::test_case(ReviewCancellationSource::ParentShutdown; "parent_shutdown")]
 #[tokio::test]
-async fn request_permissions_guardian_review_stops_when_cancelled() {
+async fn request_permissions_guardian_review_stops_when_cancelled(
+    source: ReviewCancellationSource,
+) {
     let server = start_mock_server().await;
     let _guardian_request_log = mount_response_once(
         &server,
@@ -479,13 +492,35 @@ async fn request_permissions_guardian_review_stops_when_cancelled() {
     .await
     .expect("guardian review should start before cancellation");
 
-    cancellation_token.cancel();
+    let reviewer_tasks = session
+        .services
+        .thread_extension_data
+        .get::<codex_guardian_reviewer::ReviewerTasks>()
+        .expect("reviewer tasks installed");
+    match source {
+        ReviewCancellationSource::Action => cancellation_token.cancel(),
+        ReviewCancellationSource::ParentShutdown => reviewer_tasks.cancellation.cancel(),
+    }
 
     let response = timeout(Duration::from_secs(5), request_handle)
         .await
         .expect("request_permissions should stop when cancelled")
         .expect("request_permissions task should not panic");
-    assert_eq!(response, None);
+    let expected_response = match source {
+        ReviewCancellationSource::Action => None,
+        ReviewCancellationSource::ParentShutdown => Some(RequestPermissionsResponse {
+            permissions: RequestPermissionProfile::default(),
+            scope: PermissionGrantScope::Turn,
+            strict_auto_review: false,
+        }),
+    };
+    assert_eq!(response, expected_response);
+    if matches!(source, ReviewCancellationSource::ParentShutdown) {
+        reviewer_tasks.tasks.close();
+        timeout(Duration::from_secs(5), reviewer_tasks.tasks.wait())
+            .await
+            .expect("parent shutdown must finish reviewer cleanup");
+    }
     assert_eq!(
         session
             .granted_turn_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID)
@@ -1329,49 +1364,4 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         }
     );
     drop(io);
-}
-
-#[test_case(TerminalEventKind::TurnComplete; "completion")]
-#[test_case(TerminalEventKind::TurnAborted; "interruption")]
-#[tokio::test]
-async fn terminal_turn_clears_extension_owned_denials(terminal: TerminalEventKind) {
-    let (session, turn, events) = make_session_and_context_with_rx().await;
-    let finish = Arc::new(tokio::sync::Notify::new());
-    session
-        .spawn_task(
-            Arc::clone(&turn),
-            Vec::new(),
-            HeldStepTask {
-                kind: TaskKind::Regular,
-                finish: Arc::clone(&finish),
-            },
-        )
-        .await;
-    let denials =
-        codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data);
-    for _ in 0..2 {
-        assert_eq!(
-            denials.record_denial(&turn.sub_id, turn.model_info()).await,
-            None
-        );
-    }
-    match terminal {
-        TerminalEventKind::TurnComplete => finish.notify_one(),
-        TerminalEventKind::TurnAborted => {
-            session.abort_all_tasks(TurnAbortReason::Interrupted).await
-        }
-    }
-    recv_terminal_event(&events, terminal).await;
-    // Delivery precedes accounting cleanup. Wait for the runtime to finish the turn.
-    timeout(Duration::from_secs(/*secs*/ 5), async {
-        while session.active_turn.lock().await.is_some() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("turn becomes idle");
-    assert_eq!(
-        denials.record_denial(&turn.sub_id, turn.model_info()).await,
-        None
-    );
 }

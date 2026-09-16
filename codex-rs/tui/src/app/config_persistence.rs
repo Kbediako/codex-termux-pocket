@@ -228,7 +228,6 @@ impl App {
                 approvals_reviewer,
                 Some(permission_profile.clone()),
                 active_permission_profile,
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
@@ -588,12 +587,6 @@ impl App {
 
         let auto_review_preset = auto_review_mode();
         let mut next_config = self.config.clone();
-        let windows_sandbox_changed = updates.iter().any(|(feature, _)| {
-            matches!(
-                feature,
-                Feature::WindowsSandbox | Feature::WindowsSandboxElevated
-            )
-        });
         let mut approval_policy_override = None;
         let mut approvals_reviewer_override = None;
         let mut permission_profile_override = None;
@@ -733,9 +726,6 @@ impl App {
                     &feature_updates_to_apply,
                 )
                 .await;
-                if windows_sandbox_changed {
-                    self.propagate_windows_sandbox_turn_context();
-                }
             }
             return;
         }
@@ -803,7 +793,6 @@ impl App {
                 approvals_reviewer_override,
                 permission_profile_override,
                 active_permission_profile_override,
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
@@ -818,10 +807,6 @@ impl App {
                 self.note_active_thread_outbound_op(op).await;
                 self.refresh_pending_thread_approvals().await;
             }
-        }
-
-        if windows_sandbox_changed {
-            self.propagate_windows_sandbox_turn_context();
         }
 
         if let Some(label) = permissions_history_label {
@@ -1205,7 +1190,6 @@ impl App {
             Some(self.config.approvals_reviewer),
             /*permission_profile*/ None,
             Some(auto_review_preset.active_permission_profile),
-            /*windows_sandbox_level*/ None,
             /*model*/ None,
             /*effort*/ None,
             /*summary*/ None,
@@ -1249,53 +1233,21 @@ impl App {
     pub(super) async fn verify_windows_sandbox_mode_after_setup(
         &mut self,
         app_server: &mut AppServerSession,
-        requested_mode: codex_config::types::WindowsSandboxModeToml,
+        requested_mode: codex_app_server_protocol::WindowsSandboxSetupMode,
     ) -> bool {
-        let cwd = self.chat_widget.config_ref().cwd.display().to_string();
-        let mode = crate::config_update::read_effective_config(app_server.request_handle(), cwd)
-            .await
-            .ok()
-            .and_then(|config| windows_sandbox_mode_from_effective_config(&config));
-        let Some(mode) = mode else {
-            self.chat_widget.add_error_message(
-                "Windows sandbox setup completed, but Codex could not verify the effective sandbox mode."
-                    .to_string(),
-            );
+        if !self.refresh_windows_sandbox_config(app_server).await {
             return false;
-        };
-        self.config.permissions.windows_sandbox_mode = Some(mode);
-        if mode == requested_mode {
+        }
+        if self.chat_widget.windows_sandbox_config.mode == Some(requested_mode)
+            && self
+                .chat_widget
+                .windows_sandbox_config
+                .allows(requested_mode)
+        {
             return true;
         }
-        self.chat_widget.set_windows_sandbox_mode(Some(mode));
-        self.propagate_windows_sandbox_turn_context();
-        self.chat_widget.add_error_message(
-            "Windows sandbox setup completed, but its mode was overridden by the effective configuration."
-                .to_string(),
-        );
+        self.chat_widget.add_error_message("Windows sandbox setup completed, but its mode was overridden by the effective configuration.".to_string());
         false
-    }
-
-    fn propagate_windows_sandbox_turn_context(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
-            self.app_event_tx
-                .send(AppEvent::CodexOp(AppCommand::override_turn_context(
-                    /*cwd*/ None,
-                    /*approval_policy*/ None,
-                    /*approvals_reviewer*/ None,
-                    /*permission_profile*/ None,
-                    /*active_permission_profile*/ None,
-                    Some(windows_sandbox_level),
-                    /*model*/ None,
-                    /*effort*/ None,
-                    /*summary*/ None,
-                    /*service_tier*/ None,
-                    /*collaboration_mode*/ None,
-                    /*personality*/ None,
-                )));
-        }
     }
 }
 
@@ -1355,23 +1307,6 @@ fn features_toml_from_json(value: &serde_json::Value) -> Option<FeaturesToml> {
     serde_json::from_value(value.clone()).ok()
 }
 
-#[cfg(target_os = "windows")]
-fn windows_sandbox_mode_from_effective_config(
-    effective_config: &ConfigReadResponse,
-) -> Option<codex_config::types::WindowsSandboxModeToml> {
-    let root_windows = effective_config
-        .config
-        .additional
-        .get("windows")
-        .and_then(windows_toml_from_json);
-    root_windows.and_then(|windows| windows.sandbox)
-}
-
-#[cfg(target_os = "windows")]
-fn windows_toml_from_json(value: &serde_json::Value) -> Option<WindowsToml> {
-    serde_json::from_value(value.clone()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1426,7 +1361,7 @@ mod tests {
 
             let default_effort =
                 app.on_apply_advanced_reasoning("gpt-5.5", ReasoningEffortConfig::Ultra);
-            let new_thread_config = app.fresh_session_config();
+            let new_thread_config = &app.config;
 
             assert_eq!(default_effort, Some(expected_default_effort.clone()));
             assert_eq!(app.chat_widget.current_model(), "gpt-5.5");
@@ -1437,7 +1372,7 @@ mod tests {
             assert_eq!(
                 (
                     new_thread_config.model.as_deref(),
-                    new_thread_config.model_reasoning_effort,
+                    new_thread_config.model_reasoning_effort.clone(),
                 ),
                 (Some("gpt-5.5"), Some(expected_default_effort))
             );
@@ -1466,7 +1401,7 @@ mod tests {
 
         let default_effort =
             app.on_apply_advanced_reasoning("ultra-only", ReasoningEffortConfig::Ultra);
-        let new_thread_config = app.fresh_session_config();
+        let new_thread_config = &app.config;
 
         assert_eq!(default_effort, None);
         assert_eq!(app.chat_widget.current_model(), "ultra-only");
@@ -1477,7 +1412,7 @@ mod tests {
         assert_eq!(
             (
                 new_thread_config.model.as_deref(),
-                new_thread_config.model_reasoning_effort,
+                new_thread_config.model_reasoning_effort.clone(),
             ),
             (Some("gpt-5.5"), Some(ReasoningEffortConfig::Low))
         );
@@ -1723,7 +1658,7 @@ enabled = false
         )?;
 
         let assert_cloud_requirements = |app: &App| {
-            let config = app.fresh_session_config();
+            let config = &app.config;
             assert_eq!(
                 config
                     .config_layer_stack
@@ -1775,6 +1710,7 @@ enabled = false
 
         app.chat_widget
             .handle_thread_session(crate::session_state::ThreadSessionState {
+                windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id: ThreadId::new(),
                 forked_from_id: None,
                 fork_parent_title: None,

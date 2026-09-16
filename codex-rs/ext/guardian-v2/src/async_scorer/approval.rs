@@ -3,7 +3,6 @@
 
 use super::authorization::ScoreAuthorization;
 use super::config::GuardianV2Config;
-use super::coverage::GuardianPolicy;
 use super::metrics::TOOL_CALL_LAG_METRIC;
 use super::metrics::record_fast_decision;
 use super::parent_compaction::select_parent_compaction;
@@ -12,13 +11,13 @@ use super::score::GuardianV2ScoreProgress;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::context::GuardianContextMode;
-use codex_core::context::GuardianReviewEvidence;
 use codex_extension_api::ApprovalDecision;
 use codex_extension_api::ApprovalDecisionInput;
 use codex_extension_api::ApprovalReviewContributor;
 use codex_extension_api::ExtensionFuture;
 use codex_protocol::approvals::GuardianReviewReason;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::openai_models::GuardianModelPolicy;
 use codex_protocol::openai_models::GuardianReviewMode;
 use codex_protocol::openai_models::GuardianScope;
 use codex_protocol::protocol::AskForApproval;
@@ -37,7 +36,7 @@ impl ApprovalReviewContributor for GuardianApprovalReviewer {
         input: &'a ApprovalDecisionInput<'_>,
     ) -> ExtensionFuture<'a, Option<ApprovalDecision>> {
         Box::pin(async move {
-            // If the extension is unavailable, core keeps its existing synchronous fallback.
+            // If the scorer is unavailable, the reviewer extension runs its synchronous fallback.
             let manager = self.thread_manager.upgrade()?;
             let Ok(thread) = manager.get_thread(input.thread_id).await else {
                 record_fast_decision(input.metrics.as_deref(), "deferred", "scoring_failure");
@@ -78,18 +77,22 @@ impl GuardianApprovalReviewer {
             .map_or_else(|| GuardianV2Config::resolve(&config), Ok)
             .ok();
         let mut policy = guardian_config.as_ref().map_or_else(
-            || GuardianPolicy::from_legacy(/*scope*/ None).for_model(model.as_deref()),
+            || {
+                codex_config::GuardianPolicyLoader::new(
+                    Some(&codex_features::FeatureToml::Enabled(true)),
+                    &codex_config::ConfigRequirements::default(),
+                )
+                .resolve(model.as_deref())
+            },
             |config| config.policy_for_model(model.as_deref()),
         );
-        if model.as_ref().is_some_and(|model| {
+        if let Some(model) = model.as_ref() {
             config
                 .config_layer_stack
                 .requirements()
-                .auto_review_required_for_model(&model.slug)
-        }) {
-            policy.enforce_required_model();
+                .constrain_guardian_policy(&mut policy, &model.slug);
         }
-        let mode = policy.mode(input.category);
+        let mode = policy.review_mode(input.category);
         if mode != GuardianReviewMode::Adaptive {
             record_fast_decision(input.metrics.as_deref(), "deferred", "out_of_scope");
         }
@@ -128,7 +131,7 @@ async fn cached_evidence(
     thread: &CodexThread,
     input: &ApprovalDecisionInput<'_>,
     config: &GuardianV2Config,
-    policy: &GuardianPolicy,
+    policy: &GuardianModelPolicy,
 ) -> Result<(), GuardianReviewReason> {
     let store = input.thread_store;
     let metrics = input.metrics.as_deref();
@@ -160,14 +163,12 @@ async fn cached_evidence(
         record_fast_decision(metrics, "deferred", "scoring_failure");
         return Err(GuardianReviewReason::ScoringFailure);
     }
-    let context_mode = store
-        .get_or_init(GuardianReviewEvidence::default)
-        .context_mode();
+    let history = thread.conversation_history_snapshot().await;
+    let context_mode = GuardianContextMode::from_history(history.as_ref());
     if context_mode == GuardianContextMode::ThreadOwned {
         let sampler = store
             .get::<LunaSampler>()
             .ok_or(GuardianReviewReason::MissingScore)?;
-        let history = thread.conversation_history_snapshot().await;
         if select_parent_compaction(
             context_mode,
             config,
@@ -183,7 +184,7 @@ async fn cached_evidence(
     }
     let action = input.action;
     if input.category == GuardianScope::ComputerUse
-        && policy.initial_cua_call
+        && policy.allows_initial_cua_call()
         && action.get("tool_name").and_then(serde_json::Value::as_str) == Some("js")
         && action
             .get("connector_id")

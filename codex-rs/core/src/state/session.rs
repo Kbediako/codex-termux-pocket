@@ -73,7 +73,7 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
-    /// Cancels work bound to discarded history. Appends and compaction preserve it.
+    /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
@@ -84,6 +84,9 @@ pub(crate) struct SessionState {
     /// model/realtime handling on subsequent regular turns (including full-context
     /// reinjection after resume or `/compact`).
     previous_turn_settings: Option<PreviousTurnSettings>,
+    /// Latest task admitted in this runtime, retained across completion and history edits.
+    /// Cleared by standalone settings changes to invalidate pending continuation.
+    pub(crate) last_started_turn_id: Option<String>,
     /// Runtime accounting state for the active auto-compaction window.
     auto_compact_window: AutoCompactWindow,
     /// Original request effort for the current model while configuration updates remain active.
@@ -127,6 +130,7 @@ impl SessionState {
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
+            last_started_turn_id: None,
             auto_compact_window: AutoCompactWindow::new_with_ids(auto_compact_window_ids),
             reasoning_effort_pin: ReasoningEffortPin::Unset,
             startup_prewarm: None,
@@ -191,12 +195,19 @@ impl SessionState {
         reference_context_item: Option<TurnContextItem>,
         replacement: HistoryReplacement,
     ) {
-        match replacement {
-            HistoryReplacement::Compaction => self.history.replace_compacted(items),
+        let invalidate_reviews = match replacement {
+            HistoryReplacement::Compaction {
+                reviewer_compaction_hash,
+            } => self
+                .history
+                .replace_compacted(items, reviewer_compaction_hash.as_deref()),
             HistoryReplacement::Reset => {
                 self.history.replace_annotated(items);
-                std::mem::take(&mut self.history_reset).cancel();
+                true
             }
+        };
+        if invalidate_reviews {
+            std::mem::take(&mut self.history_reset).cancel();
         }
         self.history
             .set_reference_context_item(reference_context_item);

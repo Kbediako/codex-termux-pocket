@@ -19,7 +19,6 @@ use std::collections::HashSet;
 #[derive(Clone, Copy)]
 pub(super) enum ThreadAttachPresentation {
     SessionLineage,
-    PromptEdit,
 }
 
 /// Reports whether a loaded-thread backfill completed and which descendants already had their
@@ -498,7 +497,8 @@ impl App {
         chat_widget.remote_connection = self.chat_widget.remote_connection.clone();
         chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
         chat_widget.set_local_worktree_operations(self.chat_widget.local_worktree_operations);
-        chat_widget.windows_sandbox_host = self.chat_widget.windows_sandbox_host;
+        chat_widget.windows_sandbox_local_server = self.chat_widget.windows_sandbox_local_server;
+        chat_widget.windows_sandbox_host = WindowsSandboxHost::Unknown;
         #[cfg(any(target_os = "windows", test))]
         {
             chat_widget.windows_sandbox_elevated_setup_complete =
@@ -1196,11 +1196,6 @@ impl App {
             .adjacent_thread_id(self.current_displayed_thread_id(), direction)
     }
 
-    pub(super) fn fresh_session_config(&self) -> Config {
-        let mut config = self.config.clone();
-        config.service_tier = self.chat_widget.configured_service_tier();
-        config
-    }
     pub(super) async fn resume_target_session(
         &mut self,
         tui: &mut tui::Tui,

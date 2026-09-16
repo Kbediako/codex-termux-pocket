@@ -299,7 +299,6 @@ pub enum WindowsSandboxLevel {
     Disabled,
     RestrictedToken,
     Elevated,
-    Mxc,
 }
 
 /// Controls whether a Windows sandbox launch reconciles persistent proxy settings or preserves
@@ -312,6 +311,7 @@ pub enum WindowsSandboxProxySettingsMode {
     Preserve,
 }
 
+/// Deprecated: `friendly` and `pragmatic` no longer select a style.
 #[derive(
     Debug,
     Serialize,

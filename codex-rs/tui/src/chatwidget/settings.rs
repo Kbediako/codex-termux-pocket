@@ -56,14 +56,14 @@ impl ChatWidget {
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn set_windows_sandbox_mode(&mut self, mode: Option<WindowsSandboxModeToml>) {
-        self.config.permissions.windows_sandbox_mode = mode;
+    pub(crate) fn set_windows_sandbox_mode(&mut self, mode: Option<WindowsSandboxSetupMode>) {
+        self.windows_sandbox_config.mode = mode;
         #[cfg(target_os = "windows")]
-        self.bottom_pane
-            .set_windows_degraded_sandbox_active(matches!(
-                crate::windows_sandbox::level_from_config(&self.config),
-                WindowsSandboxLevel::RestrictedToken
-            ));
+        {
+            let enabled = self.builtin_command_flags().allow_elevate_sandbox;
+            self.bottom_pane
+                .set_windows_degraded_sandbox_active(enabled);
+        }
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -117,17 +117,6 @@ impl ChatWidget {
         }
         if feature == Feature::PreventIdleSleep {
             self.turn_lifecycle.set_prevent_idle_sleep(enabled);
-        }
-        #[cfg(target_os = "windows")]
-        if matches!(
-            feature,
-            Feature::WindowsSandbox | Feature::WindowsSandboxElevated
-        ) {
-            self.bottom_pane
-                .set_windows_degraded_sandbox_active(matches!(
-                    crate::windows_sandbox::level_from_config(&self.config),
-                    WindowsSandboxLevel::RestrictedToken
-                ));
         }
         enabled
     }
@@ -213,7 +202,6 @@ impl ChatWidget {
         self.model_popup_request_id = None;
         self.invalidate_permission_discovery();
         self.invalidate_connector_scope();
-        self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();
         self.clear_backend_banner();
         self.luna_reserve_notice_account_id = None;
@@ -495,6 +483,15 @@ impl ChatWidget {
         self.refresh_status_surfaces();
         self.sync_service_tier_commands();
         if cwd_changed {
+            #[cfg(target_os = "windows")]
+            if self.windows_sandbox_local_server
+                && let Some(thread_id) = self.thread_id
+            {
+                self.windows_sandbox_config = Default::default();
+                self.set_windows_sandbox_mode(/*mode*/ None);
+                self.app_event_tx
+                    .send(AppEvent::RefreshWindowsSandbox { thread_id });
+            }
             self.invalidate_connector_scope();
             self.refresh_skills_for_current_cwd(/*force_reload*/ true);
             self.refresh_connector_mentions(/*force_refresh*/ false);
@@ -700,7 +697,6 @@ impl ChatWidget {
                 /*approvals_reviewer*/ None,
                 /*permission_profile*/ None,
                 /*active_permission_profile*/ None,
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,

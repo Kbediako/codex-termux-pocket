@@ -116,11 +116,11 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_app_server_protocol::WindowsSandboxSetupMode;
 use codex_config::Constrained;
 use codex_config::ConstraintResult;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::Notifications;
-use codex_config::types::WindowsSandboxModeToml;
 use codex_connectors::AppInfo;
 use codex_features::Feature;
 #[cfg(test)]
@@ -142,7 +142,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -380,6 +380,7 @@ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popup_state;
 mod model_popups;
 mod notifications;
+mod session_model_selection;
 use self::notifications::Notification;
 mod permission_discovery;
 mod permission_popups;
@@ -445,12 +446,11 @@ use self::status_surfaces::CachedProjectRootName;
 mod thread_title_status;
 mod thread_usage;
 pub(crate) use self::thread_usage::ThreadUsageOutcome;
-mod tokens;
-pub(crate) use self::tokens::TokenActivityView;
 mod tool_lifecycle;
 mod tool_requests;
 mod transcript;
 mod transcript_export;
+mod usage_history;
 use self::transcript::TranscriptState;
 mod turn_lifecycle;
 mod turn_runtime;
@@ -601,6 +601,8 @@ pub(crate) struct ChatWidget {
     pub(crate) snapshot_local_images: bool,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
     pub(crate) local_worktree_operations: bool,
+    pub(crate) windows_sandbox_local_server: bool,
+    pub(crate) windows_sandbox_config: crate::windows_sandbox::WindowsSandboxConfig,
     pub(crate) windows_sandbox_host: crate::app::WindowsSandboxHost,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) windows_sandbox_elevated_setup_complete: bool,
@@ -610,9 +612,6 @@ pub(crate) struct ChatWidget {
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
     next_status_refresh_request_id: u64,
-    refreshing_token_activity_output: Option<tokens::PendingTokenActivityOutput>,
-    completed_token_activity_output: Option<history_cell::CompositeHistoryCell>,
-    next_token_activity_request_id: u64,
     pending_rate_limit_reset_request_id: Option<u64>,
     pending_rate_limit_reset_idempotency_key: Option<String>,
     rate_limit_reset_picker_request_id: Option<u64>,
@@ -870,7 +869,6 @@ pub(crate) enum ReplayKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionConfiguredDisplay {
     Normal,
-    PromptEdit,
     /// Apply session state without emitting the session info cell.
     Quiet,
     SideConversation,
@@ -1067,8 +1065,10 @@ impl ChatWidget {
         let snapshot = self.feedback.snapshot(self.thread_id);
         #[cfg(target_os = "windows")]
         let include_windows_sandbox_log =
-            codex_windows_sandbox::current_log_file_path_for_codex_home(&self.config.codex_home)
-                .is_file();
+            codex_windows_sandbox::current_log_file_path_for_codex_home(
+                &self.local_settings.codex_home,
+            )
+            .is_file();
         #[cfg(not(target_os = "windows"))]
         let include_windows_sandbox_log = false;
         let params = crate::bottom_pane::feedback_upload_consent_params(
@@ -1985,7 +1985,6 @@ impl ChatWidget {
     pub(crate) fn active_cell_transcript_key(&self) -> Option<ActiveCellTranscriptKey> {
         let cell = self.transcript.active_cell.as_ref();
         let mut realtime_cells = self.realtime_conversation.live_transcript_cells();
-        let token_activity_cell = self.pending_token_activity_output();
         let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
         if cell.is_none()
             && self
@@ -1994,7 +1993,6 @@ impl ChatWidget {
                 .next()
                 .is_none()
             && self.realtime_conversation.pending_history_cells.is_empty()
-            && token_activity_cell.is_none()
             && rate_limit_reset_hint.is_none()
         {
             return None;
@@ -2035,13 +2033,6 @@ impl ChatWidget {
                 lines.push(HyperlinkLine::from(""));
             }
             lines.extend(realtime_lines);
-        }
-        if let Some(token_activity_cell) = self.pending_token_activity_output() {
-            let token_activity_lines = token_activity_cell.transcript_hyperlink_lines(width);
-            if !token_activity_lines.is_empty() && !lines.is_empty() {
-                lines.push(HyperlinkLine::from(""));
-            }
-            lines.extend(token_activity_lines);
         }
         if let Some(rate_limit_reset_hint) = self.pending_rate_limit_reset_hint() {
             let hint_lines = rate_limit_reset_hint.transcript_hyperlink_lines(width);
