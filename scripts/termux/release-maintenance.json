@@ -1,9 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha15511-record-20260917",
-  "operation": "record-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.11",
-  "upstream_tag_object": "795d3d07f9c0660f1ed66e96fae066cfec59ab12",
-  "upstream_commit": "5840d702b85f6bb65568e0371b5fcf1919b28611",
-  "prepared_commit": "1a923226189428c68c58b92d52bb541b6ebafbce"
+  "request_id": "alpha15511-controls-pre-20260917",
+  "operation": "dispatch-checks",
+  "phase": "pre"
 }
