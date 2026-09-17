@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   attestations: read
 
 concurrency:
@@ -45,6 +46,21 @@ jobs:
             echo "::error::A force push to main was observed. Audit the rewritten history immediately."
             exit 1
           fi
+
+      - name: Collect read-only workflow registry evidence
+        shell: bash
+        run: >-
+          python3 .github/scripts/termux_workflow_registry.py
+          --output "$RUNNER_TEMP/termux-workflow-registry.json"
+
+      - name: Retain workflow registry evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: termux-workflow-registry-evidence
+          path: ${{ runner.temp }}/termux-workflow-registry.json
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Verify the promoted public release
         shell: bash

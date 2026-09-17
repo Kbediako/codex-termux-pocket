@@ -128,3 +128,19 @@ The publisher also contains the permanent read-only `route` job and bounded
 exact-head check dispatch, and explicitly closed PR branch retirement. They do
 not publish or promote releases, edit workflow YAML, or add an alternate release
 writer. See [the request contract](../scripts/termux_release/MAINTENANCE.md).
+
+## Retained workflow registry evidence
+
+Governance also collects authenticated, GET-only workflow registry metadata and
+unfinished-run inventories into `termux-workflow-registry-evidence` (30 days).
+For observed workflow identities whose YAML is absent from the audited checkout,
+it retains each exact lookup's HTTP status and JSON body. Pagination is bounded
+and incomplete, denied or inconsistent collections fail rather than implying
+absence. The artifact records its repository, audit SHA, run ID and observation
+time; it never includes request headers or credentials.
+
+This is evidence collection, not a historical-run waiver or release approval.
+A disabled or registered identity must not be reported absent. Maintainers still
+apply every historical-run condition in the release runbook and inspect the live
+state before publication. No workflow or run is cancelled, disabled or deleted;
+all existing public-channel, source, checksum and provenance checks remain.
