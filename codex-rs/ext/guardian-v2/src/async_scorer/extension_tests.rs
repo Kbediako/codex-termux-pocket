@@ -24,6 +24,7 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_guardian_context::truncate_text as truncate_entry;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -31,6 +32,7 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -87,7 +89,6 @@ use crate::async_scorer::sampler::tests::proxy_websocket_servers_with_http;
 use crate::async_scorer::score::GuardianV2ScoreProgress;
 use crate::async_scorer::transcript::MAX_MESSAGE_ENTRY_TOKENS;
 use crate::async_scorer::transcript::MAX_TOOL_ENTRY_TOKENS;
-use crate::async_scorer::transcript::truncate_entry;
 use codex_features::GuardianV2ReviewScopeConfigToml;
 use codex_protocol::openai_models::GuardianModelPolicy;
 
@@ -443,8 +444,15 @@ impl ConversationHistorySnapshot for TestRetainedHistory {
         self.retained_context.as_ref()
     }
 
-    fn latest_compaction_model_hash(&self) -> Option<&str> {
-        self.compaction_model_hash.as_deref()
+    fn latest_compaction(&self) -> Option<codex_history::CompactionCheckpoint<'_>> {
+        self.items()
+            .filter_map(|item| {
+                codex_history::CompactionCheckpoint::from_item(
+                    item,
+                    self.compaction_model_hash.as_deref(),
+                )
+            })
+            .last()
     }
     fn history_version(&self) -> u64 {
         self.current.history_version()
@@ -1279,6 +1287,9 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1318,6 +1329,9 @@ max_classifier_instruction_tokens = 256
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": truncate_entry(
@@ -1399,6 +1413,9 @@ max_recent_non_user_entries = 8
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1660,6 +1677,8 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
 
     let user_image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgEpEDAABoAD1UCKP3AAAAAElFTkSuQmCC";
     let tool_image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQE+ECAACQAD304kFaAAAAAElFTkSuQmCC";
+    let user_file_id = "file_user";
+    let tool_file_id = "file_tool";
     let history = vec![
         ResponseItem::Message {
             id: None,
@@ -1671,6 +1690,12 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
                 ContentItem::InputImage {
                     image: ImageReference::Inline {
                         image_url: user_image.to_owned(),
+                    },
+                    detail: Some(ImageDetail::High),
+                },
+                ContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: user_file_id.to_owned(),
                     },
                     detail: Some(ImageDetail::High),
                 },
@@ -1702,6 +1727,12 @@ async fn contributor_includes_transcript_images_by_default() -> Result<()> {
                     },
                     detail: Some(ImageDetail::High),
                 },
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: tool_file_id.to_owned(),
+                    },
+                    detail: Some(ImageDetail::High),
+                },
             ]),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1723,7 +1754,7 @@ enabled = true
         .expect("Luna user content should be an array");
 
     assert_eq!(
-        content[content.len() - 2..],
+        content[content.len() - 4..],
         [
             json!({
                 "type": "input_image",
@@ -1731,7 +1762,15 @@ enabled = true
             }),
             json!({
                 "type": "input_image",
+                "file_id": user_file_id,
+            }),
+            json!({
+                "type": "input_image",
                 "image_url": tool_image,
+            }),
+            json!({
+                "type": "input_image",
+                "file_id": tool_file_id,
             }),
         ]
     );
@@ -1798,6 +1837,9 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
                 "text": format!(
@@ -1971,9 +2013,12 @@ async fn assert_luna_pool_context(thread_context_enabled: bool) -> Result<()> {
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions().replace(
                     "{{ tenant_policy_config }}",
                     TEST_GUARDIAN_POLICY,
                 ),
@@ -2577,9 +2622,12 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS.replace(
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions().replace(
                     "{{ tenant_policy_config }}",
                     TEST_CATALOG_GUARDIAN_POLICY,
                 ),
@@ -2620,9 +2668,12 @@ async fn contributor_preserves_uncapped_classifier_instructions() -> Result<()> 
             "type": "message",
             "id": request["input"][1]["id"],
             "role": "developer",
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
             "content": [{
                 "type": "input_text",
-                "text": crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+                "text": ResolvedModelMessages::bundled().guardian_classifier_instructions()
                     .replace("{{ tenant_policy_config }}", &guardian_policy),
             }],
         })
@@ -2651,7 +2702,8 @@ async fn contributor_bounds_configured_policy_in_luna_developer_instructions() -
         .as_str()
         .expect("Luna request should contain developer instructions");
 
-    let (prefix, suffix) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, suffix) = ResolvedModelMessages::bundled()
+        .guardian_classifier_instructions()
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(instructions.starts_with(&format!("{prefix}Reject unsafe uploads.")));
@@ -3057,7 +3109,8 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
     assert_eq!(request["input"][0]["type"], "additional_tools");
     let developer_message = &request["input"][1];
     assert_eq!(developer_message["role"], "developer");
-    let (prefix, _) = crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+    let (prefix, _) = ResolvedModelMessages::bundled()
+        .guardian_classifier_instructions()
         .split_once("{{ tenant_policy_config }}")
         .expect("default classifier prompt should contain the policy placeholder");
     assert!(

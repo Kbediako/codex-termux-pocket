@@ -45,6 +45,7 @@ use codex_mcp::auth_elicitation_completed_result;
 use codex_mcp::build_auth_elicitation_plan;
 use codex_mcp::is_connector_auth_failure_from_tool_result;
 use codex_mcp::mcp_permission_prompt_is_auto_approved;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::items::McpAppDisplayMode;
 use codex_protocol::items::McpAppUi;
@@ -330,7 +331,10 @@ pub(crate) async fn handle_mcp_tool_call(
                     &call_id,
                     invocation,
                     item_metadata.clone(),
-                    crate::guardian::guardian_timeout_message(turn_context.model_info()),
+                    ResolvedModelMessages::from_model(turn_context.model_info())
+                        .auto_review()
+                        .timeout_instructions
+                        .to_string(),
                     /*already_started*/ true,
                 )
                 .await
@@ -777,7 +781,7 @@ async fn maybe_request_codex_apps_auth_elicitation(
         url: plan.elicitation.url,
         elicitation_id: plan.elicitation.elicitation_id,
     };
-    let response = sess
+    let outcome = match sess
         .request_mcp_server_elicitation(
             turn_context,
             CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -785,8 +789,33 @@ async fn maybe_request_codex_apps_auth_elicitation(
             request,
         )
         .await
-        .response;
-    if !response
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mut result = result;
+            // Direct output prefers structured content. Preserve its diagnostic as
+            // text so both output paths show it alongside the recovery guidance.
+            if let Some(structured_content) = result.structured_content.take() {
+                result.content.push(serde_json::json!({
+                    "type": "text",
+                    "text": structured_content.to_string(),
+                }));
+            }
+            result.content.insert(
+                /*index*/ 0,
+                serde_json::json!({
+                    "type": "text",
+                    "text": format!(
+                        "Authentication for {} could not be completed. {error}",
+                        plan.auth_failure.connector_name
+                    ),
+                }),
+            );
+            return result;
+        }
+    };
+    if !outcome
+        .response
         .as_ref()
         .is_some_and(|response| response.action == ElicitationAction::Accept)
     {
@@ -1355,12 +1384,8 @@ fn build_confirmation_policies_request_meta(
     }
 
     let mut policies = serde_json::Map::new();
-    if let Some(confirmation_policies) = step_context
-        .settings
-        .model_info
-        .model_messages
-        .as_ref()
-        .and_then(|messages| messages.confirmation_policies.as_ref())
+    if let Some(confirmation_policies) =
+        ResolvedModelMessages::from_model(&step_context.settings.model_info).confirmation_policies()
     {
         for (name, policy) in [
             ("browser_use", confirmation_policies.browser_use.as_ref()),
@@ -1597,6 +1622,10 @@ pub(crate) async fn request_mcp_tool_user_approval(
         );
     }
 
+    if turn_context.session_source.is_non_root_agent() {
+        return ReviewDecision::denied(codex_mcp::MCP_ELICITATION_HANDOFF_MESSAGE);
+    }
+
     let tool_call_mcp_elicitation_enabled = turn_context
         .config
         .features
@@ -1662,9 +1691,13 @@ pub(crate) async fn request_mcp_tool_user_approval(
                     .map(|rendered_template| rendered_template.elicitation_message.as_str()),
                 prompt_options,
             });
-        let outcome = sess
+        let outcome = match sess
             .request_mcp_server_elicitation(turn_context, server.clone(), request_id, request)
-            .await;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return ReviewDecision::denied(error.to_string()),
+        };
         (
             outcome.sent,
             parse_mcp_tool_approval_elicitation_response(outcome.response, &question_id),

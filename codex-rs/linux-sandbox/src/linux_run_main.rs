@@ -181,34 +181,34 @@ pub fn run_main() -> ! {
     if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
     }
-    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
     let EffectivePermissions {
         mut permission_profile,
         mut file_system_sandbox_policy,
         mut network_sandbox_policy,
     } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
     let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);
-    if termux_fallback
-        && file_system_sandbox_policy
-            .needs_direct_runtime_enforcement(network_sandbox_policy, &sandbox_policy_cwd)
-    {
-        // Landlock is monotonic and cannot express a read-only carve-out (for
-        // example `.git`) below a writable workspace. Fail closed to the
-        // read-only profile; a write then follows Codex's normal approval path
-        // instead of silently weakening the requested policy.
+    if termux_fallback && !file_system_sandbox_policy.has_full_disk_write_access() {
+        // Termux cannot isolate the daemon socket directory with bubblewrap.
+        // Do not widen restricted reads or preserve a network grant here.
+        // Reduce supported profiles to global read-only with no sockets, and
+        // install socket isolation before permitting the legacy backend.
+        if !file_system_sandbox_policy.has_full_disk_read_access() {
+            panic!("Termux restricted-read policies require bubblewrap");
+        }
         permission_profile = PermissionProfile::read_only();
         (file_system_sandbox_policy, network_sandbox_policy) =
             permission_profile.to_runtime_permissions();
+        crate::termux_socket_isolation::install_on_current_thread()
+            .unwrap_or_else(|err| panic!("failed to isolate Termux command sockets: {err}"));
     }
     use_legacy_landlock |= termux_fallback;
-    ensure_legacy_landlock_mode_supports_policy(
-        use_legacy_landlock,
-        &file_system_sandbox_policy,
-        network_sandbox_policy,
-        allow_network_for_proxy,
-        &sandbox_policy_cwd,
-        Path::new(WSL_INTEROP_DIR),
-    );
+    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
+    if !termux_fallback {
+        ensure_legacy_landlock_mode_supports_policy(
+            use_legacy_landlock,
+            &file_system_sandbox_policy,
+        );
+    }
 
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
@@ -434,30 +434,9 @@ fn ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec: bool, use_legacy_la
 fn ensure_legacy_landlock_mode_supports_policy(
     use_legacy_landlock: bool,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
-    network_sandbox_policy: NetworkSandboxPolicy,
-    allow_network_for_proxy: bool,
-    sandbox_policy_cwd: &Path,
-    wsl_interop_dir: &Path,
 ) {
-    if use_legacy_landlock
-        && file_system_sandbox_policy
-            .needs_direct_runtime_enforcement(network_sandbox_policy, sandbox_policy_cwd)
-    {
-        panic!(
-            "permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock"
-        );
-    }
-    if use_legacy_landlock
-        && network_sandbox_policy.is_enabled()
-        && !allow_network_for_proxy
-        && !file_system_sandbox_policy.has_full_disk_write_access()
-        // Interop can use another binfmt handler or a newly created socket.
-        // An active endpoint probe would race with sandboxed command startup.
-        && wsl_interop_dir.is_dir()
-    {
-        panic!(
-            "legacy Landlock cannot isolate WSL Windows interop with network access enabled; use bubblewrap or restrict network access"
-        );
+    if use_legacy_landlock && !file_system_sandbox_policy.has_full_disk_write_access() {
+        panic!("filesystem-restricted execution requires bubblewrap to isolate app-server sockets");
     }
 }
 

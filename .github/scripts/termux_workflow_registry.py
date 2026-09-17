@@ -133,13 +133,13 @@ def collect(client, workflow_dir, report):
     report["registered_workflows"] = workflows
     runs = report["unfinished_runs"] = {}
     for status in ACTIVE_STATUSES:
-        runs[status] = collection(client, f"/actions/runs?status={status}", "workflow_runs")
+        runs[status] = collection(
+            client, f"/actions/runs?status={status}", "workflow_runs"
+        )
     # Obtain exact metadata for every observed identity whose file is absent.
     # An identity returned by the registry remains present even if disabled.
     missing = {
-        positive_id(item["id"])
-        for item in workflows
-        if item.get("path") not in paths
+        positive_id(item["id"]) for item in workflows if item.get("path") not in paths
     }
     for batch in runs.values():
         missing.update(
@@ -148,7 +148,9 @@ def collect(client, workflow_dir, report):
             if item.get("path") not in paths
         )
     if len(missing) > 100:
-        raise AuditError("too many missing-file workflow identities for one bounded audit")
+        raise AuditError(
+            "too many missing-file workflow identities for one bounded audit"
+        )
     lookups = report["missing_file_workflow_lookups"] = {}
     for identity in sorted(missing):
         response = client.get(f"/actions/workflows/{identity}")
@@ -180,14 +182,20 @@ def main():
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", report["audit_sha"]):
             raise AuditError("GITHUB_SHA must identify the exact audit checkout")
-        client = GitHubReads(report["repository"], os.environ.get("GH_TOKEN"), report["responses"])
+        client = GitHubReads(
+            report["repository"], os.environ.get("GH_TOKEN"), report["responses"]
+        )
         collect(client, Path(__file__).resolve().parents[1] / "workflows", report)
     except (AuditError, OSError, urllib.error.URLError) as exc:
         report["error"] = str(exc)
         result = 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"workflow-registry: collection_complete={report['collection_complete']}; {args.output}")
+    args.output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(
+        f"workflow-registry: collection_complete={report['collection_complete']}; {args.output}"
+    )
     if result:
         print(f"workflow-registry: {report['error']}", file=sys.stderr)
     return result

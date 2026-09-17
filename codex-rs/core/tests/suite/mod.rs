@@ -39,6 +39,7 @@ mod additional_context;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
@@ -112,6 +113,7 @@ mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
+mod mcp_subagent_elicitation;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;

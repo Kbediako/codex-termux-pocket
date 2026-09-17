@@ -10,6 +10,8 @@ mod bundled_bwrap;
 #[cfg(target_os = "linux")]
 mod bwrap;
 #[cfg(target_os = "linux")]
+mod daemon_mounts;
+#[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]
 mod fd_mount;
@@ -24,6 +26,8 @@ mod linux_run_main;
 mod proxy_lifecycle;
 #[cfg(target_os = "linux")]
 mod proxy_routing;
+#[cfg(target_os = "linux")]
+mod termux_socket_isolation;
 #[cfg(target_os = "linux")]
 mod wslg;
 

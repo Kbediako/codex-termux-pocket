@@ -10,6 +10,7 @@ use codex_mcp::ElicitationReviewRequest;
 use codex_mcp::ElicitationReviewer;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -555,16 +556,20 @@ impl Session {
         server_name: String,
         request_id: RequestId,
         request: ElicitationRequest,
-    ) -> McpServerElicitationOutcome {
+    ) -> anyhow::Result<McpServerElicitationOutcome> {
+        anyhow::ensure!(
+            !turn_context.session_source.is_non_root_agent(),
+            codex_mcp::MCP_ELICITATION_HANDOFF_MESSAGE
+        );
         if self.services.mcp_runtime.elicitations_auto_deny() {
-            return McpServerElicitationOutcome {
+            return Ok(McpServerElicitationOutcome {
                 response: Some(ElicitationResponse {
                     action: codex_rmcp_client::ElicitationAction::Accept,
                     content: Some(serde_json::json!({})),
                     meta: None,
                 }),
                 sent: false,
-            };
+            });
         }
 
         let _elicitation = self.services.elicitations.register();
@@ -616,10 +621,10 @@ impl Session {
                     plugin_install_telemetry.tool_name.as_str(),
                 );
         }
-        McpServerElicitationOutcome {
+        Ok(McpServerElicitationOutcome {
             response: rx_response.await.ok(),
             sent: true,
-        }
+        })
     }
 
     #[expect(
@@ -1159,7 +1164,10 @@ fn mcp_elicitation_response_from_guardian_decision(
         },
         ReviewDecision::Denied { rejection } => mcp_elicitation_decline_with_message(rejection),
         ReviewDecision::TimedOut => mcp_elicitation_decline_with_message(
-            crate::guardian::guardian_timeout_message(model_info),
+            ResolvedModelMessages::from_model(model_info)
+                .auto_review()
+                .timeout_instructions
+                .to_string(),
         ),
         ReviewDecision::Abort => ElicitationResponse {
             action: ElicitationAction::Cancel,

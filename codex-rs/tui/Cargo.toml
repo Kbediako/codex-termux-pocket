@@ -47,6 +47,7 @@ codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
+codex-mermaid = { workspace = true }
 codex-message-history = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
@@ -118,6 +119,7 @@ tokio = { workspace = true, features = [
 ] }
 tokio-stream = { workspace = true, features = ["sync"] }
 toml = { workspace = true }
+toml_edit = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -150,6 +152,8 @@ windows-sys = { version = "0.52", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RemoteDesktop",
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Threading",

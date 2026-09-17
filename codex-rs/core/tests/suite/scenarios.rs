@@ -1,5 +1,7 @@
 //! Multi-turn Astra scenarios snapshot the model-visible request history of shipped features.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -14,21 +16,31 @@ use codex_config::ConfigLayerStack;
 use codex_config::types::McpServerConfig;
 use codex_context_fragments::AnsweredQuestion;
 use codex_context_fragments::ContextualUserFragment;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_exec_server::EnvironmentManager;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_skills_extension::ExecutorSkillProvider;
+use codex_skills_extension::SkillProviders;
 use codex_skills_extension::SkillsExtensionConfig;
 use codex_skills_extension::install;
+use codex_skills_extension::install_with_providers;
+use codex_utils_path_uri::PathUri;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::SnapshotEntry;
@@ -409,6 +421,112 @@ async fn astra_kickoff_with_skills_plugins_and_remote_compaction() -> Result<()>
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_omits_disabled_executor_skills_from_model_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let skill_files = TempDir::new()?;
+    let skill_root = fs::canonicalize(skill_files.path())?.join("skills");
+    let disabled = write_skill(
+        &skill_root.join("retired-helper"),
+        "retired-helper",
+        "Use the retired workflow",
+        "Follow the retired workflow.",
+    )?;
+    write_skill(
+        &skill_root.join("active-helper"),
+        "active-helper",
+        "Use the current workflow",
+        "Follow the current workflow.",
+    )?;
+    let provider = ExecutorSkillProvider::new_with_restriction_product(
+        Arc::new(EnvironmentManager::default_for_tests()),
+        /*restriction_product*/ None,
+    )
+    .with_disabled_skill_paths(HashMap::from([(
+        LOCAL_ENVIRONMENT_ID.to_string(),
+        HashSet::from([PathUri::from_host_native_path(disabled)?]),
+    )]));
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    install_with_providers(
+        &mut extensions,
+        SkillProviders::new().with_executor_provider(Arc::new(provider)),
+        |config: &Config| SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
+            bundled_skills_enabled: false,
+            orchestrator_skills_enabled: false,
+            shadow_selection_enabled: false,
+        },
+    );
+    let mock = mount_sse_sequence(
+        &server,
+        vec![sse(vec![
+            ev_assistant_message("skills", "The active-helper skill is available."),
+            ev_completed("skills-response"),
+        ])],
+    )
+    .await;
+    let test = test_codex()
+        .with_model("gpt-6-astra")
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(configure_scenario_catalog)
+        .build(&server)
+        .await?;
+    let skill_root = PathUri::from_host_native_path(skill_root)?;
+    let root_locator = format!(
+        "skill://workspace-skills/{}",
+        skill_root
+            .inferred_native_path_string()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(vec![SelectedCapabilityRoot {
+        id: "workspace-skills".to_string(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            path: skill_root,
+        },
+    }]);
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            thread_extension_init,
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![text(
+            "Which workflow skills are available?",
+        )]))
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    let mut body = requests[0].body_json();
+    let input = body["input"].to_string();
+    assert!(input.contains("active-helper"));
+    assert!(!input.contains("retired-helper"));
+    // Normalize opaque skill locators before snapshot truncation and hashing.
+    body["input"] = serde_json::from_str(
+        &input.replace(&root_locator, "skill://workspace-skills/<SKILLS_ROOT>"),
+    )?;
+    insta::assert_snapshot!(
+        "astra_disabled_executor_skills",
+        context_snapshot::format_context_snapshot(
+            "Astra sees the active executor skill while the caller-disabled skill is omitted.",
+            &[SnapshotEntry::body(&body)],
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
 #[cfg_attr(windows, ignore = "the fixture uses a Unix shell command")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn astra_settings_release_check_with_direct_and_code_mode_tools() -> Result<()> {
@@ -639,6 +757,30 @@ async fn astra_refreshes_plugin_tools_and_skills_in_an_existing_thread() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_browser_auth_returns_handoff_without_prompting() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "the MCP fixture requires a host Python interpreter");
+    use super::mcp_subagent_elicitation::Caller;
+    use super::mcp_subagent_elicitation::RequestKind;
+    use super::mcp_subagent_elicitation::mcp_server_elicitation_scenario;
+
+    let requests =
+        mcp_server_elicitation_scenario(Caller::Subagent, RequestKind::BrowserAuth).await?;
+    let snapshot = context_snapshot::format_request_history_snapshot(
+        "An MCP browser sign-in request fails in a subagent without prompting the user; the next model request contains guidance to ask the parent.",
+        &requests,
+        &ContextSnapshotOptions::default()
+            .rewrite_known_segments()
+            .include_request_settings(),
+    );
+    let snapshot = regex_lite::Regex::new(r"Wall time: [0-9]+(?:\.[0-9]+)? seconds")?
+        .replace_all(&snapshot, "Wall time: <DURATION> seconds")
+        .into_owned();
+    insta::assert_snapshot!("subagent_browser_auth_handoff", snapshot);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_checkpoint_migration_request_history() -> Result<()> {
     skip_if_no_network!(Ok(()));
     use super::guardian_checkpoint_migration::migration_scenario;
@@ -663,5 +805,26 @@ async fn guardian_checkpoint_migration_request_history() -> Result<()> {
             .into_owned();
     }
     insta::assert_snapshot!("guardian_checkpoint_migration", snapshot);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_tool_exposure_request_history() -> Result<()> {
+    let requests = super::app_tool_exposure::connector_exposure_requests(
+        super::app_tool_exposure::ExposureCase::non_deferred(
+            codex_protocol::openai_models::ToolMode::CodeModeOnly,
+        ),
+    )
+    .await?;
+    insta::assert_snapshot!(
+        "app_tool_exposure_CodeModeOnly",
+        context_snapshot::format_request_history_snapshot(
+            "A non-deferred connector is called through code mode while another connector stays deferred.",
+            &requests,
+            &ContextSnapshotOptions::default()
+                .rewrite_known_segments()
+                .include_request_settings(),
+        )
+    );
     Ok(())
 }

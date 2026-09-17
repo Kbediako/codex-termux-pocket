@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from termux_workflow_registry import ACTIVE_STATUSES, AuditError, GitHubReads, collect, collection
+from termux_workflow_registry import (
+    ACTIVE_STATUSES,
+    AuditError,
+    GitHubReads,
+    collect,
+    collection,
+)
 
 
 class RegistryTests(unittest.TestCase):
@@ -16,23 +22,33 @@ class RegistryTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         (self.directory / "current.yml").write_text("name: current\n", encoding="utf-8")
-        self.workflow = {"id": 1, "path": ".github/workflows/current.yml", "state": "active"}
+        self.workflow = {
+            "id": 1,
+            "path": ".github/workflows/current.yml",
+            "state": "active",
+        }
 
     def client(self, workflows=None, run=None, lookup_status=404):
         entries = [self.workflow] if workflows is None else workflows
         responses = {
             "/actions/workflows?per_page=100&page=1": {
-                "status": 200, "body": {"total_count": len(entries), "workflows": entries}
+                "status": 200,
+                "body": {"total_count": len(entries), "workflows": entries},
             }
         }
         for status in ACTIVE_STATUSES:
             batch = [run] if run and status == "queued" else []
             responses[f"/actions/runs?status={status}&per_page=100&page=1"] = {
-                "status": 200, "body": {"total_count": len(batch), "workflow_runs": batch}
+                "status": 200,
+                "body": {"total_count": len(batch), "workflow_runs": batch},
             }
         responses["/actions/workflows/2"] = {
             "status": lookup_status,
-            "body": {"id": 2, "state": "disabled_manually"} if lookup_status == 200 else {"message": "Not Found"},
+            "body": (
+                {"id": 2, "state": "disabled_manually"}
+                if lookup_status == 200
+                else {"message": "Not Found"}
+            ),
         }
         return Mock(get=Mock(side_effect=lambda route: responses[route]))
 
@@ -49,14 +65,19 @@ class RegistryTests(unittest.TestCase):
         run = {"id": 9, "workflow_id": 2, "path": ".github/workflows/removed.yml"}
         report = {}
         collect(self.client(run=run), self.directory, report)
-        self.assertEqual(report["missing_file_workflow_lookups"]["2"], {
-            "status": 404, "body": {"message": "Not Found"}
-        })
+        self.assertEqual(
+            report["missing_file_workflow_lookups"]["2"],
+            {"status": 404, "body": {"message": "Not Found"}},
+        )
         self.assertEqual(report["unfinished_runs"]["queued"], [run])
         self.assertTrue(report["collection_complete"])
 
     def test_disabled_identity_remains_present_and_is_queried_once(self):
-        old = {"id": 2, "path": ".github/workflows/removed.yml", "state": "disabled_manually"}
+        old = {
+            "id": 2,
+            "path": ".github/workflows/removed.yml",
+            "state": "disabled_manually",
+        }
         run = {"id": 9, "workflow_id": 2, "path": old["path"]}
         client = self.client([self.workflow, old], run, 200)
         report = {}
@@ -75,30 +96,59 @@ class RegistryTests(unittest.TestCase):
 
     def test_all_pages_are_collected(self):
         entries = [{"id": n} for n in range(1, 103)]
-        client = Mock(get=Mock(side_effect=[
-            {"status": 200, "body": {"total_count": 102, "workflows": entries[:100]}},
-            {"status": 200, "body": {"total_count": 102, "workflows": entries[100:]}},
-        ]))
+        client = Mock(
+            get=Mock(
+                side_effect=[
+                    {
+                        "status": 200,
+                        "body": {"total_count": 102, "workflows": entries[:100]},
+                    },
+                    {
+                        "status": 200,
+                        "body": {"total_count": 102, "workflows": entries[100:]},
+                    },
+                ]
+            )
+        )
         self.assertEqual(collection(client, "/actions/workflows", "workflows"), entries)
-        self.assertEqual(client.get.call_args.args[0], "/actions/workflows?per_page=100&page=2")
+        self.assertEqual(
+            client.get.call_args.args[0], "/actions/workflows?per_page=100&page=2"
+        )
 
     def test_invalid_or_incomplete_collection_fails(self):
         cases = [
             {"status": 404, "body": {"message": "Not Found"}},
             {"status": 200, "body": {"total_count": 2, "workflows": [{"id": 1}]}},
-            {"status": 200, "body": {"total_count": 2, "workflows": [{"id": 1}, {"id": 1}]}},
+            {
+                "status": 200,
+                "body": {"total_count": 2, "workflows": [{"id": 1}, {"id": 1}]},
+            },
             {"status": 200, "body": {"total_count": 2001, "workflows": []}},
             {"status": 200, "body": {"total_count": 1, "workflows": [{"id": True}]}},
         ]
         for response in cases:
             with self.subTest(response=response), self.assertRaises(AuditError):
-                collection(Mock(get=Mock(return_value=response)), "/actions/workflows", "workflows")
+                collection(
+                    Mock(get=Mock(return_value=response)),
+                    "/actions/workflows",
+                    "workflows",
+                )
 
     def test_changed_total_fails(self):
-        client = Mock(get=Mock(side_effect=[
-            {"status": 200, "body": {"total_count": 101, "workflows": [{"id": n} for n in range(1, 101)]}},
-            {"status": 200, "body": {"total_count": 100, "workflows": []}},
-        ]))
+        client = Mock(
+            get=Mock(
+                side_effect=[
+                    {
+                        "status": 200,
+                        "body": {
+                            "total_count": 101,
+                            "workflows": [{"id": n} for n in range(1, 101)],
+                        },
+                    },
+                    {"status": 200, "body": {"total_count": 100, "workflows": []}},
+                ]
+            )
+        )
         with self.assertRaisesRegex(AuditError, "changed during pagination"):
             collection(client, "/actions/workflows", "workflows")
 
@@ -117,12 +167,21 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(records[0]["request_id"], "test-request")
 
     def test_unsupported_routes_and_repository_values_fail_before_network(self):
-        for repo in ("owner/repo/extra", "owner/repo?token=x", "https://evil.invalid/repo"):
+        for repo in (
+            "owner/repo/extra",
+            "owner/repo?token=x",
+            "https://evil.invalid/repo",
+        ):
             with self.subTest(repo=repo), self.assertRaises(AuditError):
                 GitHubReads(repo, "test", [])
         client = GitHubReads("owner/repo", "test", [])
         client.opener = Mock()
-        for route in ("/actions/workflows/2/disable", "/actions/runs/9/cancel", "/../secrets", "https://evil.invalid"):
+        for route in (
+            "/actions/workflows/2/disable",
+            "/actions/runs/9/cancel",
+            "/../secrets",
+            "https://evil.invalid",
+        ):
             with self.subTest(route=route), self.assertRaises(AuditError):
                 client.get(route)
         client.opener.open.assert_not_called()
