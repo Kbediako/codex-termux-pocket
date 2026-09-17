@@ -1,8 +1,140 @@
 {
   "format_version": 1,
-  "request_id": "alpha15516-export-20260918",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.16",
-  "upstream_tag_object": "c36696937921f6f2d364ebeefcb66bc5cfa638e8",
-  "upstream_commit": "0e2f848bf4a4e8d41a02d848a851ba126c09d185"
+  "request_id": "alpha15516-prepare-20260918",
+  "operation": "prepare-source",
+  "base_main": "57db57ef1d2d7b54d37d2bd111a6c264f58a3947",
+  "prepared_commit": "1d2592c6f3d532ee65cb4d5d652fb40a99e33dab",
+  "expected_input_tree": "3b8843f1f63a2fd9aec0e436b2892ca7fd454e0b",
+  "edits": [
+    {
+      "path": "codex-rs/Cargo.toml",
+      "before": "a2b417ac7e20495313e3b48cb6154a90c6c0bb1c",
+      "after": "20c062bd1f326f32528d962addb255a993be332b",
+      "replacements": [
+        {
+          "old": "supports-color = \"3.0.2\"\nsyntect = \"5\"\nsys-locale = \"0.3.2\"\nsystem-configuration = \"0.7\"\ntar = { version = \"=0.4.45\", default-features = false }\ntempfile = \"3.23.0\"\ntest-log = \"0.2.19\"\n",
+          "new": "supports-color = \"3.0.2\"\nsyntect = \"5\"\nsys-locale = \"0.3.2\"\nsystem-configuration = \"=0.8.0\"\ntar = { version = \"=0.4.45\", default-features = false }\ntempfile = \"3.23.0\"\ntest-log = \"0.2.19\"\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": "d474558eb85e32938635739d5049a6de46acecf6",
+      "after": "af435e90e32a30f911255a0ce2bc8bd166aa6460",
+      "replacements": [
+        {
+          "old": "use clap::Args;\nuse clap::CommandFactory;\nuse clap::Parser;\nuse clap_complete::Shell;\nuse clap_complete::generate;\n",
+          "new": "use clap::Args;\nuse clap::CommandFactory;\nuse clap::FromArgMatches;\nuse clap::Parser;\nuse clap_complete::Shell;\nuse clap_complete::generate;\n"
+        },
+        {
+          "old": "use std::io::IsTerminal;\nuse std::io::Write;\nuse std::path::PathBuf;\nuse std::sync::Arc;\nuse supports_color::Stream;\n\n",
+          "new": "use std::io::IsTerminal;\nuse std::io::Write;\nuse std::path::PathBuf;\nuse std::process::Command;\nuse std::process::Stdio;\nuse std::sync::Arc;\nuse supports_color::Stream;\n\n"
+        },
+        {
+          "old": "\n    /// Inspect feature flags.\n    Features(FeaturesCli),\n}\n\n#[derive(Debug, Parser)]\n",
+          "new": "\n    /// Inspect feature flags.\n    Features(FeaturesCli),\n\n    /// Update Codex from source on Termux.\n    #[clap(name = \"self-update\", visible_alias = \"update-self\")]\n    SelfUpdate,\n}\n\n#[derive(Debug, Parser)]\n"
+        },
+        {
+          "old": "    arg0_paths: Arg0DispatchPaths,\n    remote_control_disabled: bool,\n) -> anyhow::Result<()> {\n    let MultitoolCli {\n        config_overrides: mut root_config_overrides,\n        feature_toggles,\n        remote,\n        mut interactive,\n        subcommand,\n    } = MultitoolCli::parse();\n    // Retain the launch target through TUI exit, even if a launcher changes selection.\n    let daemon_cli_executable = arg0_paths\n        .codex_self_exe\n",
+          "new": "    arg0_paths: Arg0DispatchPaths,\n    remote_control_disabled: bool,\n) -> anyhow::Result<()> {\n    let app = command_with_version();\n    let matches = app.get_matches();\n    let MultitoolCli {\n        config_overrides: mut root_config_overrides,\n        feature_toggles,\n        remote,\n        mut interactive,\n        subcommand,\n    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n    // Retain the launch target through TUI exit, even if a launcher changes selection.\n    let daemon_cli_executable = arg0_paths\n        .codex_self_exe\n"
+        },
+        {
+          "old": "                disable_feature_in_config(&feature).await?;\n            }\n        },\n    }\n\n    Ok(())\n",
+          "new": "                disable_feature_in_config(&feature).await?;\n            }\n        },\n        Some(Subcommand::SelfUpdate) => {\n            run_self_update()?;\n        }\n    }\n\n    Ok(())\n"
+        },
+        {
+          "old": "        Some(Subcommand::Logout(_)) => Some(\"logout\"),\n        Some(Subcommand::Completion(_)) => Some(\"completion\"),\n        Some(Subcommand::Update) => Some(\"update\"),\n        Some(Subcommand::Cloud(_)) => Some(\"cloud\"),\n        Some(Subcommand::Sandbox(_)) => Some(\"sandbox\"),\n        Some(Subcommand::Debug(_)) => Some(\"debug\"),\n",
+          "new": "        Some(Subcommand::Logout(_)) => Some(\"logout\"),\n        Some(Subcommand::Completion(_)) => Some(\"completion\"),\n        Some(Subcommand::Update) => Some(\"update\"),\n        Some(Subcommand::SelfUpdate) => Some(\"self-update\"),\n        Some(Subcommand::Cloud(_)) => Some(\"cloud\"),\n        Some(Subcommand::Sandbox(_)) => Some(\"sandbox\"),\n        Some(Subcommand::Debug(_)) => Some(\"debug\"),\n"
+        },
+        {
+          "old": "}\n\nfn print_completion(cmd: CompletionCommand) {\n    let mut app = MultitoolCli::command();\n    let name = \"codex\";\n    generate(cmd.shell, &mut app, name, &mut std::io::stdout());\n}\n\n#[cfg(test)]\n",
+          "new": "}\n\nfn print_completion(cmd: CompletionCommand) {\n    let mut app = command_with_version();\n    let name = \"codex\";\n    generate(cmd.shell, &mut app, name, &mut std::io::stdout());\n}\n\nfn run_self_update() -> anyhow::Result<()> {\n    let prefix = std::env::var(\"PREFIX\").unwrap_or_default();\n    if !prefix.contains(\"com.termux\") {\n        anyhow::bail!(\n            \"self-update is supported only on Termux (PREFIX must contain \\\"com.termux\\\")\"\n        );\n    }\n\n    let src_dir = resolve_codex_src_dir()?;\n    if !src_dir.is_dir() {\n        anyhow::bail!(\n            \"codex source directory does not exist: {}\",\n            src_dir.display()\n        );\n    }\n\n    let workspace_dir = src_dir.join(\"codex-rs\");\n    if !workspace_dir.is_dir() {\n        anyhow::bail!(\n            \"codex workspace directory does not exist: {}\",\n            workspace_dir.display()\n        );\n    }\n\n    let cli_dir = workspace_dir.join(\"cli\");\n    if !cli_dir.is_dir() {\n        anyhow::bail!(\"codex CLI directory does not exist: {}\", cli_dir.display());\n    }\n    let home =\n        std::env::var(\"HOME\").map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n    let cargo_target_dir = PathBuf::from(home).join(\".cache\").join(\"codex-target\");\n\n    let mut git_fetch = Command::new(\"git\");\n    git_fetch.args([\"fetch\"]).current_dir(&src_dir);\n    run_command(&mut git_fetch, \"git fetch\")?;\n\n    let mut git_pull = Command::new(\"git\");\n    git_pull.args([\"pull\", \"--ff-only\"]).current_dir(&src_dir);\n    run_command(&mut git_pull, \"git pull --ff-only\")?;\n\n    if std::env::var(\"CODEX_TERMUX_ALLOW_SOURCE_FALLBACK\")\n        .ok()\n        .as_deref()\n        != Some(\"1\")\n    {\n        anyhow::bail!(\n            \"Termux source self-update is disabled by default: the local Android Cargo build still fails at the final V8 link (undefined symbols bcmp and __errno_location). Use codex-update-alpha --mode remote-artifact, or set CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 to retry it experimentally.\"\n        );\n    }\n\n    let (rusty_v8_archive, rusty_v8_binding_path) =\n        prepare_termux_v8_musl_overrides(&workspace_dir, &cargo_target_dir)?;\n\n    let mut cargo_install = Command::new(\"cargo\");\n    cargo_install\n        .arg(\"install\")\n        .arg(\"--path\")\n        .arg(&cli_dir)\n        .arg(\"--locked\")\n        .arg(\"--root\")\n        .arg(&prefix)\n        .arg(\"--force\")\n        .env(\"CARGO_TARGET_DIR\", &cargo_target_dir)\n        .env(\"CARGO_PROFILE_RELEASE_LTO\", \"false\")\n        .env(\"CARGO_PROFILE_RELEASE_CODEGEN_UNITS\", \"16\")\n        .env(\"CARGO_BUILD_JOBS\", \"1\")\n        .env(\"RUSTY_V8_ARCHIVE\", &rusty_v8_archive)\n        .env(\"RUSTY_V8_SRC_BINDING_PATH\", &rusty_v8_binding_path)\n        .current_dir(&workspace_dir);\n    run_command(\n        &mut cargo_install,\n        \"cargo install --locked --path <cli> --root <prefix> --force (termux low-mem)\",\n    )?;\n\n    Ok(())\n}\n\nfn locked_package_version(\n    lockfile: &std::path::Path,\n    package_name: &str,\n) -> anyhow::Result<String> {\n    let contents = std::fs::read_to_string(lockfile)\n        .map_err(|err| anyhow::anyhow!(\"failed to read {}: {err}\", lockfile.display()))?;\n    let package_line = format!(\"name = \\\"{package_name}\\\"\");\n    let mut name_matches = false;\n\n    for line in contents.lines() {\n        if line == \"[[package]]\" {\n            name_matches = false;\n            continue;\n        }\n        if line == package_line {\n            name_matches = true;\n            continue;\n        }\n        if name_matches\n            && let Some(version) = line\n                .strip_prefix(\"version = \\\"\")\n                .and_then(|value| value.strip_suffix('\\\"'))\n        {\n            return Ok(version.to_string());\n        }\n    }\n\n    anyhow::bail!(\n        \"failed to find a pinned version for package {package_name:?} in {}\",\n        lockfile.display()\n    )\n}\n\nfn prepare_termux_v8_musl_overrides(\n    workspace_dir: &std::path::Path,\n    cargo_target_dir: &std::path::Path,\n) -> anyhow::Result<(String, PathBuf)> {\n    let v8_version = locked_package_version(&workspace_dir.join(\"Cargo.lock\"), \"v8\")?;\n    let v8_target = \"aarch64-unknown-linux-musl\";\n    let release_tag = format!(\"rusty-v8-v{v8_version}\");\n    let binding_dir = cargo_target_dir.join(\"v8\").join(format!(\"v{v8_version}\"));\n    let binding_path = binding_dir.join(format!(\"src_binding_release_{v8_target}.rs\"));\n    let binding_url = format!(\n        \"https://github.com/openai/codex/releases/download/{release_tag}/src_binding_release_{v8_target}.rs\"\n    );\n    let archive_url = format!(\n        \"https://github.com/openai/codex/releases/download/{release_tag}/librusty_v8_release_{v8_target}.a.gz\"\n    );\n\n    std::fs::create_dir_all(&binding_dir)\n        .map_err(|err| anyhow::anyhow!(\"failed to create {}: {err}\", binding_dir.display()))?;\n\n    if !binding_path.is_file() {\n        let mut curl = Command::new(\"curl\");\n        curl.arg(\"-fsSL\")\n            .arg(&binding_url)\n            .arg(\"-o\")\n            .arg(&binding_path);\n        run_command(&mut curl, \"download Termux musl rusty_v8 binding\")?;\n    }\n\n    Ok((archive_url, binding_path))\n}\n\nfn resolve_codex_src_dir() -> anyhow::Result<PathBuf> {\n    match std::env::var(\"CODEX_SRC_DIR\") {\n        Ok(dir) if !dir.trim().is_empty() => expand_home_dir(&dir),\n        _ => {\n            let home = std::env::var(\"HOME\")\n                .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n            Ok(PathBuf::from(home).join(\"codex\"))\n        }\n    }\n}\n\nfn expand_home_dir(path: &str) -> anyhow::Result<PathBuf> {\n    if path == \"~\" {\n        let home = std::env::var(\"HOME\")\n            .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n        return Ok(PathBuf::from(home));\n    }\n\n    if let Some(rest) = path.strip_prefix(\"~/\") {\n        let home = std::env::var(\"HOME\")\n            .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n        return Ok(PathBuf::from(home).join(rest));\n    }\n\n    Ok(PathBuf::from(path))\n}\n\nfn run_command(command: &mut Command, label: &str) -> anyhow::Result<()> {\n    let status = command\n        .stdin(Stdio::inherit())\n        .stdout(Stdio::inherit())\n        .stderr(Stdio::inherit())\n        .status()\n        .map_err(|err| anyhow::anyhow!(\"failed to run {label}: {err}\"))?;\n\n    if !status.success() {\n        anyhow::bail!(\"{label} failed with status {status}\");\n    }\n\n    Ok(())\n}\n\nfn command_with_version() -> clap::Command {\n    MultitoolCli::command().version(resolve_cli_version())\n}\n\nfn resolve_cli_version() -> &'static str {\n    option_env!(\"CODEX_CLI_BUILD_VERSION\").unwrap_or(env!(\"CARGO_PKG_VERSION\"))\n}\n\n#[cfg(test)]\n"
+        },
+        {
+          "old": "            err.to_string(),\n            \"`--strict-config` is not supported for `codex remote-control`\"\n        );\n    }\n\n    #[test]\n",
+          "new": "            err.to_string(),\n            \"`--strict-config` is not supported for `codex remote-control`\"\n        );\n\n        let cli = MultitoolCli::try_parse_from([\"codex\", \"--strict-config\", \"self-update\"])\n            .expect(\"parse\");\n        let err = reject_root_strict_config_for_subcommand(\n            cli.interactive.strict_config,\n            &cli.subcommand,\n        )\n        .expect_err(\"self-update should not support root --strict-config\");\n\n        assert_eq!(\n            err.to_string(),\n            \"`--strict-config` is not supported for `codex self-update`\"\n        );\n    }\n\n    #[test]\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/README.md",
+      "before": "e7904d3ed3dc9d7927f74a53befca683547bacfd",
+      "after": "3d0212273d52118d0acfd5d3ffe394bcaffac54d",
+      "replacements": [
+        {
+          "old": "- WSL2 uses the normal Linux bubblewrap path.\n- WSL1 is not supported for bubblewrap sandboxing; Codex rejects sandboxed\n  shell commands that would require the bubblewrap path before invoking `bwrap`.\n- Filesystem-restricted execution requires bubblewrap. The legacy Landlock\n  option is rejected for these policies because it cannot isolate app-server\n  Unix sockets. Disable `features.use_legacy_landlock` when upgrading.\n- Split-only filesystem policies that do not round-trip through the legacy\n",
+          "new": "- WSL2 uses the normal Linux bubblewrap path.\n- WSL1 is not supported for bubblewrap sandboxing; Codex rejects sandboxed\n  shell commands that would require the bubblewrap path before invoking `bwrap`.\n- On ordinary Linux, filesystem-restricted execution requires bubblewrap. The legacy Landlock\n  option is rejected for these policies because it cannot isolate app-server\n  Unix sockets. Disable `features.use_legacy_landlock` when upgrading.\n- Split-only filesystem policies that do not round-trip through the legacy\n"
+        },
+        {
+          "old": "\n**Notes**\n- The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.\n",
+          "new": "\n**Notes**\n- The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.\n\n## Termux release gate\n\nThe maintained Termux release treats the x86_64 and ARM64 jobs for this crate as\none exact-source gate. Both matrix jobs must succeed for the same commit before\nthe production Android/Termux runtime can be published. This dual-architecture\ncheck is intentionally separate from the ARM64 artifact build: it proves the\nsandbox implementation and policy tests independently of packaging, while the\nartifact and native Android gates prove the shipped runtime bundle.\n\n## Restricted commands in Termux\n\nThe automatic Termux backend does not waive app-server socket isolation. With\nno managed proxy, a filesystem-restricted profile with full read access is\nreduced to global read-only and network-disabled. Before entering the existing\nLandlock/read-only-seccomp backend, the helper denies socket creation and\ncommunication, descriptor acquisition through other processes, and io_uring.\nIt rejects socket-backed standard streams and marks all other inherited file\ndescriptors close-on-exec. Read-only shell commands and pipe/terminal output\nremain supported; Unix sockets and inherited extra descriptors do not.\n\nRestricted-read policies are rejected rather than widened to full read access.\nManaged proxy sessions retain the normal bubblewrap path. Ordinary Linux keeps\nthe upstream legacy-Landlock rejection and daemon-directory masking unchanged.\nFailure to establish either socket isolation or filesystem restrictions aborts\nbefore command execution; there is no unrestricted fallback.\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/lib.rs",
+      "before": "e4056e1589e6c9d73479068a861f2ca27faae73f",
+      "after": "77685f5de4a8cfcc624c21d0dc8c8d3613a6df9b",
+      "replacements": [
+        {
+          "old": "#[cfg(target_os = \"linux\")]\nmod fd_mount;\n#[cfg(target_os = \"linux\")]\nmod landlock;\n#[cfg(target_os = \"linux\")]\nmod launcher;\n",
+          "new": "#[cfg(target_os = \"linux\")]\nmod fd_mount;\n#[cfg(target_os = \"linux\")]\n#[path = \"landlock_wrapper.rs\"]\nmod landlock;\n#[cfg(target_os = \"linux\")]\nmod launcher;\n"
+        },
+        {
+          "old": "mod proxy_lifecycle;\n#[cfg(target_os = \"linux\")]\nmod proxy_routing;\n#[cfg(target_os = \"linux\")]\nmod wslg;\n\n",
+          "new": "mod proxy_lifecycle;\n#[cfg(target_os = \"linux\")]\nmod proxy_routing;\n#[cfg(target_os = \"linux\")]\nmod termux_socket_isolation;\n#[cfg(target_os = \"linux\")]\nmod wslg;\n\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/linux_run_main.rs",
+      "before": "1f22911aedd4234f2f66160c22b67ed3a2a6d177",
+      "after": "6163a2655905eca14cefc60b494e815462eb9740",
+      "replacements": [
+        {
+          "old": "use crate::bwrap::WSLG_DISTRO_ROOT;\nuse crate::bwrap::create_bwrap_command_args;\nuse crate::landlock::apply_permission_profile_to_current_thread;\nuse crate::launcher::exec_bwrap;\nuse crate::launcher::preferred_bwrap_supports_argv0;\nuse crate::proxy_routing::activate_proxy_routes_in_netns;\n",
+          "new": "use crate::bwrap::WSLG_DISTRO_ROOT;\nuse crate::bwrap::create_bwrap_command_args;\nuse crate::landlock::apply_permission_profile_to_current_thread;\nuse crate::landlock::is_termux_prefix;\nuse crate::launcher::exec_bwrap;\nuse crate::launcher::preferred_bwrap_supports_argv0;\nuse crate::proxy_routing::activate_proxy_routes_in_netns;\n"
+        },
+        {
+          "old": "        sandbox_policy_cwd,\n        command_cwd,\n        permission_profile,\n        use_legacy_landlock,\n        apply_seccomp_then_exec,\n        managed_network,\n        proxy_route_spec,\n",
+          "new": "        sandbox_policy_cwd,\n        command_cwd,\n        permission_profile,\n        mut use_legacy_landlock,\n        apply_seccomp_then_exec,\n        managed_network,\n        proxy_route_spec,\n"
+        },
+        {
+          "old": "    if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {\n        panic!(\"--verify-fd-mount is only supported in the inner sandbox stage\");\n    }\n    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);\n    let EffectivePermissions {\n        permission_profile,\n        file_system_sandbox_policy,\n        network_sandbox_policy,\n    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!(\"{err}\"));\n    ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);\n\n    // Inner stage: apply seccomp/no_new_privs after bubblewrap has already\n    // established the filesystem view.\n",
+          "new": "    if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {\n        panic!(\"--verify-fd-mount is only supported in the inner sandbox stage\");\n    }\n    let EffectivePermissions {\n        mut permission_profile,\n        mut file_system_sandbox_policy,\n        mut network_sandbox_policy,\n    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!(\"{err}\"));\n    let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);\n    if termux_fallback && !file_system_sandbox_policy.has_full_disk_write_access() {\n        // Termux cannot isolate the daemon socket directory with bubblewrap.\n        // Do not widen restricted reads or preserve a network grant here.\n        // Reduce supported profiles to global read-only with no sockets, and\n        // install socket isolation before permitting the legacy backend.\n        if !file_system_sandbox_policy.has_full_disk_read_access() {\n            panic!(\"Termux restricted-read policies require bubblewrap\");\n        }\n        permission_profile = PermissionProfile::read_only();\n        (file_system_sandbox_policy, network_sandbox_policy) =\n            permission_profile.to_runtime_permissions();\n        crate::termux_socket_isolation::install_on_current_thread()\n            .unwrap_or_else(|err| panic!(\"failed to isolate Termux command sockets: {err}\"));\n    }\n    use_legacy_landlock |= termux_fallback;\n    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);\n    if !termux_fallback {\n        ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);\n    }\n\n    // Inner stage: apply seccomp/no_new_privs after bubblewrap has already\n    // established the filesystem view.\n"
+        },
+        {
+          "old": "        panic!(\"error applying legacy Linux sandbox restrictions: {e:?}\");\n    }\n    exec_or_panic(command);\n}\n\n#[derive(Debug, Clone)]\n",
+          "new": "        panic!(\"error applying legacy Linux sandbox restrictions: {e:?}\");\n    }\n    exec_or_panic(command);\n}\n\nfn should_use_termux_landlock_fallback(allow_network_for_proxy: bool) -> bool {\n    let is_termux = std::env::var_os(\"PREFIX\")\n        .as_deref()\n        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)));\n    is_termux && !allow_network_for_proxy\n}\n\n#[derive(Debug, Clone)]\n"
+        },
+        {
+          "old": "        exec_bwrap(args, preserved_files);\n    }\n\n    drop(preserved_files);\n    close_child_exec_start_read(exec_start_pipe[0]);\n    let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);\n    let signal_forwarders = install_bwrap_signal_forwarders(pid);\n",
+          "new": "        exec_bwrap(args, preserved_files);\n    }\n\n    close_child_exec_start_read(exec_start_pipe[0]);\n    let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);\n    let signal_forwarders = install_bwrap_signal_forwarders(pid);\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/termux_socket_isolation.rs",
+      "before": "e79954c93b0ee7916e318d2d4ed11cccfb9b6253",
+      "after": "e79954c93b0ee7916e318d2d4ed11cccfb9b6253",
+      "replacements": [
+        {
+          "old": "//! Additional socket isolation for the Termux global read-only backend.\n",
+          "new": "//! Additional socket isolation for the Termux global read-only backend.\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/termux_socket_isolation_tests.rs",
+      "before": "1ac07afe41e1577e5a7a1bfa3241b595b1913a22",
+      "after": "1ac07afe41e1577e5a7a1bfa3241b595b1913a22",
+      "replacements": [
+        {
+          "old": "use super::install_on_current_thread;\n",
+          "new": "use super::install_on_current_thread;\n"
+        }
+      ]
+    }
+  ],
+  "package_updates": []
 }
