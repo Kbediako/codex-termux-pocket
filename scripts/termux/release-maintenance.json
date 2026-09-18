@@ -1,9 +1,10 @@
 {
   "format_version": 1,
-  "request_id": "alpha15516-record-20260918",
-  "operation": "record-upstream",
-  "upstream_tag": "rust-v0.155.0-alpha.16",
-  "upstream_tag_object": "c36696937921f6f2d364ebeefcb66bc5cfa638e8",
-  "upstream_commit": "0e2f848bf4a4e8d41a02d848a851ba126c09d185",
-  "prepared_commit": "5fc08a1cabbfa2c7ab0033f674829696e2a5e30f"
+  "request_id": "alpha15516-prepare-stdio-20260918",
+  "operation": "prepare-source",
+  "base_main": "2444570a1cda56bf26f1be401cc7144aefe277a0",
+  "prepared_commit": "f179a662032cab9854787c88d7a5d0d01a785c04",
+  "expected_input_tree": "36d7fa66c619ae1a821e439c39d1f48a0d7aa7a4",
+  "edits": [],
+  "package_updates": []
 }
