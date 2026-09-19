@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha15516-pre-stdin-repair-20260919",
+  "request_id": "alpha15516-post-publication-20260920",
   "operation": "dispatch-checks",
-  "phase": "pre"
+  "phase": "post"
 }
