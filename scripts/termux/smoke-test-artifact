@@ -118,9 +118,11 @@ smoke_installed() {
       curl --silent --show-error --connect-timeout 15 --max-time 30 --head \
       https://api.openai.com/ >/dev/null
     token="codex-termux-command-ok-$$"
+    # These fixed probes never read input. Do not pass an ADB/automation
+    # socket into the sandbox as stdin; keep output capture as a pipe.
     set +e
     output="$("$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
-      "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" 2>&1)"
+      "printf 'bwrap=%s\\n' \"\$(command -v bwrap)\"; bwrap --version; printf '%s' '$token'" </dev/null 2>&1)"
     command_status=$?
     set -e
     if (( command_status != 0 )); then
@@ -135,7 +137,7 @@ smoke_installed() {
 
     denied_path="${TMPDIR:-$PREFIX/tmp}/codex-termux-sandbox-deny-$$"
     if "$launcher" sandbox -P :workspace -- "$PREFIX/bin/bash" -c \
-      "printf forbidden >'$denied_path'" >/dev/null 2>&1; then
+      "printf forbidden >'$denied_path'" </dev/null >/dev/null 2>&1; then
       termux_abort 'restricted Termux fallback unexpectedly allowed a filesystem write.'
     fi
     [[ ! -e "$denied_path" ]] || {

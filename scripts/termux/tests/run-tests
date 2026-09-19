@@ -192,6 +192,73 @@ test_bundle_install() {
   pass 'duplicate and unknown metadata fields are rejected'
 }
 
+test_noninteractive_smoke_stdin() {
+  local bundle="$test_root/stdio-bundle"
+  local prefix="$test_root/stdio/com.termux/files/usr"
+  local shim="$test_root/stdio-shim"
+  local sha='0123456789abcdef0123456789abcdef01234567'
+  local calls="$test_root/stdio-calls"
+  mkdir -p "$bundle" "$prefix/bin" "$shim"
+  make_bundle "$bundle" "$sha" 'codex-cli 9.9.9'
+  termux_install_verified_bundle "$bundle" "$sha" 'codex-cli 9.9.9' '' "$prefix" >/dev/null
+  ln -s "$(command -v bash)" "$prefix/bin/bash"
+  write_fake_executable "$shim/uname" 'printf "%s\n" aarch64'
+  write_fake_executable "$shim/curl" 'exit 0'
+  # This launcher double checks transport, not sandbox enforcement. The actual
+  # runtime and native gates still prove that writes and sockets are denied.
+  # shellcheck disable=SC2016 # Literal body is executed in a separate process.
+  write_fake_executable "$prefix/bin/codex" '
+case "${1:-}" in
+  --version) printf "%s\n" "codex-cli 9.9.9" ;;
+  --termux-launcher-check) exit 0 ;;
+  sandbox)
+    [[ "$(readlink /proc/$$/fd/0)" == /dev/null ]] || exit 97
+    [[ ! -S /proc/$$/fd/1 && ! -S /proc/$$/fd/2 ]] || exit 98
+    [[ "${2:-}" == -P && "${3:-}" == :workspace && "${4:-}" == -- ]] || exit 99
+    shift 4
+    if [[ "${*: -1}" == *"printf forbidden"* ]]; then
+      printf "%s\n" denied >>"$CODEX_STDIO_TEST_CALLS"
+      exit 1
+    fi
+    printf "%s\n" command >>"$CODEX_STDIO_TEST_CALLS"
+    export PATH="$PREFIX/libexec/codex-termux/current/codex-resources:$PATH"
+    exec "$@"
+    ;;
+  *) exit 96 ;;
+esac'
+  PREFIX="$prefix" PATH="$shim:$PATH" TERMUX_APK_RELEASE=GITHUB \
+    CODEX_STDIO_TEST_CALLS="$calls" \
+    python3 - "$TERMUX_DIR/smoke-test-artifact" \
+      "$REPO_ROOT/.github/scripts/termux-android-emulator-check.sh" <<'PY_STDIO'
+import pathlib
+import socket
+import subprocess
+import sys
+
+# An ADB-style socket on stdin must not reach either fixed, noninteractive
+# sandbox command. Pipes on stdout/stderr retain diagnostic evidence.
+reader, peer = socket.socketpair()
+with reader, peer:
+    result = subprocess.run(
+        ["bash", sys.argv[1], "--installed"], stdin=reader,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30,
+    )
+    if result.returncode:
+        raise SystemExit(result.stdout + f"smoke returned {result.returncode}")
+    prelude = pathlib.Path(sys.argv[2]).read_text().split("<<EOF_TERMUX\n", 1)[1]
+    prelude = prelude.split("\nreport_error()", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", prelude + '\n[[ "$(readlink /proc/$$/fd/0)" == /dev/null ]]'],
+        stdin=reader, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=10,
+    )
+    if result.returncode:
+        raise SystemExit("native validation inherited socket stdin: " + result.stdout)
+PY_STDIO
+  assert_eq $'command\ndenied' "$(cat "$calls")" 'both smoke probes receive null stdin'
+  pass 'noninteractive smoke and native validation isolate inherited socket stdin'
+}
+
 make_test_bundle_for_sha() {
   local dir="$1"
   local sha="$2"
@@ -322,6 +389,7 @@ test_remote_topology
 test_migrate_openai_origin
 test_valid_alpha_tag_selection
 test_bundle_install
+test_noninteractive_smoke_stdin
 test_run_dedup_and_timeout
 test_storage_retention_and_rollback
 test_static_architecture_guards

@@ -1,10 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha15516-prepare-stdio-20260918",
-  "operation": "prepare-source",
-  "base_main": "2444570a1cda56bf26f1be401cc7144aefe277a0",
-  "prepared_commit": "f179a662032cab9854787c88d7a5d0d01a785c04",
-  "expected_input_tree": "36d7fa66c619ae1a821e439c39d1f48a0d7aa7a4",
-  "edits": [],
-  "package_updates": []
+  "request_id": "alpha15516-pre-stdin-repair-20260919",
+  "operation": "dispatch-checks",
+  "phase": "pre"
 }

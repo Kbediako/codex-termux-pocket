@@ -109,6 +109,10 @@ cat >"$termux_script" <<EOF_TERMUX
 #!/data/data/com.termux/files/usr/bin/bash
 set -Eeuo pipefail
 
+# All probes are noninteractive. ADB may provide a socket-backed stdin, which
+# must not be inherited by restricted commands. Preserve output for evidence.
+exec </dev/null
+
 report_error() {
   local status=\$?
   # Bash still invokes an ERR trap while errexit is temporarily disabled.
