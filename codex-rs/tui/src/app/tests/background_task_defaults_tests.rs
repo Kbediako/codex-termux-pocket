@@ -64,6 +64,7 @@ async fn review_regression_agents_overview_creation_is_fresh_but_returning_is_no
         app.harness_overrides.model = Some(model.into());
         let mut server = start_config_write_test_app_server(&app).await?;
         let mut tui = make_test_tui()?;
+        tui.pause_events();
         app.new_agents_overview_session(&mut tui, &mut server, /*cwd*/ None)
             .await?;
         let original = app.chat_widget.thread_id().expect("new dashboard task");
@@ -92,7 +93,7 @@ async fn review_regression_agents_overview_creation_is_fresh_but_returning_is_no
             let before_footer = |output: &str| {
                 output
                     .lines()
-                    .take_while(|line| !line.contains("gpt-6-astra"))
+                    .take_while(|line| !line.contains("GPT-6-Astra"))
                     .collect::<Vec<_>>()
                     .join("\n")
             };

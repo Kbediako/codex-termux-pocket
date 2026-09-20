@@ -399,17 +399,19 @@ pub(crate) struct SandboxAttempt<'a> {
     // TODO(anp): Reconcile these attempt settings with TurnEnvironment::sandbox_context
     // so process execution and patch writes honor the selected environment's backend.
     pub use_legacy_landlock: bool,
+    pub windows_sandbox_type: SandboxType,
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
-    pub windows_sandbox_private_desktop: bool,
     pub network_denial_cancellation_token: Option<CancellationToken>,
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
 }
 
 pub(crate) fn executor_windows_sandbox_level(
+    windows_sandbox_type: SandboxType,
     windows_sandbox_level: WindowsSandboxLevel,
     cwd: &PathUri,
 ) -> WindowsSandboxLevel {
-    if windows_sandbox_level == WindowsSandboxLevel::Disabled
+    if windows_sandbox_type != SandboxType::WindowsMxc
+        && windows_sandbox_level == WindowsSandboxLevel::Disabled
         && cwd.infer_path_convention() == Some(PathConvention::Windows)
     {
         WindowsSandboxLevel::RestrictedToken
@@ -419,13 +421,30 @@ pub(crate) fn executor_windows_sandbox_level(
 }
 
 pub(crate) fn executor_windows_sandbox_selection(
+    windows_sandbox_type: SandboxType,
     windows_sandbox_level: WindowsSandboxLevel,
     cwd: &PathUri,
 ) -> WindowsSandboxSelection {
-    if cwd.infer_path_convention() == Some(PathConvention::Windows) {
-        executor_windows_sandbox_level(windows_sandbox_level, cwd).into()
+    configured_windows_sandbox_selection(
+        windows_sandbox_type,
+        executor_windows_sandbox_level(windows_sandbox_type, windows_sandbox_level, cwd),
+        cwd,
+    )
+}
+
+pub(crate) fn configured_windows_sandbox_selection(
+    windows_sandbox_type: SandboxType,
+    windows_sandbox_level: WindowsSandboxLevel,
+    cwd: &PathUri,
+) -> WindowsSandboxSelection {
+    if cwd.infer_path_convention() != Some(PathConvention::Windows) {
+        return WindowsSandboxSelection::Disabled;
+    }
+
+    if windows_sandbox_type == SandboxType::WindowsMxc {
+        WindowsSandboxSelection::Mxc
     } else {
-        WindowsSandboxSelection::Disabled
+        windows_sandbox_level.into()
     }
 }
 
@@ -474,7 +493,6 @@ impl<'a> SandboxAttempt<'a> {
                 sandbox_exe: self.sandbox_exe.map(std::path::PathBuf::as_path),
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
-                windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
             })
             .map_err(CodexErr::from)?;
         let workspace_roots = self
@@ -509,7 +527,6 @@ impl<'a> SandboxAttempt<'a> {
                 sandbox_exe: None,
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
-                windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
             })
             .map_err(CodexErr::from)?;
         let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(
@@ -520,16 +537,16 @@ impl<'a> SandboxAttempt<'a> {
         exec_request.exec_server_managed_network = managed_network;
         if self.sandbox_requested {
             exec_request.exec_server_sandbox = Some(FileSystemSandboxContext {
-                permissions: exec_server_permissions.into(),
-                cwd: Some(exec_request.windows_sandbox_policy_cwd.clone()),
+                permissions: exec_server_permissions,
+                cwd: exec_request.windows_sandbox_policy_cwd.clone(),
                 workspace_roots: self.workspace_roots.to_vec(),
                 user_home_dir: None,
                 temporary_directories: None,
                 windows_sandbox_selection: executor_windows_sandbox_selection(
+                    self.windows_sandbox_type,
                     self.windows_sandbox_level,
                     self.sandbox_cwd,
                 ),
-                windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
                 windows_sandbox_proxy_settings_mode: None,
                 use_legacy_landlock: self.use_legacy_landlock,
             });

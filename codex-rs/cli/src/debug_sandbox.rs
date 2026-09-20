@@ -19,6 +19,7 @@ use codex_core::exec_env::create_env;
 #[cfg(target_os = "macos")]
 use codex_core::spawn::CODEX_SANDBOX_ENV_VAR;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+use codex_core::windows_sandbox::local_binding_policy_for_sandbox;
 use codex_core::windows_sandbox::managed_proxy_routing_for_windows_sandbox;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::PermissionProfile;
@@ -356,6 +357,10 @@ async fn run_command_under_sandbox(
             spec.start_proxy(
                 &permission_profile,
                 managed_proxy_routing_for_windows_sandbox(config.permissions.windows_sandbox_type),
+                local_binding_policy_for_sandbox(
+                    config.permissions.windows_sandbox_type,
+                    Some(std::env::consts::OS),
+                ),
                 /*policy_decider*/ None,
                 /*blocked_request_observer*/ None,
                 managed_network_requirements_enabled,
@@ -491,7 +496,6 @@ async fn run_command_under_sandbox(
                 sandbox_exe: Some(codex_self_exe.as_path()),
                 use_legacy_landlock: false,
                 windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
-                windows_sandbox_private_desktop: false,
             })?;
             let (program, args) = request
                 .command
@@ -582,7 +586,6 @@ async fn run_command_under_windows_session(
         deny_write_paths_override: empty_paths,
         tty: false,
         stdin_open: true,
-        use_private_desktop: config.permissions.windows_sandbox_private_desktop,
     })
     .await;
 

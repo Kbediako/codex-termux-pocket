@@ -111,6 +111,8 @@
 //! and attachment pruning, and clears pending paste state on success.
 //! Slash commands with arguments (like `/plan` and `/review`) reuse the same preparation path so
 //! pasted content and text elements are preserved when extracting args.
+//! Commands requiring dispatch validation retain their draft and defer busy-state checks to
+//! `ChatWidget`, which has the thread state needed to accept or reject the command.
 //!
 //! # Parent-Owned Thread Mode
 //!
@@ -120,9 +122,10 @@
 //! navigation slash commands remain available so users can leave or manage the view. Transcript
 //! exports also remain available, including an explicit destination filename.
 //!
-//! During reconnection, `handle_disconnected_key` edits the draft directly without popup dispatch,
+//! During reconnection, `handle_restricted_key` edits the draft directly without popup dispatch,
 //! composer shortcuts, or submission; `?` becomes literal input. Enter and Tab leave the draft
-//! intact until reconnection succeeds.
+//! intact until reconnection succeeds. When connected but the thread is unavailable, configured
+//! submit keys may dispatch explicitly allowed recovery and local commands; other drafts stay put.
 //! Collapsed pastes expand into editable text so the full draft can be copied before quitting.
 //!
 //! # Reasoning Effort Animations
@@ -349,6 +352,7 @@ mod inline_input;
 mod paste_input;
 mod popup_state;
 mod reconnect;
+pub(crate) use reconnect::RestrictedInputMode;
 mod slash_input;
 mod sparkle;
 mod vim_history;
@@ -3359,8 +3363,11 @@ impl ChatComposer {
             return Some(InputResult::None);
         }
         self.stage_slash_command_history(&command);
-        self.draft.textarea.set_text_clearing_elements("");
-        self.draft.is_bash_mode = false;
+        if !matches!(command, SlashCommandItem::Builtin(cmd) if cmd.requires_dispatch_validation())
+        {
+            self.draft.textarea.set_text_clearing_elements("");
+            self.draft.is_bash_mode = false;
+        }
         Some(match command {
             SlashCommandItem::Builtin(cmd) => InputResult::Command(cmd),
             SlashCommandItem::ServiceTier(command) => InputResult::ServiceTierCommand(command),
@@ -3423,7 +3430,10 @@ impl ChatComposer {
     }
 
     fn reject_slash_command_if_unavailable(&self, command: &SlashCommandItem) -> bool {
-        if !self.is_task_running || command.available_during_task() {
+        if !self.is_task_running
+            || command.available_during_task()
+            || matches!(command, SlashCommandItem::Builtin(cmd) if cmd.requires_dispatch_validation())
+        {
             return false;
         }
         let message = format!(
@@ -9931,13 +9941,13 @@ mod tests {
         composer
             .draft
             .textarea
-            .set_text_clearing_elements("/review these changes");
+            .set_text_clearing_elements("/compact");
 
         let (result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(InputResult::None, result);
-        assert_eq!("/review these changes", composer.draft.textarea.text());
+        assert_eq!("/compact", composer.draft.textarea.text());
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {

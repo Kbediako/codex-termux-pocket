@@ -742,7 +742,11 @@ impl TestCodexBuilder {
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
         let thread_manager = Arc::new_cyclic(|manager| {
             let mut extensions = self.extensions.to_builder();
-            codex_guardian_v2::install_reviewer(&mut extensions, manager.clone());
+            if config.features.enabled(Feature::GuardianV2) {
+                codex_guardian_v2::install(&mut extensions, auth_manager.clone(), manager.clone());
+            } else {
+                codex_guardian_v2::install_reviewer(&mut extensions, manager.clone());
+            }
             let thread_manager = ThreadManager::new(
                 &config,
                 auth_manager.clone(),
@@ -1420,6 +1424,31 @@ pub fn test_codex() -> TestCodexBuilder {
         thread_store: None,
         image_store: codex_core::passthrough_image_store(),
     }
+}
+
+pub fn run_test_with_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    const WORKER_THREADS: usize = 2;
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(move || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKER_THREADS)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()?;
+            runtime.block_on(Box::pin(test()))
+        })?;
+
+    handle
+        .join()
+        .map_err(|_| anyhow!("{name} thread panicked"))?
 }
 
 #[cfg(test)]

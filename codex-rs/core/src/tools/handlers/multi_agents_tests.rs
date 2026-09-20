@@ -1232,7 +1232,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -1308,7 +1308,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -1473,7 +1473,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("researcher agent should spawn");
@@ -1493,7 +1493,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker agent should spawn");
@@ -2216,7 +2216,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         .await
         .expect("non-empty role config should apply");
     let TurnEnvironmentState::Ready(environment) = turn
-        .environments
+        .initial_environments
         .environments
         .first_mut()
         .expect("parent environment should exist")
@@ -4023,7 +4023,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_id() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -4090,7 +4090,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
                 agent_nickname: None,
                 agent_role: None,
             })),
-            crate::agent::control::SpawnAgentOptions::default(),
+            crate::agent::types::SpawnAgentOptions::default(),
         )
         .await
         .expect("worker spawn should succeed")
@@ -4203,7 +4203,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
     let parent_session = parent.thread.session.clone();
     let parent_turn = parent_session.new_default_turn().await;
     let mut owner_config = parent_turn
-        .environments
+        .initial_environments
         .primary()
         .expect("parent should have an environment")
         .config()
@@ -4478,7 +4478,7 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
         &file_system_sandbox_policy,
         network_sandbox_policy,
     );
-    turn.environments.environments.clear();
+    turn.initial_environments.environments.clear();
     Arc::make_mut(&mut turn.config)
         .permissions
         .set_permission_profile(permission_profile)
@@ -4566,7 +4566,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
             PermissionProfile::read_only()
         };
     let TurnEnvironmentState::Ready(environment) = turn
-        .environments
+        .initial_environments
         .environments
         .first_mut()
         .expect("parent environment should exist")

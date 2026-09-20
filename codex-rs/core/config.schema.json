@@ -530,6 +530,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "experimental_show_cell_overhead": {
+          "description": "Show handler duration, code-mode host duration, and harness overhead in each code-mode cell response. Experimental: this option and the response format may change or be removed.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -755,6 +759,9 @@
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
             "cwd_relative_turn_diffs": {
+              "type": "boolean"
+            },
+            "daemon_auto_start": {
               "type": "boolean"
             },
             "default_mode_request_user_input": {
@@ -1028,6 +1035,9 @@
               "type": "boolean"
             },
             "step_model_switching": {
+              "type": "boolean"
+            },
+            "system_proxy_fallback": {
               "type": "boolean"
             },
             "telepathy": {
@@ -1559,6 +1569,91 @@
         "api"
       ],
       "type": "string"
+    },
+    "GatewayOAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "delivery": {
+          "$ref": "#/definitions/GatewayOAuthDelivery"
+        },
+        "redirect_port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "token_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorization_url",
+        "client_id",
+        "delivery",
+        "token_url"
+      ],
+      "type": "object"
+    },
+    "GatewayOAuthDelivery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "header"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "scheme": {
+              "default": "Bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "cookie"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "GhostSnapshotToml": {
       "additionalProperties": false,
@@ -2442,12 +2537,24 @@
           "description": "Value to use with `Authorization: Bearer <token>` header. Use of this config is discouraged in favor of `env_key` for security reasons, but this may be necessary when using this programmatically.",
           "type": "string"
         },
+        "gateway_oauth": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthConfig"
+            }
+          ],
+          "description": "Secondary OAuth credentials required by the provider's gateway."
+        },
         "http_headers": {
           "additionalProperties": {
             "type": "string"
           },
           "description": "Additional HTTP headers to include in requests to this provider where the (key, value) pairs are the header name and value.",
           "type": "object"
+        },
+        "model_catalog_url": {
+          "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
+          "type": "string"
         },
         "name": {
           "default": "",
@@ -2717,6 +2824,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -2795,6 +2903,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -6095,7 +6204,8 @@
     "WindowsSandboxModeToml": {
       "enum": [
         "elevated",
-        "unelevated"
+        "unelevated",
+        "mxc"
       ],
       "type": "string"
     },
@@ -6104,10 +6214,6 @@
       "properties": {
         "sandbox": {
           "$ref": "#/definitions/WindowsSandboxModeToml"
-        },
-        "sandbox_private_desktop": {
-          "description": "Defaults to `true`. Set to `false` to launch the final sandboxed child process on `Winsta0\\\\Default` instead of a private desktop.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -6411,6 +6517,9 @@
         "cwd_relative_turn_diffs": {
           "type": "boolean"
         },
+        "daemon_auto_start": {
+          "type": "boolean"
+        },
         "default_mode_request_user_input": {
           "type": "boolean"
         },
@@ -6682,6 +6791,9 @@
           "type": "boolean"
         },
         "step_model_switching": {
+          "type": "boolean"
+        },
+        "system_proxy_fallback": {
           "type": "boolean"
         },
         "telepathy": {
@@ -6979,6 +7091,13 @@
         }
       ],
       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
+    },
+    "model_post_turn_compact_threshold_percent": {
+      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0–100.",
+      "format": "uint8",
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "type": "integer"
     },
     "model_provider": {
       "description": "Provider to use from the model_providers map.",

@@ -126,6 +126,7 @@ fn test_model_info(
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
@@ -717,7 +718,7 @@ async fn unsupported_configured_service_tier_warns_at_session_start() -> Result<
     let mut builder = test_codex()
         .with_model(model_slug)
         .with_config(move |config| {
-            config.service_tier = Some(ServiceTier::Flex.request_value().to_string());
+            config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
             config.model_catalog = Some(ModelsResponse {
                 models: vec![model],
             });
@@ -737,7 +738,7 @@ async fn unsupported_configured_service_tier_warns_at_session_start() -> Result<
     };
     assert_eq!(
         warning.message,
-        "Configured service tier `flex` is not advertised as supported for model `test-no-tier-model` and will be omitted from requests."
+        "Configured service tier `priority` is not advertised as supported for model `test-no-tier-model` and will be omitted from requests."
     );
     Ok(())
 }
@@ -1253,6 +1254,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,

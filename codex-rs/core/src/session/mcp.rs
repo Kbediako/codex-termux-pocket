@@ -108,6 +108,7 @@ impl Session {
             )
         };
         let environments = self.services.turn_environments.snapshot().await;
+        let environment_selections = environments.all_selections();
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
             .await;
@@ -120,23 +121,26 @@ impl Session {
                 &environments,
             )
             .await;
-        let mcp_projection = self
-            .services
-            .mcp_manager
-            .runtime_config_for_step(
-                config,
-                &self.services.mcp_thread_init,
-                &self.services.thread_extension_data,
-                McpThreadIdentity {
-                    session_source: &session_source,
-                    originator: &originator,
-                    disabled_plugin_ids: &disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
-                },
-                &ready_selected_capability_roots,
-                executor_capability_discovery.as_deref(),
-            )
-            .await;
+        let mcp_projection =
+            self.services
+                .mcp_manager
+                .runtime_config_for_step(
+                    config,
+                    &self.services.mcp_thread_init,
+                    &self.services.thread_extension_data,
+                    McpThreadIdentity {
+                        auth_changed: !self.services.mcp_runtime.current_auth_matches(
+                            self.services.auth_manager.auth_cached().as_ref(),
+                        ),
+                        session_source: &session_source,
+                        originator: &originator,
+                        disabled_plugin_ids: &disabled_plugin_ids,
+                        environments: McpEnvironmentScope::Selected(&environment_selections),
+                    },
+                    &ready_selected_capability_roots,
+                    executor_capability_discovery.as_deref(),
+                )
+                .await;
         let mcp_config = self
             .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
             .await
@@ -150,15 +154,8 @@ impl Session {
             local_process_cwd,
         )
         .with_selected_environments(
-            environments
-                .turn_environments()
-                .map(|environment| {
-                    (
-                        environment.selection.environment_id.clone(),
-                        Arc::clone(&environment.environment),
-                    )
-                })
-                .collect(),
+            environment_selections.into(),
+            environments.ready_environment_handles(),
         );
         (mcp_config, runtime_context)
     }
@@ -178,22 +175,13 @@ impl Session {
             return;
         };
         loop {
+            // Compare and rebuild from current environments, not choices saved for a future turn.
             let environments = self.services.turn_environments.snapshot().await;
-            let ready_environments = environments
-                .turn_environments()
-                .map(|environment| {
-                    (
-                        environment.selection.environment_id.clone(),
-                        Arc::clone(&environment.environment),
-                    )
-                })
-                .collect();
-            // Attachment resolution can finish after the owner's configuration callback.
-            if !self
-                .services
-                .mcp_runtime
-                .current_environments_match(&ready_environments)
-            {
+            let environment_selections = environments.all_selections();
+            if !self.services.mcp_runtime.current_environments_match(
+                &environment_selections,
+                &environments.ready_environment_handles(),
+            ) {
                 self.mark_mcp_runtime_dirty();
             }
             let auth = self.services.auth_manager.auth_cached();
@@ -213,7 +201,7 @@ impl Session {
                 published: false,
             };
             let auth = self.services.auth_manager.auth().await;
-            let desired = self.latest_mcp_desired_state(auth).await;
+            let desired = self.latest_mcp_desired_state(auth, environments).await;
             let selected_capability_roots = self
                 .resolve_selected_capability_roots_for_step(&desired.environments)
                 .await;
@@ -234,10 +222,14 @@ impl Session {
                     &self.services.mcp_thread_init,
                     &self.services.thread_extension_data,
                     McpThreadIdentity {
+                        auth_changed: !self
+                            .services
+                            .mcp_runtime
+                            .current_auth_matches(desired.auth.as_ref()),
                         session_source: &desired.session_source,
                         originator: &desired.originator,
                         disabled_plugin_ids: &desired.disabled_plugin_ids,
-                        environments: McpEnvironmentScope::Live(&self.services.turn_environments),
+                        environments: McpEnvironmentScope::Selected(&environment_selections),
                     },
                     &ready_selected_capability_roots,
                     executor_capability_discovery.as_deref(),
@@ -280,7 +272,9 @@ impl Session {
             .await
             .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
         let auth = self.services.auth_manager.auth().await;
-        let desired = self.latest_mcp_desired_state(auth).await;
+        let environments = self.services.turn_environments.snapshot().await;
+        let environment_selections = environments.all_selections();
+        let desired = self.latest_mcp_desired_state(auth, environments).await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&desired.environments)
             .await;
@@ -301,10 +295,14 @@ impl Session {
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
                 McpThreadIdentity {
+                    auth_changed: !self
+                        .services
+                        .mcp_runtime
+                        .current_auth_matches(desired.auth.as_ref()),
                     session_source: &desired.session_source,
                     originator: &desired.originator,
                     disabled_plugin_ids: &desired.disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
+                    environments: McpEnvironmentScope::Selected(&environment_selections),
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
@@ -683,11 +681,14 @@ impl Session {
             .mcp_runtime
             .current_ready_selected_capability_roots();
         let environments = self.services.turn_environments.snapshot().await;
+        let environment_selections = environments.all_selections();
+        let mut desired = self.latest_mcp_desired_state(auth, environments).await;
+        desired.config = Arc::new(refresh_config.clone());
         let executor_capability_discovery = self
             .executor_capability_discovery_for_step(
                 refresh_config,
                 &ready_selected_capability_roots,
-                &environments,
+                &desired.environments,
             )
             .await;
         let mcp_projection = self
@@ -698,17 +699,19 @@ impl Session {
                 &self.services.mcp_thread_init,
                 &self.services.thread_extension_data,
                 McpThreadIdentity {
+                    auth_changed: !self
+                        .services
+                        .mcp_runtime
+                        .current_auth_matches(desired.auth.as_ref()),
                     session_source: &turn_context.session_source,
                     originator: &turn_context.originator,
                     disabled_plugin_ids: &disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
+                    environments: McpEnvironmentScope::Selected(&environment_selections),
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
             )
             .await;
-        let mut desired = self.latest_mcp_desired_state(auth).await;
-        desired.config = Arc::new(refresh_config.clone());
         self.publish_mcp_runtime(
             &desired,
             mcp_projection,
@@ -745,7 +748,7 @@ async fn review_guardian_mcp_elicitation(
     let Some(mcp_config) = session.services.mcp_runtime.current_config() else {
         return Ok(None);
     };
-    let step_settings = turn_context.current_settings.load_full();
+    let step_settings = Arc::clone(&turn_context.next_step_input.load().settings);
 
     // User approval skips ordinary CUA checks, not separate sensitive requests.
     let user_cua_execution = step_settings.approvals_reviewer() == ApprovalsReviewer::User
@@ -761,7 +764,7 @@ async fn review_guardian_mcp_elicitation(
 
     // Full Access skips inference, not the active-turn and cancellation checks.
     if (user_cua_execution
-        || turn_context.environments.has_full_access(
+        || turn_context.initial_environments.has_full_access(
             turn_context.approval_policy(),
             &turn_context
                 .config

@@ -9,6 +9,8 @@ pub use auth::WorkspaceRoutingSession;
 
 mod callback_params;
 mod device_code_auth;
+mod gateway_auth;
+mod oauth;
 mod outbound_proxy;
 mod pkce;
 mod server;
@@ -39,6 +41,7 @@ pub use auth::AuthKeyringBackendKind;
 pub use auth::AuthManager;
 pub use auth::AuthManagerConfig;
 pub use auth::AuthManagerInitializationError;
+pub use auth::AuthRuntimeConfig;
 pub use auth::CLIENT_ID;
 pub use auth::CLIENT_ID_OVERRIDE_ENV_VAR;
 pub use auth::CODEX_ACCESS_TOKEN_ENV_VAR;
@@ -71,3 +74,6 @@ pub use auth_env_telemetry::AuthEnvTelemetry;
 pub use auth_env_telemetry::collect_auth_env_telemetry;
 pub use outbound_proxy::AuthRouteConfig;
 pub use token_data::TokenData;
+
+pub use gateway_auth::GatewayAuthConfig;
+pub use gateway_auth::GatewayAuthManager;

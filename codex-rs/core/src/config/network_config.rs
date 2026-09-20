@@ -15,9 +15,8 @@ use codex_features::FeatureToml;
 use codex_features::FeaturesToml;
 use codex_network_proxy::EnvironmentNetworkPolicy;
 use codex_network_proxy::NetworkProxyConfig;
-use codex_network_proxy::NetworkProxyConstraints;
-use codex_network_proxy::build_config_state;
 use codex_protocol::models::PermissionProfile;
+use codex_utils_path_uri::Platform;
 
 use super::NetworkProxySpec;
 use super::permissions::apply_network_proxy_feature_config;
@@ -26,9 +25,12 @@ use super::permissions::apply_network_proxy_feature_config;
 #[error("invalid portable environment network policy")]
 pub struct EnvironmentNetworkConfigError;
 
-/// Drops listener addresses, which the executor chooses for each command, before
-/// validating an environment's selected network configuration. Use the returned
-/// value when deciding whether a policy is present and when preparing it.
+/// Drops listener addresses and rejects unsupported controller fields in an
+/// environment's selected network configuration. Use the returned value when
+/// deciding whether a policy is present and when preparing it.
+///
+/// Domain and socket values may be replaced by feature settings or requirements.
+/// Validate the composed policy with [`validate_environment_network_policy`].
 pub fn project_environment_profile_network(
     network: Option<NetworkToml>,
 ) -> Result<Option<NetworkToml>, EnvironmentNetworkConfigError> {
@@ -46,38 +48,28 @@ pub fn project_environment_profile_network(
         allow_local_binding: network.allow_local_binding,
         ..Default::default()
     };
-    let invalid_socket = network.unix_sockets.as_ref().is_some_and(|sockets| {
-        sockets
-            .entries
-            .keys()
-            .any(|path| !path.starts_with('/') || path.contains('\0'))
-    });
-    if network != supported || invalid_socket {
+    if network != supported {
         return Err(EnvironmentNetworkConfigError);
     }
-    // MITM and credential settings have been excluded. This only validates
-    // patterns and lexical socket paths; it does not discover executor files.
-    build_config_state(
-        network.to_network_proxy_config(),
-        NetworkProxyConstraints::default(),
-    )
-    .map_err(|_| EnvironmentNetworkConfigError)?;
     Ok(Some(network))
 }
 
 /// Validates the owner policy for its final permission profile using the native
 /// environment resolver. Execution also applies controller and saved exec rules.
+/// This checks the supplied executor's path syntax; socket support is checked at execution.
 pub fn validate_environment_network_policy(
     policy: &EnvironmentNetworkPolicy,
     permission_profile: &PermissionProfile,
+    executor_os: Platform,
 ) -> Result<(), EnvironmentNetworkConfigError> {
     NetworkProxySpec::for_environment(
         /*controller*/ None,
         policy,
         permission_profile,
         &Policy::empty(),
+        codex_network_proxy::LocalBindingPolicy::DefaultFalse,
     )
-    .and_then(|spec| spec.build_config_state_for_spec().map(|_| ()))
+    .and_then(|spec| spec.build_config_state_for_spec(executor_os).map(|_| ()))
     .map_err(|_| EnvironmentNetworkConfigError)
 }
 

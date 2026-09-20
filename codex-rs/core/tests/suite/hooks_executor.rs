@@ -288,7 +288,12 @@ async fn executor_stop_hook_stops_after_disconnection() -> Result<()> {
 async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let fixture = executor_stop_hook_fixture().await?;
+    let fixture = executor_hook_fixture(
+        ["first-turn", "switch-environments", "second-turn"]
+            .map(completed_turn_response)
+            .to_vec(),
+    )
+    .await?;
     let selection = fixture.attach().await?;
     fixture
         .test
@@ -372,6 +377,11 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
         },
     )
     .await?;
+    fixture
+        .test
+        .submit_text_turn("apply the new executor environment")
+        .await?;
+    fixture.wait_for_hook_call().await?;
 
     let mut mismatched_config = fixture.test.config.clone();
     let mut node_repl = mismatched_config
@@ -391,7 +401,16 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
         .codex
         .refresh_mcp_config(mismatched_config)
         .await;
-    wait_for_mcp_server(&fixture.test.codex, "node_repl").await?;
+    fixture
+        .test
+        .codex
+        .call_mcp_tool(
+            "node_repl",
+            "js",
+            Some(json!({"code": "1 + 1"})),
+            /*meta*/ None,
+        )
+        .await?;
     assert_eq!(
         fixture
             .test
@@ -409,7 +428,15 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
         executor.abort();
     }
 
-    assert_eq!(fixture.calls().await?.len(), 1);
+    assert_eq!(
+        fixture
+            .calls()
+            .await?
+            .iter()
+            .filter(|call| call["params"]["name"] == "turn_ended")
+            .count(),
+        2
+    );
 
     Ok(())
 }
@@ -838,11 +865,7 @@ impl ExecutorHookFixture {
                     ),
                     shell_environment_policy: Default::default(),
                     windows_sandbox_level: WindowsSandboxLevel::from_config(&self.test.config),
-                    windows_sandbox_private_desktop: self
-                        .test
-                        .config
-                        .permissions
-                        .windows_sandbox_private_desktop,
+                    windows_sandbox_type: self.test.config.permissions.windows_sandbox_type,
                     use_legacy_landlock: self.test.config.features.use_legacy_landlock(),
                     exec_policy: None,
                     mcp_policy: None,

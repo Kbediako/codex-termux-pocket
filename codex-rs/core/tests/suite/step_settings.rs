@@ -44,6 +44,7 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentModeMessages;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
+use codex_protocol::openai_models::MultiAgentToolMessages;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::ToolMessage;
@@ -86,6 +87,7 @@ use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_completed;
 use core_test_support::responses::sse_response;
@@ -112,6 +114,7 @@ use super::rmcp_client::remote_aware_stdio_server_bin;
 #[path = "step_settings/agent_spawn_tests.rs"]
 mod agent_spawn;
 mod code_mode_notifications;
+mod environment_selection;
 
 const MODEL_A: &str = "step-settings-a";
 const MODEL_B: &str = "step-settings-b";
@@ -2224,9 +2227,29 @@ async fn model_activation_uses_destination_metadata_defaults(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn request_user_input_async_description_follows_mid_turn_model_changes() -> Result<()> {
+async fn tool_messages_follow_mid_turn_model_changes() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    const MULTI_AGENT_TOOLS: [&str; 6] = [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ];
+
+    let parameters = |model: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": format!("Agent on {model}.")},
+                "message": {"type": "string", "encrypted": true},
+            },
+            "required": ["target"],
+            "additionalProperties": false,
+        })
+    };
     let server = start_mock_server().await;
     let response_mock = mount_sse_sequence(
         &server,
@@ -2237,7 +2260,12 @@ async fn request_user_input_async_description_follows_mid_turn_model_changes() -
     )
     .await;
     let test = step_settings_test()
-        .with_config(|config| {
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.multi_agent_v2.expose_spawn_agent_model_overrides = false;
             for model in &mut config
                 .model_catalog
                 .as_mut()
@@ -2247,6 +2275,12 @@ async fn request_user_input_async_description_follows_mid_turn_model_changes() -
                 model
                     .experimental_supported_tools
                     .push("send_user_message_async".to_string());
+                let tool_message = |name| {
+                    Some(ToolMessage {
+                        description: Some(format!("{name} description for {}.", model.slug)),
+                        parameters: Some(parameters(&model.slug).to_string()),
+                    })
+                };
                 model
                     .model_messages
                     .as_mut()
@@ -2254,6 +2288,15 @@ async fn request_user_input_async_description_follows_mid_turn_model_changes() -
                     .tools = Some(ToolMessages {
                     send_user_message_async: Some(ToolMessage {
                         description: Some(format!("Async message description for {}.", model.slug)),
+                        ..Default::default()
+                    }),
+                    multi_agent: Some(MultiAgentToolMessages {
+                        spawn_agent: tool_message("spawn_agent"),
+                        send_message: tool_message("send_message"),
+                        followup_task: tool_message("followup_task"),
+                        wait_agent: tool_message("wait_agent"),
+                        interrupt_agent: tool_message("interrupt_agent"),
+                        list_agents: tool_message("list_agents"),
                     }),
                 });
             }
@@ -2290,13 +2333,31 @@ async fn request_user_input_async_description_follows_mid_turn_model_changes() -
                     .iter()
                     .find(|tool| tool["name"] == "request_user_input_async")
                     .expect("async message tool");
-                json!({"model": body["model"], "description": tool["description"]})
+                let multi_agent_messages = MULTI_AGENT_TOOLS.map(|name| {
+                    let tool = namespace_child_tool(&body, "collaboration", name).expect(name);
+                    (name.to_string(), json!({
+                        "description": tool["description"].as_str().expect("tool description").trim(),
+                        "parameters": tool["parameters"],
+                    }))
+                }).into_iter().collect::<serde_json::Map<String, Value>>();
+                json!({
+                    "model": body["model"],
+                    "async_description": tool["description"],
+                    "multi_agent_messages": multi_agent_messages,
+                })
             })
             .collect::<Vec<_>>(),
         [MODEL_A, MODEL_B]
             .map(|model| json!({
                 "model": model,
-                "description": format!("Async message description for {model}."),
+                "async_description": format!("Async message description for {model}."),
+                "multi_agent_messages": MULTI_AGENT_TOOLS
+                    .map(|name| (name.to_string(), json!({
+                        "description": format!("{name} description for {model}."),
+                        "parameters": parameters(model),
+                    })))
+                    .into_iter()
+                    .collect::<serde_json::Map<String, Value>>(),
             }))
             .to_vec(),
     );

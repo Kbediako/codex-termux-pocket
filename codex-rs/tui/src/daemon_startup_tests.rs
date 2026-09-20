@@ -1,9 +1,132 @@
-//! Implicit daemon discovery is opportunistic; explicit endpoints remain authoritative.
+//! Opportunistic attachment may fall back; automatic startup requires a shared server.
 
 use super::*;
 use crate::legacy_core::config::ConfigBuilder;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+
+#[test]
+fn audited_overrides_allow_daemon_without_allowing_arbitrary_config() {
+    for (raw, eligible) in [
+        ("features.worktrees=true", true),
+        ("features.worktrees=false", true),
+        ("features={worktrees=true}", true),
+        (
+            "features={worktrees=true,api_key_model_discovery=false}",
+            false,
+        ),
+        ("features.auth_elicitation=false", false),
+        ("features.code_mode_host=false", false),
+        ("features.mcp_oauth_refresh_coordination=false", false),
+        ("suppress_unstable_features_warning=true", true),
+        ("suppress_unstable_features_warning='true'", false),
+        ("features={worktrees=true,shell_tool=false}", false),
+        ("features.shell_tool=false", false),
+        ("features.worktrees.enabled=true", false),
+        ("features={}", false),
+        ("model='test'", false),
+    ] {
+        let overrides = codex_utils_cli::CliConfigOverrides {
+            raw_overrides: vec![raw.to_string()],
+        }
+        .parse_overrides()
+        .unwrap();
+        assert_eq!(
+            daemon_startup::config_exclusion(
+                &overrides,
+                &LoaderOverrides::default(),
+                /*strict_config*/ false,
+                /*bypass_hook_trust*/ false,
+            )
+            .is_none(),
+            eligible,
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn monorepo_wrapper_overrides_are_eligible_and_select_only_server_features() {
+    let overrides = codex_utils_cli::CliConfigOverrides {
+        raw_overrides: [
+            "features.realtime_conversation=true",
+            "features.worktrees=true",
+            "features.remote_models=true",
+            "features.api_key_model_discovery=true",
+            "features.request_rule=true",
+            "features.auth_elicitation=true",
+            "features.mcp_oauth_refresh_coordination=true",
+            "features.responses_websockets_v2=true",
+            "features.workspace_owner_usage_nudge=true",
+            "features.tool_search_always_defer_mcp_tools=true",
+            "features.remote_compaction_v2=true",
+            "features.standalone_web_search=true",
+            "features.multi_agent_mode=true",
+            "features.code_mode_host=true",
+            "suppress_unstable_features_warning=true",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    }
+    .parse_overrides()
+    .unwrap();
+    assert_eq!(
+        daemon_startup::config_exclusion(
+            &overrides,
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*bypass_hook_trust*/ false,
+        ),
+        None
+    );
+    assert_eq!(
+        daemon_startup::server_features(&overrides),
+        std::collections::BTreeMap::from([
+            ("api_key_model_discovery".to_string(), true),
+            ("auth_elicitation".to_string(), true),
+            ("code_mode_host".to_string(), true),
+            ("mcp_oauth_refresh_coordination".to_string(), true),
+        ])
+    );
+}
+
+#[test]
+fn daemon_features_follow_cli_table_replacement_and_last_value() {
+    let overrides = codex_utils_cli::CliConfigOverrides {
+        raw_overrides: [
+            "features.api_key_model_discovery=true",
+            "features={code_mode_host=false}",
+            "features.code_mode_host=true",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    }
+    .parse_overrides()
+    .unwrap();
+    assert_eq!(
+        daemon_startup::server_features(&overrides),
+        std::collections::BTreeMap::from([("code_mode_host".to_string(), true),])
+    );
+}
+
+#[test]
+fn daemon_launch_telemetry_records_once_on_connection_or_early_return() {
+    for connected in [false, true] {
+        let observations = std::cell::RefCell::new(Vec::new());
+        let launch = daemon_telemetry::Launch(Some(|target: &AppServerTarget, actual: bool| {
+            observations.borrow_mut().push((target.clone(), actual));
+        }));
+        if connected {
+            launch.record(&AppServerTarget::Embedded, connected);
+        } else {
+            drop(launch);
+        }
+        assert_eq!(
+            observations.into_inner(),
+            vec![(AppServerTarget::Embedded, connected)]
+        );
+    }
+}
 
 #[cfg(windows)]
 #[tokio::test]
@@ -14,6 +137,7 @@ async fn daemon_connection_rejects_unprotected_socket_before_handshake() -> colo
     let socket_path = AbsolutePathBuf::from_absolute_path_checked(parent.join("server.sock"))?;
     let mut listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
     let target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
     };
     tokio::select! {
@@ -25,7 +149,12 @@ async fn daemon_connection_rejects_unprotected_socket_before_handshake() -> colo
 
 #[tokio::test]
 async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::Result<()> {
-    for scenario in ["missing socket", "failed handshake", "explicit endpoint"] {
+    for scenario in [
+        "missing socket",
+        "failed handshake",
+        "explicit endpoint",
+        "required daemon",
+    ] {
         let home = TempDir::new()?;
         let config = ConfigBuilder::default()
             .codex_home(home.path().to_path_buf())
@@ -50,7 +179,10 @@ async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::
         let mut target = if scenario == "explicit endpoint" {
             AppServerTarget::Remote { endpoint }
         } else {
-            AppServerTarget::LocalDaemon { endpoint }
+            AppServerTarget::LocalDaemon {
+                endpoint,
+                allow_embedded_fallback: scenario != "required daemon",
+            }
         };
         let original_target = target.clone();
         let mut state_db = None;
@@ -69,8 +201,13 @@ async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::
         )
         .await;
         reject_handshake.abort();
-        if scenario == "explicit endpoint" {
+        if scenario == "explicit endpoint" || scenario == "required daemon" {
             assert!(result.is_err());
+            if scenario == "required daemon" {
+                let message = result.err().unwrap().to_string();
+                assert!(message.contains("rerun the same command with --no-daemon"));
+                assert!(message.contains("failed to connect to remote app server"));
+            }
             assert_eq!(target, original_target);
             assert!(state_db.is_none());
         } else {
@@ -89,7 +226,8 @@ fn daemon_eligibility_preserves_launch_options_and_explains_exclusions() {
     use clap::Parser;
     for (args, expected) in [
         ("--no-daemon", Some("--no-daemon")),
-        ("--worktree", Some("--worktree")),
+        ("--worktree", None),
+        ("--worktree --no-daemon", Some("--no-daemon")),
         ("--oss", Some("--oss")),
         ("--profile test", Some("--profile")),
         ("--strict-config", Some("--strict-config")),
@@ -161,4 +299,20 @@ fn daemon_eligibility_preserves_launch_options_and_explains_exclusions() {
         ),
         None
     );
+}
+
+#[test]
+fn daemon_exclusion_warning_snapshot() {
+    use crate::history_cell::HistoryCell;
+    let cell = crate::history_cell::StartupWarningsCell::new(vec![
+        "Running without the shared background server: --strict-config requires embedded mode."
+            .into(),
+    ]);
+    let text = cell
+        .transcript_lines(/*width*/ 80)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("daemon_exclusion_warning", text);
 }

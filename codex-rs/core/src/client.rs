@@ -91,6 +91,7 @@ use codex_protocol::protocol::Event as ProtocolEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
@@ -203,6 +204,7 @@ struct ModelClientState {
     originator: String,
     model_verbosity: Option<VerbosityConfig>,
     content_item_kinds_enabled: bool,
+    reasoning_effort_override_enabled: bool,
     enable_request_compression: bool,
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
@@ -476,6 +478,7 @@ impl ModelClient {
         originator: String,
         model_verbosity: Option<VerbosityConfig>,
         content_item_kinds_enabled: bool,
+        reasoning_effort_override_enabled: bool,
         enable_request_compression: bool,
         include_timing_metrics: bool,
         beta_features_header: Option<String>,
@@ -492,6 +495,16 @@ impl ModelClient {
         let auth_env_telemetry =
             collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
         let include_attestation = model_provider.supports_attestation();
+        // Fixed-effort workers use request-level effort even when managed requirements
+        // pin the feature on. Share this decision with update injection and pinning.
+        let memory_consolidation = matches!(
+            &session_source,
+            SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+                | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation)
+        );
+        let reasoning_effort_override_enabled = reasoning_effort_override_enabled
+            && !crate::guardian::is_basic_session_source(&session_source)
+            && !memory_consolidation;
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
@@ -502,6 +515,7 @@ impl ModelClient {
                 originator,
                 model_verbosity,
                 content_item_kinds_enabled,
+                reasoning_effort_override_enabled,
                 enable_request_compression,
                 include_timing_metrics,
                 beta_features_header,
@@ -519,6 +533,12 @@ impl ModelClient {
             http_client_factory,
             restored_history: false,
         }
+    }
+
+    pub(crate) fn reasoning_effort_override_enabled(&self, model_info: &ModelInfo) -> bool {
+        self.state.reasoning_effort_override_enabled
+            && self.state.provider.info().is_openai()
+            && model_info.supports_reasoning_effort_updates
     }
 
     pub(crate) fn with_restored_history(mut self, restored_history: bool) -> Self {
@@ -856,6 +876,11 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info);
+        if !self.reasoning_effort_override_enabled(model_info) {
+            // Unsupported models and disabled overrides must also accept saved history.
+            // Filter only the request copy; persisted history remains unchanged.
+            input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
+        }
         let is_openai = self.state.provider.info().is_openai();
         let (instructions, tools) = if model_info.use_responses_lite {
             // These prompt-only items are rebuilt on every request. Hash their visible payloads
@@ -932,7 +957,12 @@ impl ModelClient {
             prompt.output_schema_strict,
         );
         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
-        let service_tier = model_info.service_tier_for_request(service_tier);
+        let service_tier = if self.state.provider.info().is_amazon_bedrock() {
+            // Bedrock only supports the implicit default tier, including with custom catalogs.
+            None
+        } else {
+            model_info.service_tier_for_request(service_tier)
+        };
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
@@ -2547,7 +2577,7 @@ async fn handle_unauthorized(
                     original_error = %original,
                     "provider authentication recovery failed"
                 );
-                return Err(if error.is_retryable() {
+                return Err(if error.retry_delay(/*retry_count*/ 1).is_some() {
                     original
                 } else {
                     error

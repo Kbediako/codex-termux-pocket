@@ -59,7 +59,6 @@ struct PreparedWindowsSandboxRequest {
     network_proxy_restricting_sid: Option<String>,
     proxy_settings_mode: WindowsSandboxProxySettingsMode,
     filesystem_overrides: Option<WindowsSandboxFilesystemOverrides>,
-    use_private_desktop: bool,
 }
 
 impl PreparedExecRequest {
@@ -74,7 +73,6 @@ impl PreparedExecRequest {
                 network_proxy_restricting_sid: request.network_proxy_restricting_sid.as_deref(),
                 proxy_settings_mode: request.proxy_settings_mode,
                 filesystem_overrides: request.filesystem_overrides.as_ref(),
-                use_private_desktop: request.use_private_desktop,
             })
     }
 }
@@ -90,9 +88,9 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
     if let Some(sandbox) = params.sandbox.as_ref()
         && sandbox.windows_sandbox_selection == WindowsSandboxSelection::Mxc
     {
-        if params.arg0.is_some() || sandbox.windows_sandbox_private_desktop {
+        if params.arg0.is_some() {
             return Err(invalid_params(
-                "MXC custom argv0 and private-desktop launches are not supported".to_owned(),
+                "MXC custom argv0 is not supported".to_owned(),
             ));
         }
         if !codex_sandboxing::windows_mxc_available() {
@@ -145,19 +143,18 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             windows_sandbox: None,
         });
     };
+    let runtime_paths = runtime_paths
+        .ok_or_else(|| invalid_params("sandbox runtime paths are not configured".to_string()))?;
+    sandbox_context
+        .validate_file_system_paths_for_current_host()
+        .map_err(|err| invalid_params(err.to_string()))?;
     let windows_sandbox_proxy_settings_mode = sandbox_context
         .windows_sandbox_proxy_settings_mode
         .unwrap_or_default();
-    let runtime_paths = runtime_paths
-        .ok_or_else(|| invalid_params("sandbox runtime paths are not configured".to_string()))?;
     // TODO(jif): Transport permissions before orchestrator-local paths are materialized,
     // then resolve executor-local helper and workspace paths here.
-    let permissions: PermissionProfile = sandbox_context
-        .permissions
-        .clone()
-        .try_into()
-        .map_err(|err| invalid_params(format!("invalid sandbox permission path URI: {err}")))?;
-    let sandbox_policy_cwd = sandbox_context.cwd.as_ref().unwrap_or(&params.cwd);
+    let permissions = sandbox_context.permissions.clone();
+    let sandbox_policy_cwd = &sandbox_context.cwd;
     let native_sandbox_policy_cwd = native_path(sandbox_policy_cwd, "sandbox cwd")?;
     let native_workspace_roots = sandbox_context
         .workspace_roots
@@ -272,7 +269,6 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             },
             use_legacy_landlock: sandbox_context.use_legacy_landlock,
             windows_sandbox_level: windows_sandbox_level.unwrap_or(WindowsSandboxLevel::Disabled),
-            windows_sandbox_private_desktop: sandbox_context.windows_sandbox_private_desktop,
         },
     };
     let mut request = if sandbox == SandboxType::WindowsRestrictedToken {
@@ -313,7 +309,6 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             network_proxy_restricting_sid,
             proxy_settings_mode: windows_sandbox_proxy_settings_mode,
             filesystem_overrides,
-            use_private_desktop: sandbox_context.windows_sandbox_private_desktop,
         })
     } else {
         None
@@ -349,8 +344,11 @@ async fn prepare_managed_network(
     let Some(network_proxy) = network_proxy.cloned() else {
         return Ok((env, managed_network.cloned(), None, None));
     };
-    let mut state = NetworkProxyState::from_remote_launch_config(network_proxy)
-        .map_err(|err| invalid_params(format!("invalid network proxy config: {err}")))?;
+    let mut state = NetworkProxyState::from_remote_launch_config(
+        network_proxy,
+        codex_utils_path_uri::Platform::native(),
+    )
+    .map_err(|err| invalid_params(format!("invalid network proxy config: {err}")))?;
     if let Some(observer) = network_policy_audit_observer {
         state.set_policy_audit_observer(observer);
     }

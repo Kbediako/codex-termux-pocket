@@ -295,13 +295,6 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
         .await;
 }
 
-fn rollout_item_contains_message_text(item: &RolloutItem, needle: &str) -> bool {
-    let RolloutItem::ResponseItem(response_item) = item else {
-        return false;
-    };
-    response_item_contains_message_text(response_item, needle)
-}
-
 fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> bool {
     let ResponseItem::Message { content, .. } = item else {
         return false;
@@ -524,7 +517,8 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
         ]),
         NetworkSandboxPolicy::Restricted,
     );
-    let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0] else {
+    let TurnEnvironmentState::Ready(environment) = &mut turn.initial_environments.environments[0]
+    else {
         panic!("parent environment should be ready");
     };
     environment.config_mut().permission_profile =
@@ -569,6 +563,179 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
     assert!(text.contains(second_denied_root.to_string_lossy().as_ref()));
     assert!(text.contains(&format!("glob `{denied_glob}`")));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_approval_permissions_use_the_owning_environment() -> anyhow::Result<()> {
+    let (session, mut turn) = crate::session::tests::make_session_and_context().await;
+    let mut secondary = turn.initial_environments.primary().unwrap().clone();
+    let cwd = test_path_buf("/guardian-secondary").abs();
+    let denied = cwd.join("private");
+    secondary.selection.environment_id = "secondary".to_string();
+    secondary.selection.cwd = PathUri::from_abs_path(&cwd);
+    secondary.config_mut().permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: PathUri::from_abs_path(&denied),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            }]),
+            NetworkSandboxPolicy::Restricted,
+        ));
+    let mut windows = secondary.clone();
+    let windows_cwd = PathUri::parse("file:///C:/guardian-secondary")?;
+    windows.environment = Arc::new(codex_exec_server::Environment::create_for_tests(Some(
+        "ws://127.0.0.1:1".into(),
+    ))?);
+    windows.selection.environment_id = "windows".into();
+    windows.selection.cwd = windows_cwd.clone();
+    windows.config_mut().workspace_roots = vec![windows_cwd.clone()];
+    windows.config_mut().permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::restricted(vec![
+                FileSystemSandboxEntry::new(
+                    windows_cwd.join("private")?.into(),
+                    FileSystemAccessMode::Deny,
+                ),
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::GlobPattern {
+                        pattern: "*.secret".into(),
+                    },
+                    FileSystemAccessMode::Deny,
+                ),
+            ]),
+            NetworkSandboxPolicy::Restricted,
+        ));
+    turn.initial_environments.environments.extend([
+        TurnEnvironmentState::Ready(secondary),
+        TurnEnvironmentState::Ready(windows),
+    ]);
+    let turn = Arc::new(turn);
+    let context = GuardianReviewContext::from(&turn);
+    let network_request = |environment_id: &str| GuardianApprovalRequest::NetworkAccess {
+        id: "network".to_string(),
+        turn_id: turn.sub_id.clone(),
+        environment_id: environment_id.to_string(),
+        target: "https://example.com:443".to_string(),
+        host: "example.com".to_string(),
+        protocol: NetworkApprovalProtocol::Https,
+        port: 443,
+        trigger: None,
+    };
+    let requests = [
+        network_request("secondary"),
+        network_request("windows"),
+        #[cfg(unix)]
+        GuardianApprovalRequest::Execve {
+            id: "shell".to_string(),
+            environment_id: "secondary".to_string(),
+            source: codex_protocol::approvals::GuardianCommandSource::UnifiedExec,
+            program: "cat".to_string(),
+            argv: Vec::new(),
+            cwd,
+            additional_permissions: None,
+        },
+    ];
+    for request in requests {
+        let is_windows = request.background_environment_id() == Some("windows");
+        let prompt = build_guardian_prompt_items_with_parent_turn(
+            &session,
+            session.conversation_history_snapshot().await.as_ref(),
+            Some(&context),
+            ApprovalRequestReasons::default(),
+            request,
+            GuardianPromptMode::Full,
+            /*reviewed_node_repl_evidence_sequence*/ 0,
+        )
+        .await?;
+        let text = guardian_prompt_text(&prompt.context.into_user_inputs()?);
+        if is_windows {
+            assert!(
+                text.contains(r"path `C:\guardian-secondary\private`"),
+                "{text}"
+            );
+            assert!(
+                text.contains(r"glob `C:\guardian-secondary\*.secret`"),
+                "{text}"
+            );
+        } else {
+            assert!(text.contains(denied.to_string_lossy().as_ref()));
+        }
+    }
+    assert!(
+        runtime::ReviewAction::from(network_request("missing"))
+            .validate(&context)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn guardian_uses_thread_permissions_for_an_unavailable_captured_environment()
+-> anyhow::Result<()> {
+    let (session, mut turn) = crate::session::tests::make_session_and_context().await;
+    let original_root = test_path_buf("/original-workspace").abs();
+    let captured_root = test_path_buf("/captured-workspace").abs();
+    let thread_profile = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: codex_protocol::permissions::FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: codex_protocol::permissions::FileSystemSpecialPath::project_roots(Some(
+                        "private".into(),
+                    )),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let permissions = &mut Arc::make_mut(&mut turn.config).permissions;
+    permissions.set_permission_profile(thread_profile)?;
+    permissions.set_workspace_roots(vec![original_root.clone()]);
+    let TurnEnvironmentState::Ready(original) = &mut turn.initial_environments.environments[0]
+    else {
+        panic!("initial environment should be ready");
+    };
+    original.config_mut().permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
+    let mut selection = original.selection();
+    selection.cwd = PathUri::from_abs_path(&captured_root);
+    selection.workspace_roots = vec![selection.cwd.clone()];
+    selection.config = codex_protocol::protocol::EnvironmentConfigState::Failed("offline".into());
+    let captured = crate::environment_selection::TurnEnvironmentSnapshot {
+        environments: vec![TurnEnvironmentState::Failed {
+            selection,
+            error: "offline".into(),
+        }],
+    };
+    let turn = Arc::new(turn);
+    let context = GuardianReviewContext::from_resolved_settings(
+        Arc::clone(&turn),
+        &turn.initial_settings,
+        &captured,
+    );
+    let prompt = build_guardian_prompt_items_with_parent_turn(
+        &session,
+        session.conversation_history_snapshot().await.as_ref(),
+        Some(&context),
+        ApprovalRequestReasons::default(),
+        guardian_exec_command_request("shell"),
+        GuardianPromptMode::Full,
+        /*reviewed_node_repl_evidence_sequence*/ 0,
+    )
+    .await?;
+    let text = guardian_prompt_text(&prompt.context.into_user_inputs()?);
+    assert!(text.contains(captured_root.join("private").to_string_lossy().as_ref()));
+    assert!(!text.contains(original_root.join("private").to_string_lossy().as_ref()));
     Ok(())
 }
 
@@ -1098,6 +1265,7 @@ fn guardian_approval_request_to_json_renders_network_access_trigger() -> serde_j
     let action = GuardianApprovalRequest::NetworkAccess {
         id: "network-1".to_string(),
         turn_id: "turn-1".to_string(),
+        environment_id: "local".to_string(),
         target: "https://example.com:443".to_string(),
         host: "example.com".to_string(),
         protocol: NetworkApprovalProtocol::Https,
@@ -1148,6 +1316,7 @@ async fn build_guardian_prompt_items_explains_network_access_review_scope() -> a
         GuardianApprovalRequest::NetworkAccess {
             id: "network-1".to_string(),
             turn_id: "turn-1".to_string(),
+            environment_id: "local".to_string(),
             target: "https://example.com:443".to_string(),
             host: "example.com".to_string(),
             protocol: NetworkApprovalProtocol::Https,
@@ -1346,6 +1515,7 @@ fn guardian_request_turn_id_prefers_network_access_owner_turn() {
     let network_access = GuardianApprovalRequest::NetworkAccess {
         id: "network-1".to_string(),
         turn_id: "owner-turn".to_string(),
+        environment_id: "local".to_string(),
         target: "https://example.com:443".to_string(),
         host: "example.com".to_string(),
         protocol: NetworkApprovalProtocol::Https,
@@ -1375,6 +1545,7 @@ fn guardian_request_target_item_id_omits_network_access_trigger_call_id() {
     let network_access = GuardianApprovalRequest::NetworkAccess {
         id: "network-1".to_string(),
         turn_id: "owner-turn".to_string(),
+        environment_id: "local".to_string(),
         target: "https://example.com:443".to_string(),
         host: "example.com".to_string(),
         protocol: NetworkApprovalProtocol::Https,
@@ -2232,17 +2403,11 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     .await;
 
     let (session, mut turn) = guardian_test_session_and_turn(&server).await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::GuardianReuseParentCompaction)
-        .expect("Guardian parent-compaction reuse should be configurable");
     let turn_mut = Arc::get_mut(&mut turn).expect("turn should be unique");
     update_turn_settings_for_test(turn_mut, |settings| {
         Arc::make_mut(&mut settings.model_info).auto_review_model_override =
             Some("codex-auto-review".to_string());
     });
-    turn_mut.config = Arc::new(config);
     seed_guardian_parent_history(&session, &turn).await;
 
     let first_request = GuardianApprovalRequest::ExecCommand {
@@ -2335,7 +2500,15 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     assert_eq!(
         committed_rollout_items
             .iter()
-            .filter(|item| rollout_item_contains_message_text(
+            .flat_map(|item| match item {
+                RolloutItem::ResponseItem(item) => std::slice::from_ref(item),
+                RolloutItem::Compacted(checkpoint) => checkpoint
+                    .replacement_history
+                    .as_deref()
+                    .unwrap_or_default(),
+                _ => &[],
+            })
+            .filter(|item| response_item_contains_message_text(
                 item,
                 "Use prior reviews as context, not binding precedent."
             ))

@@ -299,7 +299,7 @@ mod tests {
 
     struct CapturingExtensionExecutor {
         captured_call: Arc<Mutex<Option<codex_tools::ToolCall<'static>>>>,
-        captured_sandbox_cwds: Arc<Mutex<Vec<Option<PathUri>>>>,
+        captured_sandbox_cwds: Arc<Mutex<Vec<PathUri>>>,
     }
 
     impl<'call> codex_extension_api::ToolExecutor<codex_tools::ToolCall<'call>>
@@ -430,9 +430,9 @@ mod tests {
         let model = turn.model_info().slug.clone();
         let truncation_policy = turn.model_info().truncation_policy.into();
         let expected_sandbox_cwds = turn
-            .environments
+            .initial_environments
             .turn_environments()
-            .map(|environment| Some(environment.cwd().clone()))
+            .map(|environment| environment.cwd().clone())
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
             id: None,

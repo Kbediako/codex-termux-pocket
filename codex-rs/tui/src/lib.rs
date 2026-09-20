@@ -112,6 +112,7 @@ mod app_server_connection;
 mod app_server_session;
 mod approval_events;
 mod ascii_animation;
+mod async_question_reply;
 mod backend_banners;
 mod bottom_pane;
 mod branch_summary;
@@ -217,6 +218,7 @@ mod theme_picker;
 mod thread_color;
 mod thread_transcript;
 mod token_usage;
+mod tool_output;
 mod tooltips;
 mod transcript_reflow;
 mod tui;
@@ -299,8 +301,13 @@ async fn start_embedded_app_server(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppServerTarget {
     Embedded,
-    LocalDaemon { endpoint: RemoteAppServerEndpoint },
-    Remote { endpoint: RemoteAppServerEndpoint },
+    LocalDaemon {
+        endpoint: RemoteAppServerEndpoint,
+        allow_embedded_fallback: bool,
+    },
+    Remote {
+        endpoint: RemoteAppServerEndpoint,
+    },
 }
 
 impl AppServerTarget {
@@ -517,10 +524,24 @@ async fn start_app_server(
     if let Some(connection) = connection {
         match connection {
             Ok(app_server) => return Ok(app_server),
-            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
+            Err(err)
+                if matches!(
+                    target,
+                    AppServerTarget::LocalDaemon {
+                        allow_embedded_fallback: true,
+                        ..
+                    }
+                ) =>
+            {
                 tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
                 *target = AppServerTarget::Embedded;
                 *state_db = init_state_db_for_app_server_target(&config, target).await?;
+            }
+            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
+                return Err(color_eyre::eyre::eyre!(
+                    "{err:#}\n{}",
+                    daemon_startup::FAILURE_HINT
+                ));
             }
             Err(err) => return Err(err),
         }
@@ -948,6 +969,7 @@ fn app_server_target_for_launch(
         None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
             default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
                 AppServerTarget::LocalDaemon {
+                    allow_embedded_fallback: true,
                     endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
                 }
             })
@@ -1040,6 +1062,8 @@ async fn run_ratatui_app(
     mut state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
     managed_worktree: Option<ManagedTuiWorktree>,
+    daemon_startup_warning: Option<String>,
+    launch_telemetry: daemon_telemetry::Launch<impl FnOnce(&AppServerTarget, bool)>,
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
@@ -1105,6 +1129,7 @@ async fn run_ratatui_app(
             ),
         )
         .await;
+    launch_telemetry.record(&app_server_target, matches!(&startup_app_server, Ok(Ok(_))));
     let app_server_session = match startup_app_server {
         Ok(Ok(app_server)) => {
             AppServerSession::new(app_server, app_server_target.thread_params_mode())
@@ -1896,6 +1921,7 @@ async fn run_ratatui_app(
         startup_elapsed_before_app,
         startup_bootstrap,
         startup_hooks_browser,
+        daemon_startup_warning,
         startup_draft,
         managed_worktree,
         daemon_cli_executable,
@@ -2163,6 +2189,7 @@ fn should_show_bedrock_setup_wizard(
 }
 
 mod daemon_startup;
+mod daemon_telemetry;
 
 #[cfg(test)]
 #[path = "daemon_startup_tests.rs"]
@@ -2291,6 +2318,7 @@ requires_openai_auth = {requires_openai_auth}
                 enabled,
                 LoginStatus::NotAuthenticated,
                 AppServerTarget::LocalDaemon {
+                    allow_embedded_fallback: true,
                     endpoint: shared_endpoint.clone(),
                 },
                 false,
@@ -2911,6 +2939,7 @@ requires_openai_auth = {requires_openai_auth}
         assert_eq!(
             target,
             AppServerTarget::LocalDaemon {
+                allow_embedded_fallback: true,
                 endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
             }
         );
@@ -3012,6 +3041,7 @@ requires_openai_auth = {requires_openai_auth}
     #[test]
     fn should_load_configured_environments_for_local_daemon() -> color_eyre::Result<()> {
         let target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
@@ -3069,6 +3099,7 @@ requires_openai_auth = {requires_openai_auth}
         let config = build_config(&temp_dir).await?;
         let cwd = temp_dir.path().join("project");
         let target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
@@ -3405,6 +3436,7 @@ requires_openai_auth = {requires_openai_auth}
     -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
@@ -3481,6 +3513,7 @@ requires_openai_auth = {requires_openai_auth}
             &environment_manager
         ));
         let local_daemon = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },

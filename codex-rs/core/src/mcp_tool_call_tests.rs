@@ -1331,13 +1331,13 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
     let (_, mut turn_context) = make_session_and_context().await;
     let secondary_cwd = PathUri::parse("file:///C:/remote/project")?;
     let environment = turn_context
-        .environments
+        .initial_environments
         .primary()
         .expect("primary environment")
         .environment
         .clone();
     turn_context
-        .environments
+        .initial_environments
         .environments
         .push(TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
@@ -1348,10 +1348,7 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
                     allow_login_shell: true,
                     workspace_roots: Vec::new(),
                     windows_sandbox_level: turn_context.windows_sandbox_level,
-                    windows_sandbox_private_desktop: turn_context
-                        .config
-                        .permissions
-                        .windows_sandbox_private_desktop,
+                    windows_sandbox_type: turn_context.config.permissions.windows_sandbox_type,
                     use_legacy_landlock: turn_context.config.features.use_legacy_landlock(),
                     permission_profile: turn_context
                         .config

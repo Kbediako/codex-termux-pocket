@@ -104,6 +104,8 @@ pub(crate) struct SessionConfiguration {
 
     /// Desired configured inputs inherited by future turns.
     pub(super) step_settings: Arc<StepSettings>,
+    /// Ordered environments inherited by future turns.
+    pub(super) environments: Vec<TurnEnvironmentSelection>,
     /// Explicit startup overrides used when resolving effective model metadata.
     pub(super) model_info_overrides: ModelInfoOverrides,
 
@@ -123,7 +125,6 @@ pub(crate) struct SessionConfiguration {
     // internal sandbox decisions should use the selected environment's configuration.
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
     pub(super) windows_sandbox_type: SandboxType,
-    pub(super) windows_sandbox_private_desktop: bool,
     pub(super) use_legacy_landlock: bool,
 
     /// Legacy thread cwd used when a turn does not select an environment.
@@ -177,7 +178,7 @@ impl SessionConfiguration {
             permission_profile: self.permission_profile_state.snapshot(),
             shell_environment_policy: self.shell_environment_policy.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
-            windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
+            windows_sandbox_type: self.windows_sandbox_type,
             use_legacy_landlock: self.use_legacy_landlock,
             exec_policy: None,
             mcp_policy: None,
@@ -418,6 +419,7 @@ impl SessionConfiguration {
         let current_cwd = self.cwd().clone();
         if let Some(environments) = &updates.environments {
             next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
+            next_configuration.environments = environments.environments.clone();
         }
         let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
         if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
@@ -735,7 +737,7 @@ impl Session {
         mut session_configuration: SessionConfiguration,
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
-        instructions: SessionInstructions,
+        mut instructions: SessionInstructions,
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
@@ -754,7 +756,7 @@ impl Session {
         extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
         mut thread_extension_init: ExtensionDataInit,
         client_mcp_extensions: ClientMcpExtensions,
-        agent_control: AgentControl,
+        agent_control: LocalAgentControl,
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -867,6 +869,16 @@ impl Session {
                 ));
             }
         };
+        let isolation = thread_extension_init
+            .get::<codex_extension_api::SessionIsolation>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
+        if !session_configuration.session_source.is_non_root_agent()
+            && isolation != codex_extension_api::SessionIsolation::Isolated
+        {
+            instructions.thread_provider = agent_control
+                .root_thread_instructions_provider(thread_id, instructions.thread_provider);
+        }
         // Ephemeral forks reuse cache routing, without sharing storage or lifecycle identity.
         let fork_cache_key = match &initial_history {
             InitialHistory::Forked(items)
@@ -947,10 +959,6 @@ impl Session {
         // Publish the already resolved model before extensions make startup decisions.
         // Turn construction refreshes this attachment when the selected model changes.
         thread_extension_init.insert(model_info);
-        let isolation = thread_extension_init
-            .get::<codex_extension_api::SessionIsolation>()
-            .map(|policy| *policy)
-            .unwrap_or_default();
         let allowed_tools = thread_extension_init
             .get::<codex_extension_api::AllowedTools>()
             .or_else(|| {
@@ -1123,10 +1131,11 @@ impl Session {
                     mcp_thread_init_for_startup,
                     thread_extension_data_for_mcp,
                     McpThreadIdentity {
+                        auth_changed: false,
                         session_source: &mcp_session_source,
                         originator: &mcp_originator,
                         disabled_plugin_ids: &mcp_disabled_plugin_ids,
-                        environments: McpEnvironmentScope::Initial(environment_selections),
+                        environments: McpEnvironmentScope::Selected(environment_selections),
                     },
                     /*ready_selected_capability_roots*/ &[],
                     /*executor_capability_discovery*/ None,
@@ -1401,6 +1410,7 @@ impl Session {
                 environment_selections,
                 &session_configuration.inferred_environment_config(),
             );
+            session_configuration.environments = turn_environments.selections();
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(instructions));
             let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
@@ -1613,6 +1623,14 @@ impl Session {
                 &initial_history,
             );
             let codex_responses_headers = thread_extension_data.get::<crate::CodexResponsesHeaders>();
+            // Ephemeral title requests use request-level effort even when managed settings
+            // enable overrides. The client-supplied tag selects cache behavior, not permissions.
+            let title_request = config.ephemeral && matches!(
+                session_configuration.thread_source.as_ref(),
+                Some(ThreadSource::Feature(feature)) if feature == "thread_title"
+            );
+            let reasoning_effort_override_enabled =
+                config.features.enabled(Feature::ReasoningEffortOverride) && !title_request;
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1676,6 +1694,7 @@ impl Session {
                     session_configuration.originator.clone(),
                     config.model_verbosity,
                     config.features.enabled(Feature::ContentItemKinds),
+                    reasoning_effort_override_enabled,
                     config.features.enabled(Feature::EnableRequestCompression),
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
@@ -1794,8 +1813,10 @@ impl Session {
                 mcp_auth_changes.mark_unchanged();
             }
             let latest_auth = sess.services.auth_manager.auth().await;
+            let resolved_environment_selections = resolved_environments.all_selections();
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
+                || resolved_environment_selections.as_slice() != environment_selections
             {
                 sess.services
                     .mcp_manager
@@ -1804,12 +1825,14 @@ impl Session {
                         &sess.services.mcp_thread_init,
                         &sess.services.thread_extension_data,
                         McpThreadIdentity {
+                            auth_changed: !sess
+                                .services
+                                .mcp_runtime
+                                .current_auth_matches(latest_auth.as_ref()),
                             session_source: &session_configuration.session_source,
                             originator: &session_configuration.originator,
                             disabled_plugin_ids: &session_configuration.disabled_plugin_ids,
-                            environments: McpEnvironmentScope::Live(
-                                &sess.services.turn_environments,
-                            ),
+                            environments: McpEnvironmentScope::Selected(&resolved_environment_selections),
                         },
                         /*ready_selected_capability_roots*/ &[],
                         /*executor_capability_discovery*/ None,

@@ -22,6 +22,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
+pub use codex_protocol::sandbox::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
@@ -36,27 +37,6 @@ const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &[
     // ShellExecuteExW needs SystemRoot to elevate the setup helper.
     "SYSTEMROOT",
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SandboxType {
-    None,
-    MacosSeatbelt,
-    LinuxSeccomp,
-    WindowsRestrictedToken,
-    WindowsMxc,
-}
-
-impl SandboxType {
-    pub fn as_metric_tag(self) -> &'static str {
-        match self {
-            SandboxType::None => "none",
-            SandboxType::MacosSeatbelt => "seatbelt",
-            SandboxType::LinuxSeccomp => "seccomp",
-            SandboxType::WindowsRestrictedToken => "windows_sandbox",
-            SandboxType::WindowsMxc => "windows_mxc",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxablePreference {
@@ -128,7 +108,6 @@ pub struct SandboxExecRequest {
     // TODO(anp): Reconcile these backend copies with the supplied sandbox context
     // (TurnEnvironment::sandbox_context for turns), preserving this launch snapshot.
     pub windows_sandbox_level: WindowsSandboxLevel,
-    pub windows_sandbox_private_desktop: bool,
     pub permission_profile: PermissionProfile,
     pub arg0: Option<String>,
 }
@@ -151,7 +130,6 @@ pub struct SandboxTransformRequest<'a> {
     // (TurnEnvironment::sandbox_context for turns) so selection shares its authority.
     pub use_legacy_landlock: bool,
     pub windows_sandbox_level: WindowsSandboxLevel,
-    pub windows_sandbox_private_desktop: bool,
 }
 
 /// Bundled arguments for a sandbox transformation whose result will be spawned
@@ -324,7 +302,7 @@ impl SandboxManager {
         &self,
         permission_profile: &PermissionProfile,
         pref: SandboxablePreference,
-        windows_sandbox_level: WindowsSandboxLevel,
+        windows_sandbox_type: SandboxType,
         has_managed_network_requirements: bool,
     ) -> SandboxType {
         #[cfg(windows)]
@@ -333,8 +311,10 @@ impl SandboxManager {
         if !self.should_sandbox(permission_profile, pref, has_managed_network_requirements) {
             return SandboxType::None;
         }
-        get_platform_sandbox(windows_sandbox_level != WindowsSandboxLevel::Disabled)
-            .unwrap_or(SandboxType::None)
+        if cfg!(windows) && windows_sandbox_type == SandboxType::WindowsMxc {
+            return SandboxType::WindowsMxc;
+        }
+        get_platform_sandbox(windows_sandbox_type != SandboxType::None).unwrap_or(SandboxType::None)
     }
 
     /// Returns whether the request needs a sandbox, independently of whether
@@ -375,7 +355,6 @@ impl SandboxManager {
             sandbox_exe,
             use_legacy_landlock,
             windows_sandbox_level,
-            windows_sandbox_private_desktop,
         } = request;
         #[cfg(target_os = "macos")]
         let managed_network = command.managed_network.as_ref();
@@ -397,11 +376,6 @@ impl SandboxManager {
         let (argv, arg0_override, pending_sandboxed_request) = match sandbox {
             SandboxType::None => (argv, None, None),
             SandboxType::WindowsMxc => {
-                if windows_sandbox_private_desktop {
-                    return Err(SandboxTransformError::WindowsMxcPreparation(
-                        "private desktop isolation is not supported by MXC".to_string(),
-                    ));
-                }
                 if !codex_mxc_sandbox::is_available() {
                     return Err(SandboxTransformError::WindowsMxcPreparation(
                         "native MXC is unavailable on this executor".to_string(),
@@ -545,20 +519,6 @@ impl SandboxManager {
                     ));
                 }
                 let pending = pending_sandboxed_request?;
-                if let Some(metrics) = codex_otel::global() {
-                    let _ = metrics.counter(
-                        "codex.windows_sandbox.private_desktop",
-                        /*inc*/ 1,
-                        &[(
-                            "enabled",
-                            if windows_sandbox_private_desktop {
-                                "true"
-                            } else {
-                                "false"
-                            },
-                        )],
-                    );
-                }
                 (argv, None, Some(pending))
             }
             #[cfg(not(target_os = "windows"))]
@@ -582,7 +542,6 @@ impl SandboxManager {
             network_environment_id: environment_id.map(str::to_string),
             sandbox,
             windows_sandbox_level,
-            windows_sandbox_private_desktop,
             permission_profile,
             arg0: arg0_override,
         })
@@ -709,7 +668,6 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             &request.env,
             &request.permission_profile,
             request.windows_sandbox_level,
-            request.windows_sandbox_private_desktop,
             proxy_enforced,
             network_proxy_restricting_sid.as_deref(),
             proxy_settings_mode,

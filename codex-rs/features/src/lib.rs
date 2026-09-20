@@ -110,6 +110,8 @@ pub enum Feature {
     SecretAuthStorage,
 
     // Experimental
+    /// Automatically start the shared local daemon for eligible interactive launches.
+    DaemonAutoStart,
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Record model-attempted tool calls in internal Responses metadata.
@@ -197,6 +199,8 @@ pub enum Feature {
     Worktrees,
     /// Respect host system proxy settings for Codex-owned network clients.
     RespectSystemProxy,
+    /// Retry eligible bootstrap requests through the system proxy after normal routing fails.
+    SystemProxyFallback,
     /// Enable collab tools.
     Collab,
     /// Enable task-path-based multi-agent routing.
@@ -921,6 +925,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::DaemonAutoStart,
+        key: "daemon_auto_start",
+        stage: Stage::Experimental {
+            name: "Automatically start the background server",
+            menu_description: "Use the shared local server for new, resumed, and forked sessions. Takes effect next launch.",
+            announcement: "Automatic background server startup can now be enabled from /experimental.",
+        },
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::TranscriptV2,
         key: "transcript_v2",
         stage: Stage::UnderDevelopment,
@@ -1280,6 +1294,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::SystemProxyFallback,
+        key: "system_proxy_fallback",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::Collab,
         key: "multi_agent",
         stage: Stage::Stable,
@@ -1600,8 +1620,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianReuseParentCompaction,
         key: "guardian_reuse_parent_compaction",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::GuardianEnhancedNodeReplTranscripts,

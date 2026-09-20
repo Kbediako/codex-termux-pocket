@@ -68,6 +68,7 @@ use crate::unified_exec::process::UnifiedExecProcess;
 use crate::unified_exec::shell_snapshot::shell_snapshot_request;
 use crate::unified_exec::take_plugin_metrics_sidecar;
 use crate::unified_exec::trace_id;
+use crate::windows_sandbox::windows_sandbox_level_for_legacy_checks;
 use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginMetricsSidecar;
@@ -120,7 +121,7 @@ fn deterministic_process_ids_forced_for_tests() -> bool {
     FORCE_DETERMINISTIC_PROCESS_IDS.load(Ordering::Relaxed)
 }
 
-fn should_use_deterministic_process_ids() -> bool {
+pub(super) fn should_use_deterministic_process_ids() -> bool {
     cfg!(test) || deterministic_process_ids_forced_for_tests()
 }
 
@@ -1277,7 +1278,7 @@ impl UnifiedExecProcessManager {
         let network_policy_decider = network_proxy_launch
             .as_ref()
             .filter(|launch| launch.policy_decision_timeout_ms.is_some())
-            .and_then(|_| network.and_then(NetworkProxy::remote_policy_decider));
+            .and_then(|launch| network?.remote_policy_decider(launch.proxy.allow_local_binding));
         if environment.is_remote() && network.is_some() && network_proxy_launch.is_none() {
             request.exec_server_enforce_managed_network = false;
         }
@@ -1407,7 +1408,6 @@ impl UnifiedExecProcessManager {
                     network_proxy_restricting_sid: network_proxy_restricting_sid.as_deref(),
                     proxy_settings_mode: windows_sandbox_proxy_settings_mode,
                     filesystem_overrides: request.windows_sandbox_filesystem_overrides.as_ref(),
-                    use_private_desktop: request.windows_sandbox_private_desktop,
                 })
             } else {
                 None
@@ -1488,7 +1488,10 @@ impl UnifiedExecProcessManager {
                     approval_policy: context.step_context.settings.approval_policy(),
                     permission_profile: request.turn_environment.permission_profile().clone(),
                     environment_policy: request.turn_environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
+                    windows_sandbox_level: windows_sandbox_level_for_legacy_checks(
+                        request.turn_environment.config().windows_sandbox_type,
+                        request.turn_environment.config().windows_sandbox_level,
+                    ),
                     sandbox_permissions: if request.additional_permissions_preapproved {
                         crate::sandboxing::SandboxPermissions::UseDefault
                     } else {

@@ -66,6 +66,7 @@ fn connected_server_version_notice_snapshot() {
 #[test]
 fn local_daemon_version_notice_snapshot() {
     let target = crate::AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: AbsolutePathBuf::from_absolute_path(
                 std::env::temp_dir().join("codex.sock"),
@@ -497,10 +498,7 @@ fn structured_tool_cell_renders_raw_plain_text_without_prefix_or_style() {
         invocation,
         /*animations_enabled*/ false,
     );
-    assert!(
-        cell.complete(Duration::from_millis(1), Ok(result))
-            .is_none()
-    );
+    cell.complete(Duration::from_millis(1), Ok(result));
 
     let lines = cell.raw_lines();
     let rendered = render_lines(&lines);
@@ -520,18 +518,14 @@ fn raw_mode_toggle_transcript_snapshot() {
         },
         /*animations_enabled*/ false,
     );
-    assert!(
-        tool_cell
-            .complete(
-                Duration::from_millis(5),
-                Ok(CallToolResult {
-                    content: vec![text_block("structured output\nsecond line")],
-                    is_error: None,
-                    structured_content: None,
-                    meta: None,
-                }),
-            )
-            .is_none()
+    tool_cell.complete(
+        Duration::from_millis(5),
+        Ok(CallToolResult {
+            content: vec![text_block("structured output\nsecond line")],
+            is_error: None,
+            structured_content: None,
+            meta: None,
+        }),
     );
     let cells: Vec<Box<dyn HistoryCell>> = vec![
             Box::new(new_user_prompt(
@@ -736,6 +730,7 @@ async fn session_info_uses_availability_nux_tooltip_override() {
         &config,
         &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
+        "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,
         Some("Model just became available".to_string()),
@@ -759,6 +754,7 @@ async fn session_info_availability_nux_tooltip_snapshot() {
         &config,
         &crate::local_settings::LocalSettings::from(&config),
         "gpt-5",
+        "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,
         Some("Model just became available".to_string()),
@@ -776,6 +772,7 @@ async fn session_info_first_event_suppresses_tooltips_and_nux() {
     let cell = new_session_info(
         &config,
         &crate::local_settings::LocalSettings::from(&config),
+        "gpt-5",
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ true,
@@ -796,6 +793,7 @@ async fn session_info_hides_tooltips_when_disabled() {
     let cell = new_session_info(
         &config,
         &crate::local_settings::LocalSettings::from(&config),
+        "gpt-5",
         "gpt-5",
         &session_configured_event("gpt-5"),
         /*is_first_event*/ false,
@@ -1330,7 +1328,7 @@ fn web_search_history_cell_without_detail_snapshot() {
 }
 
 #[test]
-fn web_search_history_cell_wraps_with_indented_continuation() {
+fn web_search_history_cell_truncates() {
     let query = "example search query with several generic words to exercise wrapping".to_string();
     let cell = new_web_search_call(
         "call-1".to_string(),
@@ -1344,10 +1342,7 @@ fn web_search_history_cell_wraps_with_indented_continuation() {
 
     assert_eq!(
         rendered,
-        vec![
-            "• Searched the web for example search query with several generic".to_string(),
-            "  words to exercise wrapping".to_string(),
-        ]
+        vec!["• Searched the web for example search query with several generi…".to_string(),]
     );
 }
 
@@ -1441,12 +1436,11 @@ fn code_mode_tool_call_uses_title_and_preserves_full_transcript() {
     let transcript = render_lines(&cell.transcript_lines(/*width*/ 180)).join("\n");
     insta::assert_snapshot!(format!("history:\n{history}\n\ntranscript:\n{transcript}"), @r#"
     history:
-    • Called Inspect Spotify workspace
+    • Inspect Spotify workspace
       └ 012345678901234567890123456789012345
-            67890123456789012345678901234567
-        … more · ctrl+t
-            23456789012345678901234567890123
-            45678901...
+        678901234567890123456789012345678901
+        234567890123456789012345678901234567
+        +1 line (ctrl + t to view transcrip…
 
     transcript:
     • Called node_repl.js({"title":"Inspect Spotify workspace","code":"await tools.exec_command({ cmd: 'git status' })"})
@@ -1484,7 +1478,7 @@ fn code_mode_tool_call_preserves_failure_details() {
     let transcript = render_lines(&cell.transcript_lines(/*width*/ 120)).join("\n");
     insta::assert_snapshot!(format!("history:\n{history}\n\ntranscript:\n{transcript}"), @r#"
     history:
-    • Called Inspect workspace
+    • Inspect workspace
       └ Script failed
         Output:
         permission denied
@@ -1546,10 +1540,7 @@ fn completed_mcp_tool_call_success_snapshot() {
         invocation,
         /*animations_enabled*/ true,
     );
-    assert!(
-        cell.complete(Duration::from_millis(1420), Ok(result))
-            .is_none()
-    );
+    cell.complete(Duration::from_millis(1420), Ok(result));
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
 
@@ -1557,7 +1548,7 @@ fn completed_mcp_tool_call_success_snapshot() {
 }
 
 #[test]
-fn completed_mcp_tool_call_image_after_text_returns_extra_cell() {
+fn completed_mcp_tool_call_image_after_text_snapshot() {
     let invocation = McpInvocation {
         server: "image".into(),
         tool: "generate".into(),
@@ -1581,12 +1572,10 @@ fn completed_mcp_tool_call_image_after_text_returns_extra_cell() {
         invocation,
         /*animations_enabled*/ true,
     );
-    let extra_cell = cell
-        .complete(Duration::from_millis(25), Ok(result))
-        .expect("expected image cell");
+    cell.complete(Duration::from_millis(25), Ok(result));
 
-    let rendered = render_lines(&extra_cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered, vec!["tool result (image output)"]);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
 }
 
 #[test]
@@ -1612,16 +1601,14 @@ fn completed_mcp_tool_call_accepts_data_url_image_blocks() {
         invocation,
         /*animations_enabled*/ true,
     );
-    let extra_cell = cell
-        .complete(Duration::from_millis(25), Ok(result))
-        .expect("expected image cell");
+    cell.complete(Duration::from_millis(25), Ok(result));
 
-    let rendered = render_lines(&extra_cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered, vec!["tool result (image output)"]);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
 }
 
 #[test]
-fn completed_mcp_tool_call_skips_invalid_image_blocks() {
+fn completed_mcp_tool_call_multiple_image_blocks_snapshot() {
     let invocation = McpInvocation {
         server: "image".into(),
         tool: "generate".into(),
@@ -1642,12 +1629,10 @@ fn completed_mcp_tool_call_skips_invalid_image_blocks() {
         invocation,
         /*animations_enabled*/ true,
     );
-    let extra_cell = cell
-        .complete(Duration::from_millis(25), Ok(result))
-        .expect("expected image cell");
+    cell.complete(Duration::from_millis(25), Ok(result));
 
-    let rendered = render_lines(&extra_cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered, vec!["tool result (image output)"]);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
 }
 
 #[test]
@@ -1666,10 +1651,7 @@ fn completed_mcp_tool_call_error_snapshot() {
         invocation,
         /*animations_enabled*/ true,
     );
-    assert!(
-        cell.complete(Duration::from_secs(2), Err("network timeout".into()))
-            .is_none()
-    );
+    cell.complete(Duration::from_secs(2), Err("network timeout".into()));
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
 
@@ -1709,10 +1691,7 @@ fn completed_mcp_tool_call_multiple_outputs_snapshot() {
         invocation,
         /*animations_enabled*/ true,
     );
-    assert!(
-        cell.complete(Duration::from_millis(640), Ok(result))
-            .is_none()
-    );
+    cell.complete(Duration::from_millis(640), Ok(result));
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 48)).join("\n");
 
@@ -1744,10 +1723,7 @@ fn completed_mcp_tool_call_wrapped_outputs_snapshot() {
         invocation,
         /*animations_enabled*/ true,
     );
-    assert!(
-        cell.complete(Duration::from_millis(1280), Ok(result))
-            .is_none()
-    );
+    cell.complete(Duration::from_millis(1280), Ok(result));
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 40)).join("\n");
 
@@ -1780,10 +1756,7 @@ fn completed_mcp_tool_call_multiple_outputs_inline_snapshot() {
         invocation,
         /*animations_enabled*/ true,
     );
-    assert!(
-        cell.complete(Duration::from_millis(320), Ok(result))
-            .is_none()
-    );
+    cell.complete(Duration::from_millis(320), Ok(result));
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 120)).join("\n");
 
@@ -2234,7 +2207,7 @@ fn multiline_command_both_lines_wrap_with_correct_prefixes() {
 #[test]
 fn stderr_tail_more_than_five_lines_snapshot() {
     // Build an exec cell with a non-zero exit and 10 lines on stderr to exercise
-    // the head/tail rendering and gutter prefixes.
+    // the three-line preview, hidden-line count, and gutter prefixes.
     let call_id = "c_err".to_string();
     let mut cell = ExecCell::new(
         ExecCall {

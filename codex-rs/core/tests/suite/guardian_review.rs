@@ -510,7 +510,10 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
 
     let server = start_mock_server().await;
     let summary = "Guardian retained the user's standing authorization.";
+    let store = Arc::new(codex_thread_store::InMemoryThreadStore::default());
     let mut builder = test_codex()
+        .with_thread_store(store.clone())
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Legacy)
         .with_model_info_override("gpt-5.5", |model| {
             model.auto_review_model_override = Some(model.slug.clone());
             model.supports_experimental_context = true;
@@ -591,6 +594,12 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
 
     let user_authorization = "Read the internal evaluation samples I have authorized.";
     test.submit_text_turn(user_authorization).await?;
+
+    assert_eq!(
+        store.calls().await.load_history,
+        0,
+        "review checkpoints use live context"
+    );
 
     let requests = responses.requests();
     let guardian_requests = requests
@@ -1633,7 +1642,7 @@ async fn guardian_session_is_reused_for_consecutive_tool_reviews_without_prewarm
         ),
         shell_environment_policy: Default::default(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
-        windows_sandbox_private_desktop: test.config.permissions.windows_sandbox_private_desktop,
+        windows_sandbox_type: test.config.permissions.windows_sandbox_type,
         use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
         mcp_policy: None,

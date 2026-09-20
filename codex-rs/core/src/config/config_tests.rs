@@ -635,6 +635,7 @@ async fn load_config_resolves_code_mode_config() -> std::io::Result<()> {
 [features.code_mode]
 enabled = true
 default_exec_yield_time_ms = 10000
+experimental_show_cell_overhead = true
 excluded_tool_namespaces = ["mcp__codex_apps", "multi_agent_v1"]
 direct_only_tool_namespaces = ["mcp__history", "mcp__notes"]
 
@@ -652,6 +653,7 @@ disable_in_process_fallback = true
     .await?;
 
     assert_eq!(config.code_mode.default_exec_yield_time_ms, 10_000);
+    assert!(config.code_mode.experimental_show_cell_overhead);
     assert_eq!(
         config.code_mode.excluded_tool_namespaces,
         vec!["mcp__codex_apps".to_string(), "multi_agent_v1".to_string()]
@@ -1899,7 +1901,6 @@ async fn network_proxy_feature_matrix_preserves_sandbox_network_semantics() -> s
                 }),
                 windows: Some(WindowsToml {
                     sandbox: Some(WindowsSandboxModeToml::Elevated),
-                    sandbox_private_desktop: None,
                 }),
                 features,
                 ..Default::default()
@@ -2054,6 +2055,10 @@ respect_system_proxy = true
             .outbound_proxy_policy(),
         codex_http_client::OutboundProxyPolicy::ReqwestDefault
     );
+    assert!(
+        resolve_bootstrap_http_client_factory(&configured, Some(&disabled))?
+            .allows_system_proxy_fallback()
+    );
 
     let configured = ConfigToml::default();
     let enabled = Sourced::new(
@@ -2072,6 +2077,115 @@ respect_system_proxy = true
             .outbound_proxy_policy(),
         codex_http_client::OutboundProxyPolicy::RespectSystemProxy
     );
+    assert!(
+        !resolve_bootstrap_http_client_factory(&configured, Some(&enabled))?
+            .allows_system_proxy_fallback()
+    );
+    assert!(
+        resolve_bootstrap_http_client_factory(&configured, /*feature_requirements*/ None)?
+            .allows_system_proxy_fallback()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_proxy_fallback_config_matches_bootstrap() -> std::io::Result<()> {
+    for (features, expected_fallback, expected_policy) in [
+        (
+            "",
+            true,
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+        (
+            "respect_system_proxy = false",
+            true,
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+        (
+            "system_proxy_fallback = false",
+            false,
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+        (
+            "respect_system_proxy = true",
+            false,
+            codex_http_client::OutboundProxyPolicy::RespectSystemProxy,
+        ),
+        (
+            "respect_system_proxy = true\nsystem_proxy_fallback = false",
+            false,
+            codex_http_client::OutboundProxyPolicy::RespectSystemProxy,
+        ),
+    ] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!("[features]\n{features}\n"),
+        )?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await?;
+        let bootstrap = ConfigToml {
+            features: Some(toml::from_str(features).expect("valid feature configuration")),
+            ..Default::default()
+        };
+        let factory =
+            resolve_bootstrap_http_client_factory(&bootstrap, /*feature_requirements*/ None)?;
+        assert_eq!(
+            factory.allows_system_proxy_fallback(),
+            expected_fallback,
+            "{features}"
+        );
+        assert_eq!(
+            factory.outbound_proxy_policy(),
+            expected_policy,
+            "{features}"
+        );
+        assert_eq!(config.http_client_factory(), factory, "{features}");
+        assert_eq!(
+            config.auth_route_config().http_client_factory(),
+            &factory,
+            "{features}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_proxy_fallback_honors_feature_requirements() -> std::io::Result<()> {
+    for (configured, required) in [(true, false), (false, true)] {
+        let cfg = ConfigToml {
+            features: Some(
+                toml::from_str(&format!("system_proxy_fallback = {configured}"))
+                    .expect("valid features"),
+            ),
+            ..Default::default()
+        };
+        let requirements = Sourced::new(
+            FeatureRequirementsToml {
+                entries: BTreeMap::from([("system_proxy_fallback".to_string(), required)]),
+            },
+            RequirementSource::Unknown,
+        );
+        let bootstrap = resolve_bootstrap_http_client_factory(&cfg, Some(&requirements))?;
+        assert_eq!(bootstrap.allows_system_proxy_fallback(), required);
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!("[features]\nsystem_proxy_fallback = {configured}\n"),
+        )?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
+                    "[features]\nsystem_proxy_fallback = {required}\n"
+                )),
+            )
+            .build()
+            .await?;
+        assert_eq!(config.http_client_factory(), bootstrap);
+    }
     Ok(())
 }
 
@@ -3546,7 +3660,6 @@ async fn implicit_builtin_workspace_profile_preserves_sandbox_workspace_write_se
             }),
             windows: Some(WindowsToml {
                 sandbox: Some(WindowsSandboxModeToml::Elevated),
-                sandbox_private_desktop: None,
             }),
             ..Default::default()
         },
@@ -3611,7 +3724,6 @@ async fn implicit_builtin_workspace_profile_preserves_add_dir_metadata_carveouts
             )])),
             windows: Some(WindowsToml {
                 sandbox: Some(WindowsSandboxModeToml::Elevated),
-                sandbox_private_desktop: None,
             }),
             ..Default::default()
         },
@@ -5478,10 +5590,13 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         thread_layer_stack,
     )
     .await?;
+    let zsh_path = refreshed_config.zsh_path.clone();
     let config = Config::rebuild_with_session_layers(
         &thread_config.config_layer_stack,
         thread_config.cwd.to_path_buf(),
-        &refreshed_config,
+        &refreshed_config.config_layer_stack,
+        refreshed_config.codex_home.clone(),
+        zsh_path.map(AbsolutePathBuf::try_from).transpose()?,
     )
     .await?;
 
@@ -5603,10 +5718,13 @@ async fn rebuild_with_session_layers_refreshes_plugin_derived_mcp_config() -> an
         thread_layer_stack,
     )
     .await?;
+    let zsh_path = refreshed_config.zsh_path.clone();
     let config = Config::rebuild_with_session_layers(
         &thread_config.config_layer_stack,
         thread_config.cwd.to_path_buf(),
-        &refreshed_config,
+        &refreshed_config.config_layer_stack,
+        refreshed_config.codex_home.clone(),
+        zsh_path.map(AbsolutePathBuf::try_from).transpose()?,
     )
     .await?;
     let plugins_manager =
@@ -13016,9 +13134,6 @@ allow_login_shell = true
 
 [feedback]
 enabled = true
-
-[windows]
-sandbox_private_desktop = true
 "#,
     )?;
 
@@ -13034,9 +13149,6 @@ allow_login_shell = false
 
 [feedback]
 enabled = false
-
-[windows]
-sandbox_private_desktop = false
 "#,
         required_sqlite_home.display(),
         required_log_dir.display(),
@@ -13050,7 +13162,6 @@ sandbox_private_desktop = false
     assert!(!config.check_for_update_on_startup);
     assert!(!config.permissions.allow_login_shell);
     assert!(!config.feedback_enabled);
-    assert!(!config.permissions.windows_sandbox_private_desktop);
     assert!(config.startup_warnings.iter().any(|warning| {
         warning.contains("Configured value for `check_for_update_on_startup` is overridden")
     }));

@@ -2,11 +2,11 @@ use super::*;
 use crate::agent::child_config::SpawnConfigOptions;
 use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::prepare_agent_spawn_config;
-use crate::agent::control::MessageDeliveryMode;
-use crate::agent::control::SpawnAgentForkMode;
-use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::types::MessageDeliveryMode;
+use crate::agent::types::SpawnAgentForkMode;
+use crate::agent::types::SpawnAgentOptions;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
@@ -25,11 +25,18 @@ use codex_tools::ToolSpec;
 #[derive(Default)]
 pub(crate) struct Handler {
     options: SpawnAgentToolOptions,
+    description_override: Option<String>,
 }
 
 impl Handler {
-    pub(crate) fn new(options: SpawnAgentToolOptions) -> Self {
-        Self { options }
+    pub(crate) fn new(
+        options: SpawnAgentToolOptions,
+        description_override: Option<String>,
+    ) -> Self {
+        Self {
+            options,
+            description_override,
+        }
     }
 }
 
@@ -39,7 +46,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_spawn_agent_tool_v2(self.options.clone())
+        create_spawn_agent_tool_v2(self.options.clone(), self.description_override.as_deref())
     }
 
     fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>

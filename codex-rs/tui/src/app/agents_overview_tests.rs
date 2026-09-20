@@ -430,7 +430,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     let mut app = make_test_app().await;
     trust_fixture_folders(&mut app);
     let mut ids = Vec::new();
-    for day in 1..=22 {
+    for day in 1..=12 {
         let source = match day {
             3 => codex_protocol::protocol::SessionSource::Custom("atlas".to_string()),
             4 => codex_protocol::protocol::SessionSource::Custom("chatgpt".to_string()),
@@ -457,13 +457,13 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     }
     let message_path = app_test_support::rollout_path(
         &app.config.codex_home,
-        "2025-01-21T12-00-00",
-        &ids[20].to_string(),
+        "2025-01-11T12-00-00",
+        &ids[10].to_string(),
     );
     let mut history = std::fs::read_to_string(&message_path)?;
     history.push_str(
         &serde_json::json!({
-            "timestamp": "2025-01-21T12:00:01Z",
+            "timestamp": "2025-01-11T12:00:01Z",
             "type": "event_msg",
             "payload": { "type": "agent_message", "message": "Found the regression in the parser." }
         })
@@ -473,7 +473,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     std::fs::write(message_path, history)?;
     let config = app.config.clone();
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
-    for thread_id in [ids[0], ids[21]] {
+    for thread_id in [ids[0], ids[11]] {
         app_server
             .resume_thread(
                 &app.local_settings,
@@ -486,8 +486,8 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     // A newer rollout missing from the index must not trigger a startup filesystem scan.
     app_test_support::create_fake_rollout_with_source(
         &app.config.codex_home,
-        "2025-01-23T12-00-00",
-        "2025-01-23T12:00:00Z",
+        "2025-01-13T12-00-00",
+        "2025-01-13T12:00:00Z",
         "Unindexed task",
         Some(&app.config.model_provider_id),
         /*git_info*/ None,
@@ -495,6 +495,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     )
     .expect("materialize unindexed session");
     app.app_server_target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: test_path_buf("/tmp/unused.sock").abs(),
         },
@@ -510,9 +511,9 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     assert_eq!(retained, expected);
     assert_eq!(
         app.agents_overview.last_messages,
-        HashMap::from([(ids[20], "Found the regression in the parser.".to_string())])
+        HashMap::from([(ids[10], "Found the regression in the parser.".to_string())])
     );
-    let thread = app.agents_overview.threads[&ids[20]].as_ref().unwrap();
+    let thread = app.agents_overview.threads[&ids[10]].as_ref().unwrap();
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
 
     let created = app_server.start_thread(&config).await?.session.thread_id;
@@ -595,6 +596,12 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     finish_overview_refresh(&mut restarted, &app_server, &mut event_rx).await;
     let retained: HashSet<_> = restarted.agents_overview.threads.keys().copied().collect();
     assert_eq!(retained, recent_ids);
+    restarted.open_agents_overview(&app_server);
+    insta::assert_snapshot!(
+        "agents_overview_recent_sessions",
+        render_bottom_popup(&restarted.chat_widget, /*width*/ 80)
+            .replace(&test_path_display("/"), "/")
+    );
     app_server.shutdown().await?;
     Ok(())
 }
@@ -621,6 +628,15 @@ async fn finish_overview_refresh(
 
 #[tokio::test]
 async fn hidden_system_thread_does_not_refresh_shared_overview() {
+    check_hidden_thread_does_not_refresh_shared_overview("system").await;
+}
+
+#[tokio::test]
+async fn hidden_title_thread_does_not_refresh_shared_overview() {
+    check_hidden_thread_does_not_refresh_shared_overview("thread_title").await;
+}
+
+async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
     let mut app = make_test_app().await;
     let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
@@ -647,7 +663,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
         ThreadStatus::Idle,
     );
     thread.ephemeral = true;
-    thread.thread_source = Some(ThreadSource::Feature("system".to_string()));
+    thread.thread_source = Some(ThreadSource::Feature(source.to_string()));
 
     app.handle_app_server_event(
         &app_server,
@@ -678,7 +694,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
         "Persisted system thread",
         ThreadStatus::Idle,
     );
-    thread.thread_source = Some(ThreadSource::Feature("system".to_string()));
+    thread.thread_source = Some(ThreadSource::Feature(source.to_string()));
 
     app.handle_app_server_event(
         &app_server,
@@ -2335,6 +2351,7 @@ async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<
         .await?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     app.app_server_target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
     };
     app.chat_widget.remote_connection =

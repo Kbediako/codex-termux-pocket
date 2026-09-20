@@ -10,9 +10,11 @@
 //! bumps the active-cell revision tracked by `ChatWidget`, so the cache key changes whenever the
 //! rendered transcript output can change.
 
+mod activity_group;
+pub(crate) use activity_group::ActivityGroup;
+
 use crate::diff_model::FileChange;
 use crate::diff_render::create_diff_summary;
-use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::OutputLinesParams;
 use crate::exec_cell::TOOL_CALL_MAX_LINES;
@@ -41,7 +43,6 @@ use crate::terminal_hyperlinks::visible_lines;
 use crate::test_support::PathBufExt;
 #[cfg(test)]
 use crate::test_support::test_path_buf;
-use crate::text_formatting::format_and_truncate_tool_result;
 use crate::text_formatting::truncate_text;
 use crate::tooltips;
 use crate::ui_consts::LIVE_PREFIX_COLS;
@@ -100,7 +101,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use url::Url;
 
 const RAW_DIFF_SUMMARY_WIDTH: usize = 10_000;
-const RAW_TOOL_OUTPUT_WIDTH: usize = 10_000;
 
 mod approvals;
 mod base;
@@ -185,6 +185,12 @@ pub(crate) fn plain_lines(lines: impl IntoIterator<Item = Line<'static>>) -> Vec
 /// heights when they apply additional layout logic beyond what
 /// `Paragraph::line_count` captures.
 pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
+    /// Retain reasoning inside an activity group, or return it for normal insertion.
+    /// Call positions stay fixed as in-flight calls complete; other history cells decline it.
+    fn append_reasoning(&mut self, cell: Box<dyn HistoryCell>) -> Result<(), Box<dyn HistoryCell>> {
+        Err(cell)
+    }
+
     /// Returns the logical lines for the main chat viewport.
     fn display_lines(&self, width: u16) -> Vec<Line<'static>>;
 

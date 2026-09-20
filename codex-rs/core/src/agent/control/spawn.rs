@@ -2,6 +2,11 @@ use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::role::apply_role_to_config;
+use crate::agent::types::AgentMetadata;
+use crate::agent::types::LiveAgent;
+use crate::agent::types::SpawnAgentForkMode;
+use crate::agent::types::SpawnAgentOptions;
+use crate::agents_md_manager::SessionInstructions;
 use crate::codex_thread::CodexThread;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
@@ -172,7 +177,7 @@ async fn load_agent_model_context(
     }
 }
 
-impl AgentControl {
+impl LocalAgentControl {
     /// Restore persisted V2 agent identities without reopening their runtimes.
     pub(crate) async fn restore_v2_agent_metadata(
         &self,
@@ -322,18 +327,13 @@ impl AgentControl {
         parent: Option<Arc<CodexThread>>,
     ) -> CodexResult<()> {
         let state = self.upgrade()?;
-        let parent = if let Some(parent) = parent {
+        let owner_thread_id = parent.as_ref().map(|parent| parent.session.thread_id);
+        if let Some(parent) = &parent {
             let parent_thread_id = parent.session.thread_id;
-            let turn = parent.session.new_default_turn().await;
-            config = build_agent_resume_config(&turn).map_err(|_| {
-                CodexErr::InvalidRequest(format!(
-                    "cannot resume multi-agent v2 child {thread_id} with the current parent settings"
-                ))
-            })?;
             let registered_parent = state.get_thread(parent_thread_id).await.ok();
             if !registered_parent
                 .as_ref()
-                .is_some_and(|registered| Arc::ptr_eq(registered, &parent))
+                .is_some_and(|registered| Arc::ptr_eq(registered, parent))
                 || !parent.is_running()
                 || parent.multi_agent_version() != Some(MultiAgentVersion::V2)
                 || !Arc::ptr_eq(&self.state, &parent.session.services.agent_control.state)
@@ -342,11 +342,7 @@ impl AgentControl {
                     "cannot resume multi-agent v2 child {thread_id}: parent ownership is unavailable; resume the parent first"
                 )));
             }
-            Some((parent, turn.environments.clone()))
-        } else {
-            None
-        };
-        let owner_thread_id = parent.as_ref().map(|(parent, _)| parent.session.thread_id);
+        }
         if owner_thread_id.is_none() && state.get_thread(thread_id).await.is_ok() {
             self.touch_loaded_v2_residency(&state, thread_id).await;
             return Ok(());
@@ -400,6 +396,20 @@ impl AgentControl {
                 return Ok(());
             }
         }
+        let parent = if let Some(parent) = parent {
+            let turn = parent
+                .session
+                .new_turn_with_default_settings(Uuid::now_v7().to_string(), Default::default())
+                .await;
+            config = build_agent_resume_config(&turn).map_err(|_| {
+                CodexErr::InvalidRequest(format!(
+                    "cannot resume multi-agent v2 child {thread_id} with the current parent settings"
+                ))
+            })?;
+            Some((parent, turn.initial_environments.clone()))
+        } else {
+            None
+        };
         config.model_reasoning_effort = stored_reasoning_effort;
         if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
@@ -567,7 +577,12 @@ impl AgentControl {
         {
             Some(parent.session.inherited_instructions().await)
         } else {
-            None
+            self.shared_thread_instructions_provider
+                .get()
+                .map(|provider| SessionInstructions {
+                    thread_provider: Some(Arc::clone(provider)),
+                    ..Default::default()
+                })
         };
         // Reserving a slot can evict an idle nested parent. Capture its instructions
         // alongside its authority so the child does not depend on a later live lookup.
@@ -684,7 +699,7 @@ impl AgentControl {
         };
         let notification_source = session_source.clone();
 
-        // The same `AgentControl` is sent to spawn the thread.
+        // The same `LocalAgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
             (Some(session_source), Some(_), inheritance) => {
                 Box::pin(self.spawn_forked_thread(
@@ -960,6 +975,11 @@ impl AgentControl {
                     .metadata
                     .get_or_insert_default()
                     .inherited_user_message = true;
+            }
+            if let Some(metadata) = &mut envelope.metadata
+                && metadata.sender_user_messages.take().is_some()
+            {
+                metadata.user_input_order = None;
             }
             let response_item = &mut envelope.item;
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {

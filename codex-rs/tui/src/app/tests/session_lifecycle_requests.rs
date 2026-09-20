@@ -678,6 +678,7 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
     for target in [
         AppServerTarget::Embedded,
         AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: endpoint.clone(),
         },
         AppServerTarget::Remote { endpoint },
@@ -984,6 +985,7 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
     let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:4500")?;
     for target in [
         AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: endpoint.clone(),
         },
         AppServerTarget::Remote { endpoint },
@@ -1089,11 +1091,12 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         codex_home.path().join("config.toml"),
         "web_search = \"disabled\"\n",
     )?;
-    let (mut app_server, mut requests, mut proxy) = start_recording_app_server(
+    // Keep the large lifecycle futures off the Windows test thread's stack.
+    let (mut app_server, mut requests, mut proxy) = Box::pin(start_recording_app_server(
         &app.config,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
-    )
+    ))
     .await?;
     app_server
         .start_dynamic_tool_mcp(
@@ -1188,14 +1191,13 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         ThreadHistoryMode::Legacy,
         "Approved task source",
     )?;
-    app_server
-        .resume_thread(
-            &app.local_settings,
-            app.config.clone(),
-            delegation_source,
-            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
-        )
-        .await?;
+    Box::pin(app_server.resume_thread(
+        &app.local_settings,
+        app.config.clone(),
+        delegation_source,
+        crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+    ))
+    .await?;
     let resumed = recorded_params(&requests, "thread/resume")
         .pop()
         .expect("resumed task request");
@@ -1203,14 +1205,13 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         resumed["config"]["mcp_servers.codex_tui"],
         starts[0]["config"]["mcp_servers.codex_tui"]
     );
-    app_server
-        .resume_thread(
-            &app.local_settings,
-            app.config.clone(),
-            delegation_source,
-            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-        )
-        .await?;
+    Box::pin(app_server.resume_thread(
+        &app.local_settings,
+        app.config.clone(),
+        delegation_source,
+        crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+    ))
+    .await?;
     let reattached = recorded_params(&requests, "thread/resume")
         .pop()
         .expect("reattached task request");
@@ -1218,8 +1219,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         reattached["config"]["mcp_servers.codex_tui"],
         starts[0]["config"]["mcp_servers.codex_tui"]
     );
-    app_server
-        .fork_thread(&app.local_settings, app.config.clone(), delegation_source)
+    Box::pin(app_server.fork_thread(&app.local_settings, app.config.clone(), delegation_source))
         .await?;
     let forked = recorded_params(&requests, "thread/fork")
         .pop()
@@ -1270,12 +1270,13 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         paused.contains("TUI is reconnecting; tool was not sent"),
         "{paused}"
     );
-    let (replacement, replacement_requests, replacement_proxy) = start_recording_app_server(
-        &app.config,
-        /*blocked_thread_list*/ None,
-        /*failed_thread_name*/ None,
-    )
-    .await?;
+    let (replacement, replacement_requests, replacement_proxy) =
+        Box::pin(start_recording_app_server(
+            &app.config,
+            /*blocked_thread_list*/ None,
+            /*failed_thread_name*/ None,
+        ))
+        .await?;
     let (new_tx, new_rx) = mpsc::unbounded_channel();
     let new_sender = AppEventSender::new(new_tx);
     drop(events);
@@ -2624,6 +2625,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
             &app.config,
             &app.local_settings,
             started.session.model.as_str(),
+            started.session.model.as_str(),
             &started.session,
             /*is_first_event*/ false,
             Some("This is a test announcement".to_string()),
@@ -2898,6 +2900,7 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
         .await?;
         let started = app_server.start_thread(&app.config).await?;
         app.app_server_target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
                 socket_path: test_path_buf("/tmp/unused.sock").abs(),
             },
@@ -4433,6 +4436,7 @@ async fn external_writer_escape_preserves_snapshot_and_explicit_quits() -> Resul
     let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:4500")?;
     for target in [
         AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: endpoint.clone(),
         },
         AppServerTarget::Remote { endpoint },
@@ -4616,6 +4620,7 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
         )
         .await?;
         app.app_server_target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
         };
         let current = Box::pin(server.start_thread(&app.config)).await?;

@@ -6,6 +6,7 @@
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelMessages;
+use codex_protocol::openai_models::ToolMessage;
 use permissions::ResolvedApprovalMessages;
 use permissions::ResolvedPermissionMessages;
 
@@ -149,6 +150,34 @@ impl<'a> ResolvedModelMessages<'a> {
             .and_then(|tools| tools.send_user_message_async.as_ref())
             .and_then(|tool| tool.description.as_deref())
             .unwrap_or(REQUEST_USER_INPUT_ASYNC_DESCRIPTION)
+    }
+
+    /// Selects a V2 tool's static description by its name, independently of its runtime namespace.
+    /// Missing text retains the tool's bundled description; an empty string replaces it.
+    pub fn multi_agent_tool_description_override(&self, tool_name: &str) -> Option<&'a str> {
+        self.multi_agent_tool(tool_name)?.description.as_deref()
+    }
+
+    /// Selects a V2 tool's complete parameter schema; parsing belongs to the tool consumer.
+    pub fn multi_agent_tool_parameters_override(&self, tool_name: &str) -> Option<&'a str> {
+        self.multi_agent_tool(tool_name)?.parameters.as_deref()
+    }
+
+    fn multi_agent_tool(self, tool_name: &str) -> Option<&'a ToolMessage> {
+        let tools = self
+            .catalog_messages
+            .and_then(|messages| messages.tools.as_ref())
+            .and_then(|tools| tools.multi_agent.as_ref())?;
+        let tool = match tool_name {
+            "spawn_agent" => &tools.spawn_agent,
+            "send_message" => &tools.send_message,
+            "followup_task" => &tools.followup_task,
+            "wait_agent" => &tools.wait_agent,
+            "interrupt_agent" => &tools.interrupt_agent,
+            "list_agents" => &tools.list_agents,
+            _ => return None,
+        };
+        tool.as_ref()
     }
 
     /// Resolves persistent-mode instructions without deciding whether the mode is active.

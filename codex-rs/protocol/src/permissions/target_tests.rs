@@ -43,6 +43,10 @@ fn read_denials_use_target_paths_and_native_glob_semantics() {
         let matcher = ReadDenyMatcher::try_new_with_context(&policy, &context)
             .unwrap()
             .unwrap();
+        assert_eq!(
+            policy.get_unreadable_roots_with_context(&context),
+            Ok(vec![cwd.join("private").unwrap()]),
+        );
         for (path, expected) in [
             ("private", true),
             ("private/file", true),
@@ -208,6 +212,17 @@ fn malformed_or_unresolvable_denials_fail_closed() {
         path: uri("file:///C:/private"),
     })]);
     assert!(ReadDenyMatcher::try_new_with_context(&policy, &context).is_err());
+    let policy = FileSystemSandboxPolicy::restricted(vec![deny(FileSystemPath::Special {
+        value: FileSystemSpecialPath::Tmpdir,
+    })]);
+    assert!(
+        policy
+            .get_unreadable_roots_with_context(&FileSystemSandboxPolicyContext {
+                temporary_directories: None,
+                ..context
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -228,6 +243,49 @@ fn slash_tmp_denials_follow_the_executor_convention() {
         if let Some(matcher) = matcher {
             assert!(matcher.is_read_denied_uri(&cwd.join("/tmp/file").unwrap(), &context));
         }
+    }
+}
+
+/// Full-disk read policy shares the native check and ignores `:slash_tmp` only on Windows.
+#[test]
+fn full_disk_read_policy_uses_the_executor_convention() {
+    use FileSystemAccessMode::Read;
+    use FileSystemAccessMode::Write;
+    use FileSystemSpecialPath::Minimal;
+    use FileSystemSpecialPath::Root;
+    use FileSystemSpecialPath::SlashTmp;
+    use FileSystemSpecialPath::Tmpdir;
+
+    for (root_access, denial, posix, windows, unknown) in [
+        (Read, None, true, true, true),
+        (Read, Some(SlashTmp), false, true, false),
+        (Read, Some(Tmpdir), false, false, false),
+        (Write, Some(Minimal), false, false, false),
+        (Write, Some(Root), false, false, false),
+    ] {
+        let mut entries = vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special { value: Root },
+            root_access,
+        )];
+        if let Some(value) = denial {
+            entries.push(deny(FileSystemPath::Special { value }));
+        }
+        let policy = FileSystemSandboxPolicy::restricted(entries);
+        for (convention, expected) in [
+            (Some(PathConvention::Posix), posix),
+            (Some(PathConvention::Windows), windows),
+            (None, unknown),
+        ] {
+            assert_eq!(
+                policy.has_full_disk_read_access_for_convention(convention),
+                expected,
+                "policy={policy:?}, convention={convention:?}",
+            );
+        }
+        assert_eq!(
+            policy.has_full_disk_read_access(),
+            policy.has_full_disk_read_access_for_convention(Some(PathConvention::native())),
+        );
     }
 }
 
