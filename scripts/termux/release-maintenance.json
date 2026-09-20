@@ -1,8 +1,129 @@
 {
   "format_version": 1,
-  "request_id": "alpha1568-export-20260920",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.156.0-alpha.8",
-  "upstream_tag_object": "0783e3270fece607ff0f2c4024025a558282581d",
-  "upstream_commit": "da41ff285c7e3f627dfcfef0588a30b3b7d91617"
+  "request_id": "alpha1568-prepare-20260920",
+  "operation": "prepare-source",
+  "base_main": "27a795ff7f8d548afc22f019c6661ee4a364357b",
+  "prepared_commit": "0eda3981b7b408860373259e1f822bd6e85a9418",
+  "expected_input_tree": "4b62be8a75c044972b1962e4cab4ca403674b026",
+  "edits": [
+    {
+      "path": "codex-rs/Cargo.toml",
+      "before": "20c062bd1f326f32528d962addb255a993be332b",
+      "after": "585a73f9ac8b13fe7cfc6a5a198c3b282dafacb6",
+      "replacements": [
+        {
+          "old": "\n[workspace.package]\nversion = \"0.155.0-alpha.16\"\n# Track the edition for all workspace crates in one place. Individual\n# crates can still override this value, but keeping it here means new\n",
+          "new": "\n[workspace.package]\nversion = \"0.156.0-alpha.8\"\n# Track the edition for all workspace crates in one place. Individual\n# crates can still override this value, but keeping it here means new\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": "af435e90e32a30f911255a0ce2bc8bd166aa6460",
+      "after": "724f505070a8a24c2543c5ec95d7c2abf232e802",
+      "replacements": [
+        {
+          "old": "mod cloud_config;\nmod daemon_install;\n#[cfg(any(target_os = \"macos\", target_os = \"windows\"))]\nmod desktop_app;\n",
+          "new": "mod cloud_config;\nmod daemon_install;\nmod daemon_telemetry;\n#[cfg(any(target_os = \"macos\", target_os = \"windows\"))]\nmod desktop_app;\n"
+        },
+        {
+          "old": "        let status = std::process::Command::new(executable)\n            .args(source.command_args())\n            .status()?;\n        anyhow::ensure!(\n",
+          "new": "        let status = std::process::Command::new(executable)\n            .args(source.command_args())\n            .env(codex_app_server_daemon::telemetry::HANDOFF_ENV, \"1\")\n            .status()?;\n        anyhow::ensure!(\n"
+        },
+        {
+          "old": "                        yes,\n                    } => {\n                        if let Some(output) = codex_app_server_daemon::update_from_cli(|request| {\n                            daemon_install::confirm_install(request, yes)\n                        })\n                        .await?\n                        {\n                            println!(\"{}\", serde_json::to_string(&output)?);\n                        }\n",
+          "new": "                        yes,\n                    } => {\n                        let result = codex_app_server_daemon::update_from_cli(|request| {\n                            daemon_install::confirm_install(request, yes)\n                        })\n                        .await;\n                        daemon_telemetry::record_command(\n                            &root_config_overrides,\n                            analytics_default_enabled,\n                            \"this_cli\",\n                            &result,\n                        )\n                        .await;\n                        if let Some(output) = result? {\n                            println!(\"{}\", serde_json::to_string(&output)?);\n                        }\n"
+        },
+        {
+          "old": "                            AppServerDaemonSubcommand::Update { .. }\n                        ) {\n                            let output =\n                                codex_app_server_daemon::update(http_client_factory).await?;\n                            println!(\"{}\", serde_json::to_string(&output)?);\n                        } else {\n                            let AppServerDaemonSubcommand::PidUpdateLoop {\n",
+          "new": "                            AppServerDaemonSubcommand::Update { .. }\n                        ) {\n                            let result = codex_app_server_daemon::update(http_client_factory)\n                                .await\n                                .map(Some);\n                            daemon_telemetry::record_command(\n                                &root_config_overrides,\n                                analytics_default_enabled,\n                                \"public_stable\",\n                                &result,\n                            )\n                            .await;\n                            if let Some(output) = result? {\n                                println!(\"{}\", serde_json::to_string(&output)?);\n                            }\n                        } else {\n                            let AppServerDaemonSubcommand::PidUpdateLoop {\n"
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/linux-sandbox/src/linux_run_main.rs",
+      "before": "22a78f7ddb0abe44e6cbe952ef1b1f2df67369a2",
+      "after": "8de82e9bbfe6210a5ee53b6794a8c3b9b1674669",
+      "replacements": [
+        {
+          "old": "\n    if options.mount_proc\n        && !preflight_proc_mount_support(options.network_mode)\n            .unwrap_or_else(|err| exit_with_bwrap_build_error(err))\n    {\n",
+          "new": "\n    if options.mount_proc\n        && !preflight_proc_mount_support(options)\n            .unwrap_or_else(|err| exit_with_bwrap_build_error(err))\n    {\n"
+        },
+        {
+          "old": "}\n\nfn preflight_proc_mount_support(network_mode: BwrapNetworkMode) -> CodexResult<bool> {\n    let preflight_argv = build_preflight_bwrap_argv(network_mode)?;\n    let stderr = run_bwrap_in_child_capture_stderr(preflight_argv);\n    Ok(!is_proc_mount_failure(stderr.as_str()))\n}\n\nfn build_preflight_bwrap_argv(\n    network_mode: BwrapNetworkMode,\n) -> CodexResult<crate::bwrap::BwrapArgs> {\n    let file_system_sandbox_policy =\n        FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {\n",
+          "new": "}\n\nfn preflight_proc_mount_support(options: BwrapOptions) -> CodexResult<bool> {\n    let preflight_argv = build_preflight_bwrap_argv(options)?;\n    let stderr = run_bwrap_in_child_capture_stderr(preflight_argv);\n    Ok(!is_proc_mount_failure(stderr.as_str()))\n}\n\nfn build_preflight_bwrap_argv(options: BwrapOptions) -> CodexResult<crate::bwrap::BwrapArgs> {\n    let file_system_sandbox_policy =\n        FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {\n"
+        },
+        {
+          "old": "        BwrapOptions {\n            mount_proc: true,\n            network_mode,\n            ..Default::default()\n        },\n    )\n",
+          "new": "        BwrapOptions {\n            mount_proc: true,\n            // The alias check must see the same WSL masks as the main sandbox.\n            ..options\n        },\n    )\n"
+        }
+      ]
+    }
+  ],
+  "package_updates": [
+    {
+      "name": "axum",
+      "version": "0.8.9"
+    },
+    {
+      "name": "console",
+      "version": "0.16.6"
+    },
+    {
+      "name": "crossbeam-channel",
+      "version": "0.5.16"
+    },
+    {
+      "name": "globset",
+      "version": "0.4.20"
+    },
+    {
+      "name": "http-body-util",
+      "version": "0.1.5"
+    },
+    {
+      "name": "indexmap@2.14.2",
+      "version": "2.14.2"
+    },
+    {
+      "name": "insta",
+      "version": "1.48.0"
+    },
+    {
+      "name": "native-tls",
+      "version": "0.2.18"
+    },
+    {
+      "name": "predicates",
+      "version": "3.1.4"
+    },
+    {
+      "name": "regex-automata",
+      "version": "0.4.18"
+    },
+    {
+      "name": "regex-lite",
+      "version": "0.1.9"
+    },
+    {
+      "name": "socket2@0.6.5",
+      "version": "0.6.5"
+    },
+    {
+      "name": "system-configuration@0.8.0",
+      "version": "0.8.0"
+    },
+    {
+      "name": "tokio-tungstenite@0.29.0",
+      "version": "0.29.0"
+    },
+    {
+      "name": "tokio-util",
+      "version": "0.7.19"
+    },
+    {
+      "name": "tungstenite@0.29.0",
+      "version": "0.29.0"
+    }
+  ]
 }
