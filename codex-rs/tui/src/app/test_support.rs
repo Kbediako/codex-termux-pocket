@@ -9,7 +9,7 @@ use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 
-pub(super) async fn make_test_app() -> App {
+pub(crate) async fn make_test_app() -> App {
     let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
@@ -37,6 +37,8 @@ pub(super) async fn make_test_app() -> App {
         pending_server_profiles: HashMap::new(),
         file_search,
         transcript_cells: Vec::new(),
+        native_history: Default::default(),
+        transcript_view: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,

@@ -25,7 +25,7 @@ use codex_app_server_protocol::WindowsSandboxSetupMode;
 pub(super) const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
 
 impl App {
-    pub(super) async fn handle_event(
+    pub(crate) async fn handle_event(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
@@ -35,6 +35,8 @@ impl App {
             && !matches!(
                 &event,
                 AppEvent::OpenDaemonMenu
+                    | AppEvent::OpenWarnings
+                    | AppEvent::CopyWarning(_)
                     | AppEvent::ConfirmDaemonUpdate(_)
                     | AppEvent::RunDaemonUpdate(_)
                     | AppEvent::InsertHistoryCell(_)
@@ -298,15 +300,20 @@ impl App {
                     .handle_older_history_page(tui, app_server, thread_id, &cursor, result)
                     .await
                 {
-                    app_server.cancel_older_history_page(thread_id);
-                    if self.chat_widget.thread_id() == Some(thread_id)
-                        && let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()
-                    {
-                        overlay.set_history_state(TranscriptHistoryState::Failed);
+                    app_server.cancel_older_history_page(thread_id, &cursor);
+                    if self.chat_widget.thread_id() == Some(thread_id) {
+                        self.transcript_view.history = TranscriptHistoryState::Failed;
+                        if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() {
+                            overlay.set_history_state(TranscriptHistoryState::Failed);
+                        }
                         tui.frame_requester().schedule_frame();
                     }
                     tracing::warn!(%thread_id, error = %err, "failed to load older transcript history");
                 }
+            }
+            AppEvent::OpenWarnings => self.chat_widget.open_warnings(&self.transcript_cells),
+            AppEvent::CopyWarning(text) => {
+                let _ = self.chat_widget.copy_transcript_selection(&text);
             }
             AppEvent::OpenTranscriptExportFilePrompt => {
                 self.chat_widget.show_transcript_export_file_prompt();
@@ -543,10 +550,20 @@ impl App {
             }
             AppEvent::RevertSessionForPromptEdit {
                 thread_id,
-                nth_user_message,
+                selected_cell,
                 mut prompt,
             } => {
                 if self.chat_widget.thread_id() != Some(thread_id) {
+                    return Ok(AppRunControl::Continue);
+                }
+                if self.app_server_target.uses_remote_workspace()
+                    && (!prompt.local_images.is_empty()
+                        || prompt.text.trim_start().starts_with(['/', '!']))
+                {
+                    self.chat_widget.add_error_message(
+                        "This remote prompt contains local image paths or command syntax that cannot be restored safely. Write a new message and reattach any images.".into(),
+                    );
+                    tui.frame_requester().schedule_frame();
                     return Ok(AppRunControl::Continue);
                 }
                 if self.pending_server_profiles.contains_key(&thread_id) {
@@ -557,6 +574,12 @@ impl App {
                     tui.frame_requester().schedule_frame();
                     return Ok(AppRunControl::Continue);
                 }
+                let Some(index) = self.transcript_cells.iter().position(|cell| Arc::ptr_eq(cell, &selected_cell)) else {
+                    self.restore_backtrack_prompt_after_revert_error(prompt, "the selected prompt is no longer visible");
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                };
+                let nth_user_message = crate::app_backtrack::user_count(&self.transcript_cells[..index]);
                 let selection: Result<(String, Vec<Turn>)> = async {
                     let channel = self.thread_event_channels.get(&thread_id)
                         .ok_or_else(|| color_eyre::eyre::eyre!("the selected thread is no longer available"))?;
@@ -701,12 +724,15 @@ impl App {
                 if self.chat_widget.thread_id() == Some(thread_id) {
                     if let Some(index) = crate::app_backtrack::nth_user_position(&self.transcript_cells, nth_user_message) {
                         self.transcript_cells.truncate(index);
+                self.native_history.retain(&self.transcript_cells);
                     }
+                    self.transcript_view = Default::default();
+                    self.scrollback_has_older_history = app_server.has_older_history(thread_id);
                     self.deferred_history_lines.clear();
                     self.last_rendered_history_tail = None;
                     self.last_thread_usage_status_cell = None;
                     self.pending_thread_usage_history_refresh = false;
-                    self.backtrack_render_pending = true;
+                    self.backtrack_render_pending = !tui.is_owned_screen();
                     self.chat_widget.set_queue_autosend_suppressed(/*suppressed*/ false);
                     self.chat_widget.emit_prompt_edit_thread_event();
                     tui.frame_requester().schedule_frame();
@@ -727,6 +753,10 @@ impl App {
                     self.insert_history_cell(tui, cell);
                 }
             }
+            AppEvent::FollowTranscript => {
+                self.transcript_view.jump_to_latest();
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::InsertHistoryCell(cell) => {
                 self.insert_history_cell(tui, cell);
             }
@@ -735,6 +765,9 @@ impl App {
                     .chat_widget
                     .thread_id()
                     .is_some_and(|thread_id| app_server.has_older_history(thread_id));
+                if tui.is_owned_screen() {
+                    self.transcript_view.history = if self.scrollback_has_older_history { TranscriptHistoryState::Partial } else { TranscriptHistoryState::Complete };
+                }
                 self.finish_initial_history_replay_buffer(tui);
             }
             AppEvent::ConsolidateAgentMessage {
@@ -764,27 +797,29 @@ impl App {
                     Arc::new(history_cell::new_proposed_plan(source, &self.config.cwd));
 
                 if start < end {
+                    self.native_history.consolidate(&self.transcript_cells[start..end], &consolidated);
+                    if tui.is_owned_screen() {
+                        self.transcript_view.replace_group(&self.transcript_cells, start..end, &consolidated);
+                    } else {
+                        self.transcript_view.replace_range(&self.transcript_cells, start..end, &consolidated);
+                    }
                     self.transcript_cells
                         .splice(start..end, std::iter::once(consolidated.clone()));
 
                     if let Some(Overlay::Transcript(t)) = &mut self.overlay {
-                        t.consolidate_cells(start..end, consolidated.clone());
+                        t.regroup_cells(start..end, consolidated.clone());
                         tui.frame_requester().schedule_frame();
                     }
 
                     self.finish_required_stream_reflow(tui)?;
                 } else {
+                    let deferred = tui.is_owned_screen() || self.native_history.insert(&consolidated);
                     self.transcript_cells.push(consolidated.clone());
                     if let Some(Overlay::Transcript(t)) = &mut self.overlay {
                         t.insert_cell(consolidated.clone());
                         tui.frame_requester().schedule_frame();
                     }
-                    self.insert_history_cell_lines(
-                        tui,
-                        consolidated.as_ref(),
-                        self.chat_widget
-                            .history_wrap_width(tui.terminal.last_known_screen_size.width),
-                    );
+                    self.render_inserted_history_cell(tui, &consolidated, deferred);
 
                     self.maybe_finish_stream_reflow(tui)?;
                 }
@@ -1535,6 +1570,7 @@ impl App {
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
                     let snapshots = if accepted
                     {
+                        self.chat_widget.apply_usage_notice_read(request_id);
                         self.chat_widget.update_backend_banner(&response);
                         self.apply_backend_banner_fallback(app_server).await;
                         app_server_rate_limit_snapshots(response)
@@ -1927,6 +1963,7 @@ impl App {
                 self.chat_widget.open_advanced_reasoning_popup(model);
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 if self
                     .active_thread_model_setting_update_params(model.clone())
                     .is_some_and(|params| params.permissions.is_some())
@@ -2164,6 +2201,7 @@ impl App {
                 }
             }
             AppEvent::PersistModelSelection { model, effort } => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 match self.persist_model_defaults(
                     app_server.request_handle(),
                     crate::config_update::build_model_selection_edits(
@@ -2199,6 +2237,7 @@ impl App {
                 }
             }
             AppEvent::SelectSessionModel { model, effort } => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.select_session_model(app_server, model, effort).await;
             }
             AppEvent::CyberModelAutoReviewNotice => {
@@ -2414,6 +2453,7 @@ impl App {
                 }
             }
             AppEvent::PersistPlanModeReasoningEffort(effort) => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 let key_path = "plan_mode_reasoning_effort";
                 let edit = if let Some(effort) = effort {
                     crate::config_update::replace_config_value(
@@ -2457,8 +2497,9 @@ impl App {
                     ));
                 }
             }
-            AppEvent::OpenAgentsOverview => {
-                self.open_agents_overview(app_server);
+            AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
+            AppEvent::NewAgentsOverviewSession { cwd } => {
+                return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
                 self.apply_agents_overview_thread_refresh(app_server, request_id, result);
@@ -2476,9 +2517,6 @@ impl App {
                     AppRunControl::Continue => {}
                     AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
                 }
-            }
-            AppEvent::NewAgentsOverviewSession { cwd } => {
-                return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::NewAgentsOverviewWorktree { cwd } => {
                 Box::pin(self.new_agents_overview_worktree(tui, app_server, cwd)).await;
@@ -2507,8 +2545,9 @@ impl App {
                     Err(error) => {
                         if let Ok(mut state) = self.agents_overview.view_state.lock() {
                             state.input = name;
-                            state.renaming = true;
+                            state.rename_target = Some(thread_id);
                         }
+                        self.repaint_agents_overview();
                         self.add_agents_overview_error(format!("Failed to rename task: {error}"));
                     }
                 }
@@ -2841,6 +2880,9 @@ impl App {
                     ));
                 }
             },
+            AppEvent::FullscreenTranscriptSelected { enabled } => {
+                self.save_fullscreen_transcript(enabled).await;
+            }
             AppEvent::StatusLineSetup {
                 items,
                 use_theme_colors,
@@ -2862,6 +2904,7 @@ impl App {
                     Err(err) => {
                         let error = format_config_error(&err);
                         tracing::error!(error = %error, "failed to persist status line settings; keeping previous selection");
+                        self.app_event_tx.send(AppEvent::FollowTranscript);
                         self.chat_widget.add_error_message(format!(
                             "Failed to save status line settings: {error}"
                         ));
@@ -2901,6 +2944,7 @@ impl App {
                     }
                     Err(err) => {
                         tracing::error!(error = %err, "failed to persist terminal title items; keeping previous selection");
+                        self.app_event_tx.send(AppEvent::FollowTranscript);
                         self.chat_widget.revert_terminal_title_setup_preview();
                         self.chat_widget.add_error_message(format!(
                             "Failed to save terminal title items: {err}"
@@ -2940,6 +2984,7 @@ impl App {
                         self.restore_runtime_theme_from_config();
                         self.refresh_status_line();
                         tracing::error!(error = %err, "failed to persist theme selection");
+                        self.app_event_tx.send(AppEvent::FollowTranscript);
                         self.chat_widget
                             .add_error_message(format!("Failed to save theme: {err}"));
                     }
@@ -3076,6 +3121,7 @@ impl App {
         ) {
             Ok(outcome) => outcome,
             Err(err) => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget.add_error_message(err);
                 return;
             }
@@ -3087,6 +3133,7 @@ impl App {
                 message,
             } => (*keymap_config, bindings, message),
             crate::keymap_setup::KeymapEditOutcome::Unchanged { message } => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget.add_info_message(message, /*hint*/ None);
                 return;
             }
@@ -3096,7 +3143,12 @@ impl App {
             Ok(runtime_keymap) => runtime_keymap,
             Err(err) => {
                 let params = crate::keymap_setup::build_keymap_conflict_params(
-                    context, action, key, intent, err,
+                    context,
+                    action,
+                    key,
+                    intent,
+                    err,
+                    &self.keymap,
                 );
                 self.chat_widget.show_selection_view(params);
                 return;
@@ -3119,10 +3171,12 @@ impl App {
                 self.sync_side_thread_ui();
                 self.chat_widget
                     .return_to_keymap_picker(&context, &action, &runtime_keymap);
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget.add_info_message(message, /*hint*/ None);
             }
             Err(err) => {
                 tracing::error!(error = %err, "failed to persist keymap binding");
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget
                     .add_error_message(format!("Failed to save shortcut: {err}"));
             }
@@ -3144,6 +3198,7 @@ impl App {
         ) {
             Ok(keymap_config) => keymap_config,
             Err(err) => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget.add_error_message(err);
                 return;
             }
@@ -3152,6 +3207,7 @@ impl App {
         let runtime_keymap = match RuntimeKeymap::from_config(&keymap_config) {
             Ok(runtime_keymap) => runtime_keymap,
             Err(err) => {
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget
                     .add_error_message(format!("Failed to refresh shortcuts: {err}"));
                 return;
@@ -3173,6 +3229,7 @@ impl App {
                 self.sync_side_thread_ui();
                 self.chat_widget
                     .return_to_keymap_picker(&context, &action, &runtime_keymap);
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget.add_info_message(
                     format!("Removed custom shortcut for `{context}.{action}`."),
                     /*hint*/ None,
@@ -3180,6 +3237,7 @@ impl App {
             }
             Err(err) => {
                 tracing::error!(error = %err, "failed to clear keymap binding");
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget
                     .add_error_message(format!("Failed to remove shortcut: {err}"));
             }

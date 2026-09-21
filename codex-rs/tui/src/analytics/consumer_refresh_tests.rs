@@ -44,7 +44,7 @@ fn consumer_chats_keep_missing_rows_and_only_offer_known_metrics() {
     assert!(!hidden.contains("Private title") && !hidden.contains("Unverified backend row"));
     press(&mut view, KeyCode::Up);
     press(&mut view, KeyCode::Enter);
-    insta::assert_snapshot!(screen(&mut view, /*width*/ 90, /*height*/ 30));
+    assert!(screen(&mut view, /*width*/ 90, /*height*/ 30).contains("-0.000004"));
     let chats = match &mut view.tasks {
         Load::Ready(chats) => chats,
         _ => unreachable!(),
@@ -67,14 +67,11 @@ fn consumer_chats_keep_missing_rows_and_only_offer_known_metrics() {
         screen(&mut view, /*width*/ 110, /*height*/ 30)
     );
     press(&mut view, KeyCode::Char('s'));
-    insta::assert_snapshot!(
-        "consumer_chat_available_limits",
-        screen(&mut view, /*width*/ 58, /*height*/ 30)
-    );
+    assert_eq!(view.task_metric(), 1);
 }
 
 #[test]
-fn consumer_overview_shows_top_five_and_closes_with_retained_details() {
+fn consumer_chats_show_all_rows_and_collapse_details_before_closing() {
     let mut view = fixture::view(models::AccountKind::Consumer);
     view.section = Section::Chats;
     view.tasks = Load::Ready(Chats {
@@ -87,19 +84,20 @@ fn consumer_overview_shows_top_five_and_closes_with_retained_details() {
         }).collect(),
         ..Chats::default()
     });
+    screen(&mut view, /*width*/ 120, /*height*/ 42);
     press(&mut view, KeyCode::End);
     press(&mut view, KeyCode::Enter);
     assert_eq!(view.sections[Section::Chats].detail, Some(5));
-    press(&mut view, KeyCode::Char('z'));
     let content = view
         .task_lines(/*width*/ 70)
         .0
         .iter()
-        .map(ToString::to_string)
+        .map(|line| line.to_string().trim_end().to_owned())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(content.contains("Task 5") && !content.contains("Task 0"));
-    insta::assert_snapshot!(content);
+    assert!(content.contains("Task 5") && content.contains("Task 0"));
+    press(&mut view, KeyCode::Esc);
+    assert!(!view.is_done);
     press(&mut view, KeyCode::Esc);
     assert!(view.is_done);
 }

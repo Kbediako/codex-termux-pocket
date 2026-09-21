@@ -31,6 +31,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub use crate::tui_effects::TuiEffects;
 pub use crate::tui_keymap::KeybindingSpec;
 pub use crate::tui_keymap::KeybindingsSpec;
 pub use crate::tui_keymap::MAX_FUNCTION_KEY;
@@ -753,17 +754,16 @@ pub struct Tui {
     /// Records the one-time screen-reader detection attempt. Either value skips detection.
     pub screen_reader_detection_done: Option<bool>,
 
-    /// Enable decorative effects such as Astra composer stars. Also requires animations.
-    /// Defaults to `true`.
-    #[serde(default = "default_true")]
-    pub whimsy: bool,
+    /// Individual visual effects. Each also requires animations to be enabled.
+    #[serde(default)]
+    pub effects: TuiEffects,
 
     /// Show startup tooltips in the TUI welcome screen.
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
 
-    /// Show an informational notice when the connected app server is an older stable release.
+    /// Show informational notices about connected app server version differences.
     /// Defaults to `true`; this does not control compatibility errors or version status.
     #[serde(default = "default_true")]
     pub show_server_version_notice: bool,
@@ -792,6 +792,11 @@ pub struct Tui {
     /// Defaults to `false`.
     #[serde(default)]
     pub raw_output_mode: bool,
+
+    /// Own the fullscreen transcript, including scrolling, selection, and search.
+    /// Defaults to `false`; alternate-screen restrictions take precedence.
+    #[serde(default)]
+    pub fullscreen_transcript: bool,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///

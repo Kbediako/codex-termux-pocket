@@ -748,8 +748,8 @@ pub struct Config {
     /// Enable ASCII animations and shimmer effects in the TUI.
     pub animations: bool,
 
-    /// Enable decorative TUI effects such as Astra composer stars.
-    pub tui_whimsy: bool,
+    /// Individual TUI effects, subordinate to the animation master switch.
+    pub tui_effects: codex_config::types::TuiEffects,
 
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
@@ -769,6 +769,9 @@ pub struct Config {
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     pub tui_raw_output_mode: bool,
+
+    /// Own the fullscreen transcript when the alternate screen is enabled.
+    pub tui_fullscreen_transcript: bool,
 
     /// Start the TUI in the specified collaboration mode (plan/default).
 
@@ -4382,7 +4385,7 @@ impl Config {
                 .map(|t| t.notification_settings.clone())
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
-            tui_whimsy: cfg.tui.as_ref().map(|t| t.whimsy).unwrap_or(true),
+            tui_effects: cfg.tui.as_ref().map(|t| t.effects).unwrap_or_default(),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
             tui_show_server_version_notice: cfg
                 .tui
@@ -4406,6 +4409,10 @@ impl Config {
                 .as_ref()
                 .map(|t| t.raw_output_mode)
                 .unwrap_or(false),
+            tui_fullscreen_transcript: cfg
+                .tui
+                .as_ref()
+                .is_some_and(|tui| tui.fullscreen_transcript),
             tui_alternate_screen: cfg
                 .tui
                 .as_ref()

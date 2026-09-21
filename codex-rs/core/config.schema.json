@@ -4210,6 +4210,27 @@
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
           "type": "boolean"
         },
+        "effects": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiEffects"
+            }
+          ],
+          "default": {
+            "effort": true,
+            "progress": true,
+            "shimmer": true,
+            "starfield": true,
+            "title": true,
+            "welcome": true
+          },
+          "description": "Individual visual effects. Each also requires animations to be enabled."
+        },
+        "fullscreen_transcript": {
+          "default": false,
+          "description": "Own the fullscreen transcript, including scrolling, selection, and search. Defaults to `false`; alternate-screen restrictions take precedence.",
+          "type": "boolean"
+        },
         "keymap": {
           "allOf": [
             {
@@ -4280,6 +4301,8 @@
             "global": {
               "clear_terminal": null,
               "copy": null,
+              "find_transcript": null,
+              "focus_activity": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
@@ -4306,6 +4329,7 @@
             "pager": {
               "close": null,
               "close_transcript": null,
+              "find": null,
               "half_page_down": null,
               "half_page_up": null,
               "jump_bottom": null,
@@ -4479,7 +4503,7 @@
         },
         "show_server_version_notice": {
           "default": true,
-          "description": "Show an informational notice when the connected app server is an older stable release. Defaults to `true`; this does not control compatibility errors or version status.",
+          "description": "Show informational notices about connected app server version differences. Defaults to `true`; this does not control compatibility errors or version status.",
           "type": "boolean"
         },
         "show_tooltips": {
@@ -4523,11 +4547,6 @@
         "vim_mode_default": {
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
-          "type": "boolean"
-        },
-        "whimsy": {
-          "default": true,
-          "description": "Enable decorative effects such as Astra composer stars. Also requires animations. Defaults to `true`.",
           "type": "boolean"
         }
       },
@@ -4968,6 +4987,43 @@
       },
       "type": "object"
     },
+    "TuiEffects": {
+      "additionalProperties": false,
+      "description": "Optional visual effects. Disabling an effect preserves its underlying activity.",
+      "properties": {
+        "effort": {
+          "default": true,
+          "description": "Animate reasoning-effort changes in the composer and footer.",
+          "type": "boolean"
+        },
+        "progress": {
+          "default": true,
+          "description": "Animate activity bullets and loading spinners.",
+          "type": "boolean"
+        },
+        "shimmer": {
+          "default": true,
+          "description": "Shimmer status and loading text.",
+          "type": "boolean"
+        },
+        "starfield": {
+          "default": true,
+          "description": "Animate the composer starfield.",
+          "type": "boolean"
+        },
+        "title": {
+          "default": true,
+          "description": "Blink the terminal-title indicator when user action is required.",
+          "type": "boolean"
+        },
+        "welcome": {
+          "default": true,
+          "description": "Animate the welcome artwork.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "TuiGlobalKeymap": {
       "additionalProperties": false,
       "description": "Global keybindings. These are used when a context does not define an override.",
@@ -4987,6 +5043,22 @@
             }
           ],
           "description": "Copy the last agent response to the clipboard."
+        },
+        "find_transcript": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in the full transcript."
+        },
+        "focus_activity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus activity groups in the owned transcript to inspect their details."
         },
         "open_agents": {
           "allOf": [
@@ -5179,6 +5251,8 @@
           "default": {
             "clear_terminal": null,
             "copy": null,
+            "find_transcript": null,
+            "focus_activity": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
@@ -5219,6 +5293,7 @@
           "default": {
             "close": null,
             "close_transcript": null,
+            "find": null,
             "half_page_down": null,
             "half_page_up": null,
             "jump_bottom": null,
@@ -5443,6 +5518,14 @@
             }
           ],
           "description": "Close the transcript overlay via its dedicated toggle key."
+        },
+        "find": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in a transcript pager."
         },
         "half_page_down": {
           "allOf": [
