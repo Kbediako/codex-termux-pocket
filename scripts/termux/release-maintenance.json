@@ -1,9 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "alpha1572-record-20260922",
-  "operation": "record-upstream",
-  "upstream_tag": "rust-v0.157.0-alpha.2",
-  "upstream_tag_object": "725dfc797cb1d2d49fa807a3ecfdb8e06d678238",
-  "upstream_commit": "e9f240c5b6edcf7f21e79397cb9caac61a2059c4",
-  "prepared_commit": "0cf02870dfef62829370ce8362729cd4bc3b0aa6"
+  "request_id": "alpha1572-post-20260923",
+  "operation": "dispatch-checks",
+  "phase": "post"
 }
