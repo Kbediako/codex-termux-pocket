@@ -1,3 +1,12 @@
+# Model catalog provider requirements
+
+`model/list` and periodic model catalog refreshes check the startup provider against
+current managed provider requirements before using the catalog. If that provider no longer
+complies, `model/list` returns JSON-RPC error `-32600` asking the client to restart Codex,
+and background refreshes skip the old endpoint. Requirement load failures also block these
+operations. Checks apply even when the catalog is cached. Existing startup provider selection
+and caching behavior remain in effect while the provider satisfies current requirements.
+
 # MCP App UI
 
 `mcpToolCall.mcpAppUi` records the invoked descriptor's `resourceUri`
@@ -86,6 +95,12 @@ network connections do not receive this mode, even with a recognized client name
 Before sending verification requests to desktop sessions, deploy a GUI that
 handles the typed verification request, cancellation, and late proofs. The general
 `experimentalApi` opt-in does not identify a compatible GUI version.
+
+Native `openai/userVerification` elicitation requests preserve optional `_meta`
+JSON through MCP transport and `mcpServer/elicitation/request`. Clients may use
+this metadata for extension-specific presentation and must continue to accept
+requests without it. Metadata does not change the challenge bytes or the proof
+returned in the acceptance response.
 
 Local UI clients use five methods. They require the existing
 `experimentalApi` opt-in. The local provider reports

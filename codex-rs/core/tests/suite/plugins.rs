@@ -88,7 +88,7 @@ fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
         include_instructions: config.include_skill_instructions,
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
-        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+        cloud_skill_enabled: config.cloud_skill_enabled,
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     Arc::new(extensions.build())
@@ -1922,12 +1922,13 @@ async fn explicit_plugin_mentions_track_plugin_used_analytics() -> Result<()> {
     let codex = Arc::clone(&test_codex.codex);
 
     codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![
-            codex_protocol::user_input::UserInput::Mention {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![codex_protocol::user_input::UserInput::Mention {
                 name: "sample".into(),
                 path: format!("plugin://{SAMPLE_PLUGIN_CONFIG_NAME}"),
-            },
-        ]))
+            }])
+            .with_responses_metadata(Some(std::collections::HashMap::from([]))),
+        )
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 

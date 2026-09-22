@@ -5978,6 +5978,7 @@ async fn make_test_app() -> App {
         runtime_permission_profile_override: None,
         file_search,
         transcript_cells: Vec::new(),
+        composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
         native_history: Default::default(),
         transcript_view: Default::default(),
         last_rendered_history_tail: None,
@@ -6081,6 +6082,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             runtime_permission_profile_override: None,
             file_search,
             transcript_cells: Vec::new(),
+            composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
             native_history: Default::default(),
             transcript_view: Default::default(),
             last_rendered_history_tail: None,
@@ -8364,7 +8366,7 @@ async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place() -> Res
     let transcript = buffer
         .content()
         .chunks(usize::from(size.width))
-        .take(usize::from(bottom.y.saturating_sub(/*rhs*/ 1)))
+        .take(usize::from(bottom.y))
         .map(|row| {
             row.iter()
                 .map(ratatui::buffer::Cell::symbol)

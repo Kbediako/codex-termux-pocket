@@ -708,8 +708,8 @@ pub struct Config {
     /// Optional token budget override for the available-skills catalog.
     pub skill_max_context_tokens: Option<NonZeroUsize>,
 
-    /// Whether orchestrator-owned skills are exposed to the model.
-    pub orchestrator_skills_enabled: bool,
+    /// Whether cloud skills are discovered and exposed to the model.
+    pub cloud_skill_enabled: bool,
 
     /// Whether orchestrator-owned MCP tools are exposed to the model.
     pub orchestrator_mcp_enabled: bool,
@@ -750,6 +750,9 @@ pub struct Config {
 
     /// Individual TUI effects, subordinate to the animation master switch.
     pub tui_effects: codex_config::types::TuiEffects,
+
+    /// Rich content rendering preferences, independent of animations.
+    pub tui_rendering: codex_config::types::TuiRendering,
 
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
@@ -2669,9 +2672,7 @@ fn resolve_update_plan_enabled(config_toml: &ConfigToml) -> bool {
         .is_some_and(|config| config.enabled)
 }
 
-fn resolve_orchestrator_feature_enabled(
-    feature: Option<&codex_config::config_toml::OrchestratorFeatureToml>,
-) -> bool {
+fn resolve_feature_enabled(feature: Option<&codex_config::config_toml::FeatureToggleToml>) -> bool {
     feature.and_then(|feature| feature.enabled).unwrap_or(true)
 }
 
@@ -3205,10 +3206,14 @@ impl Config {
                 .as_ref(),
         )?;
         let orchestrator = cfg.orchestrator.as_ref();
-        let orchestrator_skills_enabled =
-            resolve_orchestrator_feature_enabled(orchestrator.and_then(|value| value.skills.as_ref()));
+        let cloud_skill_enabled = cfg
+            .cloud
+            .as_ref()
+            .and_then(|cloud| cloud.skills.as_ref())
+            .and_then(|skills| skills.enabled)
+            .unwrap_or(true);
         let orchestrator_mcp_enabled =
-            resolve_orchestrator_feature_enabled(orchestrator.and_then(|value| value.mcp.as_ref()));
+            resolve_feature_enabled(orchestrator.and_then(|value| value.mcp.as_ref()));
         let mut startup_warnings = config_layer_stack
             .startup_warnings()
             .unwrap_or_default()
@@ -4221,7 +4226,7 @@ impl Config {
             include_collaboration_mode_instructions,
             include_skill_instructions,
             skill_max_context_tokens,
-            orchestrator_skills_enabled,
+            cloud_skill_enabled,
             orchestrator_mcp_enabled,
             include_environment_context,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
@@ -4386,6 +4391,7 @@ impl Config {
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             tui_effects: cfg.tui.as_ref().map(|t| t.effects).unwrap_or_default(),
+            tui_rendering: cfg.tui.as_ref().map(|t| t.rendering).unwrap_or_default(),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
             tui_show_server_version_notice: cfg
                 .tui
