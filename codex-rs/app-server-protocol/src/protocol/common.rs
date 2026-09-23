@@ -1105,6 +1105,21 @@ client_request_definitions! {
         serialization: None,
         response: v2::ModelListResponse,
     },
+    GatewayOAuthRead => "account/gatewayOAuth/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthReadResponse,
+    },
+    GatewayOAuthLogin => "account/gatewayOAuth/login" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthLoginResponse,
+    },
+    GatewayOAuthCancel => "account/gatewayOAuth/cancel" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthCancelResponse,
+    },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
         serialization: None,
@@ -1965,6 +1980,7 @@ server_notification_definitions! {
     #[experimental("mcpServer/event/stream/notification")]
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
+    GatewayOAuthChanged => "account/gatewayOAuth/changed" (v2::GatewayOAuthChangedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
@@ -2453,6 +2469,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(
@@ -2642,6 +2659,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
@@ -2726,6 +2744,7 @@ mod tests {
                     version: "0.1.0".to_string(),
                 },
                 capabilities: Some(v1::InitializeCapabilities {
+                    explicit_gateway_oauth: false,
                     experimental_api: true,
                     request_attestation: true,
                     mcp_server_openai_form_elicitation: true,
@@ -2813,6 +2832,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capabilities: Some(v1::InitializeCapabilities {
+                        explicit_gateway_oauth: false,
                         experimental_api: true,
                         request_attestation: true,
                         mcp_server_openai_form_elicitation: true,

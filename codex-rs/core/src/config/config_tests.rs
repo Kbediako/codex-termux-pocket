@@ -1262,7 +1262,7 @@ fn config_toml_deserializes_model_availability_nux() {
             vim_mode_default: false,
             question_esc_back: true,
             raw_output_mode: false,
-            fullscreen_transcript: false,
+            fullscreen_transcript: true,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
             status_line_use_colors: true,
@@ -2023,6 +2023,7 @@ respect_system_proxy = true
             codex_http_client::HttpClientFactory::new(
                 codex_http_client::OutboundProxyPolicy::RespectSystemProxy,
             ),
+            /*product_sku*/ None,
         )
     );
     Ok(())
@@ -4391,7 +4392,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             vim_mode_default: false,
             question_esc_back: true,
             raw_output_mode: false,
-            fullscreen_transcript: false,
+            fullscreen_transcript: true,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
             status_line_use_colors: true,
@@ -8366,6 +8367,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
         r#"
 [auto_review]
 policy = "Use the user-configured guardian policy."
+extra_policy = "Use the user-configured additional policy."
 experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
 "#,
     )
@@ -8375,10 +8377,12 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
     assert_eq!(
         (
             auto_review.policy.as_deref(),
+            auto_review.extra_policy.as_deref(),
             auto_review.experimental_policy_template.as_deref(),
         ),
         (
             Some("Use the user-configured guardian policy."),
+            Some("Use the user-configured additional policy."),
             Some("Configured template: {{ tenant_policy_config }}"),
         )
     );
@@ -8390,6 +8394,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            extra_policy: Some("  Use the user-configured additional policy.  ".to_string()),
             experimental_policy_template: Some(
                 "  Configured template: {{ tenant_policy_config }}  ".to_string(),
             ),
@@ -8410,10 +8415,12 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
     assert_eq!(
         (
             config.guardian_policy_config.as_deref(),
+            config.guardian_extra_policy.as_deref(),
             config.guardian_policy_template.as_deref(),
         ),
         (
             Some("Use the user-configured guardian policy."),
+            Some("Use the user-configured additional policy."),
             Some("Configured template: {{ tenant_policy_config }}"),
         )
     );
@@ -8424,40 +8431,56 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
 #[tokio::test]
 async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let config_layer_stack = ConfigLayerStack::new(
-        Vec::new(),
-        Default::default(),
-        codex_config::ConfigRequirementsToml {
-            guardian_policy_config: Some("Use the managed guardian policy.".to_string()),
+    for (managed_extra, expected_extra) in [
+        (
+            Some("  Use the managed additional policy.  "),
+            "Use the managed additional policy.",
+        ),
+        (Some("   "), "Use the user-configured additional policy."),
+        (None, "Use the user-configured additional policy."),
+    ] {
+        let config_layer_stack = ConfigLayerStack::new(
+            Vec::new(),
+            Default::default(),
+            codex_config::ConfigRequirementsToml {
+                guardian_policy_config: Some("Use the managed guardian policy.".to_string()),
+                guardian_extra_policy: managed_extra.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        let cfg = ConfigToml {
+            auto_review: Some(AutoReviewToml {
+                policy: Some("Use the user-configured guardian policy.".to_string()),
+                extra_policy: Some("Use the user-configured additional policy.".to_string()),
+                experimental_policy_template: None,
+            }),
             ..Default::default()
-        },
-    )
-    .map_err(std::io::Error::other)?;
-    let cfg = ConfigToml {
-        auto_review: Some(AutoReviewToml {
-            policy: Some("Use the user-configured guardian policy.".to_string()),
-            experimental_policy_template: None,
-        }),
-        ..Default::default()
-    };
+        };
 
-    let config = Config::load_config_with_layer_stack(
-        LOCAL_FS.as_ref(),
-        cfg,
-        ConfigOverrides {
-            cwd: Some(codex_home.path().to_path_buf()),
-            ..Default::default()
-        },
-        codex_home.abs(),
-        config_layer_stack,
-    )
-    .await?;
+        let config = Config::load_config_with_layer_stack(
+            LOCAL_FS.as_ref(),
+            cfg,
+            ConfigOverrides {
+                cwd: Some(codex_home.path().to_path_buf()),
+                ..Default::default()
+            },
+            codex_home.abs(),
+            config_layer_stack,
+        )
+        .await?;
 
-    assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the managed guardian policy.")
-    );
-
+        assert_eq!(
+            (
+                config.guardian_policy_config.as_deref(),
+                config.guardian_extra_policy.as_deref(),
+            ),
+            (
+                Some("Use the managed guardian policy."),
+                Some(expected_extra),
+            )
+        );
+    }
     Ok(())
 }
 
@@ -8467,6 +8490,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            extra_policy: Some("   ".to_string()),
             experimental_policy_template: None,
         }),
         ..Default::default()
@@ -8482,7 +8506,10 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    assert_eq!(
+        (config.guardian_policy_config, config.guardian_extra_policy),
+        (None, None)
+    );
 
     Ok(())
 }
@@ -8495,6 +8522,7 @@ async fn load_config_ignores_empty_requirements_guardian_policy_config() -> std:
         Default::default(),
         codex_config::ConfigRequirementsToml {
             guardian_policy_config: Some("   ".to_string()),
+            guardian_extra_policy: Some("   ".to_string()),
             ..Default::default()
         },
     )
@@ -8512,7 +8540,10 @@ async fn load_config_ignores_empty_requirements_guardian_policy_config() -> std:
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    assert_eq!(
+        (config.guardian_policy_config, config.guardian_extra_policy),
+        (None, None)
+    );
 
     Ok(())
 }
@@ -10220,6 +10251,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         models: None,
         additional_developer_instructions: None,
         guardian_policy_config: None,
+        guardian_extra_policy: None,
     };
     let requirement_source = codex_config::RequirementSource::Unknown;
     let requirement_source_for_error = requirement_source.clone();

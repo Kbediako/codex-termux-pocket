@@ -29,6 +29,8 @@ mod buffered_replay;
 mod connector_policy;
 #[path = "tests/disconnect_tests.rs"]
 mod disconnect;
+#[path = "tests/external_writer_fork_tests.rs"]
+mod external_writer_fork_tests;
 #[path = "tests/fork_workspace_roots_tests.rs"]
 mod fork_workspace_roots_tests;
 #[path = "tests/fresh_sparkle_tests.rs"]
@@ -71,6 +73,8 @@ mod realtime_start;
 mod reasoning_resume_tests;
 #[path = "tests/recap_generation_tests.rs"]
 mod recap_generation;
+#[path = "tests/resume_shutdown_tests.rs"]
+mod resume_shutdown_tests;
 mod safety_buffering;
 #[path = "tests/session_lifecycle_requests.rs"]
 mod session_lifecycle_requests;
@@ -428,6 +432,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
             name: "docs".to_string(),
             runtime_status: None,
             plugin_id: None,
+            http_origin: None,
             server_info: None,
             tools: HashMap::new(),
             resources: Vec::new(),
