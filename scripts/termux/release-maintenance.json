@@ -1,19 +1,15 @@
 {
   "format_version": 1,
-  "request_id": "pr147-tracing026-prepare-20260924",
+  "request_id": "pr147-openssl-sys09117-prepare-20260925",
   "operation": "prepare-source",
-  "base_main": "44baac60ca4b88299eda508adc7364b02fa17c68",
-  "prepared_commit": "44baac60ca4b88299eda508adc7364b02fa17c68",
-  "expected_input_tree": "40555f973ff20fd3eae29f8f8d2df371f74095c4",
+  "base_main": "5558b1866e16d8e4204b91aa4dbdfe12e3c6318f",
+  "prepared_commit": "5558b1866e16d8e4204b91aa4dbdfe12e3c6318f",
+  "expected_input_tree": "02c4fcb1bbf4939b8e537af73016e72e55fc4153",
   "edits": [],
   "package_updates": [
     {
-      "name": "tracing-test",
-      "version": "0.2.6"
-    },
-    {
-      "name": "tracing-test-macro",
-      "version": "0.2.6"
+      "name": "openssl-sys",
+      "version": "0.9.117"
     }
   ]
 }
