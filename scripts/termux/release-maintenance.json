@@ -1,6 +1,15 @@
 {
   "format_version": 1,
-  "request_id": "alpha1579-post-20260923",
-  "operation": "dispatch-checks",
-  "phase": "post"
+  "request_id": "pr147-openssl-sys09117-prepare-20260925",
+  "operation": "prepare-source",
+  "base_main": "5558b1866e16d8e4204b91aa4dbdfe12e3c6318f",
+  "prepared_commit": "5558b1866e16d8e4204b91aa4dbdfe12e3c6318f",
+  "expected_input_tree": "02c4fcb1bbf4939b8e537af73016e72e55fc4153",
+  "edits": [],
+  "package_updates": [
+    {
+      "name": "openssl-sys",
+      "version": "0.9.117"
+    }
+  ]
 }
