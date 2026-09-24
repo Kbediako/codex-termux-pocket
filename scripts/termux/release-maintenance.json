@@ -1,6 +1,19 @@
 {
   "format_version": 1,
-  "request_id": "alpha1579-post-20260923",
-  "operation": "dispatch-checks",
-  "phase": "post"
+  "request_id": "pr147-tracing026-prepare-20260924",
+  "operation": "prepare-source",
+  "base_main": "44baac60ca4b88299eda508adc7364b02fa17c68",
+  "prepared_commit": "44baac60ca4b88299eda508adc7364b02fa17c68",
+  "expected_input_tree": "40555f973ff20fd3eae29f8f8d2df371f74095c4",
+  "edits": [],
+  "package_updates": [
+    {
+      "name": "tracing-test",
+      "version": "0.2.6"
+    },
+    {
+      "name": "tracing-test-macro",
+      "version": "0.2.6"
+    }
+  ]
 }
