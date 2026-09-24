@@ -30,7 +30,7 @@ toml = { workspace = true }
 pretty_assertions = { workspace = true }
 
 [target.'cfg(windows)'.dependencies.windows]
-version = "0.58"
+version = "0.62"
 features = [
     "ApplicationModel",
     "Foundation_Collections",
