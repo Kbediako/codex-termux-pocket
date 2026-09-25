@@ -51,6 +51,7 @@ FIELDS = {
         "package_updates",
     },
     "dispatch-checks": {"phase"},
+    "dispatch-pr-build": {"pr_number", "source_sha"},
     "retire-branches": {"branches"},
 }
 
@@ -102,6 +103,10 @@ def validate_request(value):
         raise ValueError("invalid official alpha tag")
     if operation == "prepare-source":
         from source_preparation import validate
+
+        validate(value)
+    if operation == "dispatch-pr-build":
+        from pr_build import validate
 
         validate(value)
     if operation == "dispatch-checks" and value["phase"] not in ("pre", "post"):
@@ -436,6 +441,10 @@ def main():
         execute(request, repo, source, api, live_main)
     elif operation == "dispatch-checks":
         dispatch_checks(repo, source, request["phase"])
+    elif operation == "dispatch-pr-build":
+        from pr_build import execute
+
+        execute(request, repo, source, api, live_main, command)
     elif operation == "retire-branches":
         retire_branches(request, repo)
 
