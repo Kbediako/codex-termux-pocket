@@ -95,3 +95,38 @@ in `termux-prepared-source`. A maintainer must independently review these bytes
 and create the final source commit through direct Git writes. This operation
 never advances refs, publishes, promotes, or closes issues. The ordinary five
 exact-source runtime gates are still mandatory after source selection.
+
+## Pinned pre-merge production builds
+
+`dispatch-pr-build` accepts only `pr_number` and `source_sha` in addition to the
+format, request ID and operation. Commit the request to main through the normal
+maintainer path. The existing read-only router runs the maintenance guard tests
+before the bounded maintenance job can execute it.
+
+This operation starts only `termux-mobile-artifact.yml`. The PR must be open,
+owned by this repository, and target main. Its current head and actual branch ref
+must both equal the full reviewed source SHA. Its entire workflow-definition tree
+must match the trusted controller checkout. The controller never checks out or
+executes candidate code. The build itself executes the explicitly reviewed source
+on the existing hosted runner, with the existing workflow permissions unchanged.
+
+Before dispatch, require a complete exact-source run inventory. Reuse a matching
+unfinished or successful build; refuse failed/cancelled or ambiguous existing
+evidence instead of silently replacing it. Recheck main and the PR head/ref
+immediately before the sole dispatch. The ref is the resolved PR branch and
+`source_ref` is the exact SHA, so the run and artifact identities can be inspected
+without merging the PR. Main-only release gate dispatch remains unchanged.
+
+Record dispatch acceptance in the job log before attempting readback. Recheck
+main/head, then perform one immediate run-list lookup, with no sleeping or
+polling. An accepted dispatch whose run is not yet visible is not resubmitted;
+on the next resume, locate it by its pinned source and workflow. A failed lookup
+or moved ref after acceptance must likewise be investigated before any retry.
+Do not advance main or the candidate while this validation is unresolved.
+
+The receipt is scheduling evidence only. Independently inspect the actual run,
+required build/validation steps and retained checksums, metadata, SBOM and payload.
+It does not approve a merge, provide affected-consumer coverage, or replace the
+final dependency source's five runtime gates. No release, manifest, tag, branch,
+issue or workflow file is mutated by this operation. Retrying a failed build
+requires log inspection and the ordinary explicit Actions retry operation.
