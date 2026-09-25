@@ -12,6 +12,10 @@ on:
       - "codex-rs/rust-toolchain.toml"
       - "codex-rs/linux-sandbox/**"
       - "codex-rs/sandboxing/**"
+      - "codex-rs/http-client/**"
+      - "codex-rs/utils/rustls-provider/**"
+      - "codex-rs/utils/cargo-bin/**"
+      - "justfile"
   push:
     branches:
       - main
@@ -24,6 +28,10 @@ on:
       - "codex-rs/rust-toolchain.toml"
       - "codex-rs/linux-sandbox/**"
       - "codex-rs/sandboxing/**"
+      - "codex-rs/http-client/**"
+      - "codex-rs/utils/rustls-provider/**"
+      - "codex-rs/utils/cargo-bin/**"
+      - "justfile"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -81,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libssl-dev bubblewrap
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
@@ -109,3 +117,7 @@ jobs:
       - name: Test codex-linux-sandbox
         shell: bash
         run: cargo nextest run --locked --no-fail-fast --cargo-profile ci-test --target ${{ matrix.target }} -p codex-linux-sandbox
+
+      - name: Test HTTP and native TLS consumers
+        shell: bash
+        run: just test --locked --cargo-profile ci-test --target ${{ matrix.target }} -p codex-http-client

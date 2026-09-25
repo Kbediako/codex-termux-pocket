@@ -44,8 +44,11 @@ independent verification semantically identical without sharing write authority.
 - `termux-control-plane.yml` is the ARM64 contract gate for installer/updater
   helpers, shell tests, release controls, workflow topology, and the complete
   locked dependency graph.
-- `termux-linux-sandbox.yml` runs the scoped Linux sandbox suite on public x64
-  and ARM64 Ubuntu runners.
+- `termux-linux-sandbox.yml` runs the scoped Linux sandbox and HTTP/native-TLS
+  consumer suites on public x64 and ARM64 Ubuntu runners. The existing sandbox
+  command is unchanged; a separate locked `just test -p codex-http-client` step
+  exercises that package with the repository's normal test defaults. Both suites
+  must pass on each architecture; this does not replace native Android validation.
 - `termux-mobile-artifact.yml` builds, validates, attests, and retains the
   production ARM64 runtime. It is build-only and has no release-write authority.
 - `termux-android-emulator.yml` builds its fixture from the triggering source and
