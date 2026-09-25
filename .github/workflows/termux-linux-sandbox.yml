@@ -120,4 +120,14 @@ jobs:
 
       - name: Test HTTP and native TLS consumers
         shell: bash
-        run: just test --locked --cargo-profile ci-test --target ${{ matrix.target }} -p codex-http-client
+        run: |
+          set -euo pipefail
+          # Custom CA overrides select rustls, but native-TLS fixtures need system defaults.
+          # Custom-CA subprocess tests still supply their own fixture bundles and overrides.
+          python3 - <<'PYENV'
+          import os
+          for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"):
+              print(f"{name}_configured={bool(os.environ.get(name))}")
+          PYENV
+          env -u CODEX_CA_CERTIFICATE -u SSL_CERT_FILE \
+            just test --locked --cargo-profile ci-test --target ${{ matrix.target }} -p codex-http-client
