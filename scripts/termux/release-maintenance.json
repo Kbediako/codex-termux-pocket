@@ -1,7 +1,8 @@
 {
   "format_version": 1,
-  "request_id": "pr147-pr143-build-603a45e4-20260925",
-  "operation": "dispatch-pr-build",
-  "pr_number": 143,
-  "source_sha": "603a45e42ce52d687f1f2c8d3f49ef500a490d3a"
+  "request_id": "issue148-export-alpha15815-20260926",
+  "operation": "export-upstream",
+  "upstream_tag": "rust-v0.158.0-alpha.15",
+  "upstream_tag_object": "5a7c1e4a3283873b4519c2916f2bcebee43b0300",
+  "upstream_commit": "b656266631899e327ff912dba6a01a499522e0ab"
 }
