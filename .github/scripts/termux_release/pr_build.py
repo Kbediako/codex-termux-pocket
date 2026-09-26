@@ -137,9 +137,12 @@ def execute(request, repo, main_sha, api, live_main, command):
         )
     else:
         print(
-            json.dumps(receipt | {
-                "run_not_yet_visible": True,
-                "next_action": "locate accepted run; do not redispatch",
-            }),
+            json.dumps(
+                receipt
+                | {
+                    "run_not_yet_visible": True,
+                    "next_action": "locate accepted run; do not redispatch",
+                }
+            ),
             flush=True,
         )
