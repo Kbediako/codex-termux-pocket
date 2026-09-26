@@ -40,7 +40,8 @@ independent verification semantically identical without sharing write authority.
 
 - `blocking-ci.yml` (`fork-ci`) runs the broad inexpensive baseline on every pull
   request and `main` push: workflow topology, shell/Python syntax, release-control
-  self-tests, locked Cargo metadata, Rust formatting, and dependency policy.
+  self-tests, locked Cargo metadata, Rust formatting, dependency policy, and
+  release-helper Python formatting with the frozen `scripts/uv.lock` toolchain.
 - `termux-control-plane.yml` is the ARM64 contract gate for installer/updater
   helpers, shell tests, release controls, workflow topology, and the complete
   locked dependency graph.
@@ -59,6 +60,14 @@ independent verification semantically identical without sharing write authority.
 inventory, rejects issue-triggered or temporary maintenance jobs and scripts,
 requires all five exact-source gate fields, and ensures no workflow other than
 `termux-release-request.yml` can write release state.
+
+The baseline Python formatting check runs `uv run --frozen --project scripts
+ruff format --diff .github/scripts/termux_release` using the same pinned uv runner
+as source preparation. It never rewrites helper files: formatting drift fails
+Fork CI and prints the exact proposed diff in the job log. Apply only reviewed
+formatter output through a maintainer commit, then rerun source preparation with
+matching trusted workflow and release-control trees. Do not expand preparation's
+output allowlist to accept changes to its own controls.
 
 ## Exact-source pre-publication gates
 

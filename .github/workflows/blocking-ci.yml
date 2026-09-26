@@ -89,6 +89,14 @@ jobs:
           rust-version: 1.95.0
           manifest-path: ./codex-rs/Cargo.toml
 
+      - name: Install pinned Python formatter runner
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: uv@0.12.10
+
+      - name: Check release helper formatting
+        run: uv run --frozen --project scripts ruff format --diff .github/scripts/termux_release
+
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
