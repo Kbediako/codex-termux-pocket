@@ -69,6 +69,17 @@ formatter output through a maintainer commit, then rerun source preparation with
 matching trusted workflow and release-control trees. Do not expand preparation's
 output allowlist to accept changes to its own controls.
 
+When this check fails, the same permanent job retains `termux-format-evidence`
+for seven days. The collector sends committed Python bytes to the frozen
+formatter through stdin and writes only under runner temporary storage. Its
+receipt binds the checkout/tree, run/attempt, tool versions, configuration and
+every before/after byte stream to Git blob hashes, SHA-256 digests and sizes.
+It also retains command outputs and verifies that tracked inputs did not change.
+The original formatting failure remains blocking; diagnostics cannot approve
+source or replace any release gate. An incomplete receipt or mismatched preimage
+is not repair evidence. Independently verify the artifact and preserve Python
+syntax trees and comments before applying any formatting-only repair.
+
 ## Exact-source pre-publication gates
 
 A run is reusable only when the API proves its workflow path, `head_sha`, final
