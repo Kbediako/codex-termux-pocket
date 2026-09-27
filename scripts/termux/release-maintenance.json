@@ -1,8 +1,33 @@
 {
   "format_version": 1,
-  "request_id": "issue149-alpha1599-export-20260928",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.159.0-alpha.9",
-  "upstream_tag_object": "9cb53a1c5ca207064dd0d4230c5e0a7d44ad0b6e",
-  "upstream_commit": "c185f4f60988ab7b70c20858f713b68103333238"
+  "request_id": "issue149-alpha1599-prepare-20260928",
+  "operation": "prepare-source",
+  "base_main": "1beb595174331f5ca17c89c9c20871bc0e5635e8",
+  "prepared_commit": "99c490df8cac46682120d346cb5132f35b97062a",
+  "expected_input_tree": "4a9e9ea189e87629f84822c0d391ac323969f9a7",
+  "edits": [
+    {
+      "path": "codex-rs/Cargo.toml",
+      "before": "e967168e907a672b774e980bbfdcf713f9a8e534",
+      "after": "99322f9f37c47a5b16f8d56c7f388c5f04744a50",
+      "replacements": [
+        {
+          "old": "[workspace.package]\nversion = \"0.158.0-alpha.15\"",
+          "new": "[workspace.package]\nversion = \"0.159.0-alpha.9\""
+        }
+      ]
+    },
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": "6134112d91cb357ba7be02c65b2e8f82e00363c7",
+      "after": "992000b0858d7f9ca228ea09c456ed16eaeb4a1e",
+      "replacements": [
+        {
+          "old": "                \"Reconnect: codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN resume 123e4567-e89b-12d3-a456-426614174000\",",
+          "new": "                \"To reconnect, run:\",\n                \"  codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN resume 123e4567-e89b-12d3-a456-426614174000\","
+        }
+      ]
+    }
+  ],
+  "package_updates": []
 }
