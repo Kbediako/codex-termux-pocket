@@ -159,9 +159,6 @@ pub(super) use codex_protocol::plan_tool::StepStatus;
 pub(super) use codex_protocol::plan_tool::UpdatePlanArgs;
 pub(super) use codex_protocol::request_permissions::RequestPermissionProfile;
 pub(super) use codex_protocol::user_input::TextElement;
-pub(super) use codex_terminal_detection::Multiplexer;
-pub(super) use codex_terminal_detection::TerminalInfo;
-pub(super) use codex_terminal_detection::TerminalName;
 pub(super) use codex_utils_absolute_path::AbsolutePathBuf;
 pub(super) use codex_utils_approval_presets::builtin_approval_presets;
 pub(super) use codex_utils_path_uri::LegacyAppPathString;
@@ -259,6 +256,8 @@ pub(crate) mod helpers;
 #[path = "tests/history_projection.rs"]
 mod history_projection;
 mod history_replay;
+#[path = "tests/home_cleanup_tests.rs"]
+mod home_cleanup_tests;
 #[path = "tests/luna_reserve_usage_tests.rs"]
 mod luna_reserve_usage_tests;
 mod mcp_startup;
@@ -313,6 +312,9 @@ pub(super) use helpers::*;
 
 #[path = "tests/questions_tests.rs"]
 mod questions_tests;
+
+#[path = "tests/question_turn_end_tests.rs"]
+mod question_turn_end_tests;
 
 #[path = "tests/list_spacing_tests.rs"]
 mod list_spacing_tests;

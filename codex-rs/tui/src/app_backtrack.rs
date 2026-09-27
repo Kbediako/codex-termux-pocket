@@ -122,6 +122,7 @@ impl App {
 
     /// Revert the current thread before the selected prompt.
     pub(crate) fn apply_backtrack_selection(&mut self, selection: BacktrackSelection) {
+        self.chat_widget.clear_prompt_suggestion();
         if self.chat_widget.side_conversation_active() {
             self.reset_backtrack_state();
             self.chat_widget
@@ -169,6 +170,8 @@ impl App {
         self.overlay = Some(Overlay::new_transcript(
             self.transcript_cells.clone(),
             self.keymap.pager.clone(),
+            self.local_settings
+                .copy_on_select(&codex_terminal_detection::terminal_info()),
         ));
         if self.scrollback_has_older_history
             && let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()

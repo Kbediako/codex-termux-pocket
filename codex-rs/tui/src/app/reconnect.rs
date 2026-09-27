@@ -175,6 +175,7 @@ impl App {
     }
 
     pub(super) fn begin_reconnect(&mut self) -> bool {
+        self.chat_widget.clear_prompt_suggestion();
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             return false;
         }
@@ -185,6 +186,10 @@ impl App {
             {
                 self.chat_widget.restore_user_message_to_composer(message);
             }
+            if let Some(owner) = self.background_voice.as_mut() {
+                owner.reset_realtime_conversation();
+            }
+            self.retire_background_voice();
             self.reconnect.offline = true;
             // Cached blank sessions are usable only while this connection owns a subscription.
             self.agents_overview.blank_sessions.clear();

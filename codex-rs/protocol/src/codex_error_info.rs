@@ -21,6 +21,7 @@ enum CodexErrorInfoWire {
     SessionBudgetExceeded,
     UsageLimitExceeded,
     RateLimitExceeded,
+    FlexUnavailable,
     ServerOverloaded,
     CyberPolicy,
     BioPolicy,
@@ -34,6 +35,7 @@ enum CodexErrorInfoWire {
     InternalServerError,
     Unauthorized,
     BadRequest,
+    InvalidPrompt,
     SandboxError,
     ResponseStreamDisconnected {
         http_status_code: Option<u16>,

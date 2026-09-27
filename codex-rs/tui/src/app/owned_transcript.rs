@@ -41,6 +41,9 @@ impl App {
         let chat_widget = &self.chat_widget;
         let transcript_width = chat_widget.history_wrap_width(width);
         let view = &mut self.transcript_view;
+        view.copy_on_select = self
+            .local_settings
+            .copy_on_select(&codex_terminal_detection::terminal_info());
         view.set_keymap_bindings(&self.keymap);
         view.set_presentation(view.is_detailed(), chat_widget.history_render_mode());
         let active_key = chat_widget.active_cell_transcript_key();
@@ -83,7 +86,7 @@ impl App {
         self.sync_owned_transcript(screen_size.width);
         let transcript_width = self.chat_widget.history_wrap_width(screen_size.width);
         let composer_hint = self.composer_hint(transcript_width);
-        let composer_gap = (!self.chat_widget.has_active_view()
+        let mut composer_gap = (!self.chat_widget.has_active_view()
             && !self.chat_widget.is_external_writer_view())
         .then(crate::bottom_pane::ComposerGap::default);
         let mut prompt_footer =
@@ -124,7 +127,7 @@ impl App {
         };
         drop(bottom);
         let available = screen_size.height.saturating_sub(bottom_height);
-        let bottom_area = Rect::new(
+        let mut bottom_area = Rect::new(
             /*x*/ 0,
             screen_size.height.saturating_sub(bottom_height),
             screen_size.width,
@@ -133,6 +136,7 @@ impl App {
         let mut rendered_cursor = None;
         let mut footer_height_changed = false;
         let mut feedback_tick = None;
+        let now = Instant::now();
         tui.draw(screen_size.height, |frame| {
             ratatui::widgets::Clear.render(
                 Rect::new(/*x*/ 0, /*y*/ 0, screen_size.width, available),
@@ -148,6 +152,11 @@ impl App {
                 frame.buffer,
                 &self.transcript_cells,
             );
+            if let Some(gap) = composer_gap.as_mut() {
+                gap.needs_separator = available > 1
+                    && chat_widget.no_modal_or_popup_active()
+                    && view.composer_gap_has_content(transcript_width, composer_hint.as_ref(), now);
+            }
             // Rendering resolves whether new activity is still hidden. Paint that result in
             // this frame so a revision change cannot flash a stale activity hint.
             let mut footer =
@@ -177,6 +186,22 @@ impl App {
                     .desired_height(screen_size.width)
                     .min(screen_size.height)
                     != bottom_height;
+            if footer_height_changed && composer_gap.as_ref().is_some_and(|gap| gap.needs_separator)
+            {
+                bottom_area.height = bottom
+                    .desired_height(screen_size.width)
+                    .min(screen_size.height);
+                bottom_area.y = screen_size.height.saturating_sub(bottom_area.height);
+                // Resolve controls with the compact viewport first, then make room for
+                // their separator. Resizing must not preserve a stale return control.
+                ratatui::widgets::Clear.render(bottom_area, frame.buffer);
+                view.render(
+                    Rect::new(/*x*/ 0, /*y*/ 0, transcript_width, bottom_area.y),
+                    frame.buffer,
+                    &self.transcript_cells,
+                );
+                footer_height_changed = false;
+            }
             bottom.render(bottom_area, frame.buffer);
             let follow_area = if let Some(gap) = composer_gap.as_ref() {
                 Some(Rect {
@@ -195,7 +220,7 @@ impl App {
             }
             .filter(|_| chat_widget.no_modal_or_popup_active());
             feedback_tick =
-                view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer);
+                view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer, now);
             chat_widget.note_rendered_width(screen_size.width);
             rendered_cursor = bottom.cursor_pos(bottom_area);
             if let Some(position) = rendered_cursor {
@@ -267,7 +292,12 @@ impl App {
                 self.render_owned_transcript(tui, size)?;
             }
             if composer_ready
-                && self.handle_composer_copy_event(tui, event, tui::Tui::copy_transcript_selection)
+                && self.handle_composer_copy_event(tui, event, |tui, text| {
+                    tui.copy_transcript_selection(
+                        text,
+                        crate::clipboard_copy::CopyFormat::PlainText,
+                    )
+                })
             {
                 return Ok(true);
             }
@@ -430,23 +460,24 @@ impl App {
             return self.handle_owned_backtrack_event(tui, event);
         };
         let resume_following = matches!(action, ViewAction::CopyAndFollow(_));
+        let copy_on_select = matches!(action, ViewAction::CopyOnSelect(_));
         match action {
             ViewAction::Changed => {}
-            ViewAction::Copy(text) | ViewAction::CopyAndFollow(text) => {
+            ViewAction::Copy(text)
+            | ViewAction::CopyOnSelect(text)
+            | ViewAction::CopyAndFollow(text) => {
                 let result = self.transcript_view.copy_selected_text_with(
                     &self.transcript_cells,
                     &text,
-                    |text| tui.copy_transcript_selection(text),
+                    !copy_on_select,
+                    |text, format| tui.copy_transcript_selection(text, format),
                 );
                 self.transcript_view
                     .show_copy_feedback(&result, text.chars().count());
                 if resume_following
-                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Confirmed))
+                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Pending(_)))
                 {
-                    if self.backtrack.overlay_preview_active {
-                        self.close_transcript_overlay(tui);
-                    }
-                    self.transcript_view.jump_to_latest();
+                    self.transcript_view.follow_pending_copy();
                 }
             }
             ViewAction::OpenLink(url) => self.open_url_in_browser(url),

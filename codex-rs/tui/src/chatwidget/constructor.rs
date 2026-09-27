@@ -33,6 +33,8 @@ impl ChatWidget {
             terminal_title_invalid_items_warned,
             session_telemetry,
         } = common;
+        // Keep asynchronous widget callbacks scoped separately from the app and other widgets.
+        let app_event_tx = AppEventSender::new(app_event_tx.app_event_tx);
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
         config.model = model.clone();
@@ -70,7 +72,6 @@ impl ChatWidget {
             &header_model,
             &model_catalog.try_list_models().unwrap_or_default(),
         );
-        let current_terminal_info = terminal_info();
         let runtime_keymap = RuntimeKeymap::from_config(&local_settings.tui.keymap).ok();
         let default_keymap = RuntimeKeymap::defaults();
         let copy_last_response_binding = runtime_keymap
@@ -81,10 +82,6 @@ impl ChatWidget {
             .as_ref()
             .map(|keymap| keymap.chat.clone())
             .unwrap_or_else(|| default_keymap.chat.clone());
-        let queued_message_edit_hint_binding = queued_message_edit_hint_binding(
-            runtime_keymap.as_ref().unwrap_or(&default_keymap),
-            current_terminal_info,
-        );
         let pet_http_client = codex_http_client::RouteAwareClientPool::new(
             config.http_client_factory(),
             codex_http_client::ClientRouteClass::Other,
@@ -174,7 +171,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             pending_stream_consolidations: 0,
-            clipboard_lease: None,
+            pending_clipboard: None,
             copy_last_response_binding,
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
@@ -223,6 +220,7 @@ impl ChatWidget {
             pet_image_support_override: None,
             thread_id: None,
             thread_name: None,
+            prompt_suggestion_summary: None,
             thread_rename_block_message: None,
             active_side_conversation: false,
             blocks_direct_input: false,
@@ -238,7 +236,6 @@ impl ChatWidget {
             safety_buffering_source: UserMessageSource::Prompt,
             chat_keymap,
             permission_shortcut_pending: false,
-            queued_message_edit_hint_binding,
             show_welcome_banner: is_first_run,
             startup_tooltip_override,
             suppress_session_configured_redraw: false,
@@ -282,6 +279,8 @@ impl ChatWidget {
             last_rendered_user_message_display: None,
             last_rendered_user_message_client_id: None,
             last_non_retry_error: None,
+            #[cfg(test)]
+            test_codex_home: None,
         };
 
         widget.prefetch_rate_limits();
@@ -307,9 +306,6 @@ impl ChatWidget {
             .bottom_pane
             .set_voice_command_enabled(/*enabled*/ false);
         widget.sync_mentions_v2_enabled();
-        widget
-            .bottom_pane
-            .set_queued_message_edit_binding(widget.queued_message_edit_hint_binding);
         widget.update_collaboration_mode_indicator();
 
         widget

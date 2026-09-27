@@ -119,6 +119,31 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        if let ServerNotification::ThreadStarted(started) = &notification
+            && started.thread.ephemeral
+            && matches!(started.thread.thread_source.as_ref(), Some(ThreadSource::Feature(source)) if source == "prompt_suggestion")
+            && let Ok(id) = ThreadId::from_string(&started.thread.id)
+        {
+            self.hidden_prompt_threads.push_back(id);
+            if self.hidden_prompt_threads.len() > 32 {
+                self.hidden_prompt_threads.pop_front();
+            }
+            return;
+        }
+        if let ServerNotificationThreadTarget::Thread(id) =
+            server_notification_thread_target(&notification)
+            && self.hidden_prompt_threads.contains(&id)
+        {
+            if let Some(sender) = self.temporary_structured_requests.get(&id)
+                && matches!(
+                    &notification,
+                    ServerNotification::ItemCompleted(_) | ServerNotification::TurnCompleted(_)
+                )
+            {
+                let _ = sender.send(notification);
+            }
+            return;
+        }
         // A picker can leave an old runtime's close notification queued while the same thread
         // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
         // unloaded before routing a close that would exit the TUI or switch away from it.
@@ -405,7 +430,13 @@ impl App {
                         }
                     }
                 }
-                if self.primary_thread_id.is_none() && !self.pending_startup_thread_start {
+                let background_voice = self.background_voice.as_ref().is_some_and(|owner| {
+                    owner.thread_id() == Some(thread_id) && owner.realtime_conversation_is_running()
+                });
+                if self.primary_thread_id.is_none()
+                    && !self.pending_startup_thread_start
+                    && !background_voice
+                {
                     return;
                 }
                 if self.primary_thread_id.is_some()
@@ -430,9 +461,7 @@ impl App {
                 {
                     return;
                 }
-                let result = if self.primary_thread_id == Some(thread_id)
-                    || self.primary_thread_id.is_none()
-                {
+                let result = if self.primary_thread_id.is_none() && !background_voice {
                     self.enqueue_primary_thread_notification(notification).await
                 } else {
                     self.enqueue_thread_notification(thread_id, notification)
@@ -513,6 +542,18 @@ impl App {
         app_server_client: &AppServerSession,
         request: ServerRequest,
     ) {
+        if server_request_thread_id(&request)
+            .is_some_and(|id| self.hidden_prompt_threads.contains(&id))
+        {
+            let _ = self
+                .reject_app_server_request(
+                    app_server_client,
+                    request.id().clone(),
+                    "Prompt suggestions cannot request user interaction".to_string(),
+                )
+                .await;
+            return;
+        }
         if let ServerRequest::DynamicToolCall { request_id, params } = &request {
             if self.dynamic_tool_tasks.contains_key(request_id)
                 || (params.namespace.as_deref() != Some(crate::dynamic_tools::NAMESPACE)
@@ -602,6 +643,11 @@ impl App {
         }
 
         let thread_id = server_request_thread_id(&request);
+        let background_voice = self.background_voice.as_ref().is_some_and(|owner| {
+            owner.realtime_conversation_is_running()
+                && owner.thread_id().is_some()
+                && owner.thread_id() == thread_id
+        });
         if thread_id.is_some_and(|thread_id| self.abandoned_side_threads.contains(&thread_id)) {
             if let Err(err) = self
                 .reject_app_server_request(
@@ -617,6 +663,7 @@ impl App {
         }
         if thread_id.is_some()
             && self.primary_thread_id.is_none()
+            && !background_voice
             && self.pending_startup_thread_start
         {
             self.pending_primary_events
@@ -640,6 +687,7 @@ impl App {
         if let Some(thread_id) = thread_id
             && self.primary_thread_id != Some(thread_id)
             && !unsupported_request
+            && !background_voice
             && let Some(requests) = self.agents_overview.dispatched_requests.get_mut(&thread_id)
         {
             requests.push(request);
@@ -647,6 +695,7 @@ impl App {
         }
         if thread_id.is_some()
             && self.primary_thread_id.is_none()
+            && !background_voice
             && !self.pending_startup_thread_start
             && !unsupported_request
         {
@@ -727,12 +776,11 @@ impl App {
             return;
         };
 
-        let result =
-            if self.primary_thread_id == Some(thread_id) || self.primary_thread_id.is_none() {
-                self.enqueue_primary_thread_request(request).await
-            } else {
-                self.enqueue_thread_request(thread_id, request).await
-            };
+        let result = if self.primary_thread_id.is_none() && !background_voice {
+            self.enqueue_primary_thread_request(request).await
+        } else {
+            self.enqueue_thread_request(thread_id, request).await
+        };
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }

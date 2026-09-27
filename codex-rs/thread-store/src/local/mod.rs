@@ -468,6 +468,10 @@ impl LocalThreadStore {
 }
 
 impl ThreadStore for LocalThreadStore {
+    fn default_history_mode(&self) -> ThreadHistoryMode {
+        ThreadHistoryMode::Paginated
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -529,6 +533,9 @@ impl ThreadStore for LocalThreadStore {
         thread_id: ThreadId,
         context: PersistContext,
     ) -> ThreadStoreFuture<'_, ()> {
+        if context == PersistContext::SubagentSpawn {
+            return Box::pin(async { Ok(()) });
+        }
         Box::pin(async move {
             if context == PersistContext::ThreadPreparation {
                 live_writer::flush_thread(self, thread_id).await
