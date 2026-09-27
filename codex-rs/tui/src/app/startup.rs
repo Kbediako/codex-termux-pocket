@@ -698,7 +698,10 @@ impl App {
         }
         chat_widget.note_rendered_width(tui.terminal.last_known_screen_size.width);
         if pending_startup_thread_start && !start_in_agents_overview {
-            chat_widget.empty_state_animation.borrow_mut().start_fresh();
+            chat_widget
+                .empty_state_animation
+                .borrow_mut()
+                .continue_from(&mut startup_draft.blossom.borrow_mut());
         }
         chat_widget.remote_connection = remote_connection;
         chat_widget.snapshot_local_images = app_server_target.uses_remote_workspace();
@@ -765,6 +768,7 @@ See the Codex keymap documentation for supported actions and examples."
             key_chord_matcher: KeyChordMatcher::default(),
             transcript_cells: Vec::new(),
             native_history: Default::default(),
+            turn_tips: Default::default(),
             transcript_view: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
@@ -809,7 +813,6 @@ See the Codex keymap documentation for supported actions and examples."
             background_voice: None,
             background_voice_error: None,
             temporary_structured_requests: HashMap::new(),
-            hidden_prompt_threads: VecDeque::new(),
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
@@ -872,7 +875,6 @@ See the Codex keymap documentation for supported actions and examples."
         app.update_visible_history_rows(tui.terminal.last_known_screen_size);
         let initial_session_started_at = Instant::now();
         if let Some(started) = initial_started_thread {
-            app.chat_widget.prompt_suggestion_summary = started.reasoning_summary;
             let thread_id = started.session.thread_id;
             app.chat_widget
                 .set_task_mentions_enabled(started.task_tools_available);

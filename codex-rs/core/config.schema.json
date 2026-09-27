@@ -894,6 +894,9 @@
             "in_app_updates": {
               "type": "boolean"
             },
+            "instant_interrupt": {
+              "type": "boolean"
+            },
             "item_ids": {
               "type": "boolean"
             },
@@ -4359,7 +4362,7 @@
             }
           ],
           "default": "auto",
-          "description": "Copy selected transcript text when the mouse button is released. Defaults to `auto`: enabled in tmux/Zellij and in direct macOS terminals except Ghostty/Kitty. On other platforms, direct terminals default off except iTerm2/Terminal.app."
+          "description": "Copy selected transcript text when the mouse button is released. Defaults to `auto`: enabled except in direct terminals known to forward their native copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows). Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying."
         },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
@@ -4623,11 +4626,6 @@
           ],
           "default": "composer",
           "description": "Where the terminal pet should anchor vertically.\n\nDefaults to `composer`, which follows the current TUI composer viewport."
-        },
-        "prompt_suggestions": {
-          "default": false,
-          "description": "Suggest a next message after successful turns. Defaults to `false`.",
-          "type": "boolean"
         },
         "question_esc_back": {
           "default": true,
@@ -6924,6 +6922,9 @@
           "type": "boolean"
         },
         "in_app_updates": {
+          "type": "boolean"
+        },
+        "instant_interrupt": {
           "type": "boolean"
         },
         "item_ids": {

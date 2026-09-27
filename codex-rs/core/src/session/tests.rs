@@ -268,6 +268,11 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            preempt: turn
+                .config
+                .features
+                .enabled(Feature::InstantInterrupt)
+                .then(tokio_util::sync::CancellationToken::new),
             token_budget: token_budget::resolve_token_budget(
                 turn.configured_token_budget.as_ref(),
                 turn.use_model_token_budget_defaults,
@@ -4039,6 +4044,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
             comp_hash: None,
+            cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
         })
     );
@@ -5786,6 +5792,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-model".to_string(),
         comp_hash: Some("comp-hash".to_string()),
+        cyber_access_program: None,
         realtime_active: Some(true),
     };
     session
@@ -10510,6 +10517,7 @@ async fn build_initial_context_restates_realtime_start_when_reference_context_is
     let previous_turn_settings = PreviousTurnSettings {
         model: turn_context.model_info().slug.clone(),
         comp_hash: None,
+        cyber_access_program: None,
         realtime_active: Some(true),
     };
 
@@ -10873,6 +10881,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "base-model".to_string(),
             comp_hash: None,
+            cyber_access_program: None,
             realtime_active: None,
         }))
         .await;
@@ -10954,6 +10963,7 @@ async fn build_initial_context_prepends_model_switch_message() {
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-regular-model".to_string(),
         comp_hash: None,
+        cyber_access_program: None,
         realtime_active: None,
     };
 
@@ -11008,6 +11018,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: previous_context.model_info().slug.clone(),
             comp_hash: None,
+            cyber_access_program: None,
             realtime_active: Some(previous_context.realtime_active),
         }))
         .await;
@@ -11577,6 +11588,7 @@ async fn interrupting_compaction_fallback_retains_last_known_step_context() {
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "gpt-5.4".to_string(),
             comp_hash: Some("old".to_string()),
+            cyber_access_program: None,
             realtime_active: Some(turn.realtime_active),
         }))
         .await;

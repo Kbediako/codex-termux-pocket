@@ -35,12 +35,18 @@ fn refreshed_mouse_policy_applies_to_fullscreen_and_overlays() {
             for next in [
                 OverlayInput::Transcript,
                 OverlayInput::Usage,
-                OverlayInput::StaticPager,
+                OverlayInput::Onboarding,
                 OverlayInput::Default,
+                OverlayInput::StaticPager,
             ] {
                 input.apply(&screen, &mut output, next, owned).unwrap();
                 terminal.process(&std::mem::take(&mut output));
-                let expected = if !disabled && next.captures_mouse(owned) {
+                let capture = match next {
+                    OverlayInput::Default => owned,
+                    OverlayInput::Transcript | OverlayInput::Usage => true,
+                    OverlayInput::StaticPager | OverlayInput::Onboarding => false,
+                };
+                let expected = if !disabled && capture {
                     vt100::MouseProtocolMode::AnyMotion
                 } else {
                     vt100::MouseProtocolMode::None
@@ -89,6 +95,45 @@ impl KeyboardScreens {
 
     fn state(&self) -> (bool, &[u8], &[u8]) {
         (self.alternate_active, &self.main, &self.alternate)
+    }
+}
+
+#[test]
+fn editor_handoff_balances_keyboard_stacks_if_editor_leaves_the_screen() {
+    if keyboard_modes::keyboard_enhancement_disabled() {
+        return;
+    }
+    for editor_leaves in [false, true] {
+        let screen = AlternateScreen::default();
+        let mut output = Vec::new();
+        let mut keyboard = KeyboardScreens::default();
+        execute!(
+            output,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .unwrap();
+        keyboard_modes::enable_keyboard_enhancement(&mut output);
+        screen.enter(&mut output, /*capture_mouse*/ true).unwrap();
+        screen.leave(&mut output).unwrap();
+        screen
+            .restore(&mut output, KeyboardRestore::PopStack)
+            .unwrap();
+        screen.enter(&mut output, /*capture_mouse*/ true).unwrap();
+        screen.release_input(&mut output).unwrap();
+        keyboard.process(&std::mem::take(&mut output));
+        assert_eq!(keyboard.state(), (true, &[1][..], &[][..]));
+
+        if editor_leaves {
+            execute!(output, LeaveAlternateScreen).unwrap();
+        }
+        screen.leave(&mut output).unwrap();
+        keyboard_modes::enable_keyboard_enhancement(&mut output);
+        screen.enter(&mut output, /*capture_mouse*/ true).unwrap();
+        screen
+            .restore(&mut output, KeyboardRestore::PopStack)
+            .unwrap();
+        keyboard.process(&output);
+        assert_eq!(keyboard.state(), (false, &[1][..], &[][..]));
     }
 }
 

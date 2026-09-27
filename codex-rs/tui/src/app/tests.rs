@@ -630,7 +630,6 @@ async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach()
             turns: Vec::new(),
             blocks_direct_input: false,
             task_tools_available: false,
-            reasoning_summary: None,
         },
         session_lifecycle::ThreadAttachPresentation::SessionLineage,
         /*initial_user_message*/ None,
@@ -4731,13 +4730,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     app.enqueue_primary_thread_session(session, Vec::new())
         .await
         .expect("switch to read thread");
-    let header =
-        lines_to_single_string(&app.clear_ui_header_lines_with_version(/*width*/ 80, "<VERSION>"));
-    let model_line = header
-        .lines()
-        .find(|line| line.contains("model:"))
-        .expect("rendered model line");
-    assert_app_snapshot!("thread_read_model_after_switch", model_line);
+    assert_eq!(app.chat_widget.current_model(), "server-reported-model");
 }
 
 #[test]
@@ -5313,7 +5306,6 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
             turns: Vec::new(),
             blocks_direct_input: false,
             task_tools_available: false,
-            reasoning_summary: None,
         },
         &mut child_snapshot,
     )
@@ -5936,7 +5928,9 @@ async fn ctrl_l_clears_owned_history_and_preserves_the_draft() -> Result<()> {
             .is::<history_cell::SessionHeaderHistoryCell>()
     );
     let header = lines_to_single_string(&app.transcript_cells[0].display_lines(/*width*/ 80));
-    assert!(header.contains("gpt-test"));
+    assert!(header.contains("OpenAI Codex"));
+    let raw_header = lines_to_single_string(&app.transcript_cells[0].raw_lines());
+    assert!(raw_header.contains("gpt-test"));
     assert!(!header.contains("old transcript row"));
     assert_eq!(
         app.chat_widget.composer_text_with_pending(),
@@ -5946,41 +5940,6 @@ async fn ctrl_l_clears_owned_history_and_preserves_the_draft() -> Result<()> {
     tui.set_owned_screen(/*owned*/ false)?;
     app_server.shutdown().await?;
     Ok(())
-}
-
-#[tokio::test]
-#[cfg_attr(
-    target_os = "windows",
-    ignore = "snapshot path rendering differs on Windows"
-)]
-async fn clear_ui_header_shows_fast_status_for_fast_capable_models() {
-    let mut app = make_test_app().await;
-    app.config.cwd = test_path_buf("/tmp/project").abs();
-    app.chat_widget.set_model("gpt-5.4");
-    set_fast_mode_test_catalog(&mut app.chat_widget);
-    app.chat_widget
-        .set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
-    app.chat_widget.set_service_tier(Some(
-        codex_protocol::config_types::ServiceTier::Fast
-            .request_value()
-            .to_string(),
-    ));
-    set_chatgpt_auth(&mut app.chat_widget);
-    set_fast_mode_test_catalog(&mut app.chat_widget);
-
-    let rendered = app
-        .clear_ui_header_lines_with_version(/*width*/ 80, "<VERSION>")
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert_app_snapshot!("clear_ui_header_fast_status_fast_capable_models", rendered);
 }
 
 async fn make_test_app() -> Box<App> {
@@ -6012,6 +5971,7 @@ async fn make_test_app() -> Box<App> {
         file_search,
         transcript_cells: Vec::new(),
         native_history: Default::default(),
+        turn_tips: Default::default(),
         transcript_view: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
@@ -6056,7 +6016,6 @@ async fn make_test_app() -> Box<App> {
         background_voice: None,
         background_voice_error: None,
         temporary_structured_requests: HashMap::new(),
-        hidden_prompt_threads: VecDeque::new(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
@@ -6127,6 +6086,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             file_search,
             transcript_cells: Vec::new(),
             native_history: Default::default(),
+            turn_tips: Default::default(),
             transcript_view: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
@@ -6171,7 +6131,6 @@ pub(super) async fn make_test_app_with_channels() -> (
             background_voice: None,
             background_voice_error: None,
             temporary_structured_requests: HashMap::new(),
-            hidden_prompt_threads: VecDeque::new(),
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
@@ -6500,7 +6459,6 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
             )],
             blocks_direct_input: false,
             task_tools_available: false,
-            reasoning_summary: None,
         },
         session_lifecycle::ThreadAttachPresentation::SessionLineage,
         /*initial_user_message*/ None,
@@ -6537,8 +6495,8 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
         .iter()
         .map(|line| {
             let text = rendered_line_text(line);
-            if text.contains("│ directory: ") {
-                "│ directory: <thread cwd>                │".to_string()
+            if text.trim() == test_path_buf("/tmp/next").display().to_string() {
+                "     <thread cwd>".to_string()
             } else {
                 text
             }
@@ -7750,7 +7708,7 @@ async fn remote_exec_resume_current_cwd_is_rejected() -> Result<()> {
     app.environment_manager = Arc::new(
         EnvironmentManager::create_for_tests(
             Some("ws://127.0.0.1:8765".to_string()),
-            Some(codex_exec_server::ExecServerRuntimePaths::new(
+            Some(codex_exec_server::ExecServerRuntimeOptions::new(
                 std::env::current_exe()?,
                 /*codex_linux_sandbox_exe*/ None,
             )?),
@@ -7997,7 +7955,7 @@ async fn in_app_resume_uses_configured_or_explicit_cwd() -> Result<()> {
             Arc::new(
                 EnvironmentManager::create_for_tests(
                     Some("ws://127.0.0.1:8765".to_string()),
-                    Some(codex_exec_server::ExecServerRuntimePaths::new(
+                    Some(codex_exec_server::ExecServerRuntimeOptions::new(
                         std::env::current_exe()?,
                         /*codex_linux_sandbox_exe*/ None,
                     )?),
@@ -8867,7 +8825,6 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
             turns: resumed_turns.clone(),
             blocks_direct_input: true,
             task_tools_available: false,
-            reasoning_summary: None,
         },
         &mut snapshot,
     )

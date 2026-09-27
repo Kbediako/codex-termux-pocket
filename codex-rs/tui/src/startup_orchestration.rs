@@ -318,7 +318,7 @@ pub(super) async fn run_main_inner(
         .clone()
         .filter(|_| app_server_target.uses_remote_workspace());
 
-    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+    let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
@@ -388,7 +388,7 @@ pub(super) async fn run_main_inner(
                     startup_draft.flush_pending_events().await?;
                     startup_draft
                         .tui_mut()
-                        .with_restored(|| {
+                        .with_restored(crate::tui::TerminalHandoff::Restore, || {
                             oss_selection::select_oss_provider(lmstudio_status, ollama_status)
                         })
                         .await?
@@ -523,26 +523,37 @@ pub(super) async fn run_main_inner(
     daemon_features.retain(|_, enabled| *enabled);
     let mut managed_daemon = false;
     if auto_start_daemon && daemon_exclusion.is_none() {
-        startup_draft.flush_pending_events().await?;
         let output = startup_draft
-            .tui_mut()
-            .with_restored(|| async {
-                // Package installation may print progress; keep ordinary Ctrl+C handling.
-                crossterm::terminal::disable_raw_mode()?;
+            .run_until(async {
+                // Daemon startup needs no terminal input. Keep the composer visible and
+                // responsive while it checks the running server or prepares an installation.
                 let result = codex_app_server_daemon::start_with_features(&daemon_features).await;
                 daemon_telemetry::record_start(&config, &result).await;
-                result.map_err(|err| {
-                    std::io::Error::other(format!("{err:#}\n{}", daemon_startup::FAILURE_HINT))
-                })
+                match result {
+                    Ok(output) => Ok(Some(output)),
+                    #[cfg(windows)]
+                    Err(err) if err.is::<codex_app_server_daemon::DetachedLaunchRestricted>() => {
+                        Ok(None)
+                    }
+                    Err(err) => Err(std::io::Error::other(format!(
+                        "{err:#}\n{}",
+                        daemon_startup::FAILURE_HINT
+                    ))),
+                }
             })
-            .await?;
-        managed_daemon = output.backend.is_some();
-        app_server_target = AppServerTarget::LocalDaemon {
-            endpoint: RemoteAppServerEndpoint::UnixSocket {
-                socket_path: AbsolutePathBuf::from_absolute_path_checked(output.socket_path)?,
-            },
-            allow_embedded_fallback: false,
-        };
+            .await??;
+        if let Some(output) = output {
+            managed_daemon = output.backend.is_some();
+            app_server_target = AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket {
+                    socket_path: AbsolutePathBuf::from_absolute_path_checked(output.socket_path)?,
+                },
+                allow_embedded_fallback: false,
+            };
+        } else {
+            app_server_target = AppServerTarget::Embedded;
+            daemon_exclusion = Some("this Windows launcher");
+        }
     }
     // The overview must inspect the shared server's agents regardless of local settings.
     let compatibility_warning = if cli.agents_overview {
@@ -602,7 +613,7 @@ pub(super) async fn run_main_inner(
             startup_draft.flush_pending_events().await?;
             startup_draft
                 .tui_mut()
-                .with_restored(|| async {
+                .with_restored(crate::tui::TerminalHandoff::Restore, || async {
                     #[allow(clippy::print_stderr)]
                     {
                         eprintln!("Could not create otel exporter: {e}");
@@ -815,7 +826,7 @@ pub(super) async fn run_main_inner(
         startup_draft.flush_pending_events().await?;
         startup_draft
             .tui_mut()
-            .with_restored(|| async {
+            .with_restored(crate::tui::TerminalHandoff::Restore, || async {
                 // Provider setup may print progress or block in an external downloader.
                 // Restore ordinary signal handling so Ctrl+C can interrupt that process.
                 crossterm::terminal::disable_raw_mode()?;

@@ -158,7 +158,6 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -288,7 +287,6 @@ mod input_flow;
 mod input_restore;
 mod input_submission;
 mod interrupts;
-mod prompt_suggestions;
 mod questions;
 mod startup_submission;
 use self::interrupts::InterruptManager;
@@ -579,7 +577,7 @@ pub(crate) struct ChatWidget {
     backend_banner_notice_model: Option<String>,
     // Remember the account's Reserve entry notice across chats and transient banner refreshes.
     luna_reserve_notice_account_id: Option<String>,
-    warning_display_state: WarningDisplayState,
+    pub(crate) warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     add_credits_nudge_email_in_flight: Option<rate_limits::PendingCreditsNudge>,
     adaptive_chunking: AdaptiveChunkingPolicy,
@@ -658,8 +656,6 @@ pub(crate) struct ChatWidget {
     pet_image_support_override: Option<crate::pets::PetImageSupport>,
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
-    // Unknown until the server supplies live settings; resume responses omit summary.
-    pub(crate) prompt_suggestion_summary: Option<codex_protocol::config_types::ReasoningSummary>,
     thread_rename_block_message: Option<String>,
     active_side_conversation: bool,
     blocks_direct_input: bool,
@@ -1485,13 +1481,10 @@ impl ChatWidget {
 
     /// Build a placeholder header cell while the session is configuring.
     fn placeholder_session_header_cell(config: &Config) -> Box<dyn HistoryCell> {
-        let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
         Box::new(
-            history_cell::SessionHeaderHistoryCell::new_with_style(
+            history_cell::SessionHeaderHistoryCell::new(
                 DEFAULT_MODEL_DISPLAY_NAME.to_string(),
-                placeholder_style,
                 /*reasoning_effort*/ None,
-                /*show_fast_status*/ false,
                 config.cwd.to_path_buf(),
                 CODEX_CLI_VERSION,
             )
@@ -1778,7 +1771,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn show_external_writer_thread(&mut self) {
-        self.clear_prompt_suggestion();
         self.cancel_image_submission();
         self.blocks_direct_input = true;
         self.external_writer_view = true;

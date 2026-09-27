@@ -52,7 +52,7 @@ use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
 use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_features::Feature;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
@@ -183,7 +183,6 @@ mod npm_registry;
 pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
-mod prompt_suggestions;
 pub(crate) mod public_widgets;
 mod render;
 mod resize_reflow_cap;
@@ -230,6 +229,7 @@ mod transcript_mode;
 mod transcript_reflow;
 mod transcript_view;
 mod tui;
+mod turn_tip;
 mod ui_consts;
 mod unarchive_prompt;
 pub(crate) mod update_action;
@@ -1312,6 +1312,7 @@ async fn run_ratatui_app(
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust: None,
                 login_status,
+                app_server_target: app_server_target.clone(),
                 app_server_request_handle: app_server
                     .as_ref()
                     .map(AppServerSession::request_handle),
@@ -2623,7 +2624,7 @@ requires_openai_auth = {requires_openai_auth}
                 .cloud_config_bundle(cloud_config_bundle)
                 .build()
                 .await?;
-            let runtime_paths = ExecServerRuntimePaths::new(
+            let runtime_paths = ExecServerRuntimeOptions::new(
                 std::env::current_exe()?,
                 /*codex_linux_sandbox_exe*/ None,
             )?;
@@ -3636,7 +3637,7 @@ requires_openai_auth = {requires_openai_auth}
         let target = AppServerTarget::Embedded;
         let environment_manager = EnvironmentManager::create_for_tests(
             Some("ws://127.0.0.1:8765".to_string()),
-            Some(ExecServerRuntimePaths::new(
+            Some(ExecServerRuntimeOptions::new(
                 std::env::current_exe().expect("current exe"),
                 /*codex_linux_sandbox_exe*/ None,
             )?),

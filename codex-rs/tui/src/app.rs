@@ -230,6 +230,7 @@ mod managed_worktree_creation;
 mod misalignment_policy;
 mod model_defaults;
 mod new_session;
+mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
 mod clipboard;
 mod native_history;
@@ -239,7 +240,6 @@ mod permission_shortcuts;
 mod pets;
 mod platform_actions;
 mod plugin_mentions;
-mod prompt_suggestions;
 mod rate_limit_refresh;
 mod realtime_delivery;
 mod realtime_settings;
@@ -581,6 +581,7 @@ pub(crate) struct App {
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     native_history: native_history::NativeHistory,
+    turn_tips: turn_tips::TurnTips,
     pub(crate) transcript_view: crate::transcript_view::TranscriptView,
     last_rendered_history_tail: Option<history_ui::RenderedHistoryTail>,
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
@@ -646,7 +647,6 @@ pub(crate) struct App {
     background_voice: Option<Box<ChatWidget>>,
     background_voice_error: Option<(ThreadId, String)>,
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
-    hidden_prompt_threads: VecDeque<ThreadId>,
     /// Track title generation across thread switches and deduplicate automatic requests.
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
