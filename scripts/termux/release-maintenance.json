@@ -1,10 +1,10 @@
 {
   "format_version": 1,
-  "request_id": "issue148-prepare-fmt-alpha15815-20260926",
+  "request_id": "issue148-prepare-verifiedfmt-alpha15815-20260927",
   "operation": "prepare-source",
-  "base_main": "7215d3f4def721cdd3f20bffd57c2666c0601659",
-  "prepared_commit": "58f88ebee4d892b3df03b16347e429de9aaa72f1",
-  "expected_input_tree": "9a7ce1ef287beed6ee810ec2bd3f6996882c1e2d",
+  "base_main": "bb9f0e9fb7396328d0bb35905dcaf6b3ab7f061e",
+  "prepared_commit": "265ca7fcf988177406a852d8b85294d0516542c1",
+  "expected_input_tree": "240fdb2ad3b04dba5b865699558c70e00fcfc447",
   "edits": [
     {
       "path": "codex-rs/Cargo.toml",
