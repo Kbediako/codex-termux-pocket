@@ -56,8 +56,7 @@ def checked_branch(request, repo, main_sha, api, live_main):
 
 def exact_runs(repo, source, branch, api):
     data = api(
-        f"repos/{repo}/actions/workflows/{WORKFLOW}/runs"
-        f"?head_sha={source}&per_page=100"
+        f"repos/{repo}/actions/workflows/{WORKFLOW}/runs?head_sha={source}&per_page=100"
     )
     runs = data["workflow_runs"]
     if (
@@ -132,7 +131,9 @@ def execute(request, repo, main_sha, api, live_main, command):
     runs = exact_runs(repo, source, branch, api)  # One lookup; no sleep or polling.
     if runs:
         print(
-            json.dumps(receipt | {"run_id": runs[0]["id"], "status": runs[0]["status"]}),
+            json.dumps(
+                receipt | {"run_id": runs[0]["id"], "status": runs[0]["status"]}
+            ),
             flush=True,
         )
     else:

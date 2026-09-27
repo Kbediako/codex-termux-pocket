@@ -86,8 +86,12 @@ class PrBuildTests(unittest.TestCase):
             patch.object(subject, "command", return_value=self.tree) as command,
             patch.object(subject, "live_main") as live,
         ):
-            pr_build.execute(self.request, "owner/repo", self.main, self.api, live, command)
-            command.assert_called_once_with("git", "rev-parse", "HEAD:.github/workflows")
+            pr_build.execute(
+                self.request, "owner/repo", self.main, self.api, live, command
+            )
+            command.assert_called_once_with(
+                "git", "rev-parse", "HEAD:.github/workflows"
+            )
             live.assert_called_with("owner/repo", self.main)
 
     def test_schema_is_bounded(self):
