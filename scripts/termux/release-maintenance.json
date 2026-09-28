@@ -1,22 +1,9 @@
 {
   "format_version": 1,
-  "request_id": "issue150-alpha15912-prepare-20260928",
-  "operation": "prepare-source",
-  "base_main": "f5010e9ab168fe0b499c00a169c1ca95d6e74d85",
-  "prepared_commit": "736143772bbba1d9bae073201d88843c6c767e4f",
-  "expected_input_tree": "e91b3954597c2cd6619e1bcc04a2b1961b0cc110",
-  "edits": [
-    {
-      "path": "codex-rs/Cargo.toml",
-      "before": "99322f9f37c47a5b16f8d56c7f388c5f04744a50",
-      "after": "07fd94fb4d1891ba4cfee98fd916495ecad4fa1f",
-      "replacements": [
-        {
-          "old": "version = \"0.159.0-alpha.9\"",
-          "new": "version = \"0.159.0-alpha.12\""
-        }
-      ]
-    }
-  ],
-  "package_updates": []
+  "request_id": "issue150-alpha15912-record-20260928",
+  "operation": "record-upstream",
+  "upstream_tag": "rust-v0.159.0-alpha.12",
+  "upstream_tag_object": "ca01295e4fbb99a0ed71a6aba5ba2dca6e27db1e",
+  "upstream_commit": "55a7c57075f157889cf8892ee00ae4bfd6495048",
+  "prepared_commit": "3f45f1a5ad362cc4b93c56a8498e6cfa38231bfb"
 }
