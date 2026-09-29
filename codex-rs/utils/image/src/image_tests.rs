@@ -328,6 +328,14 @@ fn rejects_truncated_png_in_original_and_resized_modes() {
     let image = ImageBuffer::from_pixel(64, 32, Rgba([10u8, 20, 30, 255]));
     let original_bytes = image_bytes(&image, ImageFormat::Png);
     for mode in [PromptImageMode::Original, PromptImageMode::ResizeToFit] {
+        let valid = load_for_prompt_bytes_uncached(
+            Path::new("valid.png"),
+            original_bytes.clone(),
+            mode,
+        )
+        .expect("the complete PNG should remain valid in both modes");
+        assert_eq!((valid.width, valid.height), (64, 32));
+
         for length in [8, 16, 32, original_bytes.len() / 2] {
             let error = load_for_prompt_bytes_uncached(
                 Path::new("truncated.png"),
@@ -335,7 +343,14 @@ fn rejects_truncated_png_in_original_and_resized_modes() {
                 mode,
             )
             .expect_err("a recognized PNG signature must not hide truncated image data");
-            assert!(matches!(error, ImageProcessingError::Decode { .. }));
+            // The existing mapper also classifies decoder I/O errors as unsupported images.
+            match error {
+                ImageProcessingError::Decode { .. } => {}
+                ImageProcessingError::UnsupportedImageFormat { mime } => {
+                    assert_eq!(mime, "image/png");
+                }
+                other => panic!("unexpected truncated PNG error: {other:?}"),
+            }
         }
     }
 }

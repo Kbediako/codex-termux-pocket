@@ -90,7 +90,10 @@ async fn sdk_body_preserves_empty_bodies_and_errors() {
         pending_forever: false,
         dropped: None,
     });
-    let error = body.collect().await.expect_err("a body error must propagate");
+    let error = body
+        .collect()
+        .await
+        .expect_err("a body error must propagate");
     assert_eq!(error.to_string(), "credential response interrupted");
 }
 

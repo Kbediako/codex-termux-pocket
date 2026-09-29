@@ -149,10 +149,25 @@ jobs:
 
       - name: Test image and HTTP dependency consumers
         shell: bash
+        env:
+          NEXTEST_STATUS_LEVEL: all
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
           test -s "$evidence/source-identity.txt"
+          # Ambient custom CAs select rustls; native-TLS fixtures need a system-root baseline.
+          # Record presence only, never certificate paths or contents. Custom-CA tests set fixtures.
+          {
+            for variable in CODEX_CA_CERTIFICATE SSL_CERT_FILE; do
+              if [ -n "${!variable:-}" ]; then
+                printf 'inherited_%s=nonempty\n' "$variable"
+              else
+                printf 'inherited_%s=unset-or-empty\n' "$variable"
+              fi
+            done
+            printf 'consumer_ca_baseline=system-roots\n'
+          } | tee "$evidence/consumer-ca-environment.txt"
+          unset CODEX_CA_CERTIFICATE SSL_CERT_FILE
           set +e
           just test --locked --cargo-profile ci-test --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth 2>&1 | tee "$evidence/consumer-tests.log"
           statuses=("${PIPESTATUS[@]}")

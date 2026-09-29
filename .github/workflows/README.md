@@ -28,6 +28,16 @@ consumer output, and command/log exit codes. Evidence is retained after failure
 as well as success; an uploaded artifact alone is not a passing test result.
 The job fails on either a test or logging error and checks for source/lock drift.
 
+The consumer step records whether `CODEX_CA_CERTIFICATE` and `SSL_CERT_FILE`
+were nonempty, without recording their paths or contents, and then unsets them
+for its test process. This gives native-TLS fixtures a system-root baseline;
+the existing custom-CA subprocess tests supply their own fixture environment.
+The receipt is `consumer-ca-environment.txt`. The consumer log includes all
+nextest status names, including passed and skipped tests. This does not change
+production CA handling, certificate validation, TLS fallback rules, or the
+sandbox step.
+A clean environment is not proof of a passing TLS test; all suites still block.
+
 These tests do not replace the production ARM64 or real-Termux gates. A PR that
 changes workflow definitions remains ineligible for `dispatch-pr-build` until
 its workflow tree agrees with trusted main; do not bypass that guard. Merge
