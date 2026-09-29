@@ -1,6 +1,19 @@
 {
   "format_version": 1,
-  "request_id": "issue157-alpha1602-post-20260929",
-  "operation": "dispatch-checks",
-  "phase": "post"
+  "request_id": "issue158-png-http-body-prepare-20260930",
+  "operation": "prepare-source",
+  "base_main": "6d6d12bfe4decbe7456c50b6577205d02622261b",
+  "prepared_commit": "6d6d12bfe4decbe7456c50b6577205d02622261b",
+  "expected_input_tree": "669751f001415a20cad46914b7a684663659a0c5",
+  "edits": [],
+  "package_updates": [
+    {
+      "name": "png@0.18.0",
+      "version": "0.18.1"
+    },
+    {
+      "name": "http-body@1.0.1",
+      "version": "1.1.0"
+    }
+  ]
 }
