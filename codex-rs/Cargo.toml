@@ -515,7 +515,7 @@ tokio-tungstenite = { version = "0.28.0", features = [
 ] }
 tokio-util = "0.7.18"
 toml = "0.9.5"
-toml_edit = "0.24.0"
+toml_edit = "0.25.4"
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
 tracing-opentelemetry = "0.32.0"
