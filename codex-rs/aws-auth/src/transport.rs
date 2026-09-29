@@ -117,3 +117,7 @@ impl<B: http_body::Body> http_body::Body for SyncBody<B> {
             .poll_frame(cx)
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

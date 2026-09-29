@@ -323,6 +323,23 @@ async fn fails_cleanly_for_invalid_images() {
     ));
 }
 
+#[test]
+fn rejects_truncated_png_in_original_and_resized_modes() {
+    let image = ImageBuffer::from_pixel(64, 32, Rgba([10u8, 20, 30, 255]));
+    let original_bytes = image_bytes(&image, ImageFormat::Png);
+    for mode in [PromptImageMode::Original, PromptImageMode::ResizeToFit] {
+        for length in [8, 16, 32, original_bytes.len() / 2] {
+            let error = load_for_prompt_bytes_uncached(
+                Path::new("truncated.png"),
+                original_bytes[..length].to_vec(),
+                mode,
+            )
+            .expect_err("a recognized PNG signature must not hide truncated image data");
+            assert!(matches!(error, ImageProcessingError::Decode { .. }));
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reprocesses_updated_file_contents() {
     IMAGE_CACHE.clear();
