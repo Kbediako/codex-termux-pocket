@@ -79,6 +79,7 @@ jobs:
       RUST_BACKTRACE: "1"
       RUST_MIN_STACK: "8388608"
       NEXTEST_STATUS_LEVEL: leak
+      CONSUMER_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Checkout requested ref
@@ -134,10 +135,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD
-          git rev-parse 'HEAD^{tree}'
-          sha256sum Cargo.lock ../MODULE.bazel.lock
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          mkdir -p "$evidence"
+          {
+            printf 'repository=%s\nrun_id=%s\nrun_attempt=%s\ntarget=%s\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CONSUMER_TARGET"
+            printf 'event_source_sha=%s\n' "$GITHUB_SHA"
+            printf 'checkout_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'checkout_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+            printf 'workflow_blob=%s\n' "$(git rev-parse HEAD:.github/workflows/termux-linux-sandbox.yml)"
+            sha256sum Cargo.lock ../MODULE.bazel.lock
+          } | tee "$evidence/source-identity.txt"
 
       - name: Test image and HTTP dependency consumers
         shell: bash
-        run: just test --locked --cargo-profile ci-test --target ${{ matrix.target }} -p codex-utils-image -p codex-http-client -p codex-aws-auth
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          test -s "$evidence/source-identity.txt"
+          set +e
+          just test --locked --cargo-profile ci-test --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth 2>&1 | tee "$evidence/consumer-tests.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf 'consumer_exit_code=%s\nlog_exit_code=%s\n' "${statuses[0]}" "${statuses[1]}" | tee "$evidence/consumer-tests.exit"
+          if [ "${statuses[0]}" -ne 0 ]; then
+            exit "${statuses[0]}"
+          fi
+          exit "${statuses[1]}"
+
+      - name: Verify dependency consumer worktree
+        if: always()
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- codex-rs/Cargo.lock MODULE.bazel.lock
+          test -z "$(git status --porcelain)"
+
+      - name: Retain dependency consumer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: termux-dependency-consumers-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/termux-dependency-consumers-${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7

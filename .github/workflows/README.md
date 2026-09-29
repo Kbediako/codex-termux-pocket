@@ -22,6 +22,12 @@ The job records its actual checkout SHA, tree, and both lockfile digests before
 testing the consumers. These tests cover image encoding/decoding and limits,
 HTTP streaming and policy revocation, and the AWS HTTP-body/Smithy adapter.
 
+Each architecture retains `termux-dependency-consumers-<target>-<attempt>` for
+seven days, including the checkout/tree/workflow identity, lock digests, full
+consumer output, and command/log exit codes. Evidence is retained after failure
+as well as success; an uploaded artifact alone is not a passing test result.
+The job fails on either a test or logging error and checks for source/lock drift.
+
 These tests do not replace the production ARM64 or real-Termux gates. A PR that
 changes workflow definitions remains ineligible for `dispatch-pr-build` until
 its workflow tree agrees with trusted main; do not bypass that guard. Merge
