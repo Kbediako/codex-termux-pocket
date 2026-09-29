@@ -90,7 +90,7 @@ jobs:
           manifest-path: ./codex-rs/Cargo.toml
 
       - name: Install pinned Python formatter runner
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: uv@0.12.10
 
