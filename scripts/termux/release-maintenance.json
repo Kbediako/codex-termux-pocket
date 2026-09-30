@@ -1,19 +1,8 @@
 {
   "format_version": 1,
-  "request_id": "issue158-png-http-body-prepare-20260930",
-  "operation": "prepare-source",
-  "base_main": "6d6d12bfe4decbe7456c50b6577205d02622261b",
-  "prepared_commit": "6d6d12bfe4decbe7456c50b6577205d02622261b",
-  "expected_input_tree": "669751f001415a20cad46914b7a684663659a0c5",
-  "edits": [],
-  "package_updates": [
-    {
-      "name": "png@0.18.0",
-      "version": "0.18.1"
-    },
-    {
-      "name": "http-body@1.0.1",
-      "version": "1.1.0"
-    }
-  ]
+  "request_id": "issue160-alpha1614-export-20261001",
+  "operation": "export-upstream",
+  "upstream_tag": "rust-v0.161.0-alpha.4",
+  "upstream_tag_object": "15f4206ff6bed34c7329cf070061d6b7f102c8bd",
+  "upstream_commit": "355ef5fc399393cc1babcf2165847aa4368ca120"
 }
