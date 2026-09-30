@@ -28,15 +28,26 @@ consumer output, and command/log exit codes. Evidence is retained after failure
 as well as success; an uploaded artifact alone is not a passing test result.
 The job fails on either a test or logging error and checks for source/lock drift.
 
-The consumer step records whether `CODEX_CA_CERTIFICATE` and `SSL_CERT_FILE`
-were nonempty, without recording their paths or contents, and then unsets them
-for its test process. This gives native-TLS fixtures a system-root baseline;
-the existing custom-CA subprocess tests supply their own fixture environment.
-The receipt is `consumer-ca-environment.txt`. The consumer log includes all
-nextest status names, including passed and skipped tests. This does not change
-production CA handling, certificate validation, TLS fallback rules, or the
-sandbox step.
-A clean environment is not proof of a passing TLS test; all suites still block.
+The consumer step records a presence-only shell baseline in
+`consumer-ca-environment.txt`, but Cargo/nextest may subsequently introduce CA
+overrides. A scoped target runner therefore records inherited CA presence and
+unsets `CODEX_CA_CERTIFICATE` and `SSL_CERT_FILE` at actual test entry. It leaves
+`SSL_CERT_DIR` and unrelated environment untouched. It removes only its own
+verified runner variable before executing the test, so `assert_cmd` resolves
+fixture binaries normally and custom-CA subprocesses retain their explicitly
+configured certificates. Pre-existing runners are rejected, not replaced.
+
+Version-2 `consumer-launch-environment/*.json` receipts retain presence only,
+never certificate paths, values, or test arguments. Their summary requires
+HTTP-client and custom-CA test-run receipts, the system-root entry baseline,
+and removal of the synthetic runner. Missing or invalid receipts fail closed.
+The scoped feature tree and fresh source-matched reqwest compiler fingerprints
+remain required evidence; `TransportDefault` alone does not identify a backend.
+
+The consumer log includes all nextest status names, including passed and skipped
+tests. This does not change production CA handling, certificate validation, TLS
+fallback/replay rules, or the sandbox step. A clean entry environment is not
+proof of a passing TLS test; all suites and source/lock-drift checks still block.
 
 These tests do not replace the production ARM64 or real-Termux gates. A PR that
 changes workflow definitions remains ineligible for `dispatch-pr-build` until

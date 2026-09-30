@@ -182,8 +182,8 @@ jobs:
             done
             printf 'consumer_ca_baseline=system-roots\n'
           } | tee "$evidence/consumer-ca-environment.txt"
-          # Observe the test-launch boundary; Cargo/nextest can alter the shell environment.
-          # Do not change CA values, TLS selection, test arguments, or existing runner behavior.
+          # Enforce the fixture baseline at test entry, after Cargo/nextest prepare the environment.
+          # Remove only ambient CA overrides and this synthetic runner; fixtures retain their own CAs.
           runner_variable="CARGO_TARGET_${CONSUMER_TARGET^^}_RUNNER"
           runner_variable="${runner_variable//-/_}"
           if [[ -v "$runner_variable" ]]; then
@@ -219,22 +219,41 @@ jobs:
 
           if len(sys.argv) < 2:
               raise SystemExit("Expected a test executable")
-          directory = Path(os.environ["CONSUMER_LAUNCH_EVIDENCE_DIR"])
-          record = {
-              "schema_version": 1,
-              "binary": Path(sys.argv[1]).name,
-              "phase": "list" if "--list" in sys.argv[2:] else "run",
-              "ca_environment": {
+          runner_variable = "CARGO_TARGET_" + os.environ["CONSUMER_TARGET"].upper().replace("-", "_") + "_RUNNER"
+          expected_runner = f"python3 {Path(__file__)}"
+          if os.environ.get(runner_variable) != expected_runner:
+              raise SystemExit("Refusing to remove an unexpected Cargo target runner")
+
+
+          def ca_environment():
+              return {
                   name: ("unset" if name not in os.environ else
                          "nonempty" if os.environ[name] else "empty")
                   for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
-              },
+              }
+
+
+          directory = Path(os.environ["CONSUMER_LAUNCH_EVIDENCE_DIR"])
+          inherited = ca_environment()
+          # Fixtures opt into custom CAs explicitly; only their initial ambient overrides are removed.
+          for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"):
+              os.environ.pop(name, None)
+          # assert_cmd inspects this variable at runtime when locating custom_ca_probe.
+          # Do not make a fixture subprocess inherit the synthetic nextest launch runner.
+          os.environ.pop(runner_variable)
+          record = {
+              "schema_version": 2,
+              "binary": Path(sys.argv[1]).name,
+              "phase": "list" if "--list" in sys.argv[2:] else "run",
+              "inherited_ca_environment": inherited,
+              "ca_environment": ca_environment(),
+              "synthetic_runner_removed": runner_variable not in os.environ,
           }
           # Fail closed if the receipt cannot be retained. Do not record values or arguments.
           with (directory / f"{uuid.uuid4().hex}.json").open("x") as output:
               json.dump(record, output, sort_keys=True)
               output.write("\n")
-          # Preserve argv, environment, cwd, standard streams, PID and exit/signal behavior.
+          # Preserve argv, cwd, standard streams, PID, exit/signals and all unrelated environment.
           os.execvp(sys.argv[1], sys.argv[1:])
           PYTHON
           export "$runner_variable=python3 $evidence/consumer-env-runner.py"
@@ -264,25 +283,49 @@ jobs:
               "termux-dependency-consumers-" + os.environ["CONSUMER_TARGET"])
           records = [json.loads(path.read_text())
                      for path in sorted((evidence / "consumer-launch-environment").glob("*.json"))]
+          names = ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+          for record in records:
+              if (record.get("schema_version") != 2
+                      or record.get("synthetic_runner_removed") is not True
+                      or record.get("phase") not in ("list", "run")
+                      or not isinstance(record.get("binary"), str)):
+                  raise SystemExit("Invalid consumer test-launch receipt")
+              for field in ("inherited_ca_environment", "ca_environment"):
+                  environment = record.get(field, {})
+                  if (not isinstance(environment, dict) or set(environment) != set(names)
+                          or any(value not in ("unset", "empty", "nonempty") for value in environment.values())):
+                      raise SystemExit("Invalid consumer CA presence receipt")
+              if any(record["ca_environment"][name] != "unset" for name in names[:2]):
+                  raise SystemExit("Ambient CA override remained at consumer test entry")
+              if record["ca_environment"]["SSL_CERT_DIR"] != record["inherited_ca_environment"]["SSL_CERT_DIR"]:
+                  raise SystemExit("Consumer runner changed SSL_CERT_DIR presence")
           runs = [record for record in records if record["phase"] == "run"]
           http_runs = [record for record in runs
                        if record["binary"].split("-", 1)[0] == "codex_http_client"]
+          ca_runs = [record for record in runs
+                     if record["binary"].split("-", 1)[0] == "ca_env"]
           report = {
-              "schema_version": 1,
+              "schema_version": 2,
               "list_receipts": len(records) - len(runs),
               "run_receipts": len(runs),
               "http_client_run_receipts": len(http_runs),
+              "custom_ca_run_receipts": len(ca_runs),
+              "inherited_ca_environment_counts": {
+                  name: dict(collections.Counter(record["inherited_ca_environment"][name] for record in runs))
+                  for name in names
+              },
               "ca_environment_counts": {
                   name: dict(collections.Counter(record["ca_environment"][name] for record in runs))
-                  for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+                  for name in names
               },
-              "interpretation": "Test-process entry environment only; tests may subsequently change it.",
+              "synthetic_runner_removed_receipts": sum(record["synthetic_runner_removed"] for record in records),
+              "interpretation": "Test-entry baseline only; fixture subprocesses retain explicitly configured CAs.",
           }
           (evidence / "consumer-launch-environment-summary.json").write_text(
               json.dumps(report, indent=2) + "\n")
           print(json.dumps(report, sort_keys=True))
-          if not http_runs:
-              raise SystemExit("No HTTP-client test-launch receipt; runtime environment evidence is incomplete")
+          if not http_runs or not ca_runs:
+              raise SystemExit("Missing HTTP-client or custom-CA test-launch receipts; evidence is incomplete")
           PYTHON
 
       - name: Retain compiled reqwest backend evidence
