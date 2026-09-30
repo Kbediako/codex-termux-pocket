@@ -171,6 +171,7 @@ jobs:
           test -s "$evidence/source-identity.txt"
           # Ambient custom CAs select rustls; native-TLS fixtures need a system-root baseline.
           # Record presence only, never certificate paths or contents. Custom-CA tests set fixtures.
+          # This shell baseline is not proof of the later test-process environment.
           {
             for variable in CODEX_CA_CERTIFICATE SSL_CERT_FILE; do
               if [ -n "${!variable:-}" ]; then
@@ -181,6 +182,62 @@ jobs:
             done
             printf 'consumer_ca_baseline=system-roots\n'
           } | tee "$evidence/consumer-ca-environment.txt"
+          # Observe the test-launch boundary; Cargo/nextest can alter the shell environment.
+          # Do not change CA values, TLS selection, test arguments, or existing runner behavior.
+          runner_variable="CARGO_TARGET_${CONSUMER_TARGET^^}_RUNNER"
+          runner_variable="${runner_variable//-/_}"
+          if [[ -v "$runner_variable" ]]; then
+            echo "Refusing to replace an environment-configured Cargo target runner" >&2
+            exit 1
+          fi
+          [[ "$evidence" != *[[:space:]]* ]] || { echo "Runner path contains whitespace" >&2; exit 1; }
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          # A diagnostic runner must never silently replace an existing runner.
+          roots = [parent / ".cargo" for parent in (Path.cwd(), *Path.cwd().parents)]
+          roots.append(Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))))
+          for root in set(roots):
+              for name in ("config", "config.toml"):
+                  path = root / name
+                  if path.is_file():
+                      config = tomllib.loads(path.read_text())
+                      if any("runner" in value for value in config.get("target", {}).values()
+                             if isinstance(value, dict)):
+                          raise SystemExit("Refusing to replace a configured Cargo target runner")
+          PYTHON
+          export CONSUMER_LAUNCH_EVIDENCE_DIR="$evidence/consumer-launch-environment"
+          mkdir -p "$CONSUMER_LAUNCH_EVIDENCE_DIR"
+          cat > "$evidence/consumer-env-runner.py" <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import uuid
+
+          if len(sys.argv) < 2:
+              raise SystemExit("Expected a test executable")
+          directory = Path(os.environ["CONSUMER_LAUNCH_EVIDENCE_DIR"])
+          record = {
+              "schema_version": 1,
+              "binary": Path(sys.argv[1]).name,
+              "phase": "list" if "--list" in sys.argv[2:] else "run",
+              "ca_environment": {
+                  name: ("unset" if name not in os.environ else
+                         "nonempty" if os.environ[name] else "empty")
+                  for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+              },
+          }
+          # Fail closed if the receipt cannot be retained. Do not record values or arguments.
+          with (directory / f"{uuid.uuid4().hex}.json").open("x") as output:
+              json.dump(record, output, sort_keys=True)
+              output.write("\n")
+          # Preserve argv, environment, cwd, standard streams, PID and exit/signal behavior.
+          os.execvp(sys.argv[1], sys.argv[1:])
+          PYTHON
+          export "$runner_variable=python3 $evidence/consumer-env-runner.py"
           unset CODEX_CA_CERTIFICATE SSL_CERT_FILE
           set +e
           just test --locked --cargo-profile ci-test --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth 2>&1 | tee "$evidence/consumer-tests.log"
@@ -191,6 +248,42 @@ jobs:
             exit "${statuses[0]}"
           fi
           exit "${statuses[1]}"
+
+      - name: Retain dependency consumer launch receipts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import collections
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["RUNNER_TEMP"]) / (
+              "termux-dependency-consumers-" + os.environ["CONSUMER_TARGET"])
+          records = [json.loads(path.read_text())
+                     for path in sorted((evidence / "consumer-launch-environment").glob("*.json"))]
+          runs = [record for record in records if record["phase"] == "run"]
+          http_runs = [record for record in runs
+                       if record["binary"].split("-", 1)[0] == "codex_http_client"]
+          report = {
+              "schema_version": 1,
+              "list_receipts": len(records) - len(runs),
+              "run_receipts": len(runs),
+              "http_client_run_receipts": len(http_runs),
+              "ca_environment_counts": {
+                  name: dict(collections.Counter(record["ca_environment"][name] for record in runs))
+                  for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+              },
+              "interpretation": "Test-process entry environment only; tests may subsequently change it.",
+          }
+          (evidence / "consumer-launch-environment-summary.json").write_text(
+              json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          if not http_runs:
+              raise SystemExit("No HTTP-client test-launch receipt; runtime environment evidence is incomplete")
+          PYTHON
 
       - name: Retain compiled reqwest backend evidence
         if: always()
