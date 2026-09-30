@@ -147,6 +147,20 @@ jobs:
             sha256sum Cargo.lock ../MODULE.bazel.lock
           } | tee "$evidence/source-identity.txt"
 
+      - name: Record scoped reqwest backend evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          test -s "$evidence/source-identity.txt"
+          rustc -Vv > "$evidence/consumer-rustc.txt"
+          cargo tree --locked --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth -e features -i reqwest@0.12.28 --format '{p} features=[{f}]' | tee "$evidence/reqwest-feature-tree.txt"
+          # Metadata locates dependency source and target paths; it is not scoped feature proof.
+          cargo metadata --locked --format-version=1 --filter-platform "$CONSUMER_TARGET" > "$RUNNER_TEMP/termux-consumer-metadata-$CONSUMER_TARGET.json"
+          # Rebuild only this dependency in the existing consumer profile and target.
+          # This avoids attributing a stale sandbox-build fingerprint to the consumer build.
+          cargo clean --package reqwest@0.12.28 --profile ci-test --target "$CONSUMER_TARGET"
+
       - name: Test image and HTTP dependency consumers
         shell: bash
         env:
@@ -177,6 +191,90 @@ jobs:
             exit "${statuses[0]}"
           fi
           exit "${statuses[1]}"
+
+      - name: Retain compiled reqwest backend evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+
+
+          target = os.environ["CONSUMER_TARGET"]
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          evidence = temporary / f"termux-dependency-consumers-{target}"
+          evidence.mkdir(parents=True, exist_ok=True)
+          metadata_path = temporary / f"termux-consumer-metadata-{target}.json"
+          metadata = json.loads(metadata_path.read_text())
+          packages = [
+              package for package in metadata["packages"]
+              if package["name"] == "reqwest" and package["version"] == "0.12.28"
+          ]
+          if len(packages) != 1:
+              raise SystemExit("Expected exactly one locked reqwest 0.12.28 source")
+          package = packages[0]
+          source = Path(package["manifest_path"]).parent
+          profile = Path(metadata["target_directory"]) / target / "ci-test"
+          report = {
+              "target": target,
+              "cargo_profile": "ci-test",
+              "package_id": package["id"],
+              "metadata_use": "source and target paths only; not consumer feature resolution",
+              "fingerprint_attribution": "fresh scoped rebuild; match dep-info to the locked source",
+              "candidates": [],
+              "source_files": [],
+          }
+          for relative, name in [
+              ("Cargo.toml", "reqwest-source-Cargo.toml"),
+              ("src/tls.rs", "reqwest-source-tls.rs"),
+              ("src/async_impl/client.rs", "reqwest-source-client.rs"),
+          ]:
+              data = (source / relative).read_bytes()
+              (evidence / name).write_bytes(data)
+              report["source_files"].append({"path": relative, "artifact": name, "sha256": digest(data)})
+          matched = 0
+          for fingerprint in sorted((profile / ".fingerprint").glob("reqwest-*/lib-reqwest.json")):
+              data = fingerprint.read_bytes()
+              dep_info = profile / "deps" / f"{fingerprint.parent.name}.d"
+              dep_data = dep_info.read_bytes() if dep_info.is_file() else b""
+              source_match = (str(source) + "/").encode() in dep_data
+              item = {
+                  "unit": fingerprint.parent.name,
+                  "fingerprint_sha256": digest(data),
+                  "fingerprint": json.loads(data),
+                  "dep_info_present": bool(dep_data),
+                  "locked_source_match": source_match,
+              }
+              if source_match:
+                  matched += 1
+                  fingerprint_name = f"{fingerprint.parent.name}-fingerprint.json"
+                  dep_name = f"{fingerprint.parent.name}.d"
+                  (evidence / fingerprint_name).write_bytes(data)
+                  (evidence / dep_name).write_bytes(dep_data)
+                  item.update({
+                      "fingerprint_artifact": fingerprint_name,
+                      "dep_info_artifact": dep_name,
+                      "dep_info_sha256": digest(dep_data),
+                  })
+              report["candidates"].append(item)
+          report["matched_compiled_units"] = matched
+          report["interpretation"] = (
+              "Use source-matched units and the scoped feature tree together. "
+              "Multiple units must be distinguished; TransportDefault is not backend proof."
+          )
+          (evidence / "reqwest-compiler-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
+          if not matched:
+              raise SystemExit("No source-matched reqwest compiler fingerprint; backend evidence is incomplete")
+          print(f"Retained {matched} source-matched reqwest compiler unit(s) for {target}")
+          PYTHON
 
       - name: Verify dependency consumer worktree
         if: always()
