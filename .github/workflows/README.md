@@ -10,6 +10,51 @@ Agents and maintainers repairing an alpha or publishing a runtime must first rea
 That runbook is the hard completion contract. Live GitHub state, not a workflow's
 intended behaviour or a stale tracker, decides whether a release is complete.
 
+## Permanent dependency-consumer coverage
+
+`termux-linux-sandbox.yml` retains its existing x64 and ARM64 sandbox gate and
+also runs the repository's scoped `just test` suites for `codex-utils-image`,
+`codex-http-client`, and `codex-aws-auth` with the committed lockfile. Relevant
+consumer sources, shared helpers, Cargo configuration, and the test recipe are
+included in its path filters. Both architectures must pass both the sandbox and
+consumer steps; the added coverage is permanent, not an issue-specific runner.
+The job records its actual checkout SHA, tree, and both lockfile digests before
+testing the consumers. These tests cover image encoding/decoding and limits,
+HTTP streaming and policy revocation, and the AWS HTTP-body/Smithy adapter.
+
+Each architecture retains `termux-dependency-consumers-<target>-<attempt>` for
+seven days, including the checkout/tree/workflow identity, lock digests, full
+consumer output, and command/log exit codes. Evidence is retained after failure
+as well as success; an uploaded artifact alone is not a passing test result.
+The job fails on either a test or logging error and checks for source/lock drift.
+
+The consumer step records a presence-only shell baseline in
+`consumer-ca-environment.txt`, but Cargo/nextest may subsequently introduce CA
+overrides. A scoped target runner therefore records inherited CA presence and
+unsets `CODEX_CA_CERTIFICATE` and `SSL_CERT_FILE` at actual test entry. It leaves
+`SSL_CERT_DIR` and unrelated environment untouched. It removes only its own
+verified runner variable before executing the test, so `assert_cmd` resolves
+fixture binaries normally and custom-CA subprocesses retain their explicitly
+configured certificates. Pre-existing runners are rejected, not replaced.
+
+Version-2 `consumer-launch-environment/*.json` receipts retain presence only,
+never certificate paths, values, or test arguments. Their summary requires
+HTTP-client and custom-CA test-run receipts, the system-root entry baseline,
+and removal of the synthetic runner. Missing or invalid receipts fail closed.
+The scoped feature tree and fresh source-matched reqwest compiler fingerprints
+remain required evidence; `TransportDefault` alone does not identify a backend.
+
+The consumer log includes all nextest status names, including passed and skipped
+tests. This does not change production CA handling, certificate validation, TLS
+fallback/replay rules, or the sandbox step. A clean entry environment is not
+proof of a passing TLS test; all suites and source/lock-drift checks still block.
+
+These tests do not replace the production ARM64 or real-Termux gates. A PR that
+changes workflow definitions remains ineligible for `dispatch-pr-build` until
+its workflow tree agrees with trusted main; do not bypass that guard. Merge
+reviewed permanent CI changes only after their candidate checks succeed, then
+obtain fresh runtime gates on the final source before release acceptance.
+
 ## A layered release system
 
 The release path is a tower of explicit identities rather than a loose sequence
@@ -46,7 +91,7 @@ independent verification semantically identical without sharing write authority.
   helpers, shell tests, release controls, workflow topology, and the complete
   locked dependency graph.
 - `termux-linux-sandbox.yml` runs the scoped Linux sandbox suite on public x64
-  and ARM64 Ubuntu runners.
+  and ARM64 Ubuntu runners, followed by the scoped image/HTTP consumer suites.
 - `termux-mobile-artifact.yml` builds, validates, attests, and retains the
   production ARM64 runtime. It is build-only and has no release-write authority.
 - `termux-android-emulator.yml` builds its fixture from the triggering source and

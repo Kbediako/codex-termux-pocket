@@ -12,6 +12,16 @@ on:
       - "codex-rs/rust-toolchain.toml"
       - "codex-rs/linux-sandbox/**"
       - "codex-rs/sandboxing/**"
+      - "codex-rs/utils/image/**"
+      - "codex-rs/utils/cache/**"
+      - "codex-rs/utils/rustls-provider/**"
+      - "codex-rs/utils/cargo-bin/**"
+      - "codex-rs/http-client/**"
+      - "codex-rs/aws-auth/**"
+      - ".cargo/**"
+      - "codex-rs/.cargo/**"
+      - "justfile"
+      - "scripts/just-shell.py"
   push:
     branches:
       - main
@@ -24,6 +34,16 @@ on:
       - "codex-rs/rust-toolchain.toml"
       - "codex-rs/linux-sandbox/**"
       - "codex-rs/sandboxing/**"
+      - "codex-rs/utils/image/**"
+      - "codex-rs/utils/cache/**"
+      - "codex-rs/utils/rustls-provider/**"
+      - "codex-rs/utils/cargo-bin/**"
+      - "codex-rs/http-client/**"
+      - "codex-rs/aws-auth/**"
+      - ".cargo/**"
+      - "codex-rs/.cargo/**"
+      - "justfile"
+      - "scripts/just-shell.py"
   workflow_dispatch:
     inputs:
       source_ref:
@@ -59,6 +79,7 @@ jobs:
       RUST_BACKTRACE: "1"
       RUST_MIN_STACK: "8388608"
       NEXTEST_STATUS_LEVEL: leak
+      CONSUMER_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Checkout requested ref
@@ -81,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libssl-dev bubblewrap
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
@@ -109,3 +130,302 @@ jobs:
       - name: Test codex-linux-sandbox
         shell: bash
         run: cargo nextest run --locked --no-fail-fast --cargo-profile ci-test --target ${{ matrix.target }} -p codex-linux-sandbox
+
+      - name: Record dependency consumer source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          mkdir -p "$evidence"
+          {
+            printf 'repository=%s\nrun_id=%s\nrun_attempt=%s\ntarget=%s\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CONSUMER_TARGET"
+            printf 'event_source_sha=%s\n' "$GITHUB_SHA"
+            printf 'checkout_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'checkout_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+            printf 'workflow_blob=%s\n' "$(git rev-parse HEAD:.github/workflows/termux-linux-sandbox.yml)"
+            sha256sum Cargo.lock ../MODULE.bazel.lock
+          } | tee "$evidence/source-identity.txt"
+
+      - name: Record scoped reqwest backend evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          test -s "$evidence/source-identity.txt"
+          rustc -Vv > "$evidence/consumer-rustc.txt"
+          cargo tree --locked --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth -e features -i reqwest@0.12.28 --format '{p} features=[{f}]' | tee "$evidence/reqwest-feature-tree.txt"
+          # Metadata locates dependency source and target paths; it is not scoped feature proof.
+          cargo metadata --locked --format-version=1 --filter-platform "$CONSUMER_TARGET" > "$RUNNER_TEMP/termux-consumer-metadata-$CONSUMER_TARGET.json"
+          # Rebuild only this dependency in the existing consumer profile and target.
+          # This avoids attributing a stale sandbox-build fingerprint to the consumer build.
+          cargo clean --package reqwest@0.12.28 --profile ci-test --target "$CONSUMER_TARGET"
+
+      - name: Test image and HTTP dependency consumers
+        shell: bash
+        env:
+          NEXTEST_STATUS_LEVEL: all
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          test -s "$evidence/source-identity.txt"
+          # Ambient custom CAs select rustls; native-TLS fixtures need a system-root baseline.
+          # Record presence only, never certificate paths or contents. Custom-CA tests set fixtures.
+          # This shell baseline is not proof of the later test-process environment.
+          {
+            for variable in CODEX_CA_CERTIFICATE SSL_CERT_FILE; do
+              if [ -n "${!variable:-}" ]; then
+                printf 'inherited_%s=nonempty\n' "$variable"
+              else
+                printf 'inherited_%s=unset-or-empty\n' "$variable"
+              fi
+            done
+            printf 'consumer_ca_baseline=system-roots\n'
+          } | tee "$evidence/consumer-ca-environment.txt"
+          # Enforce the fixture baseline at test entry, after Cargo/nextest prepare the environment.
+          # Remove only ambient CA overrides and this synthetic runner; fixtures retain their own CAs.
+          runner_variable="CARGO_TARGET_${CONSUMER_TARGET^^}_RUNNER"
+          runner_variable="${runner_variable//-/_}"
+          if [[ -v "$runner_variable" ]]; then
+            echo "Refusing to replace an environment-configured Cargo target runner" >&2
+            exit 1
+          fi
+          [[ "$evidence" != *[[:space:]]* ]] || { echo "Runner path contains whitespace" >&2; exit 1; }
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          # A diagnostic runner must never silently replace an existing runner.
+          roots = [parent / ".cargo" for parent in (Path.cwd(), *Path.cwd().parents)]
+          roots.append(Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))))
+          for root in set(roots):
+              for name in ("config", "config.toml"):
+                  path = root / name
+                  if path.is_file():
+                      config = tomllib.loads(path.read_text())
+                      if any("runner" in value for value in config.get("target", {}).values()
+                             if isinstance(value, dict)):
+                          raise SystemExit("Refusing to replace a configured Cargo target runner")
+          PYTHON
+          export CONSUMER_LAUNCH_EVIDENCE_DIR="$evidence/consumer-launch-environment"
+          mkdir -p "$CONSUMER_LAUNCH_EVIDENCE_DIR"
+          cat > "$evidence/consumer-env-runner.py" <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import uuid
+
+          if len(sys.argv) < 2:
+              raise SystemExit("Expected a test executable")
+          runner_variable = "CARGO_TARGET_" + os.environ["CONSUMER_TARGET"].upper().replace("-", "_") + "_RUNNER"
+          expected_runner = f"python3 {Path(__file__)}"
+          if os.environ.get(runner_variable) != expected_runner:
+              raise SystemExit("Refusing to remove an unexpected Cargo target runner")
+
+
+          def ca_environment():
+              return {
+                  name: ("unset" if name not in os.environ else
+                         "nonempty" if os.environ[name] else "empty")
+                  for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+              }
+
+
+          directory = Path(os.environ["CONSUMER_LAUNCH_EVIDENCE_DIR"])
+          inherited = ca_environment()
+          # Fixtures opt into custom CAs explicitly; only their initial ambient overrides are removed.
+          for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"):
+              os.environ.pop(name, None)
+          # assert_cmd inspects this variable at runtime when locating custom_ca_probe.
+          # Do not make a fixture subprocess inherit the synthetic nextest launch runner.
+          os.environ.pop(runner_variable)
+          record = {
+              "schema_version": 2,
+              "binary": Path(sys.argv[1]).name,
+              "phase": "list" if "--list" in sys.argv[2:] else "run",
+              "inherited_ca_environment": inherited,
+              "ca_environment": ca_environment(),
+              "synthetic_runner_removed": runner_variable not in os.environ,
+          }
+          # Fail closed if the receipt cannot be retained. Do not record values or arguments.
+          with (directory / f"{uuid.uuid4().hex}.json").open("x") as output:
+              json.dump(record, output, sort_keys=True)
+              output.write("\n")
+          # Preserve argv, cwd, standard streams, PID, exit/signals and all unrelated environment.
+          os.execvp(sys.argv[1], sys.argv[1:])
+          PYTHON
+          export "$runner_variable=python3 $evidence/consumer-env-runner.py"
+          unset CODEX_CA_CERTIFICATE SSL_CERT_FILE
+          set +e
+          just test --locked --cargo-profile ci-test --target "$CONSUMER_TARGET" -p codex-utils-image -p codex-http-client -p codex-aws-auth 2>&1 | tee "$evidence/consumer-tests.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf 'consumer_exit_code=%s\nlog_exit_code=%s\n' "${statuses[0]}" "${statuses[1]}" | tee "$evidence/consumer-tests.exit"
+          if [ "${statuses[0]}" -ne 0 ]; then
+            exit "${statuses[0]}"
+          fi
+          exit "${statuses[1]}"
+
+      - name: Retain dependency consumer launch receipts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import collections
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["RUNNER_TEMP"]) / (
+              "termux-dependency-consumers-" + os.environ["CONSUMER_TARGET"])
+          records = [json.loads(path.read_text())
+                     for path in sorted((evidence / "consumer-launch-environment").glob("*.json"))]
+          names = ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+          for record in records:
+              if (record.get("schema_version") != 2
+                      or record.get("synthetic_runner_removed") is not True
+                      or record.get("phase") not in ("list", "run")
+                      or not isinstance(record.get("binary"), str)):
+                  raise SystemExit("Invalid consumer test-launch receipt")
+              for field in ("inherited_ca_environment", "ca_environment"):
+                  environment = record.get(field, {})
+                  if (not isinstance(environment, dict) or set(environment) != set(names)
+                          or any(value not in ("unset", "empty", "nonempty") for value in environment.values())):
+                      raise SystemExit("Invalid consumer CA presence receipt")
+              if any(record["ca_environment"][name] != "unset" for name in names[:2]):
+                  raise SystemExit("Ambient CA override remained at consumer test entry")
+              if record["ca_environment"]["SSL_CERT_DIR"] != record["inherited_ca_environment"]["SSL_CERT_DIR"]:
+                  raise SystemExit("Consumer runner changed SSL_CERT_DIR presence")
+          runs = [record for record in records if record["phase"] == "run"]
+          http_runs = [record for record in runs
+                       if record["binary"].split("-", 1)[0] == "codex_http_client"]
+          ca_runs = [record for record in runs
+                     if record["binary"].split("-", 1)[0] == "ca_env"]
+          report = {
+              "schema_version": 2,
+              "list_receipts": len(records) - len(runs),
+              "run_receipts": len(runs),
+              "http_client_run_receipts": len(http_runs),
+              "custom_ca_run_receipts": len(ca_runs),
+              "inherited_ca_environment_counts": {
+                  name: dict(collections.Counter(record["inherited_ca_environment"][name] for record in runs))
+                  for name in names
+              },
+              "ca_environment_counts": {
+                  name: dict(collections.Counter(record["ca_environment"][name] for record in runs))
+                  for name in names
+              },
+              "synthetic_runner_removed_receipts": sum(record["synthetic_runner_removed"] for record in records),
+              "interpretation": "Test-entry baseline only; fixture subprocesses retain explicitly configured CAs.",
+          }
+          (evidence / "consumer-launch-environment-summary.json").write_text(
+              json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          if not http_runs or not ca_runs:
+              raise SystemExit("Missing HTTP-client or custom-CA test-launch receipts; evidence is incomplete")
+          PYTHON
+
+      - name: Retain compiled reqwest backend evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+
+
+          target = os.environ["CONSUMER_TARGET"]
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          evidence = temporary / f"termux-dependency-consumers-{target}"
+          evidence.mkdir(parents=True, exist_ok=True)
+          metadata_path = temporary / f"termux-consumer-metadata-{target}.json"
+          metadata = json.loads(metadata_path.read_text())
+          packages = [
+              package for package in metadata["packages"]
+              if package["name"] == "reqwest" and package["version"] == "0.12.28"
+          ]
+          if len(packages) != 1:
+              raise SystemExit("Expected exactly one locked reqwest 0.12.28 source")
+          package = packages[0]
+          source = Path(package["manifest_path"]).parent
+          profile = Path(metadata["target_directory"]) / target / "ci-test"
+          report = {
+              "target": target,
+              "cargo_profile": "ci-test",
+              "package_id": package["id"],
+              "metadata_use": "source and target paths only; not consumer feature resolution",
+              "fingerprint_attribution": "fresh scoped rebuild; match dep-info to the locked source",
+              "candidates": [],
+              "source_files": [],
+          }
+          for relative, name in [
+              ("Cargo.toml", "reqwest-source-Cargo.toml"),
+              ("src/tls.rs", "reqwest-source-tls.rs"),
+              ("src/async_impl/client.rs", "reqwest-source-client.rs"),
+          ]:
+              data = (source / relative).read_bytes()
+              (evidence / name).write_bytes(data)
+              report["source_files"].append({"path": relative, "artifact": name, "sha256": digest(data)})
+          matched = 0
+          for fingerprint in sorted((profile / ".fingerprint").glob("reqwest-*/lib-reqwest.json")):
+              data = fingerprint.read_bytes()
+              dep_info = profile / "deps" / f"{fingerprint.parent.name}.d"
+              dep_data = dep_info.read_bytes() if dep_info.is_file() else b""
+              source_match = (str(source) + "/").encode() in dep_data
+              item = {
+                  "unit": fingerprint.parent.name,
+                  "fingerprint_sha256": digest(data),
+                  "fingerprint": json.loads(data),
+                  "dep_info_present": bool(dep_data),
+                  "locked_source_match": source_match,
+              }
+              if source_match:
+                  matched += 1
+                  fingerprint_name = f"{fingerprint.parent.name}-fingerprint.json"
+                  dep_name = f"{fingerprint.parent.name}.d"
+                  (evidence / fingerprint_name).write_bytes(data)
+                  (evidence / dep_name).write_bytes(dep_data)
+                  item.update({
+                      "fingerprint_artifact": fingerprint_name,
+                      "dep_info_artifact": dep_name,
+                      "dep_info_sha256": digest(dep_data),
+                  })
+              report["candidates"].append(item)
+          report["matched_compiled_units"] = matched
+          report["interpretation"] = (
+              "Use source-matched units and the scoped feature tree together. "
+              "Multiple units must be distinguished; TransportDefault is not backend proof."
+          )
+          (evidence / "reqwest-compiler-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
+          if not matched:
+              raise SystemExit("No source-matched reqwest compiler fingerprint; backend evidence is incomplete")
+          print(f"Retained {matched} source-matched reqwest compiler unit(s) for {target}")
+          PYTHON
+
+      - name: Verify dependency consumer worktree
+        if: always()
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- codex-rs/Cargo.lock MODULE.bazel.lock
+          test -z "$(git status --porcelain)"
+
+      - name: Retain dependency consumer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: termux-dependency-consumers-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/termux-dependency-consumers-${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7
