@@ -206,6 +206,7 @@ impl ChatWidget {
                 .push_back(QueuedUserMessage {
                     user_message,
                     action,
+                    delivery: MessageDelivery::Unsent,
                     pending_pastes,
                     source,
                 });
@@ -234,10 +235,12 @@ impl ChatWidget {
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
         if !self.is_session_configured()
+            || self.fork_in_progress
             || self.has_misalignment_policy_violation()
             || self.input_queue.suppress_queue_autosend
             || self.input_queue.rate_limit_recovery_pending
             || self.input_queue.recovered_queue
+            || self.input_queue.has_unconfirmed_messages()
         {
             return false;
         }

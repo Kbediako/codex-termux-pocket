@@ -1,5 +1,9 @@
+#[path = "remote_env_capability_roots_tests.rs"]
+mod capability_roots;
 #[path = "guardian_environments_tests.rs"]
 mod guardian_environments;
+#[path = "remote_env_spawn_tests.rs"]
+pub(super) mod spawn_tests;
 
 use anyhow::Context;
 use anyhow::Result;

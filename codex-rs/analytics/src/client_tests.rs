@@ -4,7 +4,6 @@ use super::AnalyticsEventsQueue;
 use super::AnalyticsEventsQueueMessage;
 #[cfg(debug_assertions)]
 use super::capture_track_events_request;
-#[cfg(debug_assertions)]
 use super::send_track_events;
 #[cfg(debug_assertions)]
 use super::send_track_events_request;
@@ -60,6 +59,8 @@ use crate::facts::InvocationType;
 use crate::facts::PluginMeasurementRow;
 use crate::facts::PluginMeasurementsInput;
 use crate::facts::TrackEventsContext;
+#[cfg(debug_assertions)]
+use crate::product_attribution::ThreadProducts;
 use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
 use codex_app_server_protocol::ApprovalsReviewer as AppServerApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval as AppServerAskForApproval;
@@ -107,6 +108,9 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
+
+#[path = "client_product_tests.rs"]
+mod product_tests;
 
 #[cfg(debug_assertions)]
 impl AnalyticsEventsClient {
@@ -289,6 +293,7 @@ fn client_with_receiver() -> (
     let (sender, receiver) = mpsc::channel(8);
     let queue = AnalyticsEventsQueue {
         sender,
+        product_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         app_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),
         plugin_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),
     };
@@ -370,7 +375,14 @@ async fn capture_file_writes_exact_serialized_request() {
     let auth = codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing();
 
     let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
-    send_track_events_request(&auth, &destination, vec![event], &factory).await;
+    send_track_events_request(
+        &auth,
+        &destination,
+        vec![event],
+        &factory,
+        /*product_sku*/ None,
+    )
+    .await;
 
     let contents = fs::read_to_string(&capture_path).expect("read capture file");
     let lines = contents.lines().collect::<Vec<_>>();
@@ -398,7 +410,14 @@ async fn capture_file_writes_final_batches_as_separate_lines() {
 
     for batch in track_event_request_batches(events) {
         let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
-        send_track_events_request(&auth, &destination, batch, &factory).await;
+        send_track_events_request(
+            &auth,
+            &destination,
+            batch,
+            &factory,
+            /*product_sku*/ None,
+        )
+        .await;
     }
 
     let contents = fs::read_to_string(&capture_path).expect("read capture file");
@@ -474,6 +493,7 @@ async fn api_key_auth_sends_only_plugin_events_to_codex_backend() {
             sample_artifact_operation_event("plugin-artifact"),
             plugin_measurement("plugin-measurement", "sample@test"),
         ],
+        &ThreadProducts::default(),
     )
     .await;
 
@@ -1054,4 +1074,112 @@ fn track_event_request_batches_only_isolates_accepted_line_fingerprint_events() 
     assert_eq!(batches[3].len(), 2);
     assert!(batches[1][0].should_send_in_isolated_request());
     assert!(batches[2][0].should_send_in_isolated_request());
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn account_switch_between_batches_does_not_send_old_credentials() {
+    use codex_http_client::DestinationPolicy;
+    use codex_http_client::NetworkPolicyController;
+    use codex_login::AuthCredentialsStoreMode as Store;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let home = unique_capture_path("batch-account-switch");
+    fs::create_dir_all(&home).unwrap();
+    let mut stored: codex_login::AuthDotJson = serde_json::from_value(serde_json::json!({
+        "auth_mode": "chatgptAuthTokens",
+        "tokens": {
+            "id_token": "e30.e30.sig",
+            "access_token": "test-access-token-a",
+            "refresh_token": "",
+            "account_id": "account-a",
+        },
+    }))
+    .unwrap();
+    stored.last_refresh = Some(SystemTime::now().into());
+    codex_login::save_auth(&home, &stored, Store::File, Default::default()).unwrap();
+    let controller = NetworkPolicyController::default();
+    let policy = controller.policy();
+    let manager = Arc::new(
+        codex_login::AuthManager::new(
+            home.clone(),
+            /*enable_codex_api_key_env*/ false,
+            Store::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            Default::default(),
+            codex_login::AuthRouteConfig::from_http_client_factory(
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+                    .with_network_policy(policy.clone()),
+            ),
+        )
+        .await,
+    );
+    assert!(controller.publish(policy.revision(), DestinationPolicy::Unrestricted));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination = AnalyticsEventsDestination::Http {
+        url: format!("http://{}/events", listener.local_addr().unwrap()),
+    };
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let server_manager = Arc::clone(&manager);
+    let server_home = home.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let first = {
+                let mut requests = captured.lock().unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+                requests.len() == 1
+            };
+            if first {
+                let tokens = stored.tokens.as_mut().unwrap();
+                tokens.account_id = Some("account-b".to_string());
+                tokens.access_token = "test-access-token-b".to_string();
+                codex_login::save_auth(&server_home, &stored, Store::File, Default::default())
+                    .unwrap();
+                server_manager.reload().await;
+                assert!(controller.publish(policy.revision(), DestinationPolicy::Unrestricted));
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    let events = vec![
+        sample_accepted_line_fingerprint_event("one"),
+        sample_accepted_line_fingerprint_event("two"),
+    ];
+    send_track_events(&manager, &destination, events, &ThreadProducts::default()).await;
+    server.abort();
+    let _ = server.await;
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .to_lowercase()
+            .contains("chatgpt-account-id: account-a")
+    );
+    assert!(requests[0].contains("test-access-token-a"));
+    fs::remove_dir_all(home).unwrap();
 }

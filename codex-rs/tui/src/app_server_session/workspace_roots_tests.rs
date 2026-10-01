@@ -150,7 +150,12 @@ stream_max_retries = 0
         .await?;
     assert_eq!(forked.session.runtime_workspace_roots, expected_roots);
     let side = app_server
-        .fork_side_thread(&local_settings, session_config, thread_id)
+        .fork_side_thread(
+            &local_settings,
+            session_config,
+            thread_id,
+            /*selected_profile*/ None,
+        )
         .await?;
     assert_eq!(side.session.runtime_workspace_roots, expected_roots);
 
@@ -188,6 +193,7 @@ async fn embedded_lifecycle_requests_preserve_explicit_workspace_roots() -> Resu
         ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
         ResumeModelSettings::RestoreFromThread,
+        crate::resume_permissions::ResumePermissions::CURRENT_CONFIG,
     );
     let fork = thread_fork_params_from_config(
         config,

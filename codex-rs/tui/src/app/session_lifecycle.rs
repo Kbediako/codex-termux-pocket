@@ -490,6 +490,7 @@ impl App {
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
     /// replacement widget so that replayed collab items render agent names immediately.
     pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
+        chat_widget.fork_in_progress = self.chat_widget.fork_in_progress;
         self.pending_right_click_paste = None;
         if !self.chat_widget.realtime_conversation_is_running() {
             self.retain_realtime_replay_state_before_replace();
@@ -757,6 +758,20 @@ impl App {
         self.app_event_tx
             .send(AppEvent::ResetTranscriptForThreadSwitch);
         self.replay_thread_snapshot(snapshot, resume_restored_queue);
+        if let Some(thread_id) = self.chat_widget.thread_id()
+            && let Some(active) = self
+                .chat_widget
+                .config_ref()
+                .permissions
+                .active_permission_profile()
+            && self
+                .agents_overview
+                .selected_permission_profiles
+                .get(&thread_id)
+                == Some(&active.id)
+        {
+            self.adopt_server_permissions();
+        }
         if external_writer {
             self.chat_widget.show_external_writer_thread();
         }
@@ -1108,7 +1123,7 @@ impl App {
             ThreadAttachPresentation::Fresh | ThreadAttachPresentation::FreshWithDraft
         ) {
             self.chat_widget.mark_fresh_task_for_sparkle(&started);
-            // FreshWithDraft inherits its provisional greeting and replay at the handoff.
+            // FreshWithDraft inherits its provisional replay at the handoff.
             if matches!(presentation, ThreadAttachPresentation::Fresh) {
                 self.chat_widget
                     .empty_state_animation
@@ -1297,19 +1312,25 @@ impl App {
             Ok(config) => config,
             Err(control) => return Ok(control),
         };
-        let baseline_approval = resume_config.permissions.approval_policy.value();
-        let baseline_permissions = RuntimePermissionProfileOverride::from_config(&resume_config);
-        self.apply_runtime_policy_overrides(&mut resume_config, RuntimePolicyOverrideScope::All);
+        if let Err(error) = self.apply_runtime_policy_overrides(
+            &mut resume_config,
+            RuntimePolicyOverrideScope::ExplicitOnly,
+        ) {
+            self.add_session_picker_error(format!("{error:#}"));
+            return Ok(AppRunControl::Continue);
+        }
+        let permission_overrides = self.resume_permission_overrides(&resume_config);
 
         if let Some(history_mode) = target_session.history_mode {
             app_server.remember_thread_history_mode(target_session.thread_id, history_mode);
         }
         let resumed = app_server
-            .resume_thread(
+            .resume_thread_with_permission_overrides(
                 &local_settings,
                 resume_config.clone(),
                 target_session.thread_id,
                 self.resume_model_settings(),
+                permission_overrides,
             )
             .await;
         let mut history_notice = None;
@@ -1381,16 +1402,22 @@ impl App {
                             .add_info_message(notice.to_string(), /*hint*/ None);
                     }
                 }
-                if self.app_server_target.uses_remote_workspace() {
-                    let config = self.chat_widget.config_ref();
-                    let approval = config.permissions.approval_policy.value();
-                    self.runtime_approval_policy_override = (approval != baseline_approval)
-                        .then_some(RuntimeApprovalPolicyOverride::Restored(approval.into()));
-                    self.runtime_permission_profile_override = (!baseline_permissions
-                        .matches_config(config))
-                    .then(|| RuntimePermissionProfileOverride::from_restored_config(config));
-                }
                 self.backfill_loaded_subagent_threads(app_server).await;
+                if matches!(
+                    self.runtime_approval_policy_override,
+                    Some(RuntimeApprovalPolicyOverride::Restored(_))
+                ) {
+                    self.runtime_approval_policy_override = None;
+                }
+                if self
+                    .runtime_permission_profile_override
+                    .as_ref()
+                    .is_some_and(|profile| {
+                        profile.turn_override == RuntimePermissionProfileTurnOverride::Preserve
+                    })
+                {
+                    self.runtime_permission_profile_override = None;
+                }
                 if !read_only {
                     self.replay_agents_overview_requests(app_server, resumed_thread_id)
                         .await;

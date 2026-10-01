@@ -1,5 +1,8 @@
 //! App-level orchestration tests for the TUI.
 
+#[path = "tests/mcp_login_tests.rs"]
+mod mcp_login_tests;
+
 #[path = "tests/daybreak_tests.rs"]
 mod daybreak_tests;
 #[path = "tests/math_interruption_tests.rs"]
@@ -56,6 +59,8 @@ mod pagination_completion_tests;
 mod patch_approval_tests;
 #[path = "tests/permission_selection_tests.rs"]
 mod permission_selection_tests;
+#[path = "tests/projectless_tests.rs"]
+mod projectless_tests;
 #[path = "tests/unavailable_commands_tests.rs"]
 mod unavailable_commands;
 
@@ -1432,6 +1437,15 @@ async fn replay_only_thread_keeps_restored_queue_visible() {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
     let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
+    app.thread_event_channels.insert(
+        thread_id,
+        ThreadEventChannel::new_with_session(
+            THREAD_EVENT_CHANNEL_CAPACITY,
+            session.clone(),
+            Vec::new(),
+        ),
+    );
+    app.activate_thread_channel(thread_id).await;
     app.chat_widget.handle_thread_session(session.clone());
     app.chat_widget.handle_server_notification(
         turn_started_notification(thread_id, "turn-1"),
@@ -1445,10 +1459,11 @@ async fn replay_only_thread_keeps_restored_queue_visible() {
         .apply_external_edit("queued follow-up".to_string());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let input_state = app
+    let mut input_state = app
         .chat_widget
         .capture_thread_input_state()
         .expect("expected queued follow-up state");
+    input_state.reconnect_pending = true;
 
     let (chat_widget, _app_event_tx, _rx, mut new_op_rx) =
         make_chatwidget_manual_with_sender().await;
@@ -1621,13 +1636,24 @@ async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up()
         /*replay_kind*/ None,
     );
     app.chat_widget
+        .apply_external_edit("accepted steer".to_string());
+    app.chat_widget
+        .handle_key_event(KeyEvent::from(KeyCode::Enter));
+    app.chat_widget
         .apply_external_edit("queued follow-up".to_string());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let input_state = app
+    let mut input_state = app
         .chat_widget
         .capture_thread_input_state()
         .expect("expected queued follow-up state");
+    let client_id = input_state
+        .pending_steers
+        .front()
+        .unwrap()
+        .client_id
+        .clone();
+    input_state.reconnect_pending = true;
 
     let (chat_widget, _app_event_tx, _rx, mut new_op_rx) =
         make_chatwidget_manual_with_sender().await;
@@ -1641,6 +1667,21 @@ async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up()
             session: None,
             turns: Vec::new(),
             events: vec![
+                ThreadBufferedEvent::Notification(Box::new(ServerNotification::ItemCompleted(
+                    codex_app_server_protocol::ItemCompletedNotification {
+                        thread_id: thread_id.to_string(),
+                        turn_id: "turn-1".into(),
+                        completed_at_ms: 0,
+                        item: ThreadItem::UserMessage {
+                            id: "accepted".into(),
+                            client_id: Some(client_id),
+                            content: vec![UserInput::Text {
+                                text: "accepted steer".into(),
+                                text_elements: Vec::new(),
+                            }],
+                        },
+                    },
+                ))),
                 ThreadBufferedEvent::Notification(Box::new(turn_completed_notification(
                     thread_id,
                     "turn-0",
@@ -2821,6 +2862,20 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     while app_event_rx.try_recv().is_ok() {}
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
+    app.runtime_permission_profile_override = Some(RuntimePermissionProfileOverride::from_config(
+        app.chat_widget.config_ref(),
+    ));
+    app.select_permission_profile(
+        &mut app_server,
+        PermissionProfileSelection {
+            profile_id: ":read-only".into(),
+            approval_policy: Some(AskForApproval::OnRequest),
+            approvals_reviewer: Some(ApprovalsReviewer::User),
+            display_label: "Read Only".into(),
+        },
+    )
+    .await;
+
     let control = Box::pin(app.handle_start_side(
         &mut tui,
         &mut app_server,
@@ -2862,6 +2917,53 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     }
 
     assert!(saw_thread_started);
+    assert_eq!(
+        app.config.permissions.permission_profile(),
+        &PermissionProfile::read_only()
+    );
+    assert_eq!(
+        app.runtime_permission_profile_override,
+        Some(RuntimePermissionProfileOverride::from_config(
+            app.chat_widget.config_ref()
+        ))
+    );
+    app.select_agent_thread(&mut tui, &mut app_server, parent_thread_id)
+        .await?;
+    app.select_permission_profile(
+        &mut app_server,
+        PermissionProfileSelection {
+            profile_id: ":workspace".into(),
+            approval_policy: Some(AskForApproval::OnRequest),
+            approvals_reviewer: Some(ApprovalsReviewer::User),
+            display_label: "Workspace".into(),
+        },
+    )
+    .await;
+    app.select_agent_thread(&mut tui, &mut app_server, side_thread_id)
+        .await?;
+    let settings = next_thread_settings_updated(&mut app_server, parent_thread_id).await;
+    app.enqueue_thread_notification(
+        parent_thread_id,
+        ServerNotification::ThreadSettingsUpdated(settings),
+    )
+    .await?;
+    app.select_agent_thread(&mut tui, &mut app_server, parent_thread_id)
+        .await?;
+    assert_eq!(
+        app.config
+            .permissions
+            .active_permission_profile()
+            .unwrap()
+            .id,
+        ":workspace"
+    );
+    assert_eq!(
+        app.runtime_permission_profile_override,
+        Some(RuntimePermissionProfileOverride::from_config(
+            app.chat_widget.config_ref()
+        ))
+    );
+
     app_server.shutdown().await?;
     Ok(())
 }
@@ -3047,7 +3149,7 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     let selection = PermissionProfileSelection {
         profile_id: "server-only".into(),
         approval_policy: None,
-        approvals_reviewer: None,
+        approvals_reviewer: Some(ApprovalsReviewer::User),
         display_label: "server-only".into(),
     };
     app.select_permission_profile(&mut server, selection.clone())
@@ -3060,6 +3162,9 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     let thread_id = started.session.thread_id;
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+    app.runtime_approvals_reviewer_override = Some(ApprovalsReviewer::AutoReview);
+    app.runtime_permission_profile_override =
+        Some(RuntimePermissionProfileOverride::from_config(&app.config));
     while events.try_recv().is_ok() {}
     app.select_permission_profile(&mut server, selection.clone())
         .await;
@@ -3068,22 +3173,6 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
         @"• Permission selection requested: server-only"
     );
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.select_permission_profile(&mut server, selection).await;
-    insta::assert_snapshot!(
-        next_history_message(&mut events),
-        @"■ Wait for permissions to update before changing permissions."
-    );
-    app.handle_event(
-        &mut tui,
-        &mut server,
-        AppEvent::ForkCurrentSession { name: None },
-    )
-    .await?;
-    let _ = next_history_message(&mut events);
-    insta::assert_snapshot!(
-        next_history_message(&mut events),
-        @"■ Wait for permissions to update before forking."
-    );
     app.chat_widget
         .restore_user_message_to_composer("use the selected profile".into());
     app.chat_widget
@@ -3098,8 +3187,35 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     )
     .await?;
     assert!(!app.pending_server_profiles.contains_key(&thread_id));
+    assert_eq!(
+        (
+            app.runtime_approvals_reviewer_override,
+            app.chat_widget.config_ref().approvals_reviewer
+        ),
+        (None, ApprovalsReviewer::User),
+    );
+    app.runtime_approvals_reviewer_override = Some(ApprovalsReviewer::User);
+    app.select_permission_profile(
+        &mut server,
+        PermissionProfileSelection {
+            approvals_reviewer: None,
+            ..selection.clone()
+        },
+    )
+    .await;
+    let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ThreadSettingsUpdated(settings),
+    )
+    .await?;
+    assert_eq!(
+        app.runtime_approvals_reviewer_override,
+        Some(ApprovalsReviewer::User),
+    );
     let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:8765")?;
     app.app_server_target = crate::AppServerTarget::Remote { endpoint };
+    assert!(app.selected_server_profile(thread_id).is_none());
     while events.try_recv().is_ok() {}
     app.change_working_directory(&mut tui, &mut server, home.path().abs())
         .await;
@@ -3135,48 +3251,25 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
         .restore_user_message_to_composer("queued follow-up".into());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let selection = app
-        .confirmed_server_profile(thread_id)
-        .expect("server profile");
+    let selection = PermissionProfileSelection {
+        profile_id: "server-only".into(),
+        approval_policy: None,
+        approvals_reviewer: None,
+        display_label: "server-only".into(),
+    };
     app.select_permission_profile(&mut server, selection).await;
     insta::assert_snapshot!(
         next_history_message(&mut events),
-        @"■ Wait for the current turn to finish before changing permissions."
+        @"• Permission selection requested: server-only"
     );
     app.handle_event(&mut tui, &mut server, AppEvent::SettingsSelectionSettled)
         .await?;
     app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
         turn_completed_notification(thread_id, "second", TurnStatus::Completed),
     )));
-    assert!(app.chat_widget.has_queued_follow_up_messages());
+    assert!(!app.chat_widget.has_queued_follow_up_messages());
+    let _ = next_user_turn_op(&mut ops);
     server.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn resume_rejects_selected_config_profile_permission_definitions() -> Result<()> {
-    let home = tempdir()?;
-    std::fs::write(
-        home.path().join("config.toml"),
-        "default_permissions = \":workspace\"\n",
-    )?;
-    let selected = home.path().join("work.config.toml");
-    std::fs::write(
-        &selected,
-        "default_permissions = \":workspace\"\n[permissions.unused]\nextends = \":read-only\"\n",
-    )?;
-    let mut loader = codex_config::LoaderOverrides::without_managed_config_for_tests();
-    loader.user_config_path = Some(selected.abs());
-    loader.user_config_profile = Some("work".parse()?);
-    let config = ConfigBuilder::default()
-        .codex_home(home.path().to_path_buf())
-        .loader_overrides(loader)
-        .build()
-        .await?;
-    assert!(config_persistence::has_explicit_resume_permission_override(
-        &config,
-        &ConfigOverrides::default()
-    ));
     Ok(())
 }
 
@@ -3192,13 +3285,8 @@ async fn remote_resume_rejects_explicit_permission_override() -> Result<()> {
     )?;
     app.config.codex_home = home.path().to_path_buf().abs();
     let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
-    let selected = home.path().join("work.config.toml");
-    std::fs::write(
-        &selected,
-        "[permissions.unused]\nextends = \":read-only\"\n",
-    )?;
-    app.loader_overrides.user_config_path = Some(selected.abs());
-    app.loader_overrides.user_config_profile = Some("work".parse()?);
+    app.cli_kv_overrides
+        .push(("default_permissions".into(), ":workspace".into()));
     assert!(
         !config_persistence::has_explicit_resume_permission_override(
             &app.config,
@@ -3258,6 +3346,7 @@ default_permissions = "locked-down"
     app.harness_overrides.sandbox_mode = Some(SandboxMode::WorkspaceWrite);
     app.harness_overrides.permission_profile = Some(PermissionProfile::workspace_write());
 
+    app.set_approvals_reviewer_in_app_and_widget(ApprovalsReviewer::AutoReview);
     assert!(
         app.apply_permission_profile_selection(PermissionProfileSelection {
             profile_id: "locked-down".to_string(),
@@ -3288,6 +3377,14 @@ default_permissions = "locked-down"
     assert_eq!(
         app.runtime_permission_profile_override,
         Some(RuntimePermissionProfileOverride::from_config(&app.config))
+    );
+    let mut destination = app.config.clone();
+    destination.approvals_reviewer = ApprovalsReviewer::User;
+    app.apply_runtime_policy_overrides(&mut destination, RuntimePolicyOverrideScope::ExplicitOnly)?;
+    assert_eq!(destination.approvals_reviewer, ApprovalsReviewer::User);
+    assert!(
+        !app.resume_permission_overrides(&destination)
+            .approvals_reviewer
     );
     let op = match app_event_rx.try_recv() {
         Ok(AppEvent::CodexOp(op)) => op,
@@ -5819,7 +5916,6 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             is_first,
             /*tooltip_override*/ None,
             /*auth_plan*/ None,
-            /*show_fast_status*/ false,
         )) as Arc<dyn HistoryCell>
     };
 
@@ -5966,6 +6062,7 @@ async fn make_test_app() -> Box<App> {
         loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
         cloud_config_bundle: CloudConfigBundleLoader::default(),
         runtime_approval_policy_override: None,
+        runtime_approvals_reviewer_override: None,
         runtime_permission_profile_override: None,
         file_search,
         transcript_cells: Vec::new(),
@@ -5999,6 +6096,7 @@ async fn make_test_app() -> Box<App> {
         reconnect: Default::default(),
         pending_right_click_paste: None,
         right_click_paste_environment: super::right_click_paste::PasteEnvironment {
+            primary: false,
             platform_default: true,
             ssh: false,
             wsl: false,
@@ -6044,6 +6142,8 @@ async fn make_test_app() -> Box<App> {
         startup_pending_protected_request: false,
         rate_limit_hard_stop_generation: 0,
         rate_limit_refresh_state: Default::default(),
+        pending_mcp_login_start: None,
+        active_mcp_login_ids: HashMap::new(),
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
         recap: recap::RecapState::default(),
@@ -6081,6 +6181,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             cloud_config_bundle: CloudConfigBundleLoader::default(),
             runtime_approval_policy_override: None,
+            runtime_approvals_reviewer_override: None,
             runtime_permission_profile_override: None,
             file_search,
             transcript_cells: Vec::new(),
@@ -6114,6 +6215,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             reconnect: Default::default(),
             pending_right_click_paste: None,
             right_click_paste_environment: super::right_click_paste::PasteEnvironment {
+                primary: false,
                 platform_default: true,
                 ssh: false,
                 wsl: false,
@@ -6159,6 +6261,8 @@ pub(super) async fn make_test_app_with_channels() -> (
             startup_pending_protected_request: false,
             rate_limit_hard_stop_generation: 0,
             rate_limit_refresh_state: Default::default(),
+            pending_mcp_login_start: None,
+            active_mcp_login_ids: HashMap::new(),
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
             recap: recap::RecapState::default(),
@@ -7521,7 +7625,6 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             is_first,
             /*tooltip_override*/ None,
             /*auth_plan*/ None,
-            /*show_fast_status*/ false,
         )) as Arc<dyn HistoryCell>
     };
 
@@ -8128,7 +8231,7 @@ async fn remembered_current_cwd_stays_at_launch_across_in_app_resumes() -> Resul
         Arc::new(EnvironmentManager::default_for_tests()),
     ))
     .await?;
-    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
     app.config = config;
     app.launch_cwd = launch_cwd.clone();
     app.state_db = state_db;
@@ -9178,7 +9281,10 @@ async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
         .await
         .expect("pending permission selection should block the cyber model");
         assert_eq!(app.chat_widget.current_model(), previous_model);
-        app.pending_server_profiles.remove(&thread_id);
+        let previous_selection = app.pending_server_profiles.remove(&thread_id).unwrap();
+        app.agents_overview
+            .requested_permission_profiles
+            .insert(thread_id, previous_selection);
         app.handle_event(
             &mut tui,
             &mut app_server,
@@ -9188,6 +9294,11 @@ async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
         .expect("model selection should succeed");
 
         assert!(app.pending_server_profiles.contains_key(&thread_id));
+        assert!(
+            !app.agents_overview
+                .requested_permission_profiles
+                .contains_key(&thread_id)
+        );
         let notification = next_thread_settings_updated(&mut app_server, thread_id).await;
         assert_eq!(
             notification.thread_settings.approval_policy,
