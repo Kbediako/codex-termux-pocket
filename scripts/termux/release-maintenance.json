@@ -1,12 +1,6 @@
 {
   "format_version": 1,
-  "request_id": "issue158-retire-merged-pr159-20261003",
-  "operation": "retire-branches",
-  "branches": [
-    {
-      "name": "maint/issue158-png-http-body",
-      "sha": "33ebfcdf253b524823d28e4453cb9b8422433da7",
-      "pr_number": 159
-    }
-  ]
+  "request_id": "issue158-final-post-cleanup-20261003",
+  "operation": "dispatch-checks",
+  "phase": "post"
 }
