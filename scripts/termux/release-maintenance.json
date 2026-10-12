@@ -1,8 +1,14 @@
 {
   "format_version": 1,
-  "request_id": "issue168-export-alpha1635-20261011",
+  "request_id": "issue168-export-alpha1635-batch1-20261012",
   "operation": "export-upstream",
   "upstream_tag": "rust-v0.163.0-alpha.5",
   "upstream_tag_object": "cbc0286d69de4e34227809c9481dfda5f59162a5",
-  "upstream_commit": "cf4041fa09238f33cf106e3046801ed23590bae8"
+  "upstream_commit": "cf4041fa09238f33cf106e3046801ed23590bae8",
+  "object_batch": {
+    "base_source_sha": "02e422795c4a1234c1a5a59f85da16ba8ca71210",
+    "inventory_sha256": "70f4ae7798ff9d8a25932eb5db49c6dd37171e08105e6b80302d77e3a65158bc",
+    "offset": 0,
+    "count": 2000
+  }
 }
