@@ -28,6 +28,48 @@ binary blobs use the blob endpoint. No commit, ref, checkout, workflow file,
 publication or promoted manifest is changed. The limits are 2,000 blobs, 8 MiB
 per blob and 64 MiB total; a moved main or mismatched hash fails closed.
 
+### Explicit source-object batches
+
+An oversized full export must remain failed; do not increase its limits or rerun
+unchanged input. When direct maintainer Git transport is unavailable, the same
+`export-upstream` operation optionally accepts an `object_batch` object with
+exactly `base_source_sha`, `inventory_sha256`, `offset` and `count`. No other
+operation accepts this field. Introduce or change this permanent control through
+a direct maintainer commit and accept its checks before requesting a batch.
+
+The baseline is a full commit SHA, must be an ancestor of the request source, and
+stays fixed across all batches. The inventory contains every distinct eligible
+non-workflow blob not reachable from that baseline, sorted by SHA, with sorted
+paths and byte sizes. Its digest is SHA-256 of UTF-8 JSON for the object with keys
+`base_source_sha`, `upstream_commit` and `blobs`, using `sort_keys=True` and
+`separators=(",", ":")`, default ASCII escaping and no trailing newline. Each blob
+has exactly `sha`, `paths` and `size`. Independently review that complete inventory
+against the original verified Git bundle before approving its digest.
+
+`offset` is a nonnegative integer; `count` is an integer from 1 through 2,000.
+Their exact half-open range must fit the inventory; no automatic truncation or
+continuation occurs. The 8 MiB per-blob and 64 MiB total limits apply to the whole
+inventory, not just the selected slice. Inventory JSON is additionally limited
+to 2 MiB. Before any write, the controller verifies baseline ancestry, inventory
+digest, every bound, and every selected blob's exact size and Git hash. Existing
+flat-tree/binary upload validation and live-main checks are unchanged.
+
+Batched `source-objects.json` uses format 2 and `scope: "batch"`, retains the full
+inventory and exact batch bounds, and identifies the triggering request source.
+`next_offset: null` only means the slice reaches the end: it does not prove any
+previous slice was staged. `covers_full_inventory` is true only when this one
+receipt covers the whole inventory. Logs explicitly identify batch scope.
+
+Use a unique owner-committed request per slice and stop for each workflow result.
+Before accepting transport, independently verify every successful run, retained
+receipt, inventory digest and remote object identity. Require a gap-free,
+non-overlapping union covering the approved inventory; do not combine different
+baselines, upstream commits or inventory digests. Preserve failed runs as failed.
+A batch never advances refs, installs partial source, resolves a merge, publishes,
+or substitutes for preparation or any runtime gate. An interrupted upload may
+leave only unreferenced objects; exact retries remain content-addressed and must
+be recorded explicitly rather than treated as new source acceptance.
+
 These stored objects are transport only, not an integrated or validated source.
 A maintainer must review the actual merge, construct its complete tree through
 direct Git writes and use the ordinary preparation process. `record-upstream`

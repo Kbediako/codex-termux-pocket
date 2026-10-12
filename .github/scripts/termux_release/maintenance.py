@@ -85,7 +85,13 @@ def validate_request(value):
     operation = value.get("operation")
     if operation not in FIELDS:
         raise ValueError("unknown maintenance operation")
-    if set(value) != {"format_version", "request_id", "operation"} | FIELDS[operation]:
+    expected = {"format_version", "request_id", "operation"} | FIELDS[operation]
+    if operation == "export-upstream" and "object_batch" in value:
+        from source_object_batch import validate
+
+        validate(value["object_batch"])
+        expected.add("object_batch")
+    if set(value) != expected:
         raise ValueError("missing or unexpected maintenance fields")
     if not isinstance(value["request_id"], str) or not re.fullmatch(
         r"[A-Za-z0-9_.-]{1,80}", value["request_id"]
@@ -202,11 +208,21 @@ def export_upstream(request, source):
     if request["operation"] == "export-upstream":
         from source_objects import stage
 
-        objects = stage(os.environ["GITHUB_REPOSITORY"], source, commit, api, live_main)
+        objects = stage(
+            os.environ["GITHUB_REPOSITORY"],
+            source,
+            commit,
+            api,
+            live_main,
+            object_batch=request.get("object_batch"),
+        )
         (folder / "source-objects.json").write_text(
             json.dumps(objects, indent=2) + "\n"
         )
-        print(json.dumps({"staged_upstream_blobs": objects["blob_count"]}), flush=True)
+        summary = {"staged_upstream_blobs": objects["blob_count"]}
+        if "batch" in objects:
+            summary.update(transport_scope="batch", batch=objects["batch"])
+        print(json.dumps(summary), flush=True)
     if request["operation"] == "import-upstream":
         # Transfer the unmodified official tag and original Git objects only.
         # This does not check out, rewrite, or update any workflow on main.
