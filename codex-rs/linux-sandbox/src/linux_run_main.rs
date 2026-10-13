@@ -25,12 +25,12 @@ use crate::bwrap::BwrapOptions;
 use crate::bwrap::WSL_INTEROP_DIR;
 use crate::bwrap::WSLG_DISTRO_ROOT;
 use crate::bwrap::create_bwrap_command_args;
-use crate::landlock::apply_permission_profile_to_current_thread;
-use crate::landlock::is_termux_prefix;
 use crate::launcher::exec_bwrap;
+use crate::launcher::initialize_bwrap_launcher;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
+use crate::seccomp::apply_permission_profile_to_current_thread;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
@@ -86,10 +86,8 @@ enum ProtectedCreateRemoval {
 #[derive(Debug, Parser)]
 /// CLI surface for the Linux sandbox helper.
 ///
-/// The type name remains `LandlockCommand` for compatibility with existing
-/// wiring, but bubblewrap is now the default filesystem sandbox and Landlock
-/// is the legacy fallback.
-pub struct LandlockCommand {
+/// Uses bubblewrap for filesystem isolation and seccomp for syscall filtering.
+pub struct LinuxSandboxCommand {
     /// It is possible that the cwd used in the context of the sandbox policy
     /// is different from the cwd of the process to spawn.
     #[arg(long = "sandbox-policy-cwd")]
@@ -166,11 +164,11 @@ pub struct LandlockCommand {
 /// 2. Apply in-process restrictions (no_new_privs + seccomp).
 /// 3. `execvp` into the final command.
 pub fn run_main() -> ! {
-    let LandlockCommand {
+    let LinuxSandboxCommand {
         sandbox_policy_cwd,
         command_cwd,
         permission_profile,
-        mut use_legacy_landlock,
+        use_legacy_landlock,
         apply_seccomp_then_exec,
         managed_network,
         proxy_route_spec,
@@ -178,7 +176,7 @@ pub fn run_main() -> ! {
         no_proc,
         inherit_pid_namespace,
         command,
-    } = LandlockCommand::parse();
+    } = LinuxSandboxCommand::parse();
     let allow_network_for_proxy = managed_network.is_some();
 
     if command.is_empty() {
@@ -187,34 +185,13 @@ pub fn run_main() -> ! {
     if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
     }
-    let EffectivePermissions {
-        mut permission_profile,
-        mut file_system_sandbox_policy,
-        mut network_sandbox_policy,
-    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
-    let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);
-    if termux_fallback && !file_system_sandbox_policy.has_full_disk_write_access() {
-        // Termux cannot isolate the daemon socket directory with bubblewrap.
-        // Do not widen restricted reads or preserve a network grant here.
-        // Reduce supported profiles to global read-only with no sockets, and
-        // install socket isolation before permitting the legacy backend.
-        if !file_system_sandbox_policy.has_full_disk_read_access() {
-            panic!("Termux restricted-read policies require bubblewrap");
-        }
-        permission_profile = PermissionProfile::read_only();
-        (file_system_sandbox_policy, network_sandbox_policy) =
-            permission_profile.to_runtime_permissions();
-        crate::termux_socket_isolation::install_on_current_thread()
-            .unwrap_or_else(|err| panic!("failed to isolate Termux command sockets: {err}"));
-    }
-    use_legacy_landlock |= termux_fallback;
     ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
-    if !termux_fallback {
-        ensure_legacy_landlock_mode_supports_policy(
-            use_legacy_landlock,
-            &file_system_sandbox_policy,
-        );
-    }
+    let EffectivePermissions {
+        permission_profile,
+        file_system_sandbox_policy,
+        network_sandbox_policy,
+    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
+    ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);
 
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
@@ -369,7 +346,7 @@ pub fn run_main() -> ! {
         );
     }
 
-    // Legacy path: Landlock enforcement only, when bwrap sandboxing is not enabled.
+    // Legacy pipeline: apply in-process restrictions without bubblewrap.
     if let Err(e) = apply_permission_profile_to_current_thread(
         &permission_profile,
         &sandbox_policy_cwd,
@@ -380,13 +357,6 @@ pub fn run_main() -> ! {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
     exec_or_panic(command);
-}
-
-fn should_use_termux_landlock_fallback(allow_network_for_proxy: bool) -> bool {
-    let is_termux = std::env::var_os("PREFIX")
-        .as_deref()
-        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)));
-    is_termux && !allow_network_for_proxy
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +426,9 @@ fn run_bwrap_with_proc_fallback(
     proxy_controls: Vec<File>,
 ) -> ! {
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
+
+    // Select before the preflight, whose synthetic policy omits writable roots.
+    initialize_bwrap_launcher(file_system_sandbox_policy, sandbox_policy_cwd);
 
     if options.mount_proc
         && !preflight_proc_mount_support(options)
@@ -641,6 +614,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         exec_bwrap(args, preserved_files);
     }
 
+    drop(preserved_files);
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);

@@ -664,7 +664,6 @@ fn config_overrides_from_interactive(
             .flatten(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: interactive.oss.then_some(true),
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
@@ -1113,6 +1112,14 @@ fn config_check(config: &Config) -> DoctorCheck {
         config.model.as_deref().unwrap_or("<default>")
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
+    details.push(format!(
+        "configured TUI mode: {}",
+        if config.tui_fullscreen_transcript {
+            "fullscreen"
+        } else {
+            "scrollback"
+        }
+    ));
     details.push(format!("log dir: {}", config.log_dir.display()));
     details.push(format!(
         "sqlite home: {}",
@@ -1722,6 +1729,7 @@ fn terminal_check(no_color_flag: bool) -> DoctorCheck {
 
 #[cfg(windows)]
 fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     use windows_sys::Win32::System::Console::GetConsoleCP;
@@ -1745,8 +1753,8 @@ fn windows_console_details() -> Vec<String> {
         GetStdHandle(STD_ERROR_HANDLE)
     }));
 
-    fn console_mode_detail(label: &str, handle: isize) -> String {
-        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    fn console_mode_detail(label: &str, handle: HANDLE) -> String {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return format!("{label}: unavailable");
         }
         let mut mode = 0_u32;
@@ -3220,7 +3228,7 @@ mod tests {
         let arg0_paths = Arg0DispatchPaths {
             codex_self_exe: Some(PathBuf::from("/bin/codex")),
             codex_linux_sandbox_exe: Some(PathBuf::from("/bin/codex-linux-sandbox")),
-            main_execve_wrapper_exe: Some(PathBuf::from("/bin/codex-execve-wrapper")),
+            ..Default::default()
         };
 
         let overrides = config_overrides_from_interactive(&interactive, &arg0_paths);
@@ -3239,10 +3247,6 @@ mod tests {
         assert_eq!(
             overrides.codex_linux_sandbox_exe,
             arg0_paths.codex_linux_sandbox_exe
-        );
-        assert_eq!(
-            overrides.main_execve_wrapper_exe,
-            arg0_paths.main_execve_wrapper_exe
         );
     }
 

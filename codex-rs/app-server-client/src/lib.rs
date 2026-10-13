@@ -1,3 +1,7 @@
+// Release builds exceed rustc's default query depth when laying out the async
+// MessageProcessor::handle_initialized_client_request future.
+#![recursion_limit = "256"]
+
 //! Shared in-process app-server client facade for CLI surfaces.
 //!
 //! This crate wraps [`codex_app_server::in_process`] behind a single async API
@@ -1082,6 +1086,7 @@ mod tests {
             thread_id: "thread".to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "turn".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::Completed,

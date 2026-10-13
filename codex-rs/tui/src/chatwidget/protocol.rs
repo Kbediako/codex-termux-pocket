@@ -359,6 +359,7 @@ impl ChatWidget {
             | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
+            | ServerNotification::ThreadReadStateChanged(_)
             | ServerNotification::ThreadReverted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadPredictionUpdated(_)
@@ -512,6 +513,12 @@ impl ChatWidget {
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
                     {
                         self.last_non_retry_error = None;
+                        if replay_kind.is_none() {
+                            if !self.input_queue.user_turn_pending_start {
+                                self.update_task_running_state();
+                            }
+                            self.maybe_send_next_queued_input();
+                        }
                     } else {
                         self.handle_non_retry_error(error.message, error.codex_error_info);
                     }

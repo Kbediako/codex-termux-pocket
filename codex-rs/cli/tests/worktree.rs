@@ -198,7 +198,7 @@ sandbox_mode = "workspace-write"
 windows.sandbox = "unelevated"
 tui.disable_paste_burst = true
 [otel]
-metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" }} }}
+metrics_exporter = "none"
 [model_providers.local]
 name = "local test"
 base_url = "{}/v1"
@@ -210,7 +210,6 @@ trust_level = "trusted"
 "#,
             server.uri(),
             backend == "daemon",
-            server.uri(),
             server.uri(),
             serde_json::to_string(&source)?,
             serde_json::to_string(&launcher)?
@@ -281,7 +280,8 @@ trust_level = "trusted"
         #[cfg(unix)]
         std::os::unix::fs::symlink(program.canonicalize()?, &managed)?;
         #[cfg(not(unix))]
-        fs::hard_link(&program, &managed).or_else(|_| fs::copy(&program, &managed).map(|_| ()))?;
+        fs::hard_link(&program, &managed)
+            .or_else(|_| codex_utils_cargo_bin::copy_executable(&program, &managed))?;
         fs::create_dir(home.join("app-server-daemon"))?;
         fs::write(
             home.join("app-server-daemon/settings.json"),
@@ -407,7 +407,15 @@ trust_level = "trusted"
             args.extend(["--cd".into(), source.join(".codex").display().to_string()]);
         }
         if analytics {
-            args.extend(["-c".into(), "analytics.enabled=true".into()]);
+            args.extend([
+                "-c".into(),
+                "analytics.enabled=true".into(),
+                "-c".into(),
+                format!(
+                    "otel.metrics_exporter={{otlp-http={{endpoint=\"{}/metrics\",protocol=\"json\"}}}}",
+                    server.uri()
+                ),
+            ]);
         }
         args.push(prompt.into());
         if previous.is_empty() {
@@ -660,6 +668,10 @@ trust_level = "trusted"
                 ("update_interval_setting", "default"),
                 ("shutdown_grace_setting", "default"),
             ]);
+            #[cfg(windows)]
+            if codex_app_server_daemon::is_elevated()? {
+                expected_tags.insert("daemon_selection_reason", "elevated_windows");
+            }
             if backend == "daemon" {
                 expected_tags.extend([
                     ("auto_update", "disabled"),
@@ -669,7 +681,7 @@ trust_level = "trusted"
             }
             assert_eq!(tags, expected_tags);
         } else {
-            assert!(metrics.is_empty(), "analytics disabled");
+            assert!(metrics.is_empty(), "metrics exporter disabled");
         }
         let (body, checkout, metadata) = observed
             .with_context(|| {

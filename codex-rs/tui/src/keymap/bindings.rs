@@ -164,7 +164,7 @@ macro_rules! define_runtime_action_bindings {
         }
 
         /// Return the configured slot for one runtime action, including global fallbacks.
-        pub(super) fn configured_binding_for_action(
+        pub(crate) fn configured_binding_for_action(
             keymap: &TuiKeymap,
             action: KeymapActionId,
         ) -> Option<&Option<KeybindingsSpec>> {
@@ -211,6 +211,7 @@ macro_rules! define_runtime_action_bindings {
             action: &str,
         ) -> Option<&'a [KeyBinding]> {
             match (context, action) {
+                ("global", "leader") => Some(runtime_keymap.chords.leader.as_slice()),
                 $(
                     $(
                         ($context, stringify!($action)) => {
@@ -428,6 +429,7 @@ define_runtime_action_bindings! {
         archive,
         delete,
         hide,
+        toggle_pin,
         toggle_grouping,
     ],
     "approval" => Approval, approval, approval [

@@ -12,6 +12,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_rmcp_client::InProcessTransportFactory;
 use codex_rmcp_client::RmcpClient;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
@@ -113,6 +114,9 @@ async fn test_step(
     config
         .server_permission_profiles
         .insert(SERVER_NAME.to_string(), config.permission_profile.clone());
+    config
+        .environment_use_mxc
+        .insert(format!("{label}-environment"), label == "new");
     let config = Arc::new(config);
     let prepared = PreparedMcpCall::new(
         Arc::clone(&connections),
@@ -223,19 +227,26 @@ async fn prepared_call_keeps_captured_connection_and_authority_after_refresh() -
             old_call.config().approval_policy.value(),
             old_call.permission_profile(),
             old_call.config().approvals_reviewer,
+            old_call.config().environment_use_mxc.get("old-environment"),
         ),
         (
             AskForApproval::Never,
             &PermissionProfile::Disabled,
             ApprovalsReviewer::User,
+            Some(&false),
         )
     );
     assert_eq!(
         (
             new_call.config().approval_policy.value(),
             new_call.config().approvals_reviewer,
+            new_call.config().environment_use_mxc.get("new-environment"),
         ),
-        (AskForApproval::OnRequest, ApprovalsReviewer::AutoReview)
+        (
+            AskForApproval::OnRequest,
+            ApprovalsReviewer::AutoReview,
+            Some(&true)
+        )
     );
 
     drop(old.step);
@@ -398,4 +409,85 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
     refresh
         .await
         .expect("catalog refresh should finish after preparation");
+}
+
+#[tokio::test]
+async fn sandbox_executable_requires_local_stdio_and_a_full_cli() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
+    let step = test_step(
+        "old",
+        AppToolApproval::Approve,
+        /*supports_sandbox_state_meta*/ true,
+    )
+    .await;
+    let call = step
+        .step
+        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .expect("prepared call");
+    // Use a probe-capable CLI so remote/HTTP exclusions cannot pass merely
+    // because the supplied executable lacks the sandbox capability.
+    let executable = codex_utils_cargo_bin::cargo_bin("codex")?;
+    for (server, runtime_environment, path, expected) in [
+        (
+            serde_json::json!({"command": "mcp"}),
+            "local",
+            Some(executable.clone()),
+            Some(AbsolutePathBuf::from_absolute_path_checked(&executable)?),
+        ),
+        // The Rust test harness accepts `sandbox --help`, but must not be
+        // advertised as a sandbox launcher: it lacks `--sandbox-state-json`.
+        (
+            serde_json::json!({"command": "mcp"}),
+            "local",
+            Some(std::env::current_exe()?),
+            None,
+        ),
+        (serde_json::json!({"command": "mcp"}), "local", None, None),
+        #[cfg(unix)]
+        (
+            serde_json::json!({"command": "mcp"}),
+            "local",
+            Some(std::ffi::OsStr::from_bytes(b"/non-utf8-\xff/codex").into()),
+            None,
+        ),
+        (
+            serde_json::json!({"command": "mcp"}),
+            "local",
+            Some("codex".into()),
+            None,
+        ),
+        (
+            serde_json::json!({"command": "mcp", "environment_id": "remote"}),
+            "remote",
+            Some(executable.clone()),
+            None,
+        ),
+        (
+            serde_json::json!({"command": "mcp"}),
+            "remote",
+            Some(executable.clone()),
+            None,
+        ),
+        (
+            serde_json::json!({"url": "http://127.0.0.1:8080/mcp"}),
+            "local",
+            Some(executable),
+            None,
+        ),
+    ] {
+        let mut call = call.clone();
+        let config = Arc::make_mut(&mut call.config);
+        config.codex_self_exe = path;
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_config(
+            SERVER_NAME.to_owned(),
+            serde_json::from_value(server)?,
+        ));
+        config.mcp_server_catalog = catalog.build();
+        call.server_metadata.environment_id = runtime_environment.to_owned();
+        assert_eq!(call.sandbox_codex_executable().await, expected);
+    }
+    Ok(())
 }

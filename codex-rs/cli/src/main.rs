@@ -1,6 +1,5 @@
 use clap::Args;
 use clap::CommandFactory;
-use clap::FromArgMatches;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
@@ -40,8 +39,6 @@ use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
 use std::sync::Arc;
 use supports_color::Stream;
 
@@ -62,6 +59,9 @@ mod daemon_telemetry;
 mod desktop_app;
 mod doctor;
 #[cfg(test)]
+#[path = "exec_args_tests.rs"]
+mod exec_args_tests;
+#[cfg(test)]
 #[path = "exec_server_args_tests.rs"]
 mod exec_server_args_tests;
 mod exec_server_auth;
@@ -76,6 +76,7 @@ mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
+mod sandbox_uninstall;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -189,7 +190,7 @@ enum Subcommand {
     Doctor(DoctorCommand),
 
     /// Run commands within a Codex-provided sandbox.
-    Sandbox(HostSandboxArgs),
+    Sandbox(SandboxCommand),
 
     /// Debugging tools.
     Debug(DebugCommand),
@@ -240,10 +241,6 @@ enum Subcommand {
 
     /// Inspect feature flags.
     Features(FeaturesCli),
-
-    /// Update Codex from source on Termux.
-    #[clap(name = "self-update", visible_alias = "update-self")]
-    SelfUpdate,
 }
 
 #[derive(Debug, Parser)]
@@ -461,6 +458,20 @@ impl clap::FromArgMatches for SessionTuiCli {
     fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         self.0.update_from_arg_matches(matches)
     }
+}
+
+#[derive(Debug, Parser)]
+struct SandboxCommand {
+    #[command(flatten)]
+    host: HostSandboxArgs,
+
+    #[command(subcommand)]
+    subcommand: Option<SandboxSubcommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum SandboxSubcommand {
+    Uninstall(sandbox_uninstall::SandboxUninstallCommand),
 }
 
 #[cfg(target_os = "macos")]
@@ -1031,15 +1042,13 @@ async fn cli_main(
     arg0_paths: Arg0DispatchPaths,
     remote_control_disabled: bool,
 ) -> anyhow::Result<()> {
-    let app = command_with_version();
-    let matches = app.get_matches();
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
         feature_toggles,
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    } = MultitoolCli::parse();
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe
@@ -1355,7 +1364,7 @@ async fn cli_main(
                             .build()
                             .await
                             .map_err(anyhow::Error::from);
-                        let http_client_factory = updater_http_client_factory(config);
+                        let http_client_factory = updater_http_client_factory(config)?;
                         if matches!(
                             daemon_cli.subcommand,
                             AppServerDaemonSubcommand::Update { .. }
@@ -1420,7 +1429,8 @@ async fn cli_main(
                 }
             }
         }
-        Some(Subcommand::RemoteControl(remote_control_cli)) => {
+        Some(Subcommand::RemoteControl(mut remote_control_cli)) => {
+            remote_control_cli.no_daemon |= interactive.no_daemon;
             let subcommand_name = remote_control_cli.subcommand_name();
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -1658,7 +1668,10 @@ async fn cli_main(
             codex_cloud_tasks::run_main(cloud_cli, arg0_paths.codex_linux_sandbox_exe.clone())
                 .await?;
         }
-        Some(Subcommand::Sandbox(mut sandbox_cli)) => {
+        Some(Subcommand::Sandbox(SandboxCommand {
+            host: mut sandbox_cli,
+            subcommand,
+        })) => {
             let config_profile = sandbox_cli
                 .config_profile
                 .as_ref()
@@ -1686,6 +1699,9 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 "sandbox",
             )?;
+            if let Some(SandboxSubcommand::Uninstall(command)) = subcommand {
+                return command.run();
+            }
             let loader_overrides = loader_overrides_for_profile(config_profile)?;
             #[cfg(target_os = "macos")]
             codex_cli::run_command_under_seatbelt(
@@ -1862,9 +1878,6 @@ async fn cli_main(
                 disable_feature_in_config(&feature).await?;
             }
         },
-        Some(Subcommand::SelfUpdate) => {
-            run_self_update()?;
-        }
     }
 
     Ok(())
@@ -2014,7 +2027,6 @@ async fn run_debug_prompt_input_command(
         cwd: shared.cwd,
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,
         show_raw_agent_reasoning: shared.oss.then_some(true),
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
@@ -2267,7 +2279,6 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
-        Some(Subcommand::SelfUpdate) => Some("self-update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
@@ -2347,16 +2358,10 @@ async fn print_app_server_daemon_output(command: AppServerLifecycleCommand) -> a
 
 fn updater_http_client_factory(
     config: anyhow::Result<codex_core::config::Config>,
-) -> codex_http_client::HttpClientFactory {
-    match config {
-        Ok(config) => config.http_client_factory(),
-        Err(error) => {
-            eprintln!("warning: failed to load updater network configuration: {error}");
-            codex_http_client::HttpClientFactory::new(
-                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
-            )
-        }
-    }
+) -> anyhow::Result<codex_http_client::HttpClientFactory> {
+    let mut config = config?;
+    codex_app_server::in_process::EmbeddedNetworkPolicy::default().activate(&mut config);
+    Ok(config.http_client_factory())
 }
 
 async fn print_app_server_remote_control_output(
@@ -2703,200 +2708,9 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
 }
 
 fn print_completion(cmd: CompletionCommand) {
-    let mut app = command_with_version();
+    let mut app = MultitoolCli::command();
     let name = "codex";
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
-}
-
-fn run_self_update() -> anyhow::Result<()> {
-    let prefix = std::env::var("PREFIX").unwrap_or_default();
-    if !prefix.contains("com.termux") {
-        anyhow::bail!(
-            "self-update is supported only on Termux (PREFIX must contain \"com.termux\")"
-        );
-    }
-
-    let src_dir = resolve_codex_src_dir()?;
-    if !src_dir.is_dir() {
-        anyhow::bail!(
-            "codex source directory does not exist: {}",
-            src_dir.display()
-        );
-    }
-
-    let workspace_dir = src_dir.join("codex-rs");
-    if !workspace_dir.is_dir() {
-        anyhow::bail!(
-            "codex workspace directory does not exist: {}",
-            workspace_dir.display()
-        );
-    }
-
-    let cli_dir = workspace_dir.join("cli");
-    if !cli_dir.is_dir() {
-        anyhow::bail!("codex CLI directory does not exist: {}", cli_dir.display());
-    }
-    let home =
-        std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
-    let cargo_target_dir = PathBuf::from(home).join(".cache").join("codex-target");
-
-    let mut git_fetch = Command::new("git");
-    git_fetch.args(["fetch"]).current_dir(&src_dir);
-    run_command(&mut git_fetch, "git fetch")?;
-
-    let mut git_pull = Command::new("git");
-    git_pull.args(["pull", "--ff-only"]).current_dir(&src_dir);
-    run_command(&mut git_pull, "git pull --ff-only")?;
-
-    if std::env::var("CODEX_TERMUX_ALLOW_SOURCE_FALLBACK")
-        .ok()
-        .as_deref()
-        != Some("1")
-    {
-        anyhow::bail!(
-            "Termux source self-update is disabled by default: the local Android Cargo build still fails at the final V8 link (undefined symbols bcmp and __errno_location). Use codex-update-alpha --mode remote-artifact, or set CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 to retry it experimentally."
-        );
-    }
-
-    let (rusty_v8_archive, rusty_v8_binding_path) =
-        prepare_termux_v8_musl_overrides(&workspace_dir, &cargo_target_dir)?;
-
-    let mut cargo_install = Command::new("cargo");
-    cargo_install
-        .arg("install")
-        .arg("--path")
-        .arg(&cli_dir)
-        .arg("--locked")
-        .arg("--root")
-        .arg(&prefix)
-        .arg("--force")
-        .env("CARGO_TARGET_DIR", &cargo_target_dir)
-        .env("CARGO_PROFILE_RELEASE_LTO", "false")
-        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")
-        .env("CARGO_BUILD_JOBS", "1")
-        .env("RUSTY_V8_ARCHIVE", &rusty_v8_archive)
-        .env("RUSTY_V8_SRC_BINDING_PATH", &rusty_v8_binding_path)
-        .current_dir(&workspace_dir);
-    run_command(
-        &mut cargo_install,
-        "cargo install --locked --path <cli> --root <prefix> --force (termux low-mem)",
-    )?;
-
-    Ok(())
-}
-
-fn locked_package_version(
-    lockfile: &std::path::Path,
-    package_name: &str,
-) -> anyhow::Result<String> {
-    let contents = std::fs::read_to_string(lockfile)
-        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", lockfile.display()))?;
-    let package_line = format!("name = \"{package_name}\"");
-    let mut name_matches = false;
-
-    for line in contents.lines() {
-        if line == "[[package]]" {
-            name_matches = false;
-            continue;
-        }
-        if line == package_line {
-            name_matches = true;
-            continue;
-        }
-        if name_matches
-            && let Some(version) = line
-                .strip_prefix("version = \"")
-                .and_then(|value| value.strip_suffix('\"'))
-        {
-            return Ok(version.to_string());
-        }
-    }
-
-    anyhow::bail!(
-        "failed to find a pinned version for package {package_name:?} in {}",
-        lockfile.display()
-    )
-}
-
-fn prepare_termux_v8_musl_overrides(
-    workspace_dir: &std::path::Path,
-    cargo_target_dir: &std::path::Path,
-) -> anyhow::Result<(String, PathBuf)> {
-    let v8_version = locked_package_version(&workspace_dir.join("Cargo.lock"), "v8")?;
-    let v8_target = "aarch64-unknown-linux-musl";
-    let release_tag = format!("rusty-v8-v{v8_version}");
-    let binding_dir = cargo_target_dir.join("v8").join(format!("v{v8_version}"));
-    let binding_path = binding_dir.join(format!("src_binding_release_{v8_target}.rs"));
-    let binding_url = format!(
-        "https://github.com/openai/codex/releases/download/{release_tag}/src_binding_release_{v8_target}.rs"
-    );
-    let archive_url = format!(
-        "https://github.com/openai/codex/releases/download/{release_tag}/librusty_v8_release_{v8_target}.a.gz"
-    );
-
-    std::fs::create_dir_all(&binding_dir)
-        .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", binding_dir.display()))?;
-
-    if !binding_path.is_file() {
-        let mut curl = Command::new("curl");
-        curl.arg("-fsSL")
-            .arg(&binding_url)
-            .arg("-o")
-            .arg(&binding_path);
-        run_command(&mut curl, "download Termux musl rusty_v8 binding")?;
-    }
-
-    Ok((archive_url, binding_path))
-}
-
-fn resolve_codex_src_dir() -> anyhow::Result<PathBuf> {
-    match std::env::var("CODEX_SRC_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => expand_home_dir(&dir),
-        _ => {
-            let home = std::env::var("HOME")
-                .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
-            Ok(PathBuf::from(home).join("codex"))
-        }
-    }
-}
-
-fn expand_home_dir(path: &str) -> anyhow::Result<PathBuf> {
-    if path == "~" {
-        let home = std::env::var("HOME")
-            .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
-        return Ok(PathBuf::from(home));
-    }
-
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .map_err(|_| anyhow::anyhow!("HOME is not set; set CODEX_SRC_DIR"))?;
-        return Ok(PathBuf::from(home).join(rest));
-    }
-
-    Ok(PathBuf::from(path))
-}
-
-fn run_command(command: &mut Command, label: &str) -> anyhow::Result<()> {
-    let status = command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|err| anyhow::anyhow!("failed to run {label}: {err}"))?;
-
-    if !status.success() {
-        anyhow::bail!("{label} failed with status {status}");
-    }
-
-    Ok(())
-}
-
-fn command_with_version() -> clap::Command {
-    MultitoolCli::command().version(resolve_cli_version())
-}
-
-fn resolve_cli_version() -> &'static str {
-    option_env!("CODEX_CLI_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]
@@ -2984,17 +2798,66 @@ mod tests {
             .expect("config should load");
 
         assert_eq!(
-            updater_http_client_factory(Ok(config)).outbound_proxy_policy(),
+            updater_http_client_factory(Ok(config))
+                .expect("updater configuration")
+                .outbound_proxy_policy(),
             codex_http_client::OutboundProxyPolicy::RespectSystemProxy
         );
     }
 
     #[test]
-    fn updater_http_client_factory_falls_back_when_config_load_fails() {
+    fn updater_http_client_factory_propagates_config_errors() {
         assert_eq!(
             updater_http_client_factory(Err(anyhow::anyhow!("invalid config")))
-                .outbound_proxy_policy(),
-            codex_http_client::OutboundProxyPolicy::ReqwestDefault
+                .expect_err("invalid configuration must prevent updates")
+                .to_string(),
+            "invalid config"
+        );
+    }
+
+    #[tokio::test]
+    async fn updater_http_client_factory_enforces_application_requirements() {
+        let home = tempfile::tempdir().expect("temporary Codex home");
+        let requirements = home.path().join("requirements.toml");
+        std::fs::write(
+            &requirements,
+            r#"
+[application.network]
+enabled = true
+[application.network.domains]
+"bedrock-mantle.us-gov-west-1.api.aws" = "allow"
+"chatgpt.com" = "deny"
+"releases.openai.com" = "deny"
+"#,
+        )
+        .expect("write managed requirements");
+        let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+        overrides.system_requirements_path = Some(requirements);
+        let config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .loader_overrides(overrides)
+            .build()
+            .await
+            .expect("load managed configuration");
+        let factory = updater_http_client_factory(Ok(config)).expect("updater configuration");
+        for host in ["chatgpt.com", "releases.openai.com", "unlisted.example"] {
+            assert_eq!(
+                factory
+                    .network_policy()
+                    .acquire(&format!("https://{host}/").parse().expect("URL"))
+                    .err(),
+                Some(codex_http_client::NetworkPolicyDenied::Destination)
+            );
+        }
+        assert!(
+            factory
+                .network_policy()
+                .acquire(
+                    &"https://bedrock-mantle.us-gov-west-1.api.aws/"
+                        .parse()
+                        .expect("URL")
+                )
+                .is_ok()
         );
     }
 
@@ -3753,6 +3616,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sandbox_uninstall_respects_command_separator() {
+        let cli = MultitoolCli::try_parse_from(["codex", "sandbox", "uninstall"]).expect("parse");
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Sandbox(SandboxCommand {
+                subcommand: Some(SandboxSubcommand::Uninstall(_)),
+                ..
+            }))
+        ));
+
+        for args in [
+            vec!["codex", "sandbox", "--", "uninstall", "--help"],
+            vec![
+                "codex",
+                "sandbox",
+                "--profile",
+                "uninstall",
+                "--",
+                "uninstall",
+                "--help",
+            ],
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).expect("parse forwarded command");
+            let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+                panic!("expected sandbox command");
+            };
+            assert!(command.subcommand.is_none());
+            assert_eq!(command.host.command, vec!["uninstall", "--help"]);
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[test]
     fn sandbox_parses_permission_profile() {
@@ -3766,7 +3661,7 @@ mod tests {
         ])
         .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3787,7 +3682,7 @@ mod tests {
         ])
         .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3810,7 +3705,7 @@ mod tests {
             MultitoolCli::try_parse_from(["codex", "sandbox", "-P", ":workspace", "--", "echo"])
                 .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3825,7 +3720,7 @@ mod tests {
             MultitoolCli::try_parse_from(["codex", "sandbox", "--profile", "work", "--", "echo"])
                 .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -4475,19 +4370,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "`--strict-config` is not supported for `codex remote-control`"
-        );
-
-        let cli = MultitoolCli::try_parse_from(["codex", "--strict-config", "self-update"])
-            .expect("parse");
-        let err = reject_root_strict_config_for_subcommand(
-            cli.interactive.strict_config,
-            &cli.subcommand,
-        )
-        .expect_err("self-update should not support root --strict-config");
-
-        assert_eq!(
-            err.to_string(),
-            "`--strict-config` is not supported for `codex self-update`"
         );
     }
 

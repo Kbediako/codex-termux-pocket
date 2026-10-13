@@ -19,6 +19,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::shell_environment;
+use codex_protocol::shell_environment::CODEX_THREAD_ID_ENV_VAR;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::is_likely_sandbox_denied;
 use codex_utils_pty::ExecCommandSession;
@@ -47,6 +48,7 @@ use crate::network_policy_decisions::network_policy_decider;
 use crate::process::ExecProcessEventLog;
 use crate::process::sandbox_type_from_protocol;
 use crate::process_sandbox::prepare_exec_request_with_telemetry;
+use crate::protocol::ByteChunk;
 use crate::protocol::EXEC_CLOSED_METHOD;
 use crate::protocol::ExecClosedNotification;
 use crate::protocol::ExecEnvPolicy;
@@ -95,19 +97,12 @@ const EXITED_PROCESS_RETENTION: Duration = Duration::from_millis(25);
 #[cfg(not(test))]
 const EXITED_PROCESS_RETENTION: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
-struct RetainedOutputChunk {
-    seq: u64,
-    stream: ExecOutputStream,
-    chunk: Vec<u8>,
-}
-
 struct RunningProcess {
     session: ExecCommandSession,
     tty: bool,
     pipe_stdin: bool,
     accepted_stdin_write_ids: Arc<Mutex<AcceptedStdinWriteIds>>,
-    output: VecDeque<RetainedOutputChunk>,
+    output: VecDeque<ProcessOutputChunk>,
     retained_bytes: usize,
     next_seq: u64,
     exit_code: Option<i32>,
@@ -578,16 +573,12 @@ impl LocalProcess {
                 let mut total_bytes = 0;
                 let mut next_seq = process.next_seq;
                 for retained in process.output.iter().filter(|chunk| chunk.seq > after_seq) {
-                    let chunk_len = retained.chunk.len();
+                    let chunk_len = retained.chunk.0.len();
                     if !chunks.is_empty() && total_bytes + chunk_len > max_bytes {
                         break;
                     }
                     total_bytes += chunk_len;
-                    chunks.push(ProcessOutputChunk {
-                        seq: retained.seq,
-                        stream: retained.stream,
-                        chunk: retained.chunk.clone().into(),
-                    });
+                    chunks.push(retained.clone());
                     next_seq = retained.seq + 1;
                     if total_bytes >= max_bytes {
                         break;
@@ -761,7 +752,30 @@ fn child_env(params: &ExecParams) -> HashMap<String, String> {
     };
     env.remove(crate::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR);
     env.retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
+    apply_exec_metadata(&mut env, params.metadata.as_ref());
     env
+}
+
+pub(crate) fn apply_exec_metadata(
+    env: &mut HashMap<String, String>,
+    metadata: Option<&crate::protocol::ExecMetadata>,
+) {
+    if let Some(metadata) = metadata {
+        #[cfg(windows)]
+        env.retain(|name, _| !name.eq_ignore_ascii_case(CODEX_THREAD_ID_ENV_VAR));
+        match metadata.thread_id {
+            Some(thread_id) => {
+                env.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
+            }
+            None => {
+                env.remove(CODEX_THREAD_ID_ENV_VAR);
+            }
+        }
+    }
+    shell_environment::set_tool_call_id_env_var(
+        env,
+        metadata.and_then(|metadata| metadata.tool_call_id.as_deref()),
+    );
 }
 
 pub(crate) fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvironmentPolicy {
@@ -984,6 +998,7 @@ async fn stream_output(
 ) {
     while let Some(chunk) = receiver.recv().await {
         let _chunk_len = chunk.len();
+        let chunk = ByteChunk::from(chunk);
         let notification = {
             let mut processes = inner.processes.lock().await;
             let Some(entry) = processes.get_mut(&process_id) else {
@@ -994,26 +1009,19 @@ async fn stream_output(
             };
             let seq = process.next_seq;
             process.next_seq += 1;
-            process.retained_bytes += chunk.len();
-            process.output.push_back(RetainedOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.clone(),
-            });
+            process.retained_bytes += chunk.0.len();
+            let output = ProcessOutputChunk { seq, stream, chunk };
+            process.output.push_back(output.clone());
             while process.retained_bytes > RETAINED_OUTPUT_BYTES_PER_PROCESS
                 || process.output.len() > RETAINED_OUTPUT_CHUNKS_PER_PROCESS
             {
                 let Some(evicted) = process.output.pop_front() else {
                     break;
                 };
-                process.retained_bytes = process.retained_bytes.saturating_sub(evicted.chunk.len());
+                process.retained_bytes =
+                    process.retained_bytes.saturating_sub(evicted.chunk.0.len());
             }
             let _ = process.wake_tx.send(seq);
-            let output = ProcessOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.into(),
-            };
             process
                 .events
                 .publish(ExecProcessEvent::Output(output.clone()));
@@ -1087,11 +1095,11 @@ fn watch_exit(
                     for chunk in &process.output {
                         match chunk.stream {
                             ExecOutputStream::Stdout | ExecOutputStream::Pty => {
-                                stdout.extend_from_slice(&chunk.chunk);
+                                stdout.extend_from_slice(&chunk.chunk.0);
                             }
-                            ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk),
+                            ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk.0),
                         }
-                        aggregated.extend_from_slice(&chunk.chunk);
+                        aggregated.extend_from_slice(&chunk.chunk.0);
                     }
                     let exec_output = ExecToolCallOutput {
                         exit_code,
@@ -1548,9 +1556,14 @@ mod tests {
 
     #[test]
     fn child_env_applies_policy_then_overlay() {
+        let thread_id =
+            codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")
+                .expect("thread id");
         let mut params = test_exec_params(HashMap::from([
             ("OVERLAY".to_string(), "overlay".to_string()),
             ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+            ("CODEX_THREAD_ID".into(), "overlay-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "overlay-call".into()),
             (
                 "openai_identity_token_file".to_string(),
                 "/run/identity-token".to_string(),
@@ -1563,19 +1576,89 @@ mod tests {
             r#set: HashMap::from([
                 ("POLICY_SET".to_string(), "policy".to_string()),
                 ("OpenAI_Federation_Rule_Id".to_string(), "rule".to_string()),
+                ("CODEX_THREAD_ID".into(), "policy-thread".into()),
+                ("CODEX_TOOL_CALL_ID".into(), "policy-call".into()),
             ]),
             include_only: Vec::new(),
+        });
+        params.metadata = Some(crate::protocol::ExecMetadata {
+            thread_id: Some(thread_id),
+            tool_call_id: Some("current-call".into()),
         });
 
         let mut expected = HashMap::from([
             ("OVERLAY".to_string(), "overlay".to_string()),
             ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+            ("CODEX_THREAD_ID".into(), thread_id.to_string()),
+            ("CODEX_TOOL_CALL_ID".into(), "current-call".into()),
         ]);
         if cfg!(target_os = "windows") {
             expected.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
         }
 
         assert_eq!(child_env(&params), expected);
+    }
+
+    #[test]
+    fn child_env_partial_metadata_removes_stale_counterpart() {
+        let thread_id =
+            codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")
+                .expect("thread id");
+        for (thread_id, call_id) in [
+            (Some(thread_id), None),
+            (None, Some("exec-call-only")),
+            (None, None),
+        ] {
+            let mut params = test_exec_params(HashMap::from([
+                ("CODEX_THREAD_ID".into(), "stale-thread".into()),
+                ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+                ("codex_thread_id".into(), "lowercase-thread".into()),
+                ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+                ("OTHER".into(), "unchanged".into()),
+            ]));
+            params.metadata = Some(crate::protocol::ExecMetadata {
+                thread_id,
+                tool_call_id: call_id.map(str::to_string),
+            });
+
+            let mut expected = HashMap::from([("OTHER".into(), "unchanged".into())]);
+            #[cfg(not(windows))]
+            expected.insert("Codex_Thread_Id".into(), "mixed-case-thread".into());
+            #[cfg(not(windows))]
+            expected.insert("codex_thread_id".into(), "lowercase-thread".into());
+            if let Some(thread_id) = thread_id {
+                expected.insert("CODEX_THREAD_ID".into(), thread_id.to_string());
+            }
+            if let Some(call_id) = call_id {
+                expected.insert("CODEX_TOOL_CALL_ID".into(), call_id.to_string());
+            }
+            assert_eq!(
+                child_env(&params),
+                expected,
+                "metadata: {:?}",
+                params.metadata
+            );
+        }
+    }
+
+    #[test]
+    fn child_env_without_metadata_preserves_thread_only_context() {
+        let params = test_exec_params(HashMap::from([
+            ("CODEX_THREAD_ID".into(), "prewarm-thread".into()),
+            ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+            ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+        ]));
+
+        assert_eq!(
+            child_env(&params),
+            HashMap::from([
+                ("CODEX_THREAD_ID".into(), "prewarm-thread".into()),
+                ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+                #[cfg(not(windows))]
+                ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+            ]),
+        );
     }
 
     #[tokio::test]
@@ -1734,10 +1817,10 @@ mod tests {
                 panic!("process should be running");
             };
             running.output = (1..=retained_chunk_count)
-                .map(|seq| RetainedOutputChunk {
+                .map(|seq| ProcessOutputChunk {
                     seq,
                     stream: ExecOutputStream::Stdout,
-                    chunk: vec![b'x'],
+                    chunk: vec![b'x'].into(),
                 })
                 .collect();
             running.retained_bytes = RETAINED_OUTPUT_CHUNKS_PER_PROCESS;

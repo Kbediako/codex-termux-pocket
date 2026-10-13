@@ -139,7 +139,6 @@ pub(super) use codex_protocol::approvals::GuardianRiskLevel;
 pub(super) use codex_protocol::approvals::GuardianUserAuthorization;
 pub(super) use codex_protocol::config_types::CollaborationMode;
 pub(super) use codex_protocol::config_types::ModeKind;
-pub(super) use codex_protocol::config_types::Personality;
 pub(super) use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 pub(super) use codex_protocol::config_types::ServiceTier;
 pub(super) use codex_protocol::models::ActivePermissionProfile;
@@ -258,6 +257,8 @@ mod history_projection;
 mod history_replay;
 #[path = "tests/home_cleanup_tests.rs"]
 mod home_cleanup_tests;
+#[path = "tests/iterm_session_status.rs"]
+mod iterm_session_status;
 #[path = "tests/luna_reserve_usage_tests.rs"]
 mod luna_reserve_usage_tests;
 mod mcp_startup;
@@ -321,3 +322,6 @@ mod list_spacing_tests;
 
 #[path = "tests/question_notifications_tests.rs"]
 mod question_notifications_tests;
+
+#[path = "tests/security_setup_tests.rs"]
+mod security_setup_tests;

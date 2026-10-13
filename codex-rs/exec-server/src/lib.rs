@@ -15,12 +15,13 @@ mod environment_config;
 mod environment_provider;
 mod environment_registry;
 mod environment_toml;
-mod file_read;
+mod file_handle;
 mod forward;
 mod fs_helper;
 mod fs_helper_main;
 mod fs_sandbox;
 mod local_file_system;
+mod local_file_system_read;
 mod local_process;
 mod network_policy_decisions;
 mod no_follow;
@@ -40,6 +41,8 @@ mod rpc;
 mod rpc_server_requests;
 mod rpc_timing;
 mod runtime_options;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod sandbox_integrity;
 mod sandbox_selection;
 mod sandboxed_file_open;
 mod sandboxed_file_system;
@@ -48,6 +51,8 @@ mod server;
 mod shell_snapshot;
 #[cfg(unix)]
 mod shell_snapshot_file;
+#[cfg(unix)]
+mod shell_snapshot_process;
 mod telemetry;
 mod trace_context;
 mod websocket_pong_watchdog;
@@ -86,6 +91,7 @@ pub use codex_file_system::EnvironmentAccessKey;
 pub use codex_file_system::ExecutorFileSystem;
 pub use codex_file_system::ExecutorFileSystemFuture;
 pub use codex_file_system::FILE_READ_CHUNK_SIZE;
+pub use codex_file_system::FILE_WRITE_CHUNK_SIZE;
 pub use codex_file_system::FileMetadata;
 pub use codex_file_system::FileSystemEnvironmentAccessor;
 pub use codex_file_system::FileSystemReadStream;
@@ -183,6 +189,7 @@ pub use protocol::FsCreateDirectoryParams;
 pub use protocol::FsCreateDirectoryResponse;
 pub use protocol::FsGetMetadataParams;
 pub use protocol::FsGetMetadataResponse;
+pub use protocol::FsOpenMode;
 pub use protocol::FsOpenParams;
 pub use protocol::FsOpenResponse;
 pub use protocol::FsReadBlockParams;
@@ -196,6 +203,8 @@ pub use protocol::FsRemoveParams;
 pub use protocol::FsRemoveResponse;
 pub use protocol::FsWalkParams;
 pub use protocol::FsWalkResponse;
+pub use protocol::FsWriteBlockParams;
+pub use protocol::FsWriteBlockResponse;
 pub use protocol::FsWriteFileParams;
 pub use protocol::FsWriteFileResponse;
 pub use protocol::HttpHeader;
@@ -236,3 +245,9 @@ pub use server::RequestDispatchMode;
 pub use server::run_main;
 pub use server::run_main_with_telemetry;
 pub use telemetry::ExecServerTelemetry;
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub use sandbox_integrity::run_integrity_checks;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub async fn run_integrity_checks(_request: &codex_sandboxing::SandboxExecRequest) {}

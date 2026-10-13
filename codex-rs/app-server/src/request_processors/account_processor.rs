@@ -16,6 +16,7 @@ use codex_model_provider::is_supported_amazon_bedrock_region;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_rmcp_client::EnterpriseOAuthCredentialGuard;
 
+mod bedrock_gov_cloud;
 mod bedrock_setup;
 mod enterprise_login;
 mod gateway_oauth;
@@ -149,7 +150,9 @@ impl AccountRequestProcessor {
             .set_workspace_routing_resolver(Arc::downgrade(&resolver));
         let startup = processor.clone();
         tokio::spawn(async move {
-            let _ = startup.read_account(/*request*/ None).await;
+            let _ = startup
+                .read_account_for_background_workspace_routing()
+                .await;
         });
         processor
     }

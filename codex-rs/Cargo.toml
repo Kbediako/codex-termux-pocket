@@ -7,6 +7,7 @@ members = [
     "agent-identity",
     "agent-roles",
     "backend-client",
+    "cloud-client",
     "bwrap",
     "build-info",
     "ansi-escape",
@@ -41,7 +42,6 @@ members = [
     "config-schema",
     "context-fragments",
     "shell-command",
-    "shell-escalation",
     "skills",
     "core",
     "core-api",
@@ -159,7 +159,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.161.0-alpha.4"
+version = "0.163.0-alpha.5"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -274,7 +274,6 @@ codex-rollout-trace = { path = "rollout-trace" }
 codex-sandboxing = { path = "sandboxing" }
 codex-secrets = { path = "secrets" }
 codex-shell-command = { path = "shell-command" }
-codex-shell-escalation = { path = "shell-escalation" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
@@ -323,7 +322,7 @@ core_test_support = { path = "core/tests/common" }
 # External
 learning_mode_windows = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 wxc_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
-age = "0.11.1"
+age = "0.12.1"
 ansi-to-tui = "8.0.1"
 anyhow = "1"
 appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
@@ -376,6 +375,7 @@ dunce = "1.0.4"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
+file-id = "0.2.3"
 flate2 = "1.1.8"
 futures = { version = "0.3", default-features = false }
 gethostname = "1.1.0"
@@ -480,7 +480,6 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     "ogg",
     "wav",
 ] }
-socket2 = "0.6.1"
 # Keep SQLx versions in sync; when bumping, audit the SQLite constructor deny list in clippy.toml.
 sqlx = { version = "=0.9.0", default-features = false, features = [
     "chrono",
@@ -502,7 +501,7 @@ strum_macros = "0.28.0"
 supports-color = "3.0.2"
 syntect = "5"
 sys-locale = "0.3.2"
-system-configuration = "=0.8.0"
+system-configuration = "0.7"
 tar = { version = "=0.4.45", default-features = false }
 tempfile = "3.23.0"
 test-log = "0.2.19"
@@ -548,6 +547,7 @@ which = "8"
 whoami = "1.6.1"
 wildmatch = "2.6.1"
 winapi-util = "0.1.11"
+windows-sys = "0.61.2"
 zip = "2.4.2"
 zstd = "0.13"
 
@@ -640,7 +640,7 @@ opt-level = 0
 [patch.crates-io]
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
-crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "efa177859fd9623d57b9fe7ae9bf491ae1ac6ec4" }
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 

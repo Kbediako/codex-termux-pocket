@@ -15,6 +15,10 @@ pub(crate) enum KeyEventAction {
 }
 
 impl ChatWidget {
+    pub(crate) fn clear_composer_selection(&mut self) {
+        self.bottom_pane.clear_composer_selection();
+    }
+
     pub(crate) fn end_composer_drag(&mut self) {
         self.bottom_pane.end_composer_drag();
     }
@@ -55,6 +59,10 @@ impl ChatWidget {
 
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         self.bottom_pane.keymap_contexts()
+    }
+
+    pub(crate) fn take_key_chord_reset(&mut self) -> bool {
+        std::mem::take(&mut self.bottom_pane.key_chord_reset_requested)
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> KeyEventAction {
@@ -161,12 +169,23 @@ impl ChatWidget {
             } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && c.eq_ignore_ascii_case(&'v') =>
             {
+                if Instant::now() < self.suppress_image_paste_until {
+                    self.suppress_image_paste_until =
+                        Instant::now() + clipboard::IMAGE_PASTE_REPEAT_WINDOW;
+                    return KeyEventAction::None;
+                }
+                self.suppress_image_paste_until =
+                    Instant::now() + clipboard::IMAGE_PASTE_REPEAT_WINDOW;
                 return KeyEventAction::PasteImage;
             }
             other if other.kind == KeyEventKind::Press => {
+                self.suppress_image_paste_until = Instant::now();
                 self.bottom_pane.clear_quit_shortcut_hint();
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
+            }
+            other if other.kind == KeyEventKind::Release => {
+                self.suppress_image_paste_until = Instant::now();
             }
             _ => {}
         }

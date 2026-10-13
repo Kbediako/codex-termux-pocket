@@ -31,10 +31,15 @@ pub(super) async fn check(
     startup: &mut StartupDraft,
     target: &AppServerTarget,
     config: &Config,
+    cli_kv_overrides: &[(String, toml::Value)],
     managed_daemon: bool,
 ) -> io::Result<Option<String>> {
     let issue = match startup
-        .run_until(daemon_startup::compatibility_warning(target, config))
+        .run_until(daemon_startup::compatibility_warning(
+            target,
+            config,
+            cli_kv_overrides,
+        ))
         .await?
     {
         Ok(warning) => return Ok(warning),
@@ -61,6 +66,13 @@ pub(super) async fn check(
                 break None;
             };
             tui.screen_size_for_event(&event)?;
+            if matches!(
+                &event,
+                crate::tui::TuiEvent::Paste(_) | crate::tui::TuiEvent::FocusLost
+            ) || matches!(&event, crate::tui::TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+            {
+                chord_matcher.cancel();
+            }
             if let crate::tui::TuiEvent::Key(key) = event
                 && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             {
@@ -104,7 +116,11 @@ pub(super) async fn check(
             })
             .await?;
             startup
-                .run_until(daemon_startup::compatibility_warning(target, config))
+                .run_until(daemon_startup::compatibility_warning(
+                    target,
+                    config,
+                    cli_kv_overrides,
+                ))
                 .await?
                 .map_err(io::Error::other)
         }

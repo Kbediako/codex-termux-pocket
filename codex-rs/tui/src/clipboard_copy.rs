@@ -1,12 +1,12 @@
 //! Clipboard copy backend for the TUI's `/copy` command and `Ctrl+O` hotkey.
 //!
 //! Local copying uses the native clipboard, with WSL PowerShell as a fallback.
-//! In tmux, also forward to the attached terminal so clients attached after Codex
-//! started receive the copy. Over SSH without tmux, send OSC 52 directly.
+//! In tmux and Herdr, also forward to the attached terminal so clients attached after Codex
+//! started receive the copy. Over SSH without a multiplexer, send OSC 52 directly.
 //!
 //! Terminal writes have no delivery acknowledgement: a successful send must not
 //! suppress native copying. Both the host and attached client's clipboards may
-//! change. Outside tmux and SSH, use OSC 52 only if native copying fails.
+//! change. Outside tmux, Herdr, and SSH, use OSC 52 only if native copying fails.
 //!
 //! On Linux, X11 and some Wayland compositors require the process that wrote the
 //! clipboard to keep its handle open. `ClipboardLease` wraps the `arboard::Clipboard`
@@ -25,16 +25,19 @@ pub(crate) mod worker;
 
 use base64::Engine;
 use std::io::Write;
+use std::sync::Arc;
 use tmux::copy as tmux_clipboard_copy;
 
 /// Maximum raw bytes sent through tmux or directly encoded into OSC 52.
 /// Large payloads are rejected before encoding to avoid overwhelming the terminal.
 const OSC52_MAX_RAW_BYTES: usize = 100_000;
-/// Whether copied text should also have a rendered HTML representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Whether copied text should also have a rendered HTML representation and its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CopyFormat {
     PlainText,
     Markdown,
+    /// Visible selection text is copied literally; only HTML uses the semantic Markdown.
+    MarkdownSelection(Arc<str>),
 }
 
 /// A native clipboard write or an unacknowledged request to the user's terminal.
@@ -80,8 +83,8 @@ impl CopyStatus {
 
 /// Copy text to the system clipboard.
 ///
-/// Try native copying, then independently attempt terminal forwarding in tmux or
-/// SSH. A terminal send is best effort and does not confirm clipboard delivery.
+/// Try native copying, then independently attempt terminal forwarding in tmux,
+/// Herdr, or SSH. A terminal send is best effort and does not confirm clipboard delivery.
 /// Terminal forwarding may replace native HTML with plain text.
 ///
 /// Native or WSL success returns `Copied`, even if terminal forwarding fails.
@@ -111,6 +114,7 @@ fn copy_to_clipboard(
         text,
         format,
         CopyEnvironment {
+            herdr_session: std::env::var("HERDR_ENV").is_ok_and(|value| value == "1"),
             ssh_session: is_ssh_session(),
             wsl_session: is_wsl_session(),
             tmux_session: is_tmux_session(),
@@ -156,6 +160,7 @@ impl ClipboardLease {
 /// without touching real clipboards or terminal I/O.
 #[derive(Clone, Copy)]
 struct CopyEnvironment {
+    herdr_session: bool,
     ssh_session: bool,
     wsl_session: bool,
     tmux_session: bool,
@@ -196,6 +201,9 @@ fn copy_to_clipboard_with(
     let html = match format {
         CopyFormat::PlainText => None,
         CopyFormat::Markdown => Some(crate::clipboard_html::render_markdown(text)),
+        CopyFormat::MarkdownSelection(source) => {
+            Some(crate::clipboard_html::render_markdown(&source))
+        }
     };
     let native_result = arboard_copy_fn(text, html.as_deref()).or_else(|native_error| {
         if environment.wsl_session {
@@ -208,9 +216,11 @@ fn copy_to_clipboard_with(
     });
     // Copy natively first: an X11 SelectionClear from a terminal write can otherwise
     // race with arboard reusing its ownership window and clear the new native data.
-    // Persistent tmux sessions may gain remote clients after Codex starts, so still
+    // Persistent multiplexer sessions may gain remote clients after Codex starts, so still
     // forward even when no SSH variables were inherited or native copying succeeded.
-    let terminal_result = (environment.tmux_session || environment.ssh_session).then(terminal_copy);
+    let terminal_result =
+        (environment.tmux_session || environment.herdr_session || environment.ssh_session)
+            .then(terminal_copy);
     match native_result {
         Ok(lease) => Ok(CopyOutcome::Copied(lease)),
         Err(native_error) => terminal_result
@@ -385,6 +395,7 @@ mod tests {
 
     fn remote_environment() -> CopyEnvironment {
         CopyEnvironment {
+            herdr_session: false,
             ssh_session: true,
             wsl_session: true,
             tmux_session: false,
@@ -400,6 +411,7 @@ mod tests {
 
     fn local_environment() -> CopyEnvironment {
         CopyEnvironment {
+            herdr_session: false,
             ssh_session: false,
             wsl_session: false,
             tmux_session: false,
@@ -656,21 +668,27 @@ mod tests {
 
     #[test]
     fn local_copy_offers_html_only_for_markdown() {
-        for (format, html) in [
+        for (text, format, html) in [
             (
+                "**hello**",
                 CopyFormat::Markdown,
                 Some("<p><strong>hello</strong></p>\n"),
             ),
-            (CopyFormat::PlainText, None),
+            ("**hello**", CopyFormat::PlainText, None),
+            (
+                "hello /repo/my_notes!.txt",
+                CopyFormat::MarkdownSelection(r"**hello** /repo/my\_notes\!.txt".into()),
+                Some("<p><strong>hello</strong> /repo/my_notes!.txt</p>\n"),
+            ),
         ] {
             let result = copy_to_clipboard_with(
-                "**hello**",
+                text,
                 format,
                 local_environment(),
                 |_| panic!("native copy should succeed"),
                 |_| panic!("native copy should succeed"),
-                |text, actual_html| {
-                    assert_eq!((text, actual_html), ("**hello**", html));
+                |actual_text, actual_html| {
+                    assert_eq!((actual_text, actual_html), (text, html));
                     Ok(None)
                 },
                 |_| panic!("native copy should succeed"),

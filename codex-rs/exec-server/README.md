@@ -14,6 +14,26 @@ This crate owns the transport, protocol, and filesystem/process handlers. The
 top-level `codex` binary owns hidden helper dispatch for sandboxed
 filesystem operations and `codex-linux-sandbox`.
 
+## Command metadata
+
+Launches expose `metadata.threadId` as `CODEX_THREAD_ID` and `metadata.toolCallId`
+as `CODEX_TOOL_CALL_ID` in the initial child environment. `exec_command` supplies
+the originating execution call ID, unchanged by later input. Code-mode uses the
+nested execution call ID, not the outer cell ID.
+
+These reserved labels override inherited values, policy settings, overlays, and
+cached snapshots. Present metadata clears omitted fields; absent metadata preserves
+thread-only context and unsets the call ID. Snapshot capture and validation helpers
+keep available thread context but omit the call ID; newly captured snapshots exclude
+both ID exports.
+Call IDs are copied unchanged, including empty values; NUL-containing IDs are
+omitted. Platform process-environment size limits apply.
+
+Labels support correlation, not authorization. Shell startup, commands, and
+descendants can change or remove them; consumers must handle missing or unusable
+labels. These guarantees require an updated executor: older executors may ignore
+metadata or restore stale snapshot values.
+
 ## Transport
 
 The server speaks the exec-specific `codex-exec-server-protocol` message
@@ -434,8 +454,8 @@ for invalid or unavailable paths. Native absolute path strings are rejected;
 callers must convert them to `file:` URIs before sending requests:
 
 - `fs/readFile`
-- `fs/open`, `fs/readBlock`, and `fs/close` (internal transport for
-  `ExecutorFileSystem::read_file_stream`)
+- `fs/open`, `fs/readBlock`, `fs/writeBlock`, and `fs/close` (file handles;
+  reads also back `ExecutorFileSystem::read_file_stream`)
 - `fs/writeFile`
 - `fs/createDirectory`
 - `fs/getMetadata`
@@ -444,7 +464,11 @@ callers must convert them to `file:` URIs before sending requests:
 - `fs/remove`
 - `fs/copy`
 
-Each filesystem request accepts an optional `sandbox` object. When `sandbox`
+`fs/open.mode` is `read` (default) or `replace` (create or truncate for writing).
+Writable handles require `fileWriteStreaming`; `fs/writeBlock` writes a nonempty
+base64 `chunk` of up to 1 MiB at an explicit `offset`.
+
+Path-based filesystem requests accept an optional `sandbox` object. When `sandbox`
 contains a `ReadOnly` or `WorkspaceWrite` policy, the operation runs in a
 hidden helper process launched from the top-level `codex` executable and
 prepared through the shared sandbox transform path. Helper requests and

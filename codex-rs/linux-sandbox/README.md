@@ -7,6 +7,12 @@ This crate is responsible for producing:
   - the `codex-exec` CLI can check if its arg0 is `codex-linux-sandbox` and, if so, execute as if it were `codex-linux-sandbox`
   - this should also be true of the `codex` multitool CLI
 
+The helper uses bubblewrap for filesystem and namespace isolation, and seccomp
+for syscall filtering. `src/seccomp.rs` installs `PR_SET_NO_NEW_PRIVS` and the
+seccomp filters; it also retains the legacy Landlock filesystem implementation.
+`src/linux_run_main.rs` coordinates these stages through `LinuxSandboxCommand`.
+End-to-end coverage lives in `tests/suite/sandbox.rs` and the other suite modules.
+
 On Linux, Codex prefers the first `bwrap` found on `PATH`
 outside the current working directory whenever it is available. If `bwrap` is
 present but too old to support
@@ -22,6 +28,7 @@ it cannot create the required user namespaces, so Codex rejects sandboxed shell
 commands that would enter the bubblewrap path.
 
 **Current Behavior**
+
 - Legacy `SandboxPolicy` / `sandbox_mode` configs remain supported.
 - Bubblewrap is the default filesystem sandbox.
 - If `bwrap` is present on `PATH` outside the current working directory, the
@@ -37,14 +44,17 @@ commands that would enter the bubblewrap path.
 - WSL2 uses the normal Linux bubblewrap path.
 - WSL1 is not supported for bubblewrap sandboxing; Codex rejects sandboxed
   shell commands that would require the bubblewrap path before invoking `bwrap`.
-- On ordinary Linux, filesystem-restricted execution requires bubblewrap. The legacy Landlock
+- Filesystem-restricted execution requires bubblewrap. The legacy Landlock
   option is rejected for these policies because it cannot isolate app-server
   Unix sockets. Disable `features.use_legacy_landlock` when upgrading.
 - Split-only filesystem policies that do not round-trip through the legacy
   `SandboxPolicy` model stay on bubblewrap so nested read-only or denied
   carveouts are preserved.
 - When bubblewrap is active, the helper applies `PR_SET_NO_NEW_PRIVS` and a
-  seccomp network filter in-process.
+  seccomp filter in-process after establishing the filesystem view. Restricted
+  network policies block network syscalls; filesystem-restricted policies with
+  otherwise unrestricted networking still block `AF_VSOCK` sockets. All filter
+  modes block `io_uring` to prevent bypassing socket-family restrictions.
 - When bubblewrap is active, the filesystem is read-only by default via `--ro-bind / /`.
 - When bubblewrap is active, writable roots are layered with `--bind <root> <root>`.
 - When bubblewrap is active, protected subpaths under writable roots (for
@@ -85,8 +95,10 @@ commands that would enter the bubblewrap path.
 - In managed proxy mode, the helper uses `--unshare-net` plus an internal
   TCP->UDS->TCP routing bridge so tool traffic reaches only configured proxy
   endpoints.
-- In managed proxy mode, after the bridge is live, seccomp blocks new
-  AF_UNIX/socketpair creation for the user command.
+- In managed proxy mode, after the bridge is live, seccomp allows IP sockets
+  inside the isolated network namespace and blocks new standalone `AF_UNIX`
+  sockets unless `dangerously_allow_all_unix_sockets` is granted. Unix socket
+  pairs remain allowed for communication between related processes.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default.
   If that mount is denied, it retains the inherited `/proc` and still creates a
   PID namespace, preserving the existing fallback. `--no-proc` also retains the
@@ -108,30 +120,5 @@ commands that would enter the bubblewrap path.
   remain in force. The default `isolate` mode retains PID isolation.
 
 **Notes**
+
 - The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.
-
-## Termux release gate
-
-The maintained Termux release treats the x86_64 and ARM64 jobs for this crate as
-one exact-source gate. Both matrix jobs must succeed for the same commit before
-the production Android/Termux runtime can be published. This dual-architecture
-check is intentionally separate from the ARM64 artifact build: it proves the
-sandbox implementation and policy tests independently of packaging, while the
-artifact and native Android gates prove the shipped runtime bundle.
-
-## Restricted commands in Termux
-
-The automatic Termux backend does not waive app-server socket isolation. With
-no managed proxy, a filesystem-restricted profile with full read access is
-reduced to global read-only and network-disabled. Before entering the existing
-Landlock/read-only-seccomp backend, the helper denies socket creation and
-communication, descriptor acquisition through other processes, and io_uring.
-It rejects socket-backed standard streams and marks all other inherited file
-descriptors close-on-exec. Read-only shell commands and pipe/terminal output
-remain supported; Unix sockets and inherited extra descriptors do not.
-
-Restricted-read policies are rejected rather than widened to full read access.
-Managed proxy sessions retain the normal bubblewrap path. Ordinary Linux keeps
-the upstream legacy-Landlock rejection and daemon-directory masking unchanged.
-Failure to establish either socket isolation or filesystem restrictions aborts
-before command execution; there is no unrestricted fallback.

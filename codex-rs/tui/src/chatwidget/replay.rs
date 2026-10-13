@@ -126,6 +126,7 @@ impl ChatWidget {
             }
             let Turn {
                 id: turn_id,
+                root_turn_id,
                 items_view: _,
                 items,
                 status,
@@ -224,6 +225,7 @@ impl ChatWidget {
                         thread_id: self.thread_id.map(|id| id.to_string()).unwrap_or_default(),
                         turn: Turn {
                             id: turn_id,
+                            root_turn_id,
                             items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                             items: Vec::new(),
                             status,
@@ -279,7 +281,11 @@ impl ChatWidget {
                         .into_iter()
                         .map(|reply| reply.question_item_id)
                         .collect::<Vec<_>>();
-                    self.bottom_pane.question_editor().resolve_answers(&ids);
+                    let displayed_answer_changed =
+                        self.bottom_pane.question_editor().resolve_answers(&ids);
+                    if displayed_answer_changed && !self.bottom_pane.has_active_view() {
+                        self.bottom_pane.key_chord_reset_requested = true;
+                    }
                     self.refresh_pending_input_preview();
                     self.request_redraw();
                 }
