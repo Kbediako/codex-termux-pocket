@@ -1,14 +1,35 @@
 {
   "format_version": 1,
-  "request_id": "issue168-export-alpha1635-batch2-20261012",
-  "operation": "export-upstream",
-  "upstream_tag": "rust-v0.163.0-alpha.5",
-  "upstream_tag_object": "cbc0286d69de4e34227809c9481dfda5f59162a5",
-  "upstream_commit": "cf4041fa09238f33cf106e3046801ed23590bae8",
-  "object_batch": {
-    "base_source_sha": "02e422795c4a1234c1a5a59f85da16ba8ca71210",
-    "inventory_sha256": "70f4ae7798ff9d8a25932eb5db49c6dd37171e08105e6b80302d77e3a65158bc",
-    "offset": 2000,
-    "count": 488
-  }
+  "request_id": "issue168-prepare-alpha1635-security2-20261015",
+  "operation": "prepare-source",
+  "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
+  "prepared_commit": "c301e8b09c29d9f34369ec3feeee9f04de4b6a3a",
+  "expected_input_tree": "77594068f33ea2859454ecdf04954f81b0c60dd4",
+  "edits": [
+    {
+      "path": "codex-rs/Cargo.toml",
+      "before": "b5bba2c98671d05be0611076e9c556810ccfde08",
+      "after": "f28c7e02d916a1c8ffc68106625f758b04e3439d",
+      "replacements": [
+        {
+          "old": "serde_yaml = \"0.9\"",
+          "new": "serde_yaml = { package = \"yaml_serde\", version = \"0.10.7\" }"
+        }
+      ]
+    }
+  ],
+  "package_updates": [
+    {
+      "name": "tokio-util",
+      "version": "0.7.19"
+    },
+    {
+      "name": "quinn-proto",
+      "version": "0.11.18"
+    },
+    {
+      "name": "yaml_serde",
+      "version": "0.10.7"
+    }
+  ]
 }
