@@ -1,171 +1,19 @@
 {
   "format_version": 1,
-  "request_id": "issue168-prepare-alpha1635-repair1-20261014",
+  "request_id": "issue168-prepare-alpha1635-security2-20261015",
   "operation": "prepare-source",
   "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
-  "prepared_commit": "039ef4d535a97250208cfa33045e40332d1b6529",
-  "expected_input_tree": "1b2638b8e417961d202f62195b7d525a3ca23442",
+  "prepared_commit": "c301e8b09c29d9f34369ec3feeee9f04de4b6a3a",
+  "expected_input_tree": "77594068f33ea2859454ecdf04954f81b0c60dd4",
   "edits": [
     {
       "path": "codex-rs/Cargo.toml",
-      "before": "9ebe185b271f569e0c82c3ddc9c5f3a598c24b4a",
-      "after": "b5bba2c98671d05be0611076e9c556810ccfde08",
+      "before": "b5bba2c98671d05be0611076e9c556810ccfde08",
+      "after": "f28c7e02d916a1c8ffc68106625f758b04e3439d",
       "replacements": [
         {
-          "old": "sys-locale = \"0.3.2\"\nsystem-configuration = \"0.7\"\ntar = { version = \"=0.4.45\", default-features = false }\n",
-          "new": "sys-locale = \"0.3.2\"\nsystem-configuration = \"=0.8.0\"\ntar = { version = \"=0.4.45\", default-features = false }\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/arg0/src/lib.rs",
-      "before": "33d2e6598917f500468d0c657dc634b78423d70f",
-      "after": "42c00d10e86669c03b7379224abd6bd6f7118fcd",
-      "replacements": [
-        {
-          "old": "        .open(&lock_path)?;\n    lock_file.try_lock()?;\n\n",
-          "new": "        .open(&lock_path)?;\n    match lock_file.try_lock() {\n        Ok(()) => {}\n        Err(std::fs::TryLockError::WouldBlock) => {\n            return Err(std::io::Error::new(\n                std::io::ErrorKind::WouldBlock,\n                \"arg0 helper directory lock is already held\",\n            ));\n        }\n        // Android/Termux can report file-locking as unsupported; proceed without\n        // locking so PATH helper aliases still work.\n        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {\n        }\n        Err(std::fs::TryLockError::Error(err)) => return Err(err),\n    }\n\n"
-        },
-        {
-          "old": "        Err(std::fs::TryLockError::WouldBlock) => Ok(None),\n        Err(err) => Err(err.into()),\n    }\n",
-          "new": "        Err(std::fs::TryLockError::WouldBlock) => Ok(None),\n        // If locking is unsupported on this platform, avoid deleting dirs that\n        // might be in use by another process.\n        Err(std::fs::TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::Unsupported => {\n            Ok(None)\n        }\n        Err(std::fs::TryLockError::Error(err)) => Err(err),\n    }\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/cli/src/main.rs",
-      "before": "1c440738fd9d1e19c8bcf189aa52e1fecfccc15b",
-      "after": "45c1f60d52929034410a7e22120129b8a6f0b224",
-      "replacements": [
-        {
-          "old": "use clap::CommandFactory;\nuse clap::Parser;\n",
-          "new": "use clap::CommandFactory;\nuse clap::FromArgMatches;\nuse clap::Parser;\n"
-        },
-        {
-          "old": "use std::path::PathBuf;\nuse std::sync::Arc;\n",
-          "new": "use std::path::PathBuf;\nuse std::process::Command;\nuse std::process::Stdio;\nuse std::sync::Arc;\n"
-        },
-        {
-          "old": "    Features(FeaturesCli),\n}\n",
-          "new": "    Features(FeaturesCli),\n\n    /// Update Codex from source on Termux.\n    #[clap(name = \"self-update\", visible_alias = \"update-self\")]\n    SelfUpdate,\n}\n"
-        },
-        {
-          "old": ") -> anyhow::Result<()> {\n    let MultitoolCli {\n        config_overrides: mut root_config_overrides,\n        feature_toggles,\n        remote,\n        mut interactive,\n        subcommand,\n    } = MultitoolCli::parse();\n    // Retain the launch target through TUI exit, even if a launcher changes selection.\n",
-          "new": ") -> anyhow::Result<()> {\n    let app = command_with_version();\n    let matches = app.get_matches();\n    let MultitoolCli {\n        config_overrides: mut root_config_overrides,\n        feature_toggles,\n        remote,\n        mut interactive,\n        subcommand,\n    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());\n    // Retain the launch target through TUI exit, even if a launcher changes selection.\n"
-        },
-        {
-          "old": "        },\n    }\n",
-          "new": "        },\n        Some(Subcommand::SelfUpdate) => {\n            run_self_update()?;\n        }\n    }\n"
-        },
-        {
-          "old": "        Some(Subcommand::Update) => Some(\"update\"),\n        Some(Subcommand::Cloud(_)) => Some(\"cloud\"),\n",
-          "new": "        Some(Subcommand::Update) => Some(\"update\"),\n        Some(Subcommand::SelfUpdate) => Some(\"self-update\"),\n        Some(Subcommand::Cloud(_)) => Some(\"cloud\"),\n"
-        },
-        {
-          "old": "fn print_completion(cmd: CompletionCommand) {\n    let mut app = MultitoolCli::command();\n    let name = \"codex\";\n    generate(cmd.shell, &mut app, name, &mut std::io::stdout());\n}\n",
-          "new": "fn print_completion(cmd: CompletionCommand) {\n    let mut app = command_with_version();\n    let name = \"codex\";\n    generate(cmd.shell, &mut app, name, &mut std::io::stdout());\n}\n\nfn run_self_update() -> anyhow::Result<()> {\n    let prefix = std::env::var(\"PREFIX\").unwrap_or_default();\n    if !prefix.contains(\"com.termux\") {\n        anyhow::bail!(\n            \"self-update is supported only on Termux (PREFIX must contain \\\"com.termux\\\")\"\n        );\n    }\n\n    let src_dir = resolve_codex_src_dir()?;\n    if !src_dir.is_dir() {\n        anyhow::bail!(\n            \"codex source directory does not exist: {}\",\n            src_dir.display()\n        );\n    }\n\n    let workspace_dir = src_dir.join(\"codex-rs\");\n    if !workspace_dir.is_dir() {\n        anyhow::bail!(\n            \"codex workspace directory does not exist: {}\",\n            workspace_dir.display()\n        );\n    }\n\n    let cli_dir = workspace_dir.join(\"cli\");\n    if !cli_dir.is_dir() {\n        anyhow::bail!(\"codex CLI directory does not exist: {}\", cli_dir.display());\n    }\n    let home =\n        std::env::var(\"HOME\").map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n    let cargo_target_dir = PathBuf::from(home).join(\".cache\").join(\"codex-target\");\n\n    let mut git_fetch = Command::new(\"git\");\n    git_fetch.args([\"fetch\"]).current_dir(&src_dir);\n    run_command(&mut git_fetch, \"git fetch\")?;\n\n    let mut git_pull = Command::new(\"git\");\n    git_pull.args([\"pull\", \"--ff-only\"]).current_dir(&src_dir);\n    run_command(&mut git_pull, \"git pull --ff-only\")?;\n\n    if std::env::var(\"CODEX_TERMUX_ALLOW_SOURCE_FALLBACK\")\n        .ok()\n        .as_deref()\n        != Some(\"1\")\n    {\n        anyhow::bail!(\n            \"Termux source self-update is disabled by default: the local Android Cargo build still fails at the final V8 link (undefined symbols bcmp and __errno_location). Use codex-update-alpha --mode remote-artifact, or set CODEX_TERMUX_ALLOW_SOURCE_FALLBACK=1 to retry it experimentally.\"\n        );\n    }\n\n    let (rusty_v8_archive, rusty_v8_binding_path) =\n        prepare_termux_v8_musl_overrides(&workspace_dir, &cargo_target_dir)?;\n\n    let mut cargo_install = Command::new(\"cargo\");\n    cargo_install\n        .arg(\"install\")\n        .arg(\"--path\")\n        .arg(&cli_dir)\n        .arg(\"--locked\")\n        .arg(\"--root\")\n        .arg(&prefix)\n        .arg(\"--force\")\n        .env(\"CARGO_TARGET_DIR\", &cargo_target_dir)\n        .env(\"CARGO_PROFILE_RELEASE_LTO\", \"false\")\n        .env(\"CARGO_PROFILE_RELEASE_CODEGEN_UNITS\", \"16\")\n        .env(\"CARGO_BUILD_JOBS\", \"1\")\n        .env(\"RUSTY_V8_ARCHIVE\", &rusty_v8_archive)\n        .env(\"RUSTY_V8_SRC_BINDING_PATH\", &rusty_v8_binding_path)\n        .current_dir(&workspace_dir);\n    run_command(\n        &mut cargo_install,\n        \"cargo install --locked --path <cli> --root <prefix> --force (termux low-mem)\",\n    )?;\n\n    Ok(())\n}\n\nfn locked_package_version(\n    lockfile: &std::path::Path,\n    package_name: &str,\n) -> anyhow::Result<String> {\n    let contents = std::fs::read_to_string(lockfile)\n        .map_err(|err| anyhow::anyhow!(\"failed to read {}: {err}\", lockfile.display()))?;\n    let package_line = format!(\"name = \\\"{package_name}\\\"\");\n    let mut name_matches = false;\n\n    for line in contents.lines() {\n        if line == \"[[package]]\" {\n            name_matches = false;\n            continue;\n        }\n        if line == package_line {\n            name_matches = true;\n            continue;\n        }\n        if name_matches\n            && let Some(version) = line\n                .strip_prefix(\"version = \\\"\")\n                .and_then(|value| value.strip_suffix('\\\"'))\n        {\n            return Ok(version.to_string());\n        }\n    }\n\n    anyhow::bail!(\n        \"failed to find a pinned version for package {package_name:?} in {}\",\n        lockfile.display()\n    )\n}\n\nfn prepare_termux_v8_musl_overrides(\n    workspace_dir: &std::path::Path,\n    cargo_target_dir: &std::path::Path,\n) -> anyhow::Result<(String, PathBuf)> {\n    let v8_version = locked_package_version(&workspace_dir.join(\"Cargo.lock\"), \"v8\")?;\n    let v8_target = \"aarch64-unknown-linux-musl\";\n    let release_tag = format!(\"rusty-v8-v{v8_version}\");\n    let binding_dir = cargo_target_dir.join(\"v8\").join(format!(\"v{v8_version}\"));\n    let binding_path = binding_dir.join(format!(\"src_binding_release_{v8_target}.rs\"));\n    let binding_url = format!(\n        \"https://github.com/openai/codex/releases/download/{release_tag}/src_binding_release_{v8_target}.rs\"\n    );\n    let archive_url = format!(\n        \"https://github.com/openai/codex/releases/download/{release_tag}/librusty_v8_release_{v8_target}.a.gz\"\n    );\n\n    std::fs::create_dir_all(&binding_dir)\n        .map_err(|err| anyhow::anyhow!(\"failed to create {}: {err}\", binding_dir.display()))?;\n\n    if !binding_path.is_file() {\n        let mut curl = Command::new(\"curl\");\n        curl.arg(\"-fsSL\")\n            .arg(&binding_url)\n            .arg(\"-o\")\n            .arg(&binding_path);\n        run_command(&mut curl, \"download Termux musl rusty_v8 binding\")?;\n    }\n\n    Ok((archive_url, binding_path))\n}\n\nfn resolve_codex_src_dir() -> anyhow::Result<PathBuf> {\n    match std::env::var(\"CODEX_SRC_DIR\") {\n        Ok(dir) if !dir.trim().is_empty() => expand_home_dir(&dir),\n        _ => {\n            let home = std::env::var(\"HOME\")\n                .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n            Ok(PathBuf::from(home).join(\"codex\"))\n        }\n    }\n}\n\nfn expand_home_dir(path: &str) -> anyhow::Result<PathBuf> {\n    if path == \"~\" {\n        let home = std::env::var(\"HOME\")\n            .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n        return Ok(PathBuf::from(home));\n    }\n\n    if let Some(rest) = path.strip_prefix(\"~/\") {\n        let home = std::env::var(\"HOME\")\n            .map_err(|_| anyhow::anyhow!(\"HOME is not set; set CODEX_SRC_DIR\"))?;\n        return Ok(PathBuf::from(home).join(rest));\n    }\n\n    Ok(PathBuf::from(path))\n}\n\nfn run_command(command: &mut Command, label: &str) -> anyhow::Result<()> {\n    let status = command\n        .stdin(Stdio::inherit())\n        .stdout(Stdio::inherit())\n        .stderr(Stdio::inherit())\n        .status()\n        .map_err(|err| anyhow::anyhow!(\"failed to run {label}: {err}\"))?;\n\n    if !status.success() {\n        anyhow::bail!(\"{label} failed with status {status}\");\n    }\n\n    Ok(())\n}\n\nfn command_with_version() -> clap::Command {\n    MultitoolCli::command().version(resolve_cli_version())\n}\n\nfn resolve_cli_version() -> &'static str {\n    option_env!(\"CODEX_CLI_BUILD_VERSION\").unwrap_or(env!(\"CARGO_PKG_VERSION\"))\n}\n"
-        },
-        {
-          "old": "            err.to_string(),\n            \"`--strict-config` is not supported for `codex remote-control`\"\n        );\n    }\n\n    #[test]\n",
-          "new": "            err.to_string(),\n            \"`--strict-config` is not supported for `codex remote-control`\"\n        );\n\n        let cli = MultitoolCli::try_parse_from([\"codex\", \"--strict-config\", \"self-update\"])\n            .expect(\"parse\");\n        let err = reject_root_strict_config_for_subcommand(\n            cli.interactive.strict_config,\n            &cli.subcommand,\n        )\n        .expect_err(\"self-update should not support root --strict-config\");\n\n        assert_eq!(\n            err.to_string(),\n            \"`--strict-config` is not supported for `codex self-update`\"\n        );\n    }\n\n    #[test]\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/linux-sandbox/README.md",
-      "before": "b11893162338da86483fa2d85d4d3c04e0e475f6",
-      "after": "d9f649c0eb6bded0779ecfca18121524e3d9c407",
-      "replacements": [
-        {
-          "old": "  shell commands that would require the bubblewrap path before invoking `bwrap`.\n- Filesystem-restricted execution requires bubblewrap. The legacy Landlock\n  option is rejected for these policies because it cannot isolate app-server\n",
-          "new": "  shell commands that would require the bubblewrap path before invoking `bwrap`.\n- On ordinary Linux, filesystem-restricted execution requires bubblewrap. The legacy Landlock\n  option is rejected for these policies because it cannot isolate app-server\n"
-        },
-        {
-          "old": "- The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.\n",
-          "new": "- The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.\n\n## Termux release gate\n\nThe maintained Termux release treats the x86_64 and ARM64 jobs for this crate as\none exact-source gate. Both matrix jobs must succeed for the same commit before\nthe production Android/Termux runtime can be published. This dual-architecture\ncheck is intentionally separate from the ARM64 artifact build: it proves the\nsandbox implementation and policy tests independently of packaging, while the\nartifact and native Android gates prove the shipped runtime bundle.\n\n## Restricted commands in Termux\n\nThe automatic Termux backend does not waive app-server socket isolation. With\nno managed proxy, a filesystem-restricted profile with full read access is\nreduced to global read-only and network-disabled. Before entering the existing\nLandlock/read-only-seccomp backend, the helper denies socket creation and\ncommunication, descriptor acquisition through other processes, and io_uring.\nIt rejects socket-backed standard streams and marks all other inherited file\ndescriptors close-on-exec. Read-only shell commands and pipe/terminal output\nremain supported; Unix sockets and inherited extra descriptors do not.\n\nRestricted-read policies are rejected rather than widened to full read access.\nManaged proxy sessions retain the normal bubblewrap path. Ordinary Linux keeps\nthe upstream legacy-Landlock rejection and daemon-directory masking unchanged.\nFailure to establish either socket isolation or filesystem restrictions aborts\nbefore command execution; there is no unrestricted fallback.\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/linux-sandbox/src/lib.rs",
-      "before": "fa75c702b25565a5f2a69124c650292e6f580805",
-      "after": "c004deef096af9c1d079f4e7976bf45f8896cfe7",
-      "replacements": [
-        {
-          "old": "#[cfg(target_os = \"linux\")]\nmod seccomp;\n#[cfg(target_os = \"linux\")]\n",
-          "new": "#[cfg(target_os = \"linux\")]\n#[path = \"landlock_wrapper.rs\"]\nmod seccomp;\n#[cfg(target_os = \"linux\")]\nmod termux_socket_isolation;\n#[cfg(target_os = \"linux\")]\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/linux-sandbox/src/linux_run_main.rs",
-      "before": "85bb0aaa80769ee3557be5f68007a495434307f7",
-      "after": "f4ef96a0592f822fa7210c30caf52f230587eb5f",
-      "replacements": [
-        {
-          "old": "use crate::seccomp::apply_permission_profile_to_current_thread;\nuse codex_network_proxy::ManagedNetworkSandboxContext;\n",
-          "new": "use crate::seccomp::apply_permission_profile_to_current_thread;\nuse crate::seccomp::is_termux_prefix;\nuse codex_network_proxy::ManagedNetworkSandboxContext;\n"
-        },
-        {
-          "old": "        permission_profile,\n        use_legacy_landlock,\n        apply_seccomp_then_exec,\n",
-          "new": "        permission_profile,\n        mut use_legacy_landlock,\n        apply_seccomp_then_exec,\n"
-        },
-        {
-          "old": "    }\n    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);\n    let EffectivePermissions {\n        permission_profile,\n        file_system_sandbox_policy,\n        network_sandbox_policy,\n    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!(\"{err}\"));\n    ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);\n\n",
-          "new": "    }\n    let EffectivePermissions {\n        mut permission_profile,\n        mut file_system_sandbox_policy,\n        mut network_sandbox_policy,\n    } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!(\"{err}\"));\n    let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);\n    if termux_fallback && !file_system_sandbox_policy.has_full_disk_write_access() {\n        // Termux cannot isolate the daemon socket directory with bubblewrap.\n        // Do not widen restricted reads or preserve a network grant here.\n        // Reduce supported profiles to global read-only with no sockets, and\n        // install socket isolation before permitting the legacy backend.\n        if !file_system_sandbox_policy.has_full_disk_read_access() {\n            panic!(\"Termux restricted-read policies require bubblewrap\");\n        }\n        permission_profile = PermissionProfile::read_only();\n        (file_system_sandbox_policy, network_sandbox_policy) =\n            permission_profile.to_runtime_permissions();\n        crate::termux_socket_isolation::install_on_current_thread()\n            .unwrap_or_else(|err| panic!(\"failed to isolate Termux command sockets: {err}\"));\n    }\n    use_legacy_landlock |= termux_fallback;\n    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);\n    if !termux_fallback {\n        ensure_legacy_landlock_mode_supports_policy(\n            use_legacy_landlock,\n            &file_system_sandbox_policy,\n        );\n    }\n\n"
-        },
-        {
-          "old": "\n#[derive(Debug, Clone)]\n",
-          "new": "\nfn should_use_termux_landlock_fallback(allow_network_for_proxy: bool) -> bool {\n    let is_termux = std::env::var_os(\"PREFIX\")\n        .as_deref()\n        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)));\n    is_termux && !allow_network_for_proxy\n}\n\n#[derive(Debug, Clone)]\n"
-        },
-        {
-          "old": "\n    drop(preserved_files);\n    close_child_exec_start_read(exec_start_pipe[0]);\n",
-          "new": "\n    close_child_exec_start_read(exec_start_pipe[0]);\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/linux-sandbox/src/seccomp.rs",
-      "before": "7aecf5a7a13dae8ed8a8fbc8a3168dfc47320f0a",
-      "after": "3130095557b735eeee0d083b4acfcbbaf5ad1c54",
-      "replacements": [
-        {
-          "old": "use std::collections::BTreeMap;\nuse std::path::Path;\n\n",
-          "new": "use std::collections::BTreeMap;\nuse std::collections::BTreeSet;\nuse std::ffi::CString;\nuse std::os::fd::AsRawFd;\nuse std::os::fd::FromRawFd;\nuse std::os::fd::OwnedFd;\nuse std::os::unix::ffi::OsStrExt;\nuse std::path::Path;\nuse std::path::PathBuf;\n\n"
-        },
-        {
-          "old": "use landlock::RulesetAttr;\nuse landlock::RulesetCreatedAttr;\n",
-          "new": "use landlock::RulesetAttr;\nuse landlock::RulesetCreated;\nuse landlock::RulesetCreatedAttr;\n"
-        },
-        {
-          "old": "\n    let mut ruleset = Ruleset::default()\n        .set_compatibility(CompatLevel::BestEffort)\n        .handle_access(access_rw)?\n        .create()?\n        .add_rules(landlock::path_beneath_rules(&[\"/\"], access_ro))?\n        .add_rules(landlock::path_beneath_rules(&[\"/dev/null\"], access_rw))?\n        .set_no_new_privs(true);\n\n    if !writable_roots.is_empty() {\n        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&writable_roots, access_rw))?;\n    }\n\n    let status = ruleset.restrict_self()?;\n\n    if status.ruleset == landlock::RulesetStatus::NotEnforced {\n        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));\n    }\n\n    Ok(())\n}\n",
-          "new": "\n    let readable_roots = legacy_readable_roots();\n    let mut ruleset = Ruleset::default()\n        .set_compatibility(CompatLevel::BestEffort)\n        .handle_access(access_rw)?\n        .create()?\n        .add_rules(landlock::path_beneath_rules(&[\"/dev/null\"], access_rw))?;\n\n    if !writable_roots.is_empty() {\n        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&writable_roots, access_rw))?;\n    }\n\n    if is_termux_environment() {\n        return install_termux_read_rules_and_restrict(ruleset, &readable_roots, abi);\n    }\n\n    let status = ruleset\n        .add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?\n        .set_no_new_privs(true)\n        .restrict_self()?;\n\n    if status.ruleset == landlock::RulesetStatus::NotEnforced {\n        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));\n    }\n\n    Ok(())\n}\n\n#[repr(C)]\nstruct LandlockPathBeneathAttr {\n    allowed_access: u64,\n    parent_fd: libc::c_int,\n}\n\nconst LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;\nconst LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;\n\n/// Adds read rules with the kernel UAPI on Termux, then enforces the\n/// ruleset. Android SELinux permits opening some virtual roots with\n/// `O_PATH` but denies the `fstat()` compatibility probe performed by\n/// landlock 0.4.x. The kernel only needs the live `O_PATH` descriptor.\n///\n/// Writable roots and `/dev/null` still go through the crate's normal\n/// compatibility checks before this function receives the ruleset.\nfn install_termux_read_rules_and_restrict(\n    ruleset: RulesetCreated,\n    readable_roots: &[PathBuf],\n    requested_abi: ABI,\n) -> Result<()> {\n    let effective_abi = current_landlock_abi(requested_abi)?;\n    if effective_abi == ABI::Unsupported {\n        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));\n    }\n    let allowed_access = termux_read_access_mask(requested_abi, effective_abi);\n\n    let ruleset_fd: Option<OwnedFd> = ruleset.into();\n    let Some(ruleset_fd) = ruleset_fd else {\n        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));\n    };\n\n    let mut added_rules = 0usize;\n    for path in readable_roots {\n        // Match landlock::path_beneath_rules' best-effort behavior:\n        // unavailable optional Android roots are omitted and therefore\n        // remain inaccessible once this ruleset is enforced.\n        let parent_fd = match open_path_for_landlock(path) {\n            Ok(fd) => fd,\n            Err(_) => continue,\n        };\n        let attr = LandlockPathBeneathAttr {\n            allowed_access,\n            parent_fd: parent_fd.as_raw_fd(),\n        };\n\n        // SAFETY: `ruleset_fd` and `parent_fd` are live descriptors,\n        // `attr` has the exact C layout required by\n        // `landlock_path_beneath_attr`, and Landlock requires flags 0.\n        let result = unsafe {\n            libc::syscall(\n                libc::SYS_landlock_add_rule,\n                ruleset_fd.as_raw_fd(),\n                LANDLOCK_RULE_PATH_BENEATH,\n                &attr as *const LandlockPathBeneathAttr,\n                0 as libc::c_uint,\n            )\n        };\n        if result != 0 {\n            let error = std::io::Error::last_os_error();\n            eprintln!(\n                \"failed to add Termux Landlock read rule for {} using ABI {effective_abi} and mask {allowed_access:#x}: {error}\",\n                path.display()\n            );\n            return Err(error.into());\n        }\n        added_rules += 1;\n    }\n\n    if added_rules == 0 {\n        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));\n    }\n\n    set_no_new_privs()?;\n    // SAFETY: `ruleset_fd` is a live Landlock ruleset descriptor and\n    // the kernel API currently requires flags 0.\n    let result = unsafe {\n        libc::syscall(\n            libc::SYS_landlock_restrict_self,\n            ruleset_fd.as_raw_fd(),\n            0 as libc::c_uint,\n        )\n    };\n    if result != 0 {\n        let error = std::io::Error::last_os_error();\n        eprintln!(\n            \"failed to restrict the Termux process with Landlock ABI {effective_abi}: {error}\"\n        );\n        return Err(error.into());\n    }\n\n    Ok(())\n}\n\nfn current_landlock_abi(maximum_abi: ABI) -> std::io::Result<ABI> {\n    // SAFETY: querying the supported Landlock ABI requires a null attribute,\n    // size 0, and LANDLOCK_CREATE_RULESET_VERSION as the sole flag.\n    let result = unsafe {\n        libc::syscall(\n            libc::SYS_landlock_create_ruleset,\n            std::ptr::null::<libc::c_void>(),\n            0usize,\n            LANDLOCK_CREATE_RULESET_VERSION,\n        )\n    };\n    if result < 0 {\n        return Err(std::io::Error::last_os_error());\n    }\n    Ok(std::cmp::min(maximum_abi, ABI::from(result as i32)))\n}\n\nfn termux_read_access_mask(requested_abi: ABI, kernel_abi: ABI) -> u64 {\n    AccessFs::from_read(std::cmp::min(requested_abi, kernel_abi)).bits()\n}\n\n/// Android SELinux intentionally denies opening `/`, even though an app may\n/// open selected descendants. Landlock needs an open path file descriptor for\n/// every allow rule, so a single `/` rule is silently unusable in Termux. Use a\n/// fail-closed list of Android/Termux hierarchies instead: unavailable entries\n/// are ignored by the Landlock crate's best-effort compatibility layer, while\n/// omitted paths remain inaccessible after restriction.\nfn legacy_readable_roots() -> Vec<PathBuf> {\n    let prefix = std::env::var_os(\"PREFIX\").map(PathBuf::from);\n    legacy_readable_roots_for_prefix(prefix.as_deref())\n}\n\nfn is_termux_environment() -> bool {\n    std::env::var_os(\"PREFIX\")\n        .as_deref()\n        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)))\n}\n\nfn open_path_for_landlock(path: &Path) -> std::io::Result<OwnedFd> {\n    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {\n        std::io::Error::new(\n            std::io::ErrorKind::InvalidInput,\n            \"Landlock path contains an interior NUL byte\",\n        )\n    })?;\n    // SAFETY: `path` is a live NUL-terminated CString and the flags do not\n    // require a mode argument.\n    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };\n    if fd < 0 {\n        Err(std::io::Error::last_os_error())\n    } else {\n        // SAFETY: a successful open returned a new descriptor whose ownership\n        // is transferred exactly once to this OwnedFd.\n        Ok(unsafe { OwnedFd::from_raw_fd(fd) })\n    }\n}\n\nfn legacy_readable_roots_for_prefix(prefix: Option<&Path>) -> Vec<PathBuf> {\n    let Some(prefix) = prefix.filter(|path| is_termux_prefix(path)) else {\n        return vec![PathBuf::from(\"/\")];\n    };\n\n    let mut roots = BTreeSet::from([\n        PathBuf::from(\"/apex\"),\n        PathBuf::from(\"/dev\"),\n        PathBuf::from(\"/linkerconfig\"),\n        PathBuf::from(\"/mnt\"),\n        PathBuf::from(\"/odm\"),\n        PathBuf::from(\"/odm_dlkm\"),\n        PathBuf::from(\"/proc\"),\n        PathBuf::from(\"/product\"),\n        PathBuf::from(\"/storage\"),\n        PathBuf::from(\"/sys\"),\n        PathBuf::from(\"/system\"),\n        PathBuf::from(\"/system_ext\"),\n        PathBuf::from(\"/vendor\"),\n        PathBuf::from(\"/vendor_dlkm\"),\n    ]);\n    // PREFIX is normally <app-data>/files/usr. Its parent includes both the\n    // Termux package tree and HOME without granting other apps' private data.\n    if let Some(termux_files) = prefix.parent() {\n        roots.insert(termux_files.to_path_buf());\n    } else {\n        roots.insert(prefix.to_path_buf());\n    }\n    roots.into_iter().collect()\n}\n\npub(crate) fn is_termux_prefix(path: &Path) -> bool {\n    path.ends_with(\"com.termux/files/usr\")\n}\n"
-        },
-        {
-          "old": "    use super::NetworkSeccompMode;\n    use super::network_seccomp_mode;\n    use super::should_install_network_seccomp;\n    use codex_protocol::protocol::NetworkSandboxPolicy;\n    use pretty_assertions::assert_eq;\n",
-          "new": "    use super::NetworkSeccompMode;\n    use super::is_termux_prefix;\n    use super::legacy_readable_roots_for_prefix;\n    use super::network_seccomp_mode;\n    use super::open_path_for_landlock;\n    use super::should_install_network_seccomp;\n    use super::termux_read_access_mask;\n    use codex_protocol::protocol::NetworkSandboxPolicy;\n    use landlock::ABI;\n    use landlock::Access;\n    use landlock::AccessFs;\n    use std::os::fd::AsRawFd;\n    use std::path::Path;\n    use std::path::PathBuf;\n\n    #[test]\n    fn termux_legacy_roots_do_not_depend_on_opening_android_root() {\n        let prefix = Path::new(\"/data/data/com.termux/files/usr\");\n        let roots = legacy_readable_roots_for_prefix(Some(prefix));\n        assert!(!roots.contains(&PathBuf::from(\"/\")));\n        assert!(roots.contains(&PathBuf::from(\"/data/data/com.termux/files\")));\n        assert!(roots.contains(&PathBuf::from(\"/system\")));\n        assert!(roots.contains(&PathBuf::from(\"/apex\")));\n    }\n\n    #[test]\n    fn ordinary_linux_legacy_root_remains_unchanged() {\n        assert_eq!(\n            legacy_readable_roots_for_prefix(Some(Path::new(\"/usr\"))),\n            vec![PathBuf::from(\"/\")]\n        );\n        assert!(is_termux_prefix(Path::new(\n            \"/data/data/com.termux/files/usr\"\n        )));\n    }\n\n    #[test]\n    fn termux_landlock_path_is_opened_with_o_path() {\n        let fd = open_path_for_landlock(Path::new(\"/\"))\n            .expect(\"opening the filesystem root with O_PATH should succeed\");\n        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };\n        assert_ne!(flags, -1);\n        assert_eq!(flags & libc::O_PATH, libc::O_PATH);\n    }\n\n    #[test]\n    fn termux_read_mask_is_limited_to_the_running_kernel_abi() {\n        assert_eq!(\n            termux_read_access_mask(ABI::V5, ABI::V3),\n            AccessFs::from_read(ABI::V3).bits()\n        );\n        assert_eq!(\n            termux_read_access_mask(ABI::V3, ABI::V5),\n            AccessFs::from_read(ABI::V3).bits()\n        );\n    }\n    use pretty_assertions::assert_eq;\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/sandboxing/src/bwrap.rs",
-      "before": "876323ce074f1134a6057f92374ba49b48f5a193",
-      "after": "9a974c224221d470827021f1b9710bfba642153c",
-      "replacements": [
-        {
-          "old": "    sandbox_policy_cwd: &Path,\n) -> Option<String> {\n    if !should_warn_about_system_bwrap(permission_profile) {\n        return None;\n    }\n\n",
-          "new": "    sandbox_policy_cwd: &Path,\n) -> Option<String> {\n    if !should_warn_about_system_bwrap(permission_profile) {\n        return None;\n    }\n    // Termux uses the in-process Landlock/seccomp fallback for policies it can\n    // enforce without Linux user/mount namespaces. Package-manager advice for\n    // bubblewrap is both unactionable and misleading on Android.\n    if std::env::var_os(\"PREFIX\")\n        .as_deref()\n        .is_some_and(|prefix| Path::new(prefix).ends_with(\"com.termux/files/usr\"))\n    {\n        return None;\n    }\n\n"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/linux-sandbox/src/landlock_wrapper.rs",
-      "before": "21fe0a81161a512daaf07bb467cdd1ed017651c4",
-      "after": "8ad5856cb8baba34144040465db750e07614f7fb",
-      "replacements": [
-        {
-          "old": "\n#[path = \"landlock.rs\"]\nmod original;\n",
-          "new": "\n#[path = \"seccomp.rs\"]\nmod original;\n"
+          "old": "serde_yaml = \"0.9\"",
+          "new": "serde_yaml = { package = \"yaml_serde\", version = \"0.10.7\" }"
         }
       ]
     }
@@ -174,6 +22,14 @@
     {
       "name": "tokio-util",
       "version": "0.7.19"
+    },
+    {
+      "name": "quinn-proto",
+      "version": "0.11.18"
+    },
+    {
+      "name": "yaml_serde",
+      "version": "0.10.7"
     }
   ]
 }
