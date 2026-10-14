@@ -24,7 +24,10 @@ mod proxy_lifecycle;
 #[cfg(target_os = "linux")]
 mod proxy_routing;
 #[cfg(target_os = "linux")]
+#[path = "landlock_wrapper.rs"]
 mod seccomp;
+#[cfg(target_os = "linux")]
+mod termux_socket_isolation;
 #[cfg(target_os = "linux")]
 mod wslg;
 

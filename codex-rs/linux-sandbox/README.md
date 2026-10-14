@@ -44,7 +44,7 @@ commands that would enter the bubblewrap path.
 - WSL2 uses the normal Linux bubblewrap path.
 - WSL1 is not supported for bubblewrap sandboxing; Codex rejects sandboxed
   shell commands that would require the bubblewrap path before invoking `bwrap`.
-- Filesystem-restricted execution requires bubblewrap. The legacy Landlock
+- On ordinary Linux, filesystem-restricted execution requires bubblewrap. The legacy Landlock
   option is rejected for these policies because it cannot isolate app-server
   Unix sockets. Disable `features.use_legacy_landlock` when upgrading.
 - Split-only filesystem policies that do not round-trip through the legacy
@@ -122,3 +122,29 @@ commands that would enter the bubblewrap path.
 **Notes**
 
 - The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.
+
+## Termux release gate
+
+The maintained Termux release treats the x86_64 and ARM64 jobs for this crate as
+one exact-source gate. Both matrix jobs must succeed for the same commit before
+the production Android/Termux runtime can be published. This dual-architecture
+check is intentionally separate from the ARM64 artifact build: it proves the
+sandbox implementation and policy tests independently of packaging, while the
+artifact and native Android gates prove the shipped runtime bundle.
+
+## Restricted commands in Termux
+
+The automatic Termux backend does not waive app-server socket isolation. With
+no managed proxy, a filesystem-restricted profile with full read access is
+reduced to global read-only and network-disabled. Before entering the existing
+Landlock/read-only-seccomp backend, the helper denies socket creation and
+communication, descriptor acquisition through other processes, and io_uring.
+It rejects socket-backed standard streams and marks all other inherited file
+descriptors close-on-exec. Read-only shell commands and pipe/terminal output
+remain supported; Unix sockets and inherited extra descriptors do not.
+
+Restricted-read policies are rejected rather than widened to full read access.
+Managed proxy sessions retain the normal bubblewrap path. Ordinary Linux keeps
+the upstream legacy-Landlock rejection and daemon-directory masking unchanged.
+Failure to establish either socket isolation or filesystem restrictions aborts
+before command execution; there is no unrestricted fallback.

@@ -31,6 +31,7 @@ use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
 use crate::seccomp::apply_permission_profile_to_current_thread;
+use crate::seccomp::is_termux_prefix;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
@@ -168,7 +169,7 @@ pub fn run_main() -> ! {
         sandbox_policy_cwd,
         command_cwd,
         permission_profile,
-        use_legacy_landlock,
+        mut use_legacy_landlock,
         apply_seccomp_then_exec,
         managed_network,
         proxy_route_spec,
@@ -185,13 +186,34 @@ pub fn run_main() -> ! {
     if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
     }
-    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
     let EffectivePermissions {
-        permission_profile,
-        file_system_sandbox_policy,
-        network_sandbox_policy,
+        mut permission_profile,
+        mut file_system_sandbox_policy,
+        mut network_sandbox_policy,
     } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
-    ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);
+    let termux_fallback = should_use_termux_landlock_fallback(allow_network_for_proxy);
+    if termux_fallback && !file_system_sandbox_policy.has_full_disk_write_access() {
+        // Termux cannot isolate the daemon socket directory with bubblewrap.
+        // Do not widen restricted reads or preserve a network grant here.
+        // Reduce supported profiles to global read-only with no sockets, and
+        // install socket isolation before permitting the legacy backend.
+        if !file_system_sandbox_policy.has_full_disk_read_access() {
+            panic!("Termux restricted-read policies require bubblewrap");
+        }
+        permission_profile = PermissionProfile::read_only();
+        (file_system_sandbox_policy, network_sandbox_policy) =
+            permission_profile.to_runtime_permissions();
+        crate::termux_socket_isolation::install_on_current_thread()
+            .unwrap_or_else(|err| panic!("failed to isolate Termux command sockets: {err}"));
+    }
+    use_legacy_landlock |= termux_fallback;
+    ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
+    if !termux_fallback {
+        ensure_legacy_landlock_mode_supports_policy(
+            use_legacy_landlock,
+            &file_system_sandbox_policy,
+        );
+    }
 
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
@@ -357,6 +379,13 @@ pub fn run_main() -> ! {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
     exec_or_panic(command);
+}
+
+fn should_use_termux_landlock_fallback(allow_network_for_proxy: bool) -> bool {
+    let is_termux = std::env::var_os("PREFIX")
+        .as_deref()
+        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)));
+    is_termux && !allow_network_for_proxy
 }
 
 #[derive(Debug, Clone)]
@@ -614,7 +643,6 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         exec_bwrap(args, preserved_files);
     }
 
-    drop(preserved_files);
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);

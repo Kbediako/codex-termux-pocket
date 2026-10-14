@@ -4,7 +4,14 @@
 //! The legacy Landlock filesystem implementation is retained here, but the
 //! helper rejects legacy mode for filesystem-restricted policies.
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::ffi::CString;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::path::PathBuf;
 
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::CodexErr;
@@ -22,6 +29,7 @@ use landlock::CompatLevel;
 use landlock::Compatible;
 use landlock::Ruleset;
 use landlock::RulesetAttr;
+use landlock::RulesetCreated;
 use landlock::RulesetCreatedAttr;
 use seccompiler::BpfProgram;
 use seccompiler::SeccompAction;
@@ -153,25 +161,217 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let access_rw = AccessFs::from_all(abi);
     let access_ro = AccessFs::from_read(abi);
 
+    let readable_roots = legacy_readable_roots();
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(access_rw)?
         .create()?
-        .add_rules(landlock::path_beneath_rules(&["/"], access_ro))?
-        .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
-        .set_no_new_privs(true);
+        .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?;
 
     if !writable_roots.is_empty() {
         ruleset = ruleset.add_rules(landlock::path_beneath_rules(&writable_roots, access_rw))?;
     }
 
-    let status = ruleset.restrict_self()?;
+    if is_termux_environment() {
+        return install_termux_read_rules_and_restrict(ruleset, &readable_roots, abi);
+    }
+
+    let status = ruleset
+        .add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?
+        .set_no_new_privs(true)
+        .restrict_self()?;
 
     if status.ruleset == landlock::RulesetStatus::NotEnforced {
         return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
     }
 
     Ok(())
+}
+
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
+const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
+
+/// Adds read rules with the kernel UAPI on Termux, then enforces the
+/// ruleset. Android SELinux permits opening some virtual roots with
+/// `O_PATH` but denies the `fstat()` compatibility probe performed by
+/// landlock 0.4.x. The kernel only needs the live `O_PATH` descriptor.
+///
+/// Writable roots and `/dev/null` still go through the crate's normal
+/// compatibility checks before this function receives the ruleset.
+fn install_termux_read_rules_and_restrict(
+    ruleset: RulesetCreated,
+    readable_roots: &[PathBuf],
+    requested_abi: ABI,
+) -> Result<()> {
+    let effective_abi = current_landlock_abi(requested_abi)?;
+    if effective_abi == ABI::Unsupported {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+    let allowed_access = termux_read_access_mask(requested_abi, effective_abi);
+
+    let ruleset_fd: Option<OwnedFd> = ruleset.into();
+    let Some(ruleset_fd) = ruleset_fd else {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    };
+
+    let mut added_rules = 0usize;
+    for path in readable_roots {
+        // Match landlock::path_beneath_rules' best-effort behavior:
+        // unavailable optional Android roots are omitted and therefore
+        // remain inaccessible once this ruleset is enforced.
+        let parent_fd = match open_path_for_landlock(path) {
+            Ok(fd) => fd,
+            Err(_) => continue,
+        };
+        let attr = LandlockPathBeneathAttr {
+            allowed_access,
+            parent_fd: parent_fd.as_raw_fd(),
+        };
+
+        // SAFETY: `ruleset_fd` and `parent_fd` are live descriptors,
+        // `attr` has the exact C layout required by
+        // `landlock_path_beneath_attr`, and Landlock requires flags 0.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset_fd.as_raw_fd(),
+                LANDLOCK_RULE_PATH_BENEATH,
+                &attr as *const LandlockPathBeneathAttr,
+                0 as libc::c_uint,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            eprintln!(
+                "failed to add Termux Landlock read rule for {} using ABI {effective_abi} and mask {allowed_access:#x}: {error}",
+                path.display()
+            );
+            return Err(error.into());
+        }
+        added_rules += 1;
+    }
+
+    if added_rules == 0 {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+
+    set_no_new_privs()?;
+    // SAFETY: `ruleset_fd` is a live Landlock ruleset descriptor and
+    // the kernel API currently requires flags 0.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset_fd.as_raw_fd(),
+            0 as libc::c_uint,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        eprintln!(
+            "failed to restrict the Termux process with Landlock ABI {effective_abi}: {error}"
+        );
+        return Err(error.into());
+    }
+
+    Ok(())
+}
+
+fn current_landlock_abi(maximum_abi: ABI) -> std::io::Result<ABI> {
+    // SAFETY: querying the supported Landlock ABI requires a null attribute,
+    // size 0, and LANDLOCK_CREATE_RULESET_VERSION as the sole flag.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(std::cmp::min(maximum_abi, ABI::from(result as i32)))
+}
+
+fn termux_read_access_mask(requested_abi: ABI, kernel_abi: ABI) -> u64 {
+    AccessFs::from_read(std::cmp::min(requested_abi, kernel_abi)).bits()
+}
+
+/// Android SELinux intentionally denies opening `/`, even though an app may
+/// open selected descendants. Landlock needs an open path file descriptor for
+/// every allow rule, so a single `/` rule is silently unusable in Termux. Use a
+/// fail-closed list of Android/Termux hierarchies instead: unavailable entries
+/// are ignored by the Landlock crate's best-effort compatibility layer, while
+/// omitted paths remain inaccessible after restriction.
+fn legacy_readable_roots() -> Vec<PathBuf> {
+    let prefix = std::env::var_os("PREFIX").map(PathBuf::from);
+    legacy_readable_roots_for_prefix(prefix.as_deref())
+}
+
+fn is_termux_environment() -> bool {
+    std::env::var_os("PREFIX")
+        .as_deref()
+        .is_some_and(|prefix| is_termux_prefix(Path::new(prefix)))
+}
+
+fn open_path_for_landlock(path: &Path) -> std::io::Result<OwnedFd> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Landlock path contains an interior NUL byte",
+        )
+    })?;
+    // SAFETY: `path` is a live NUL-terminated CString and the flags do not
+    // require a mode argument.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: a successful open returned a new descriptor whose ownership
+        // is transferred exactly once to this OwnedFd.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn legacy_readable_roots_for_prefix(prefix: Option<&Path>) -> Vec<PathBuf> {
+    let Some(prefix) = prefix.filter(|path| is_termux_prefix(path)) else {
+        return vec![PathBuf::from("/")];
+    };
+
+    let mut roots = BTreeSet::from([
+        PathBuf::from("/apex"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/linkerconfig"),
+        PathBuf::from("/mnt"),
+        PathBuf::from("/odm"),
+        PathBuf::from("/odm_dlkm"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/product"),
+        PathBuf::from("/storage"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/system"),
+        PathBuf::from("/system_ext"),
+        PathBuf::from("/vendor"),
+        PathBuf::from("/vendor_dlkm"),
+    ]);
+    // PREFIX is normally <app-data>/files/usr. Its parent includes both the
+    // Termux package tree and HOME without granting other apps' private data.
+    if let Some(termux_files) = prefix.parent() {
+        roots.insert(termux_files.to_path_buf());
+    } else {
+        roots.insert(prefix.to_path_buf());
+    }
+    roots.into_iter().collect()
+}
+
+pub(crate) fn is_termux_prefix(path: &Path) -> bool {
+    path.ends_with("com.termux/files/usr")
 }
 
 /// Installs a seccomp filter for Linux network sandboxing.
@@ -304,9 +504,61 @@ fn install_network_seccomp_filter_on_current_thread(
 #[cfg(test)]
 mod tests {
     use super::NetworkSeccompMode;
+    use super::is_termux_prefix;
+    use super::legacy_readable_roots_for_prefix;
     use super::network_seccomp_mode;
+    use super::open_path_for_landlock;
     use super::should_install_network_seccomp;
+    use super::termux_read_access_mask;
     use codex_protocol::protocol::NetworkSandboxPolicy;
+    use landlock::ABI;
+    use landlock::Access;
+    use landlock::AccessFs;
+    use std::os::fd::AsRawFd;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn termux_legacy_roots_do_not_depend_on_opening_android_root() {
+        let prefix = Path::new("/data/data/com.termux/files/usr");
+        let roots = legacy_readable_roots_for_prefix(Some(prefix));
+        assert!(!roots.contains(&PathBuf::from("/")));
+        assert!(roots.contains(&PathBuf::from("/data/data/com.termux/files")));
+        assert!(roots.contains(&PathBuf::from("/system")));
+        assert!(roots.contains(&PathBuf::from("/apex")));
+    }
+
+    #[test]
+    fn ordinary_linux_legacy_root_remains_unchanged() {
+        assert_eq!(
+            legacy_readable_roots_for_prefix(Some(Path::new("/usr"))),
+            vec![PathBuf::from("/")]
+        );
+        assert!(is_termux_prefix(Path::new(
+            "/data/data/com.termux/files/usr"
+        )));
+    }
+
+    #[test]
+    fn termux_landlock_path_is_opened_with_o_path() {
+        let fd = open_path_for_landlock(Path::new("/"))
+            .expect("opening the filesystem root with O_PATH should succeed");
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(flags & libc::O_PATH, libc::O_PATH);
+    }
+
+    #[test]
+    fn termux_read_mask_is_limited_to_the_running_kernel_abi() {
+        assert_eq!(
+            termux_read_access_mask(ABI::V5, ABI::V3),
+            AccessFs::from_read(ABI::V3).bits()
+        );
+        assert_eq!(
+            termux_read_access_mask(ABI::V3, ABI::V5),
+            AccessFs::from_read(ABI::V3).bits()
+        );
+    }
     use pretty_assertions::assert_eq;
 
     #[test]
