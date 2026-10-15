@@ -54,7 +54,14 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
         policy
             .entries
             .push(path_entry(denied, FileSystemAccessMode::Deny));
-        policy.for_approved_command(&context)
+        let mut policy = policy.for_approved_command(&context);
+        // The outer fixture makes / writable by its mapped root user. Describe
+        // its read-only system mount so pre-sandbox executable selection cannot
+        // treat bubblewrap as replaceable through that writable ancestor.
+        policy
+            .entries
+            .push(path_entry("/usr", FileSystemAccessMode::Read));
+        policy
     };
     let run = |policy: &FileSystemSandboxPolicy,
                private_mount: &str,
