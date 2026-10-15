@@ -1,23 +1,11 @@
 {
   "format_version": 1,
-  "request_id": "issue168-prepare-alpha1635-rustls-fixture-20261015",
+  "request_id": "issue168-prepare-alpha1635-hyper1111-20261015",
   "operation": "prepare-source",
   "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
-  "prepared_commit": "86d546812830d1d06a7c65a675050da934f292e7",
-  "expected_input_tree": "e15d63cd67ed11a50817e20cd8edc5b7e0edc778",
-  "edits": [
-    {
-      "path": "codex-rs/linux-sandbox/tests/suite/root_metadata_tests.rs",
-      "before": "fe7d4dcc2086cee59763e6174816697db5e7350c",
-      "after": "092c9ceee3df0b6cc8a63eeb48c08ddda5cc91f2",
-      "replacements": [
-        {
-          "old": "        policy.for_approved_command(&context)\n",
-          "new": "        let mut policy = policy.for_approved_command(&context);\n        // The outer fixture makes / writable by its mapped root user. Describe\n        // its read-only system mount so pre-sandbox executable selection cannot\n        // treat bubblewrap as replaceable through that writable ancestor.\n        policy\n            .entries\n            .push(path_entry(\"/usr\", FileSystemAccessMode::Read));\n        policy\n"
-        }
-      ]
-    }
-  ],
+  "prepared_commit": "d3449d5f6ca2540d8888493fca0d7199220f9a5c",
+  "expected_input_tree": "f8298d563f6ab5387103dd1d7857c52d9aabbbe6",
+  "edits": [],
   "package_updates": [
     {
       "name": "tokio-util",
@@ -34,6 +22,10 @@
     {
       "name": "rustls",
       "version": "0.23.46"
+    },
+    {
+      "name": "hyper",
+      "version": "1.11.1"
     }
   ]
 }
