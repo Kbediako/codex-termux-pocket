@@ -1,31 +1,7 @@
 {
   "format_version": 1,
-  "request_id": "issue168-prepare-alpha1635-hyper1111-20261015",
-  "operation": "prepare-source",
-  "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
-  "prepared_commit": "d3449d5f6ca2540d8888493fca0d7199220f9a5c",
-  "expected_input_tree": "f8298d563f6ab5387103dd1d7857c52d9aabbbe6",
-  "edits": [],
-  "package_updates": [
-    {
-      "name": "tokio-util",
-      "version": "0.7.19"
-    },
-    {
-      "name": "quinn-proto",
-      "version": "0.11.18"
-    },
-    {
-      "name": "yaml_serde",
-      "version": "0.10.7"
-    },
-    {
-      "name": "rustls",
-      "version": "0.23.46"
-    },
-    {
-      "name": "hyper",
-      "version": "1.11.1"
-    }
-  ]
+  "request_id": "issue168-pr172-production-5f6b015d-20261016",
+  "operation": "dispatch-pr-build",
+  "pr_number": 172,
+  "source_sha": "5f6b015dc4e4432222bad835d095bfc75feab401"
 }
