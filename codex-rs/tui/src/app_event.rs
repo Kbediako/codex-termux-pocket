@@ -44,6 +44,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
+use codex_utils_path_uri::PathUri;
 use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
@@ -239,11 +240,12 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
-/// Number of key strokes recorded by one `/keymap` capture.
+/// Kind of shortcut recorded by one `/keymap` capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeymapCaptureMode {
     SingleKey,
     Chord,
+    LeaderChord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,11 +276,27 @@ pub(crate) struct AgentsOverviewThreadRefresh {
     pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
     pub(crate) discovery: Option<crate::app::agents_overview_discovery::AgentsOverviewDiscovery>,
+    pub(crate) pinned_thread_ids: Option<Option<Vec<ThreadId>>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AgentPickerThreadRefresh {
+    pub(crate) threads: Vec<Thread>,
+    pub(crate) archived_thread_ids: std::collections::HashSet<ThreadId>,
 }
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    AccountEmailLoaded {
+        request_id: uuid::Uuid,
+        email: Option<String>,
+    },
+    SecuritySetupLoaded {
+        request_id: uuid::Uuid,
+        identity: crate::security_setup::Identity,
+        notice: crate::security_setup::Notice,
+    },
     OpenDaemonMenu,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
     RunDaemonUpdate(crate::update_action::DaemonUpdateSource),
@@ -318,6 +336,18 @@ pub(crate) enum AppEvent {
     RenameAgentsOverviewThread {
         thread_id: ThreadId,
         name: String,
+    },
+    /// Move a task into or out of the shared pinned section.
+    ToggleAgentsOverviewPin {
+        thread_id: ThreadId,
+        pinned: bool,
+    },
+    /// Finish moving a task into or out of the shared pinned section.
+    AgentsOverviewPinToggled {
+        request_id: Uuid,
+        thread_id: ThreadId,
+        pinned: bool,
+        result: Result<(), String>,
     },
     /// Generate an editable title suggestion for the active rename prompt.
     SuggestThreadName {
@@ -373,7 +403,7 @@ pub(crate) enum AppEvent {
     AgentPickerThreadsLoaded {
         primary_thread_id: ThreadId,
         request_id: Uuid,
-        result: Result<Vec<Thread>, String>,
+        result: Result<AgentPickerThreadRefresh, String>,
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
@@ -411,7 +441,10 @@ pub(crate) enum AppEvent {
         server_name: String,
         request_id: AppServerRequestId,
         attempt_id: Uuid,
-        result: Result<codex_app_server_protocol::UserVerificationProof, String>,
+        result: Result<
+            codex_app_server_protocol::UserVerificationProof,
+            crate::app_command::UserVerificationFailure,
+        >,
     },
 
     /// Interrupt, fork, and retry a safety-buffered turn with the server-selected model.
@@ -458,6 +491,14 @@ pub(crate) enum AppEvent {
     ExportTranscript {
         destination: TranscriptExportDestination,
     },
+
+    /// Select a response or block directly in the owned transcript.
+    SelectTranscriptCopy {
+        guard: Arc<crate::copy_input_guard::CopyInputGuard>,
+    },
+
+    /// Retry queued input after the transcript copy owner is released.
+    TranscriptCopyClosed,
 
     /// Copy text through the session clipboard worker.
     CopySelection {
@@ -1151,6 +1192,7 @@ pub(crate) enum AppEvent {
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
         source: String,
+        copy_source: Option<String>,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
@@ -1233,6 +1275,9 @@ pub(crate) enum AppEvent {
     OpenRealtimeDevicePicker {
         kind: codex_realtime_webrtc::AudioDeviceKind,
     },
+    OpenRealtimeInputChannels {
+        device: codex_realtime_webrtc::AudioDevice,
+    },
     RealtimeDevicesListed {
         origin: Option<ThreadId>,
         kind: codex_realtime_webrtc::AudioDeviceKind,
@@ -1241,6 +1286,9 @@ pub(crate) enum AppEvent {
     PersistRealtimeDevice {
         kind: codex_realtime_webrtc::AudioDeviceKind,
         name: Option<String>,
+    },
+    PersistRealtimeInputChannel {
+        channel: Option<codex_config::config_toml::MicrophoneChannels>,
     },
 
     /// Save the voice for subsequent conversations through the app server.
@@ -1251,6 +1299,12 @@ pub(crate) enum AppEvent {
     /// Persist the selected service tier to the appropriate config.
     PersistServiceTierSelection {
         service_tier: Option<String>,
+    },
+
+    /// Persist the current thread's Daybreak preference and the new-thread default.
+    PersistDaybreakSelection {
+        thread_id: ThreadId,
+        enabled: bool,
     },
 
     /// Fetch the current catalog even when cached models produce no picker.
@@ -1427,7 +1481,7 @@ pub(crate) enum AppEvent {
 
     /// Enable or disable a skill by path.
     SetSkillEnabled {
-        path: AbsolutePathBuf,
+        path: PathUri,
         enabled: bool,
     },
 
@@ -1558,6 +1612,9 @@ pub(crate) enum AppEvent {
     },
     /// Dismiss the terminal-title setup UI without changing config.
     TerminalTitleSetupCancelled,
+
+    /// Remember the Command Center grouping across launches.
+    PersistAgentsOverviewGrouping(codex_config::types::AgentsOverviewGrouping),
 
     /// Save the transcript renderer preference for the next launch only.
     FullscreenTranscriptSelected {

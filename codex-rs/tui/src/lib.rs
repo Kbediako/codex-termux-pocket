@@ -9,11 +9,14 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
 use crate::legacy_core::config::bootstrap_auth_config;
+use crate::legacy_core::config::edit::ConfigEdit;
+use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 #[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
+use crate::onboarding::check_gov_cloud;
 use crate::session_resume::ResolveCwdOutcome;
 use crate::session_resume::ResumeCwdContext;
 use crate::session_resume::effective_resume_cwd_mode;
@@ -75,6 +78,7 @@ use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use crossterm::SynchronizedUpdate;
 use cwd_prompt::CwdPromptAction;
+pub use daemon_startup::uses_wsl_drvfs;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
@@ -125,12 +129,14 @@ mod clock_format;
 mod collaboration_modes;
 mod color;
 mod config_update;
+mod copy_input_guard;
 pub(crate) mod custom_terminal;
 mod daybreak;
 mod experimental_features;
 mod markdown_copy;
 mod permission_discovery;
 mod pets;
+mod security_setup;
 mod worktree_browser;
 pub use custom_terminal::Terminal;
 mod assistant_directives;
@@ -156,6 +162,9 @@ mod hooks_rpc;
 mod ide_context;
 mod inline_visualization;
 pub(crate) mod insert_history;
+mod iterm_session_status;
+mod managed_worktree_tool_specs;
+mod managed_worktree_tools;
 pub use insert_history::insert_history_lines;
 mod footer_hint;
 mod key_hint;
@@ -164,6 +173,7 @@ mod keymap_setup;
 mod line_truncation;
 pub(crate) mod live_wrap;
 mod local_settings;
+mod rendered_selection;
 pub use live_wrap::RowBuilder;
 mod local_chatgpt_auth;
 mod managed_new_thread_defaults;
@@ -262,6 +272,7 @@ pub(crate) mod test_backend;
 pub(crate) mod test_support;
 
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
+use crate::onboarding::onboarding_screen::run_gov_cloud_guidance;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
 use crate::startup_hooks_review::StartupHooksReviewOutcome;
 use crate::startup_hooks_review::load_startup_hooks_review_entry;
@@ -388,10 +399,7 @@ async fn init_state_db_for_app_server_target(
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
-            std::io::Error::other(LocalStateDbStartupError::new(
-                database_path,
-                format!("{err:#}"),
-            ))
+            std::io::Error::other(LocalStateDbStartupError::new(database_path, err))
         }),
         AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
             Ok(state_db::get_state_db(config).await)
@@ -844,7 +852,11 @@ async fn lookup_latest_session_target_with_app_server(
                 include_non_interactive,
                 lookup_mode,
             ))
-            .await?;
+            .await;
+        let response = match response {
+            Err(_) if lookup_mode == LatestSessionLookupMode::StateDbOnly => continue,
+            response => response?,
+        };
         let target = response
             .data
             .into_iter()
@@ -873,6 +885,7 @@ fn latest_session_lookup_params(
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
     ThreadListParams {
+        excluded_thread_ids: None,
         originators: None,
         cursor: None,
         limit: Some(1),
@@ -1398,7 +1411,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
     if !(cli.resume_picker || cli.fork_picker || cli.agents_overview)
         && let Err(err) = startup_draft.show(&mut tui)
     {
@@ -1750,7 +1766,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
 
     if config.model_provider_id != startup_model_provider {
         startup_account = None;
@@ -1910,7 +1929,10 @@ async fn run_ratatui_app(
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.bind_config(&mut config);
     }
-    startup_draft.apply_config(&config);
+    startup_draft.apply_settings(
+        &crate::local_settings::LocalSettings::from(&config),
+        config.cwd.as_path(),
+    );
 
     // Count launches that reach final config resolution, regardless of screen policy.
     if config.analytics_enabled != Some(false)
@@ -1979,21 +2001,38 @@ async fn run_ratatui_app(
     let bypass_hook_trust_for_startup_review = config.bypass_hook_trust && !is_persistent_resume;
     let hooks_request_handle = app_server.request_handle();
     let hooks_cwd = config.cwd.to_path_buf();
+    let server_owned_fresh_bootstrap = app::startup_bootstrap::uses_server_owned_fresh_bootstrap(
+        &app_server_target,
+        &session_selection,
+        &loader_overrides,
+    );
+    // Connected servers resolve their own provider; the local config may differ.
+    let check_gov_cloud_guidance = config.notices.hide_gov_cloud_guidance != Some(true)
+        && (config.model_provider.is_amazon_bedrock()
+            || !matches!(app_server_target, AppServerTarget::Embedded));
+    let guidance_request_handle = app_server.request_handle();
     let startup_prefetch_started_at = Instant::now();
     let startup_prefetch = startup_draft
         .run_until(&mut tui, async {
             tokio::join!(
                 async {
-                    match startup_account {
+                    if server_owned_fresh_bootstrap {
+                        return Ok::<_, color_eyre::Report>(None);
+                    }
+                    let bootstrap = match startup_account {
                         Some(account) => app_server.bootstrap_with_account(&config, account).await,
                         None => app_server.bootstrap(&config).await,
-                    }
+                    }?;
+                    Ok(Some(bootstrap))
                 },
                 load_startup_hooks_review_entry(hooks_request_handle, hooks_cwd),
+                async {
+                    check_gov_cloud_guidance && check_gov_cloud(guidance_request_handle).await
+                },
             )
         })
         .await;
-    let (startup_bootstrap, startup_hooks_entry) = match startup_prefetch {
+    let (startup_bootstrap, startup_hooks_entry, show_gov_cloud_guidance) = match startup_prefetch {
         Ok(startup_prefetch) => startup_prefetch,
         Err(err) => {
             shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
@@ -2005,13 +2044,29 @@ async fn run_ratatui_app(
         return Err(err.into());
     }
     let startup_bootstrap = match startup_bootstrap {
-        Ok(startup_bootstrap) => Some(startup_bootstrap),
+        Ok(startup) => startup,
         Err(err) => {
             shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
             return Err(err);
         }
     };
     let startup_elapsed_before_app = startup_prefetch_started_at.elapsed();
+    if show_gov_cloud_guidance {
+        if let Err(err) = run_gov_cloud_guidance(&mut tui).await {
+            shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
+            return Err(err);
+        }
+        if let Err(err) = ConfigEditsBuilder::for_config(&config)
+            .with_edits([ConfigEdit::SetPath {
+                segments: vec!["notice".into(), "hide_gov_cloud_guidance".into()],
+                value: toml_edit::value(true),
+            }])
+            .apply()
+            .await
+        {
+            tracing::warn!(%err, "Failed to save GovCloud guidance acknowledgment");
+        }
+    }
     let startup_hooks_review = maybe_run_startup_hooks_review(
         &mut app_server,
         &mut tui,
@@ -3893,7 +3948,7 @@ requires_openai_auth = {requires_openai_auth}
 
         assert_eq!(startup_error.database_path(), logs_db_path.as_path());
         assert!(
-            codex_state::sqlite_error_detail_is_corruption(startup_error.detail()),
+            startup_error.is_corruption(),
             "startup error should preserve the SQLite corruption cause, got: {}",
             startup_error.detail()
         );

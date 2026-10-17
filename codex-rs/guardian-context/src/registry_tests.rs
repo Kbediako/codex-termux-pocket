@@ -200,9 +200,10 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
         super::GuardianRootMessage::IncompleteRootInstructions,
     ];
     let answers = ["assistant: Publish?\nuser: No.\n".to_string()];
-    let reviews = super::PreviousReviews::try_from_fragments(vec![
-        "<guardian_sync_review>debug-secret review</guardian_sync_review>".to_string(),
-    ])
+    let reviews = super::PreviousReviews::try_from_fragments(vec![super::PreviousReview {
+        id: codex_protocol::ResponseItemId::new("review"),
+        fragment: "<guardian_sync_review>debug-secret review</guardian_sync_review>".to_string(),
+    }])
     .unwrap();
     let permissions = super::PermissionContext {
         environment_id: None,
@@ -218,7 +219,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
     let tool = super::TrustedTool {
         server: "local".into(),
         connector_id: None,
-        source: "debug-secret/config.toml".into(),
+        source: super::TrustedToolSource::UserConfiguration("debug-secret/config.toml".into()),
     };
     let repl_items = [codex_protocol::user_input::UserInput::Text {
         text: "debug-secret result".into(),

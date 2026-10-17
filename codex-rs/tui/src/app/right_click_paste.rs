@@ -59,6 +59,12 @@ impl App {
         let allowed = match source {
             PasteSource::Clipboard => {
                 !self.transcript_view.has_selection_range()
+                    && !self
+                        .chat_widget
+                        .rendered_selection
+                        .borrow()
+                        .view
+                        .has_selection_range()
                     && self
                         .right_click_paste_environment
                         .allows(self.local_settings.tui.right_click_paste)
@@ -67,7 +73,7 @@ impl App {
         };
         if !tui.is_owned_screen()
             || self.overlay.is_some()
-            || self.transcript_view.is_search_active()
+            || self.transcript_view.is_search_editing()
             || !allowed
         {
             return None;

@@ -3,8 +3,10 @@
 //! never rewrite earlier messages, and missing retained context gets a fresh catalog.
 
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::agent::child_config::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use crate::agent::child_config::model_supports_multi_agent_backend;
 use crate::context::ContextualUserFragment;
@@ -114,10 +116,6 @@ impl WorldStateSection for ModelCatalogState {
     const ID: &'static str = "model_catalog";
     type Snapshot = WorldStateHash;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        WorldStateHash::from_fragment(self)
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && Self::matches_text(text)
     }
@@ -133,12 +131,16 @@ impl WorldStateSection for ModelCatalogState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
-        if matches!(previous, PreviousSectionState::Known(previous) if previous == &self.snapshot())
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = WorldStateHash::from_fragment(self);
+        if matches!(previous, PreviousSectionState::Known(previous) if previous == &current)
             || self.catalog.is_empty() && matches!(previous, PreviousSectionState::Absent)
         {
-            return None;
+            return (Some(current), Vec::new());
         }
-        Some(Box::new(self.clone()))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(self.clone())],
+        )
     }
 }

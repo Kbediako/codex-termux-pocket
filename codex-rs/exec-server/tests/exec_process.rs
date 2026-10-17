@@ -6,8 +6,6 @@ mod shell_snapshot;
 mod windows_sandbox;
 
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -16,6 +14,7 @@ use codex_exec_server::Environment;
 use codex_exec_server::ExecBackend;
 #[cfg(unix)]
 use codex_exec_server::ExecEnvPolicy;
+use codex_exec_server::ExecMetadata;
 use codex_exec_server::ExecOutputStream;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecProcess;
@@ -213,8 +212,10 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     shell_name: &str,
 ) -> Result<()> {
     if use_sandbox
-        && let Some(warning) =
-            codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only())
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::read_only(),
+            &std::env::current_dir()?,
+        )
     {
         eprintln!("skipping sandbox test: {warning}");
         return Ok(());
@@ -236,16 +237,15 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     let runtime_path_entry = home.path().join("runtime-bin");
     std::fs::create_dir(&profile_path_entry)?;
     let wc = profile_path_entry.join("wc");
-    std::fs::write(
+    codex_utils_cargo_bin::write_executable(
         &wc,
         "#!/bin/sh\nprintf x >> \"$HOME/tool-captures\"\nexec /usr/bin/wc \"$@\"\n",
     )?;
-    std::fs::set_permissions(&wc, std::fs::Permissions::from_mode(0o755))?;
     let posix_shell = matches!(shell_name, "sh" | "bash-sh");
     let padding = if !use_remote && !tty && shell_name == "bash" {
         format!(
             "snapshot_padding() {{ printf '%s' '{}'; }}\n",
-            "🦀".repeat(20_000)
+            "🦀".repeat(200_000)
         )
     } else {
         String::new()
@@ -375,6 +375,123 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
 }
 
 #[cfg(unix)]
+#[test_case(false, false, false; "local_pipe")]
+#[test_case(false, true, false; "local_tty")]
+#[test_case(true, false, false; "remote_pipe")]
+#[test_case(true, true, false; "remote_tty")]
+#[test_case(true, false, true; "remote_sandbox")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(remote_exec_server)]
+async fn exec_metadata_overrides_policy_and_cached_snapshot(
+    use_remote: bool,
+    tty: bool,
+    use_sandbox: bool,
+) -> Result<()> {
+    if use_sandbox
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            &std::env::current_dir()?,
+        )
+    {
+        eprintln!("skipping sandbox test: {warning}");
+        return Ok(());
+    }
+    let context = create_process_context(use_remote).await?;
+    let home = TempDir::new()?;
+    let cwd = PathUri::from_host_native_path(home.path())?;
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "printf '%s|%s\n' \"${CODEX_THREAD_ID-unset}\" \"${CODEX_TOOL_CALL_ID-unset}\" >> \"$HOME/capture-env\"\nexport CODEX_THREAD_ID=snapshot-thread\nexport CODEX_TOOL_CALL_ID=snapshot-call\n",
+    )?;
+    let policy = ExecEnvPolicy {
+        inherit: ShellEnvironmentPolicyInherit::None,
+        ignore_default_excludes: true,
+        exclude: Vec::new(),
+        r#set: HashMap::from([
+            ("HOME".into(), home.path().to_string_lossy().into_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("CODEX_THREAD_ID".into(), "policy-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "policy-call".into()),
+        ]),
+        include_only: Vec::new(),
+    };
+    let thread_id = codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")?;
+    let later_thread_id =
+        codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5c")?;
+
+    for (attempt, call_id, expected) in [
+        (0, Some(""), ""),
+        (1, Some("call-λ-'\";$()"), "call-λ-'\";$()"),
+        (2, None, "unset"),
+        (3, Some("exec-invalid\0call"), "unset"),
+    ] {
+        let execution_thread_id = if attempt == 1 {
+            later_thread_id
+        } else {
+            thread_id
+        };
+        let started = context
+            .backend
+            .start(ExecParams {
+                metadata: Some(ExecMetadata {
+                    thread_id: Some(execution_thread_id),
+                    tool_call_id: call_id.map(str::to_string),
+                }),
+                process_id: ProcessId::from(format!("metadata-snapshot-{attempt}")),
+                argv: vec![
+                    "/bin/bash".into(),
+                    "-lc".into(),
+                    "printf '%s|%s' \"$CODEX_THREAD_ID\" \"${CODEX_TOOL_CALL_ID-unset}\""
+                        .to_string(),
+                ],
+                cwd: cwd.clone(),
+                env_policy: Some(policy.clone()),
+                shell_snapshot: Some(ShellSnapshotRequest {
+                    scope_id: "metadata-attachment".into(),
+                    shell: ShellInfo {
+                        name: "bash".into(),
+                        path: "/bin/bash".into(),
+                    },
+                }),
+                env: HashMap::from([
+                    ("CODEX_THREAD_ID".into(), "overlay-thread".into()),
+                    ("CODEX_TOOL_CALL_ID".into(), "overlay-call".into()),
+                ]),
+                tty,
+                pipe_stdin: false,
+                arg0: None,
+                sandbox: use_sandbox.then(|| {
+                    FileSystemSandboxContext::from_permission_profile(
+                        PermissionProfile::workspace_write(),
+                        cwd.clone(),
+                    )
+                }),
+                enforce_managed_network: false,
+                managed_network: None,
+                network_proxy: None,
+            })
+            .await?;
+        let (stdout, stderr, status, closed) =
+            collect_process_output_from_events(started.process).await?;
+        assert_eq!(
+            (stdout, stderr, status, closed),
+            (
+                format!("{execution_thread_id}|{expected}"),
+                String::new(),
+                Some(0),
+                true,
+            )
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("capture-env"))?,
+        "019d25f0-6728-7ce2-908f-c3c187323e5b|unset\n"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(remote_exec_server)]
 async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context() -> Result<()> {
@@ -458,14 +575,26 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
 }
 
 #[cfg(unix)]
-#[test_case(false, false, "bash", 1; "local_pipe_recovery")]
-#[test_case(false, true, "bash", 1; "local_tty_recovery")]
-#[test_case(true, false, "bash", 1; "remote_pipe_recovery")]
-#[test_case(true, true, "bash", 1; "remote_tty_recovery")]
-#[test_case(false, false, "bash", 3; "local_retry_budget_exhausted")]
-#[test_case(true, false, "bash", 3; "remote_retry_budget_exhausted")]
-#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1; "local_zsh_recovery"))]
-#[cfg_attr(target_os = "macos", test_case(true, false, "zsh", 1; "remote_zsh_recovery"))]
+#[derive(Clone, Copy)]
+enum CaptureFailure {
+    Exit(i32),
+    Cancel,
+    Timeout,
+}
+
+#[cfg(unix)]
+#[test_case(false, false, "bash", 1, CaptureFailure::Exit(7); "local_pipe_recovery")]
+#[test_case(false, true, "bash", 1, CaptureFailure::Exit(7); "local_tty_recovery")]
+#[test_case(true, false, "bash", 1, CaptureFailure::Exit(7); "remote_pipe_recovery")]
+#[test_case(true, true, "bash", 1, CaptureFailure::Exit(7); "remote_tty_recovery")]
+#[test_case(false, false, "bash", 3, CaptureFailure::Exit(7); "local_retry_budget_exhausted")]
+#[test_case(true, false, "bash", 3, CaptureFailure::Exit(7); "remote_retry_budget_exhausted")]
+#[test_case(false, false, "bash", 1, CaptureFailure::Exit(0); "local_invalid_output_recovery")]
+#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1, CaptureFailure::Exit(0); "local_zsh_invalid_output_recovery"))]
+#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1, CaptureFailure::Exit(7); "local_zsh_recovery"))]
+#[cfg_attr(target_os = "macos", test_case(true, false, "zsh", 1, CaptureFailure::Exit(7); "remote_zsh_recovery"))]
+#[test_case(false, false, "bash", 1, CaptureFailure::Cancel; "cancel_capture")]
+#[test_case(false, false, "bash", 1, CaptureFailure::Timeout; "timeout_capture")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(remote_exec_server)]
 async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
@@ -473,10 +602,13 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
     tty: bool,
     shell_name: &str,
     failures_before_repair: usize,
+    failure: CaptureFailure,
 ) -> Result<()> {
     if use_remote
-        && let Some(warning) =
-            codex_sandboxing::system_bwrap_warning(&PermissionProfile::workspace_write())
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            &std::env::current_dir()?,
+        )
     {
         eprintln!("skipping sandbox test: {warning}");
         return Ok(());
@@ -489,9 +621,21 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
         "zsh" => ("/bin/zsh", ".zshrc"),
         name => anyhow::bail!("unsupported test shell {name}"),
     };
+    let child_pids = home.path().join("startup-pids");
+    let _cleanup = shell_snapshot::StartupProcesses(child_pids.clone());
+    // Sandboxed remote PIDs may be namespace-local; check descendants on the native path.
+    let startup_child = if use_remote {
+        ""
+    } else {
+        "/bin/sleep 30 >/dev/null 2>&1 &\nprintf '%s\\n' \"$!\" >> \"$HOME/startup-pids\"\n"
+    };
+    let finish = match failure {
+        CaptureFailure::Exit(code) => format!("exit {code}"),
+        CaptureFailure::Cancel | CaptureFailure::Timeout => "wait".to_string(),
+    };
     std::fs::write(
         home.path().join(profile_name),
-        "printf x >> \"$HOME/captures\"\nexit 7\n",
+        format!("printf x >> \"$HOME/captures\"\n{startup_child}{finish}\n"),
     )?;
     let policy = ExecEnvPolicy {
         inherit: ShellEnvironmentPolicyInherit::All,
@@ -537,12 +681,47 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
 
     for attempt in 0..failures_before_repair {
         params.process_id = ProcessId::from(format!("snapshot-fallback-{attempt}"));
-        let fallback = context.backend.start(params.clone()).await?;
-        let fallback_output = collect_process_output_from_events(fallback.process).await?;
-        assert_eq!(
-            fallback_output,
-            ("original".to_string(), String::new(), Some(0), true)
-        );
+        let mut start = context.backend.start(params.clone());
+        if matches!(failure, CaptureFailure::Cancel) {
+            tokio::select! {
+                result = &mut start => anyhow::bail!("capture finished before cancellation: {}", result.is_ok()),
+                _ = async {
+                    while std::fs::read_to_string(&child_pids).unwrap_or_default().trim().is_empty() {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                } => {}
+            }
+            drop(start);
+        } else {
+            let fallback = start.await?;
+            assert_eq!(
+                collect_process_output_from_events(fallback.process).await?,
+                ("original".to_string(), String::new(), Some(0), true)
+            );
+        }
+        if !use_remote {
+            let pids = std::fs::read_to_string(&child_pids)?;
+            let pid = pids
+                .split_whitespace()
+                .last()
+                .context("startup child PID")?;
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let output = std::process::Command::new("/bin/ps")
+                        .args(["-o", "stat=", "-p", pid])
+                        .output()?;
+                    let state = String::from_utf8(output.stdout)?;
+                    if state.trim().is_empty() || state.trim().starts_with('Z') {
+                        // Forget the completed child before retries can reuse its PID.
+                        std::fs::remove_file(&child_pids)?;
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .context("failed capture left its startup child running")??;
+        }
         // A real remote executor has its own clock; the unit test uses a
         // paused clock to check requests made during the one-second backoff.
         sleep(Duration::from_millis(1100)).await;
@@ -579,7 +758,10 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -651,16 +833,43 @@ async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
 
 async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
     let context = create_process_context(use_remote).await?;
+    let thread_id = codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")?;
+    let call_id = "call-λ-'\";$()";
+    #[cfg(unix)]
+    let argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf '%s|%s|%s' \"$CODEX_THREAD_ID\" \"$CODEX_TOOL_CALL_ID\" \"$CUSTOM_ENV_VAR\""
+            .to_string(),
+    ];
+    #[cfg(windows)]
+    let argv = vec![
+        "powershell.exe".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); [Console]::Write($env:CODEX_THREAD_ID + '|' + $env:CODEX_TOOL_CALL_ID + '|' + $env:CUSTOM_ENV_VAR)".into(),
+    ];
+    let mut env = std::env::vars().collect::<HashMap<_, _>>();
+    env.extend([
+        ("CODEX_THREAD_ID".into(), "stale-thread".into()),
+        ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+        ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+        ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+        ("CUSTOM_ENV_VAR".into(), "caller-owned".into()),
+    ]);
     let session = context
         .backend
         .start(ExecParams {
-            metadata: Default::default(),
+            metadata: Some(ExecMetadata {
+                thread_id: Some(thread_id),
+                tool_call_id: Some(call_id.to_string()),
+            }),
             process_id: ProcessId::from("proc-1"),
-            argv: vec!["true".to_string()],
+            argv,
             cwd: PathUri::from_host_native_path(std::env::current_dir()?)?,
             shell_snapshot: None,
             env_policy: /*env_policy*/ None,
-            env: Default::default(),
+            env,
             tty: false,
             pipe_stdin: false,
             arg0: None,
@@ -672,6 +881,17 @@ async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
         .await?;
     assert_eq!(session.process.process_id().as_str(), "proc-1");
     let wake_rx = session.process.subscribe_wake();
+    let (stdout, stderr, status, closed) =
+        collect_process_output_from_events(Arc::clone(&session.process)).await?;
+    assert_eq!(
+        (stdout, stderr, status, closed),
+        (
+            format!("{thread_id}|{call_id}|caller-owned"),
+            String::new(),
+            Some(0),
+            true,
+        )
+    );
     let (_, exit_code, closed) =
         collect_process_output_from_reads(session.process, wake_rx).await?;
 
@@ -683,7 +903,10 @@ async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -745,7 +968,10 @@ async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -755,10 +981,7 @@ async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -
     let file = workspace.path().join("allowed.txt");
     std::fs::write(&file, b"allowed")?;
     let hostile_helper = workspace.path().join("codex-linux-sandbox");
-    std::fs::write(&hostile_helper, b"#!/bin/sh\nprintf hostile")?;
-    let mut permissions = std::fs::metadata(&hostile_helper)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&hostile_helper, permissions)?;
+    codex_utils_cargo_bin::write_executable(&hostile_helper, "#!/bin/sh\nprintf hostile")?;
     let path = std::env::var_os("PATH").context("PATH is not set")?;
     let hostile_path = std::env::join_paths(
         std::iter::once(workspace.path().to_path_buf()).chain(std::env::split_paths(&path)),
@@ -819,7 +1042,10 @@ async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_process_preserves_empty_workspace_roots() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -1706,7 +1932,6 @@ async fn remote_exec_process_recovers_after_transport_disconnect() -> Result<()>
 
 #[test_case(false ; "local")]
 #[test_case(true ; "remote")]
-#[cfg_attr(not(unix), ignore = "Unix-only exec-server process test")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Serialize tests that launch a real exec-server process through the full CLI.
 #[serial_test::serial(remote_exec_server)]

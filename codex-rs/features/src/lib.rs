@@ -98,6 +98,8 @@ pub enum Feature {
     ApiKeyModelDiscovery,
     /// Forward explicit programs with builtin OpenAI API keys.
     ApiKeyCyberAccessPrograms,
+    /// Enable Daybreak controls and automatic access-program selection in CLI clients.
+    CliDaybreak,
     /// Deprecated no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
@@ -116,12 +118,17 @@ pub enum Feature {
     DaemonAutoStart,
 
     // Experimental
+    /// Advertise enabled environment-backed tools and their shell parameters before the
+    /// executor is ready. Actual execution still requires a usable environment and its policy.
+    StableEnvironmentTools,
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Record model-attempted tool calls in internal Responses metadata.
     ExecutedToolCallMetadata,
     /// Enable JavaScript code mode backed by the standalone host process.
     CodeMode,
+    /// Expose ranked tool discovery inside JavaScript code mode.
+    CodeModeToolSearch,
     /// Removed compatibility flag for the configurable code-mode exec yield timeout.
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
@@ -130,19 +137,20 @@ pub enum Feature {
     CodeModePrewarm,
     /// Terminate active code mode cells when their turn is interrupted.
     CodeModeInterrupt,
+    /// Put each tool's description before its namespace description in Code Mode.
+    CodeModeToolDescriptionFirst,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
     CodeModeOnly,
+    /// Keep eligible MCP/app and dynamic tools deferred in exec, only in Code Mode Only.
+    /// Ignores deferLoading, omit_tools_from, and namespace skip settings.
+    CodeModeOnlyStrictThirdPartyTools,
     /// Use the single unified PTY-backed exec tool.
     UnifiedExec,
     /// Allow unified exec commands to allocate an interactive terminal.
     UnifiedExecTty,
-    /// Route shell tool execution through the zsh exec bridge.
+    /// Removed compatibility flag for the retired patched zsh backend.
     ShellZshFork,
-    /// Allow unified exec to compose with the zsh exec bridge.
-    ///
-    /// This flag is only a composition gate. Enabling it by itself must not turn
-    /// on either `unified_exec` or `shell_zsh_fork` because those features have
-    /// separate rollout and enterprise controls.
+    /// Removed compatibility flag for the retired patched zsh backend.
     UnifiedExecZshFork,
     /// Removed compatibility flag. Transcript scrollback reflow on terminal resize is always on.
     TerminalResizeReflow,
@@ -150,7 +158,7 @@ pub enum Feature {
     TerminalVisualizationInstructions,
     /// Stream structured progress while apply_patch input is being generated.
     ApplyPatchStreamingEvents,
-    /// Preserve existing line endings when apply_patch updates files.
+    /// Removed compatibility flag. Patches always preserve existing line endings.
     ApplyPatchPreserveLineEndings,
     /// Allow exec tools to request additional permissions while staying sandboxed.
     ExecPermissionApprovals,
@@ -201,6 +209,8 @@ pub enum Feature {
     UnboundedConnectionRetries,
     /// Start the managed network proxy for sandboxed sessions.
     NetworkProxy,
+    /// Mask credentials and inject them through an already enabled network proxy.
+    CredentialMasking,
     /// Enable managed worktree creation and repository-aware sessions.
     Worktrees,
     /// Respect host system proxy settings for Codex-owned network clients.
@@ -213,6 +223,10 @@ pub enum Feature {
     MultiAgentV2,
     /// Keep spawn model choices in append-only context instead of tool descriptions.
     ModelCatalogInContext,
+    /// Inherit client-defined dynamic tools in fresh V2 subagents.
+    MultiAgentV2DynamicTools,
+    /// Use each subagent model's default context window and auto-compaction threshold.
+    SubagentDefaultContextLimits,
     /// Keep sampling through reasoning and commentary boundaries when agent mail arrives.
     /// Pending mail is delivered at the next normal input boundary instead.
     DeferMailboxPreemption,
@@ -246,6 +260,8 @@ pub enum Feature {
     ToolSearchAlwaysDeferMcpTools,
     /// Describe deferred tool namespaces in the model-visible world state.
     DeferredToolWorldState,
+    /// Track top-level tool definitions in world state and emit incremental context updates.
+    IncrementalTools,
     /// Expose MCP model-visible namespaces without the legacy `mcp__` prefix.
     NonPrefixedMcpToolNames,
     /// Enable discoverable tool suggestions for apps.
@@ -264,6 +280,11 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppBrowser,
+    /// Allow websites to open and customize annotation tools in desktop apps.
+    /// Ordinary user-driven annotation is independent of this gate.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    BrowserAnnotationApi,
     /// Allow the in-app chat pane in desktop apps.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -272,6 +293,11 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppDictation,
+    /// Allow in-app Voice in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    /// Permission does not establish Voice availability or provider support.
+    InAppVoice,
     /// Allow desktop apps to run local automations.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -343,10 +369,14 @@ pub enum Feature {
     GuardianEnhancedNodeReplTranscripts,
     /// Include completed node_repl or cua_repl Code Mode response images in Guardian reviews.
     GuardianNodeReplTranscriptImages,
+    /// Trust connector identities from the plugin service orchestrator in Guardian V2.
+    GuardianTrustOrchestratorConnectors,
     /// Give Guardian access to the root conversation's message history tools.
     GuardianConversationHistoryTools,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
+    /// Run Decisions alongside Guardian V2 for measurement without changing approvals.
+    GuardianV2DecisionsComparison,
     /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
@@ -375,6 +405,8 @@ pub enum Feature {
     Artifact,
     /// Enable Fast mode selection in the TUI and request layer.
     FastMode,
+    /// Enable Ultra Fast mode independently of Fast mode.
+    UltrafastMode,
     /// Enable explicitly requested model changes for later step captures.
     StepModelSwitching,
     /// Enable voice conversations in the TUI.
@@ -526,6 +558,15 @@ impl Features {
         self.enabled.contains(&f)
     }
 
+    /// Whether a routing tier is enabled, independently of model catalog support.
+    pub fn service_tier_enabled(&self, service_tier: &str) -> bool {
+        match service_tier {
+            "flex" => true,
+            "ultrafast" => self.enabled(Feature::UltrafastMode),
+            _ => self.enabled(Feature::FastMode),
+        }
+    }
+
     /// Returns whether persistent execution is enabled for the selected effort.
     pub fn persistent_execution_enabled(&self, reasoning_effort: Option<&ReasoningEffort>) -> bool {
         reasoning_effort == Some(&ReasoningEffort::Persistent)
@@ -599,6 +640,17 @@ impl Features {
                         "features.web_search_cached",
                         Feature::WebSearchCached,
                     );
+                }
+                "shell_zsh_fork" => {
+                    self.record_legacy_usage_force("shell_zsh_fork", Feature::ShellZshFork);
+                    continue;
+                }
+                "unified_exec_zsh_fork" => {
+                    self.record_legacy_usage_force(
+                        "unified_exec_zsh_fork",
+                        Feature::UnifiedExecZshFork,
+                    );
+                    continue;
                 }
                 "transcript_v2" => {
                     self.record_legacy_usage_force("features.transcript_v2", Feature::TranscriptV2);
@@ -715,6 +767,10 @@ impl Features {
 fn legacy_usage_notice(alias: &str, feature: Feature) -> (String, Option<String>) {
     let canonical = feature.key();
     match feature {
+        Feature::ShellZshFork | Feature::UnifiedExecZshFork => (
+            format!("`[features].{canonical}` is deprecated and ignored."),
+            Some(format!("The patched zsh backend has been removed. Shell commands now use the standard shell executor. Remove `{canonical}` from [features] in config.toml or profile configuration files.")),
+        ),
         Feature::GuardianThreadContext => (
             "`[features.guardianv2].thread_context` is deprecated and ignored.".to_string(),
             Some("Thread-owned Guardian context is always enabled. Remove `thread_context` from [features.guardianv2] in config.toml, including profile overrides.".to_string()),
@@ -1009,14 +1065,14 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ShellZshFork,
         key: "shell_zsh_fork",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
         id: Feature::UnifiedExecZshFork,
         key: "unified_exec_zsh_fork",
         stage: Stage::Removed,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ShellSnapshot,
@@ -1077,8 +1133,20 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::StableEnvironmentTools,
+        key: "stable_environment_tools",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::CodeMode,
         key: "code_mode",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeToolSearch,
+        key: "code_mode_tool_search",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1103,6 +1171,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeInterrupt,
         key: "code_mode_interrupt",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeToolDescriptionFirst,
+        key: "code_mode_tool_description_first",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1110,11 +1184,17 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::InstantInterrupt,
         key: "instant_interrupt",
         stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::CodeModeOnly,
         key: "code_mode_only",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeOnlyStrictThirdPartyTools,
+        key: "code_mode_only_strict_3p_tools",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1223,7 +1303,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ApplyPatchPreserveLineEndings,
         key: "apply_patch_preserve_line_endings",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1301,6 +1381,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ApiKeyModelDiscovery,
         key: "api_key_model_discovery",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CliDaybreak,
+        key: "cli_daybreak",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1330,6 +1416,12 @@ pub const FEATURES: &[FeatureSpec] = &[
             menu_description: "Apply network proxy restrictions to sandboxed sessions that already have network access.",
             announcement: "NEW: Network proxy can now be enabled from /experimental. Restart Codex after enabling it.",
         },
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CredentialMasking,
+        key: "credential_masking",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1365,6 +1457,18 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ModelCatalogInContext,
         key: "model_catalog_in_context",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::MultiAgentV2DynamicTools,
+        key: "multi_agent_v2_dynamic_tools",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SubagentDefaultContextLimits,
+        key: "subagent_default_context_limits",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1459,6 +1563,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::IncrementalTools,
+        key: "incremental_tools",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::NonPrefixedMcpToolNames,
         key: "non_prefixed_mcp_tool_names",
         stage: Stage::UnderDevelopment,
@@ -1513,6 +1623,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::BrowserAnnotationApi,
+        key: "browser_annotation_api",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::InAppChat,
         key: "in_app_chat",
         stage: Stage::Stable,
@@ -1521,6 +1637,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::InAppDictation,
         key: "in_app_dictation",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppVoice,
+        key: "in_app_voice",
         stage: Stage::Stable,
         default_enabled: true,
     },
@@ -1711,6 +1833,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::GuardianTrustOrchestratorConnectors,
+        key: "guardian_trust_orchestrator_connectors",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::GuardianConversationHistoryTools,
         key: "guardian_conversation_history_tools",
         stage: Stage::UnderDevelopment,
@@ -1719,6 +1847,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianV2,
         key: "guardianv2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianV2DecisionsComparison,
+        key: "guardianv2_decisions_comparison",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1809,6 +1943,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::FastMode,
         key: "fast_mode",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::UltrafastMode,
+        key: "ultrafast_mode",
         stage: Stage::Stable,
         default_enabled: true,
     },

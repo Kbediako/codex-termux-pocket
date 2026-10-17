@@ -132,6 +132,7 @@ async fn handle_spawn_agent(
                 root_turn_id: turn.turn_metadata_state.root_turn_id(),
                 turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
                 environments: Some(step_context.environments.clone()),
+                disabled_plugin_ids: Some(turn.disabled_plugin_ids.clone()),
                 multi_agent_v2_usage_hints: None,
                 cyber_access_program: turn.cyber_access_program,
             },
@@ -142,6 +143,8 @@ async fn handle_spawn_agent(
                 &turn.session_telemetry,
                 turn.config.apps_mcp_product_sku.as_deref(),
                 &err,
+                &call_id,
+                &turn.sub_id,
                 fork_mode.as_ref(),
                 MultiAgentVersion::V1,
             );

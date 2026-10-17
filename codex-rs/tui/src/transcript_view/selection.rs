@@ -20,6 +20,7 @@ struct PendingCopy {
     detailed: bool,
     follow: bool,
     clear_selection: bool,
+    characters: usize,
 }
 
 pub(super) struct Selection {
@@ -41,6 +42,49 @@ pub(super) struct Selection {
 }
 
 impl TranscriptView {
+    pub(super) fn select_copy_range(
+        &mut self,
+        cells: &[Arc<dyn HistoryCell>],
+        index: usize,
+        range: std::ops::Range<usize>,
+    ) {
+        let Some(layout) = self.layout(cells, index) else {
+            return;
+        };
+        let key = self.entry_key(cells, index);
+        let start = Anchor {
+            key,
+            index,
+            offset: range.start,
+            row_bias: 0,
+        };
+        let end = Anchor {
+            offset: range.end,
+            ..start
+        };
+        let mut snapshot = self.capture_snapshot(cells);
+        snapshot.pinned.retain(|key, _| *key == EntryKey::Live);
+        snapshot.pinned.insert(key, layout);
+        self.selection = Some(Selection {
+            pending_copy: None,
+            primary_owner: None,
+            snapshot,
+            start,
+            end,
+            dragging: false,
+            moved: false,
+            moved_vertically: false,
+            pointer_origin_row: 0,
+            resume_on_empty: false,
+            pointer: None,
+            pressed_link: None,
+            origin: (start, end),
+            unit: SelectionUnit::Character,
+            preferred_column: None,
+        });
+        self.reveal_copy_context(cells);
+    }
+
     pub(super) fn begin_selection(
         &mut self,
         cells: &[Arc<dyn HistoryCell>],
@@ -48,6 +92,7 @@ impl TranscriptView {
         row: u16,
         clicks: u8,
     ) {
+        self.copy_mode = None;
         let Some((anchor, layout)) = self.hit_test(column, row) else {
             return;
         };
@@ -90,6 +135,7 @@ impl TranscriptView {
     /// Rejoin current history, retaining Find offsets or a replaced group until navigation.
     /// Real selections keep their reading position, including a retired live revision.
     pub(crate) fn end_selection(&mut self, cells: &[Arc<dyn HistoryCell>]) {
+        self.copy_mode = None;
         let Some(selection) = self.selection.take() else {
             return;
         };
@@ -133,6 +179,7 @@ impl TranscriptView {
         let Some(mut selection) = self.selection.take() else {
             return;
         };
+        self.copy_mode = None;
         // A Shift-click starts a new pointer gesture while retaining the text anchor.
         if !selection.dragging {
             selection.pointer_origin_row = row;
@@ -237,38 +284,6 @@ impl TranscriptView {
         }
     }
 
-    /// Both transcript surfaces honor the same automatic-copy and plaintext PRIMARY semantics.
-    pub(crate) fn copy_selected_text(
-        &mut self,
-        tui: &mut Tui,
-        cells: &[Arc<dyn HistoryCell>],
-        text: &str,
-        clear_selection: bool,
-    ) -> CopyResult {
-        let publish_primary = !clear_selection && self.primary_selection;
-        let mut primary_owner = None;
-        let result =
-            self.copy_selected_text_with(cells, text, clear_selection, |copy_text, format| {
-                if publish_primary {
-                    let (result, owner) = tui.clipboard.select(
-                        copy_text.into(),
-                        format,
-                        CopyDestination::ClipboardAndPrimary(text.into()),
-                        tui.frame_requester(),
-                    );
-                    primary_owner = Some(owner);
-                    result
-                } else {
-                    tui.clipboard
-                        .copy(copy_text.into(), format, tui.frame_requester())
-                }
-            });
-        if publish_primary && let Some(selection) = &mut self.selection {
-            selection.primary_owner = primary_owner;
-        }
-        result
-    }
-
     /// Hide or cancel deferred publication without relinquishing the existing X11 selection.
     pub(crate) fn cancel_primary(&mut self) {
         if let Some(selection) = &mut self.selection {
@@ -297,12 +312,42 @@ impl TranscriptView {
             layout.copy_lines(range, separator, &mut lines);
             previous = Some(layout);
         }
-        let (text, format) = crate::markdown_copy::selection(&lines, text);
+        let override_payload = self.copy_mode.as_ref().and_then(|mode| {
+            if mode.whole {
+                mode.response.as_ref().map(|(_, text)| {
+                    (
+                        text.to_string(),
+                        crate::clipboard_copy::CopyFormat::Markdown,
+                    )
+                })
+            } else {
+                mode.source
+                    .as_ref()
+                    .map(|text| (text.clone(), crate::clipboard_copy::CopyFormat::PlainText))
+            }
+        });
+        let (text, format) = override_payload.unwrap_or_else(|| {
+            let (serialized, format) = crate::markdown_copy::selection(&lines, text);
+            if format == CopyFormat::Markdown {
+                (
+                    crate::markdown_copy::literal_selection(&lines, text),
+                    CopyFormat::MarkdownSelection(serialized.into()),
+                )
+            } else {
+                (serialized, format)
+            }
+        });
+        let characters = text.chars().count();
         let result = copy(&text, format);
+        self.show_copy_feedback(&result, characters);
         match result {
             Ok(crate::clipboard_copy::CopyStatus::Confirmed) => {
                 if clear_selection {
+                    let copy_mode = self.copy_mode.is_some();
                     self.end_selection(cells);
+                    if copy_mode {
+                        self.jump_to_latest();
+                    }
                 }
             }
             Ok(crate::clipboard_copy::CopyStatus::Pending(id)) => {
@@ -313,8 +358,9 @@ impl TranscriptView {
                         end: selection.end,
                         position: self.position,
                         detailed: self.detailed,
-                        follow: false,
+                        follow: clear_selection && self.copy_mode.is_some(),
                         clear_selection,
+                        characters,
                     });
                 }
             }
@@ -325,6 +371,66 @@ impl TranscriptView {
             | Err(_) => {}
         }
         result
+    }
+
+    /// Apply selection copy keys consistently in owned, overlay and rendered-region views.
+    /// Plain UI regions keep their visible text; transcript copies retain Markdown metadata.
+    /// PRIMARY is always plaintext, and automatic copies update both X11 selections.
+    pub(crate) fn copy_action(
+        &mut self,
+        tui: &mut Tui,
+        cells: &[Arc<dyn HistoryCell>],
+        action: &ViewAction,
+        format: crate::clipboard_copy::CopyFormat,
+    ) -> Option<(usize, CopyResult)> {
+        use crate::clipboard_copy::CopyFormat;
+        use crate::clipboard_copy::CopyStatus;
+
+        let text = match action {
+            ViewAction::Copy(text)
+            | ViewAction::CopyOnSelect(text)
+            | ViewAction::CopyAndFollow(text) => text.as_str(),
+            ViewAction::PrimarySelection(text) => {
+                self.publish_primary(tui, text);
+                return None;
+            }
+            ViewAction::Changed | ViewAction::OpenLink(_) => return None,
+        };
+        let clear_selection = !matches!(action, ViewAction::CopyOnSelect(_));
+        let publish_primary = !clear_selection && self.primary_selection;
+        let mut primary_owner = None;
+        let result =
+            self.copy_selected_text_with(cells, text, clear_selection, |rich, rich_format| {
+                let (copy_text, format) = match format {
+                    CopyFormat::PlainText => (text, CopyFormat::PlainText),
+                    CopyFormat::Markdown => (rich, rich_format),
+                    CopyFormat::MarkdownSelection(source) => {
+                        (text, CopyFormat::MarkdownSelection(source))
+                    }
+                };
+                if publish_primary {
+                    let (result, owner) = tui.clipboard.select(
+                        copy_text.into(),
+                        format,
+                        CopyDestination::ClipboardAndPrimary(text.into()),
+                        tui.frame_requester(),
+                    );
+                    primary_owner = Some(owner);
+                    result
+                } else {
+                    tui.clipboard
+                        .copy(copy_text.into(), format, tui.frame_requester())
+                }
+            });
+        if publish_primary && let Some(selection) = &mut self.selection {
+            selection.primary_owner = primary_owner;
+        }
+        if matches!(action, ViewAction::CopyAndFollow(_))
+            && matches!(result, Ok(CopyStatus::Pending(_)))
+        {
+            self.follow_pending_copy();
+        }
+        Some((text.chars().count(), result))
     }
 
     pub(crate) fn follow_pending_copy(&mut self) {
@@ -369,9 +475,7 @@ impl TranscriptView {
         {
             return None;
         }
-        let characters = self
-            .selected_text(cells)
-            .map_or(/*default*/ 0, |text| text.chars().count());
+        let characters = pending.characters;
         if pending.clear_selection
             && completion.1 == Ok(crate::clipboard_copy::CopyStatus::Confirmed)
         {
@@ -525,6 +629,20 @@ impl TranscriptView {
                 self.area.width,
                 /*height*/ 1,
             );
+            if self.copy_mode.is_some() {
+                // Full-entry selections include final padding; partial ranges stay half-open.
+                let last = if begin == 0 && finish == visible.layout.text().len() {
+                    finish
+                } else {
+                    finish.saturating_sub(/*rhs*/ 1)
+                };
+                let rows =
+                    visible.layout.row_for_offset(begin)..=visible.layout.row_for_offset(last);
+                if rows.contains(&visible.row) {
+                    buf.set_style(area, crate::style::selection_style());
+                }
+                continue;
+            }
             let next = (visible.index + 1..=end.index)
                 .filter_map(|index| {
                     selection

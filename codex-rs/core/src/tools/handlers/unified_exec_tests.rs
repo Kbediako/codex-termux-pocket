@@ -2,10 +2,8 @@ use super::*;
 use crate::shell::ShellType;
 use crate::shell::default_user_shell;
 use crate::shell::get_shell;
+#[cfg(not(windows))]
 use codex_exec_server::Environment;
-use codex_tools::UnifiedExecShellMode;
-use codex_tools::ZshForkConfig;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
@@ -58,7 +56,6 @@ fn test_get_command_uses_default_shell_when_unspecified() -> anyhow::Result<()> 
     let resolved = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
     )
     .map_err(anyhow::Error::msg)?;
@@ -80,7 +77,6 @@ fn test_get_command_respects_explicit_bash_shell() -> anyhow::Result<()> {
     let resolved = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
     )
     .map_err(anyhow::Error::msg)?;
@@ -100,16 +96,13 @@ fn test_get_command_respects_explicit_bash_shell() -> anyhow::Result<()> {
 #[cfg(unix)]
 #[test]
 fn test_get_command_keeps_path_prepends_after_login_startup() -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let temp_dir = tempfile::tempdir()?;
     let path_dir = temp_dir.path().join("codex '[*] path");
     let extra_path_dir = temp_dir.path().join("extra tools");
     for directory in [&path_dir, &extra_path_dir] {
         std::fs::create_dir(directory)?;
         let rg = directory.join("rg");
-        std::fs::write(&rg, "#!/bin/sh\n")?;
-        std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755))?;
+        codex_utils_cargo_bin::write_executable(&rg, "#!/bin/sh\n")?;
     }
     let rg = path_dir.join("rg");
     let startup = temp_dir.path().join("startup");
@@ -125,13 +118,8 @@ fn test_get_command_keeps_path_prepends_after_login_startup() -> anyhow::Result<
         r#"{"cmd":"sh -c 'test \"$CODEX_TEST_LOGIN_PATH_RESET\" = 1 && printf \"%s\\n\" \"$PATH\" && command -v rg'"}"#,
     )?;
     let shell = Arc::new(get_shell(ShellType::Bash).expect("bash should be available"));
-    let resolved = get_command(
-        &args,
-        Arc::clone(&shell),
-        &UnifiedExecShellMode::Direct,
-        /*allow_login_shell*/ true,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let resolved = get_command(&args, Arc::clone(&shell), /*allow_login_shell*/ true)
+        .map_err(anyhow::Error::msg)?;
     assert_eq!(
         resolved.command,
         shell.derive_exec_args(&args.cmd, /*use_login_shell*/ true)
@@ -191,19 +179,15 @@ fn test_get_command_runs_login_shell_when_path_is_readonly() -> anyhow::Result<(
         r#"{"cmd":"shopt -q login_shell || exit 90; case $- in *e*) ;; *) exit 91 ;; esac; /bin/sh -c 'printf \"%s\\n\" \"$PATH\"'; exit 23","login":true}"#,
     )?;
     let shell = Arc::new(get_shell(ShellType::Bash).expect("bash should be available"));
-    let resolved = get_command(
-        &args,
-        shell,
-        &UnifiedExecShellMode::Direct,
-        /*allow_login_shell*/ true,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let resolved =
+        get_command(&args, shell, /*allow_login_shell*/ true).map_err(anyhow::Error::msg)?;
     let command = resolved
         .shell
         .derive_exec_args_with_path_prepends(&args.cmd, &[path_dir])
         .expect("the reported directory can be put on PATH");
     let output = std::process::Command::new(&command[0])
         .args(&command[1..])
+        .env("HOME", temp_dir.path())
         .env("BASH_ENV", startup)
         .env("CODEX_TEST_LOGIN_HOME", temp_dir.path())
         .env_remove("SHLVL")
@@ -252,13 +236,8 @@ fn test_get_command_does_not_change_nested_login_or_powershell() -> anyhow::Resu
             shell_type,
             shell_path: PathBuf::from(shell_path),
         });
-        let resolved = get_command(
-            &args,
-            Arc::clone(&shell),
-            &UnifiedExecShellMode::Direct,
-            /*allow_login_shell*/ true,
-        )
-        .map_err(anyhow::Error::msg)?;
+        let resolved = get_command(&args, Arc::clone(&shell), /*allow_login_shell*/ true)
+            .map_err(anyhow::Error::msg)?;
         assert_eq!(
             (
                 resolved.command,
@@ -297,7 +276,6 @@ fn test_get_command_resolves_powershell_by_type() -> anyhow::Result<()> {
     let resolved = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
     )
     .map_err(anyhow::Error::msg)?;
@@ -322,7 +300,6 @@ fn test_get_command_respects_explicit_cmd_shell() -> anyhow::Result<()> {
     let resolved = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
     )
     .map_err(anyhow::Error::msg)?;
@@ -340,7 +317,6 @@ fn test_get_command_rejects_explicit_login_when_disallowed() -> anyhow::Result<(
     let err = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ false,
     )
     .expect_err("explicit login should be rejected");
@@ -392,71 +368,6 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
     );
 }
 
-#[test]
-fn test_get_command_rejects_explicit_shell_in_zsh_fork_mode() -> anyhow::Result<()> {
-    let json = r#"{"cmd": "echo hello", "shell": "/bin/bash"}"#;
-    let args: ExecCommandArgs = parse_arguments(json)?;
-    let shell_zsh_path = AbsolutePathBuf::from_absolute_path(if cfg!(windows) {
-        r"C:\opt\codex\zsh"
-    } else {
-        "/opt/codex/zsh"
-    })?;
-    let shell_mode = UnifiedExecShellMode::ZshFork(ZshForkConfig {
-        shell_zsh_path,
-        main_execve_wrapper_exe: AbsolutePathBuf::from_absolute_path(if cfg!(windows) {
-            r"C:\opt\codex\codex-execve-wrapper"
-        } else {
-            "/opt/codex/codex-execve-wrapper"
-        })?,
-    });
-
-    let err = get_command(
-        &args,
-        Arc::new(default_user_shell()),
-        &shell_mode,
-        /*allow_login_shell*/ true,
-    )
-    .expect_err("explicit shell should be rejected");
-
-    assert!(
-        err.contains("`shell` is not supported for local zsh-fork exec"),
-        "unexpected error: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn shell_mode_for_environment_uses_direct_mode_for_remote_environments() -> anyhow::Result<()>
-{
-    let shell_zsh_path = AbsolutePathBuf::from_absolute_path(if cfg!(windows) {
-        r"C:\opt\codex\zsh"
-    } else {
-        "/opt/codex/zsh"
-    })?;
-    let shell_mode = UnifiedExecShellMode::ZshFork(ZshForkConfig {
-        shell_zsh_path,
-        main_execve_wrapper_exe: AbsolutePathBuf::from_absolute_path(if cfg!(windows) {
-            r"C:\opt\codex\codex-execve-wrapper"
-        } else {
-            "/opt/codex/codex-execve-wrapper"
-        })?,
-    });
-    let local_environment = Environment::default_for_tests();
-    let remote_environment =
-        Environment::create_for_tests(Some("ws://127.0.0.1:1/remote-exec-server".to_string()))?;
-
-    assert_eq!(
-        shell_mode_for_environment(&shell_mode, &local_environment),
-        shell_mode
-    );
-    assert_eq!(
-        shell_mode_for_environment(&shell_mode, &remote_environment),
-        UnifiedExecShellMode::Direct
-    );
-
-    Ok(())
-}
-
 #[tokio::test]
 #[cfg(not(windows))]
 async fn exec_command_reuses_foreign_windows_grant() {
@@ -489,16 +400,6 @@ async fn exec_command_reuses_foreign_windows_grant() {
         )),
         ..Default::default()
     };
-    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
-    let turn_state = {
-        let active_turn = session.active_turn.lock().await;
-        Arc::clone(&active_turn.as_ref().expect("active turn").turn_state)
-    };
-    turn_state.lock().await.record_granted_permissions(
-        codex_exec_server::REMOTE_ENVIRONMENT_ID,
-        granted_permissions.clone(),
-    );
-
     {
         let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
         let TurnEnvironmentState::Ready(environment) = turn
@@ -519,10 +420,16 @@ async fn exec_command_reuses_foreign_windows_grant() {
         );
     }
 
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    step_context.turn.record_granted_permissions(
+        codex_exec_server::REMOTE_ENVIRONMENT_ID,
+        granted_permissions.clone(),
+        /*strict_auto_review*/ false,
+    );
     let response = ExecCommandHandler::default()
         .handle(ToolInvocation {
             session: Arc::clone(&session),
-            step_context: StepContext::for_test(Arc::clone(&turn)),
+            step_context,
             turn,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),

@@ -174,7 +174,7 @@ impl App {
         let mut initial_selected_idx = selected;
         let items: Vec<SelectionItem> = self
             .agent_navigation
-            .ordered_threads()
+            .visible_threads()
             .into_iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
@@ -495,7 +495,6 @@ impl App {
         if !self.chat_widget.realtime_conversation_is_running() {
             self.retain_realtime_replay_state_before_replace();
         }
-        chat_widget.cyber_policy_notice = self.chat_widget.cyber_policy_notice.clone();
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
@@ -520,6 +519,7 @@ impl App {
             AppServerTarget::LocalDaemon { .. }
         ));
         chat_widget.inherit_backend_banner_state(&mut self.chat_widget);
+        chat_widget.inherit_security_setup(&mut self.chat_widget);
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,
@@ -796,9 +796,19 @@ impl App {
 
     pub(super) async fn reset_thread_event_state(&mut self) {
         let voice_owner = self.voice_owner_thread_id();
+        // Move retained tasks' approvals to background routing before clearing request bookkeeping.
+        for (thread_id, requests) in &mut self.agents_overview.dispatched_requests {
+            if let Some(channel) = self.thread_event_channels.get(thread_id) {
+                for request in channel.store.lock().await.pending_replay_requests() {
+                    if !requests.iter().any(|pending| pending.id() == request.id()) {
+                        requests.push(request);
+                    }
+                }
+            }
+        }
         if voice_owner.is_some() {
             for (thread_id, channel) in &self.thread_event_channels {
-                if Some(*thread_id) != voice_owner {
+                if Some(*thread_id) != voice_owner && !self.side_threads.contains_key(thread_id) {
                     for request in channel.store.lock().await.pending_replay_requests() {
                         self.pending_app_server_requests
                             .resolve_notification(&thread_id.to_string(), request.id());
@@ -807,7 +817,10 @@ impl App {
             }
         }
         self.thread_event_listener_tasks.retain(|id, task| {
-            if Some(*id) == voice_owner {
+            if Some(*id) == voice_owner
+                || self.side_threads.contains_key(id)
+                || self.agents_overview.dispatched_requests.contains_key(id)
+            {
                 true
             } else {
                 task.abort();
@@ -815,14 +828,13 @@ impl App {
             }
         });
         self.thread_event_channels
-            .retain(|id, _| Some(*id) == voice_owner);
+            .retain(|id, _| Some(*id) == voice_owner || self.side_threads.contains_key(id));
         self.pending_realtime_speech_replay.clear();
         self.pending_realtime_transcript_replay.clear();
         self.realtime_replay_order.clear();
         self.pending_server_profiles.clear();
         self.agents_overview.activity.clear();
         self.agent_navigation.clear();
-        self.side_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
@@ -831,6 +843,16 @@ impl App {
         self.pending_primary_events.clear();
         if voice_owner.is_none() {
             self.pending_app_server_requests.clear();
+            let side_thread_ids: Vec<_> = self.side_threads.keys().copied().collect();
+            for thread_id in side_thread_ids {
+                if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                    for request in channel.store.lock().await.pending_replay_requests() {
+                        let _ = self
+                            .pending_app_server_requests
+                            .note_server_request(&request);
+                    }
+                }
+            }
         }
         self.pending_startup_thread_start = false;
         self.pending_server_version_notice = None;
@@ -977,7 +999,7 @@ impl App {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
         // until the new session is configured and any replayed turns have been rendered.
-        let mut config = match self.load_new_session_config(app_server).await {
+        let (mut config, local_settings) = match self.load_new_session_config(app_server).await {
             Ok(config) => config,
             Err(err) => {
                 if let Some(message) = initial_user_message {
@@ -1023,9 +1045,10 @@ impl App {
                     Some(started.session.thread_id),
                 )
                 .await;
-                self.local_settings = self.local_settings.reloaded(&config);
+                self.local_settings = local_settings;
                 self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
                 self.config = config;
+                self.remember_launch_permissions();
 
                 let name_error = if let Some(name) = new_thread_name {
                     match app_server

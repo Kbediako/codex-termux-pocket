@@ -20,8 +20,6 @@ use tempfile::TempDir;
 
 const APPLY_PATCH_ARG0: &str = "apply_patch";
 const MISSPELLED_APPLY_PATCH_ARG0: &str = "applypatch";
-#[cfg(unix)]
-const EXECVE_WRAPPER_ARG0: &str = "codex-execve-wrapper";
 const LOCK_FILENAME: &str = ".lock";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -33,6 +31,7 @@ pub struct Arg0DispatchPaths {
     /// instead of the real Codex CLI.
     pub codex_self_exe: Option<PathBuf>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
+    /// Always absent; retained for clients that still pass the retired wrapper path.
     pub main_execve_wrapper_exe: Option<PathBuf>,
 }
 
@@ -67,32 +66,6 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-
-    #[cfg(unix)]
-    if exe_name == EXECVE_WRAPPER_ARG0 {
-        let mut args = std::env::args();
-        let _ = args.next();
-        let file = match args.next() {
-            Some(file) => file,
-            None => std::process::exit(1),
-        };
-        let argv = args.collect::<Vec<_>>();
-
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => std::process::exit(1),
-        };
-        let exit_code = runtime.block_on(
-            codex_shell_escalation::run_shell_escalation_execve_wrapper(file, argv),
-        );
-        match exit_code {
-            Ok(exit_code) => std::process::exit(exit_code),
-            Err(_) => std::process::exit(1),
-        }
-    }
 
     if exe_name == CODEX_LINUX_SANDBOX_ARG0 {
         // Safety: [`run_main`] never returns.
@@ -134,13 +107,8 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     Err(_) => std::process::exit(1),
                 };
                 let cwd = cwd.into();
-                let update_file_mode = codex_apply_patch::apply_patch_file_update_mode_from_env();
-                match runtime.block_on(codex_apply_patch::apply_patch_with_options(
+                match runtime.block_on(codex_apply_patch::apply_patch(
                     &patch_arg,
-                    codex_apply_patch::ApplyPatchOptions {
-                        update_file_mode,
-                        ..Default::default()
-                    },
                     &cwd,
                     &mut stdout,
                     &mut stderr,
@@ -262,15 +230,13 @@ where
     Fut: Future<Output = anyhow::Result<()>>,
 {
     let paths = Arg0DispatchPaths {
+        main_execve_wrapper_exe: None,
         codex_self_exe: current_exe.clone(),
         codex_linux_sandbox_exe: if cfg!(target_os = "linux") {
             linux_sandbox_exe_path(path_entry_guard.as_ref(), current_exe)
         } else {
             None
         },
-        main_execve_wrapper_exe: path_entry_guard
-            .as_ref()
-            .and_then(|path_entry| path_entry.paths().main_execve_wrapper_exe.clone()),
     };
 
     let result = main_fn(paths).await;
@@ -407,8 +373,6 @@ fn prepare_path_entry_for_codex_aliases(
         MISSPELLED_APPLY_PATCH_ARG0,
         #[cfg(target_os = "linux")]
         CODEX_LINUX_SANDBOX_ARG0,
-        #[cfg(unix)]
-        EXECVE_WRAPPER_ARG0,
     ] {
         let exe = std::env::current_exe()?;
 
@@ -436,6 +400,7 @@ fn prepare_path_entry_for_codex_aliases(
     let updated_path_env_var = path_env_with_entry(path, existing_path);
 
     let paths = Arg0DispatchPaths {
+        main_execve_wrapper_exe: None,
         codex_self_exe: std::env::current_exe().ok(),
         codex_linux_sandbox_exe: {
             #[cfg(target_os = "linux")]
@@ -443,16 +408,6 @@ fn prepare_path_entry_for_codex_aliases(
                 Some(path.join(CODEX_LINUX_SANDBOX_ARG0))
             }
             #[cfg(not(target_os = "linux"))]
-            {
-                None
-            }
-        },
-        main_execve_wrapper_exe: {
-            #[cfg(unix)]
-            {
-                Some(path.join(EXECVE_WRAPPER_ARG0))
-            }
-            #[cfg(not(unix))]
             {
                 None
             }
@@ -640,7 +595,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing Windows system root"))?;
         let command_shell = PathBuf::from(system_root).join("System32").join("cmd.exe");
         let executable = executable_directory.join("cmd.exe");
-        fs::copy(&command_shell, &executable)?;
+        codex_utils_cargo_bin::copy_executable(&command_shell, &executable)?;
 
         let batch_path = alias_directory.join("apply_patch.bat");
         let executable_path = super::windows_batch_executable_path(&executable, &alias_directory);
@@ -679,9 +634,9 @@ mod tests {
             temp_dir,
             lock_file,
             Arg0DispatchPaths {
+                main_execve_wrapper_exe: None,
                 codex_self_exe: Some(PathBuf::from("/usr/bin/codex")),
                 codex_linux_sandbox_exe: Some(alias_path.clone()),
-                main_execve_wrapper_exe: None,
             },
         );
 
@@ -760,20 +715,16 @@ mod tests {
             temp_dir,
             lock_file,
             Arg0DispatchPaths {
+                main_execve_wrapper_exe: None,
                 codex_self_exe: Some(PathBuf::from("/usr/bin/codex")),
                 codex_linux_sandbox_exe: Some(alias_path.clone()),
-                main_execve_wrapper_exe: Some(alias_path),
             },
         );
 
         super::build_runtime()?.block_on(run_main_with_arg0_guard(
             /*path_entry_guard*/ Some(path_entry),
             Some(PathBuf::from("/usr/bin/codex")),
-            |paths| async move {
-                let alias_path = paths
-                    .codex_linux_sandbox_exe
-                    .or(paths.main_execve_wrapper_exe)
-                    .expect("unix dispatch should create at least one alias path");
+            |_paths| async move {
                 ensure!(
                     alias_path.exists(),
                     "alias path disappeared before main future was polled: {}",

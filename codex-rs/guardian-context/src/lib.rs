@@ -6,6 +6,8 @@
 //! Sections preserve source-specific evidence and share prompt framing, while
 //! profiles retain the consumer-specific transcript policy. Shared full/delta selection
 //! proposes cursors; hosts own their admission, compaction and request lifecycles.
+//! JSON records cache their rendering and shared-estimator cost through admission.
+//! Line mode admits rendered text to preserve its existing whole-entry truncation.
 //! Registered contributors declare their scope once and are collected only for
 //! matching context consumers. History and collection settings are borrowed for
 //! each request so the default registry can be reused without retaining state.
@@ -39,6 +41,7 @@ pub use transcript::MANUAL_APPROVAL_DEVELOPER_PREFIX;
 pub use transcript::TranscriptEntryLimits;
 pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
+pub use transcript::is_inherited_manual_approval;
 pub use truncation::truncate_text;
 
 mod verified_answers;
@@ -46,6 +49,7 @@ pub use verified_answers::RenderedVerifiedAnswers;
 pub use verified_answers::render_verified_answer;
 pub use verified_answers::render_verified_answers;
 
+mod retained_assistant_context;
 mod retained_instructions;
 mod sender_user_messages;
 pub use retained_instructions::retained_assistant_message;
@@ -72,10 +76,11 @@ pub use cursor::TranscriptCursor;
 pub use cursor::TranscriptMode;
 pub use cursor::TranscriptSelection;
 mod profile;
+pub use codex_protocol::TranscriptFormat;
 pub use composition::CollectedContext;
 pub use composition::ComposedContext;
 pub use composition::ContextPresentation;
-pub use composition::RenderedTranscript;
+pub use composition::PreparedTranscript;
 pub use profile::ContextProfile;
 mod authorization;
 mod entry;
@@ -93,8 +98,10 @@ mod trusted_skills;
 mod trusted_tool;
 pub use trusted_skills::TrustedSkills;
 pub use trusted_tool::TrustedTool;
+pub use trusted_tool::TrustedToolSource;
 mod reviews;
 pub use reviews::MAX_PREVIOUS_REVIEWS;
+pub use reviews::PreviousReview;
 pub use reviews::PreviousReviews;
 pub use reviews::RenderedReviewEvidence;
 pub use reviews::ReviewEvidence;
@@ -103,6 +110,9 @@ pub use truncation::TruncationObservation;
 mod section;
 pub use permissions::PermissionContext;
 mod transcript;
+mod transcript_record;
+pub use transcript_record::TRANSCRIPT_JSON_INSTRUCTIONS;
+pub use transcript_record::TranscriptRecord;
 mod truncation;
 
 /// Consumer for which a Guardian context is composed.

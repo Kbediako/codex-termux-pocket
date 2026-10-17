@@ -284,7 +284,6 @@ impl ChatWidget {
                 /*summary*/ None,
                 /*service_tier*/ None,
                 /*collaboration_mode*/ None,
-                /*personality*/ None,
             )));
             tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
             tx.send(AppEvent::UpdateActivePermissionProfile(
@@ -513,7 +512,7 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             items,
             header: Box::new(header),
-            ..SelectionViewParams::picker()
+            ..SelectionViewParams::confirmation()
         });
     }
 }

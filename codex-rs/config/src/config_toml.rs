@@ -24,7 +24,7 @@ use crate::types::MemoriesToml;
 use crate::types::Notice;
 use crate::types::OAuthCredentialsStoreMode;
 use crate::types::OtelConfigToml;
-use crate::types::PluginConfig;
+use crate::types::PluginsConfigToml;
 use crate::types::SandboxWorkspaceWrite;
 use crate::types::ShellEnvironmentPolicyToml;
 use crate::types::SkillsConfig;
@@ -166,6 +166,8 @@ pub struct FeatureToggleToml {
 pub struct ConfigToml {
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// Default Daybreak preference for new threads and non-interactive turns.
+    pub daybreak: Option<bool>,
     /// Review model override used by the `/review` feature.
     pub review_model: Option<String>,
 
@@ -263,6 +265,9 @@ pub struct ConfigToml {
     /// Whether to inject the `<environment_context>` user block.
     pub include_environment_context: Option<bool>,
 
+    /// Whether environment context includes the current date and timezone.
+    pub include_environment_context_time: Option<bool>,
+
     /// Optional path to a file containing model instructions that will override
     /// the built-in instructions for the selected model. Users are STRONGLY
     /// DISCOURAGED from using this field, as deviating from the instructions
@@ -342,7 +347,8 @@ pub struct ConfigToml {
     pub background_terminal_max_timeout: Option<u64>,
 
     /// Seconds a thread must have no subscribers and no activity before app-server
-    /// unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.
+    /// unloads it. Defaults to 1800 (30 minutes); zero unloads immediately.
+    /// Changes require a server restart.
     pub thread_unload_delay_secs: Option<u64>,
 
     /// Deprecated: ignored.
@@ -490,9 +496,9 @@ pub struct ConfigToml {
     /// Lifecycle hooks configured inline in TOML plus user-level overrides.
     pub hooks: Option<HooksToml>,
 
-    /// User-level plugin config entries keyed by plugin name.
+    /// Default and per-plugin settings keyed by exact `<plugin>@<marketplace>` IDs.
     #[serde(default)]
-    pub plugins: HashMap<String, PluginConfig>,
+    pub plugins: PluginsConfigToml,
 
     /// User-level marketplace entries keyed by marketplace name.
     #[serde(default)]
@@ -525,8 +531,9 @@ pub struct ConfigToml {
     /// Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.
     pub disable_paste_burst: Option<bool>,
 
-    /// When `false`, disables analytics across Codex product surfaces in this machine.
-    /// Defaults to `true`.
+    /// When `enabled` is `false`, disables OpenAI analytics across Codex product surfaces on this machine.
+    /// Custom OTLP metrics exporters are controlled by `otel.metrics_exporter`.
+    /// When unset, the default depends on the client.
     pub analytics: Option<AnalyticsConfigToml>,
 
     /// When `false`, disables feedback collection across Codex product surfaces.
@@ -614,8 +621,27 @@ impl ProjectConfig {
     }
 }
 
+/// Selected microphone inputs. Scalars preserve existing single-channel configuration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
+pub enum MicrophoneChannels {
+    Single(std::num::NonZeroU16),
+    Multiple(Vec<std::num::NonZeroU16>),
+}
+
+impl MicrophoneChannels {
+    pub fn as_slice(&self) -> &[std::num::NonZeroU16] {
+        match self {
+            Self::Single(channel) => std::slice::from_ref(channel),
+            Self::Multiple(channels) => channels,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RealtimeAudioConfig {
+    /// One-based microphone channels to mix; unset mixes all input channels.
+    pub microphone_channel: Option<MicrophoneChannels>,
     pub microphone: Option<String>,
     pub speaker: Option<String>,
 }
@@ -663,6 +689,8 @@ pub struct RealtimeToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct RealtimeAudioToml {
+    /// One-based microphone channels to mix; unset mixes all input channels.
+    pub microphone_channel: Option<MicrophoneChannels>,
     pub microphone: Option<String>,
     pub speaker: Option<String>,
 }

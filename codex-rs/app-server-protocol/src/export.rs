@@ -1366,6 +1366,11 @@ where
             strip_v1_server_notification_variants_from_json_schema(&mut schema_value);
             add_server_notification_emitted_at_to_json_schema(&mut schema_value)?;
         }
+        if let Some(Value::Object(error_schema)) =
+            schema_value.pointer_mut("/definitions/CodexErrorInfo")
+        {
+            keep_enum_open_ended(error_schema);
+        }
         enforce_numbered_definition_collision_overrides(file_stem, &mut schema_value);
         annotate_schema(&mut schema_value, Some(file_stem));
     }
@@ -1395,6 +1400,13 @@ where
         logical_name: logical_name.to_string(),
         value: schema_value,
     })
+}
+
+fn keep_enum_open_ended(schema: &mut Map<String, Value>) {
+    if let Some(Value::Array(mut variants)) = schema.remove("oneOf") {
+        variants.push(serde_json::json!({ "type": ["string", "object"] }));
+        schema.insert("anyOf".to_string(), Value::Array(variants));
+    }
 }
 
 fn add_server_notification_emitted_at_to_json_schema(schema: &mut Value) -> Result<()> {
@@ -2398,7 +2410,9 @@ mod tests {
                     == Path::new("v2/GetAccountTokenUsageResponse.ts")
                     && field_prefix.trim() == "threadUsage?")
                     || (path == Path::new("v2/McpServerOauthLoginCompletedNotification.ts")
-                        && field_prefix.trim() == "loginId?");
+                        && field_prefix.trim() == "loginId?")
+                    || (path == Path::new("v2/MisalignmentErrorDetails.ts")
+                        && field_prefix.trim() == "reviewTarget?");
                 if field_prefix.chars().rev().find(|c| !c.is_whitespace()) == Some('?')
                     && !allow_optional_nullable
                     && !legacy_optional_nullable_field

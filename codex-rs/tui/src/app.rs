@@ -194,6 +194,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
 use uuid::Uuid;
+mod account_status;
 mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
@@ -211,12 +212,14 @@ mod activity_groups;
 mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
+mod app_server_thread_ownership;
 mod backend_banner_fallback;
 mod background_requests;
 mod composer_hints;
 mod config_persistence;
 mod connector_mentions;
 mod daemon_menu;
+mod daybreak;
 mod empty_state_policy;
 mod event_dispatch;
 mod exit_summary;
@@ -235,6 +238,7 @@ mod new_session;
 mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
 mod clipboard;
+mod footer_selection;
 mod native_history;
 mod owned_transcript;
 mod pending_interactive_replay;
@@ -258,6 +262,7 @@ mod session_lifecycle;
 mod session_picker;
 mod side;
 mod startup;
+pub(crate) mod startup_bootstrap;
 mod startup_prompts;
 mod startup_warnings;
 mod thread_event_buffer;
@@ -653,6 +658,7 @@ pub(crate) struct App {
     /// Keeps that boundary armed while a startup approval waits for the typing-idle timer.
     startup_pending_protected_request: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
+    account_email_request_id: Option<uuid::Uuid>,
     rate_limit_hard_stop_generation: u64,
     rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
     pending_mcp_login_start: Option<PendingMcpLoginStart>,
@@ -850,6 +856,9 @@ impl App {
         self.finish_clipboard(tui, &event);
         let event = self.finish_right_click_paste(tui, event);
         let idle_draw = matches!(event, TuiEvent::Draw);
+        if self.handle_rendered_selection_event(tui, &event)? {
+            return Ok(AppRunControl::Continue);
+        }
         if matches!(&event, TuiEvent::Key(_))
             && self.handle_composer_copy_event(tui, &event, |tui, text| {
                 tui.copy_transcript_selection(text, crate::clipboard_copy::CopyFormat::PlainText)
@@ -898,7 +907,9 @@ impl App {
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
-        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost) {
+        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost)
+            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+        {
             self.cancel_pending_key_chord();
         }
 

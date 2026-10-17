@@ -68,6 +68,11 @@ async fn list_turns_pages_projected_rows_and_applies_item_views() {
         )
         .await;
     }
+    sqlx::query("UPDATE thread_turns SET root_turn_id = 'root-1' WHERE thread_id = ? AND turn_id IN ('turn-1', 'turn-3')")
+        .bind(thread_id.to_string())
+        .execute(db)
+        .await
+        .expect("record known causal roots");
     for (turn_id, item_id, ordinal) in [
         ("turn-1", "user-1", 11),
         ("turn-1", "middle-1", 12),
@@ -87,6 +92,14 @@ async fn list_turns_pages_projected_rows_and_applies_item_views() {
         .await
         .expect("first turns page");
     assert_eq!(turn_ids(&first_page), vec!["turn-1", "turn-2"]);
+    assert_eq!(
+        first_page
+            .turns
+            .iter()
+            .map(|turn| turn.root_turn_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("root-1"), None],
+    );
     assert_eq!(
         first_page.turns[0].items,
         vec![
@@ -113,6 +126,7 @@ async fn list_turns_pages_projected_rows_and_applies_item_views() {
         .await
         .expect("second turns page");
     assert_eq!(turn_ids(&second_page), vec!["turn-3"]);
+    assert_eq!(second_page.turns[0].root_turn_id.as_deref(), Some("root-1"));
     assert_eq!(second_page.turns[0].items, Vec::new());
     assert_eq!(second_page.turns[0].status, StoredTurnStatus::InProgress);
     let backwards_page = store
@@ -1179,6 +1193,24 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
         matches!(store.list_items(anchored).await, Err(ThreadStoreError::InvalidRequest { message }) if message == "cursor.itemId does not identify an item in the requested history scope")
     );
 
+    let inherited_lookup =
+        item_lookup_params(child_id, "root-1", &["root-agent", "root-user", "missing"]);
+    let inherited_lookup = store
+        .list_items(inherited_lookup)
+        .await
+        .expect("lookup inherited items");
+    assert_eq!(item_ids(&inherited_lookup), vec!["root-user", "root-agent"]);
+
+    let excluded_lookup = item_lookup_params(child_id, "excluded-root", &["excluded-item"]);
+    assert!(
+        store
+            .list_items(excluded_lookup)
+            .await
+            .expect("exclude source item after fork cutoff")
+            .items
+            .is_empty()
+    );
+
     for sort_key in [ItemSortKey::CreatedAtOrdinal, ItemSortKey::UpdatedAtOrdinal] {
         let error = store
             .list_items(ListItemsParams {
@@ -1357,6 +1389,8 @@ async fn lineage_reads_nested_forks() {
     for (thread_id, turn_id, ordinal, status, first_user_item_id) in [
         (root_id, "root", 1, "completed", None),
         (root_id, "shared", 2, "completed", Some("before-fork")),
+        (root_id, "child", 4, "completed", None),
+        (middle_id, "child", 3, "completed", None),
         (middle_id, "shared", 5, "interrupted", None),
         (middle_id, "middle", 6, "completed", None),
         (child_id, "child", 8, "completed", None),
@@ -1373,6 +1407,11 @@ async fn lineage_reads_nested_forks() {
         )
         .await;
     }
+    sqlx::query("UPDATE thread_turns SET root_turn_id = 'causal-root' WHERE thread_id = ? AND turn_id = 'shared'")
+        .bind(middle_id.to_string())
+        .execute(db)
+        .await
+        .expect("record terminal turn root");
     insert_item(
         db,
         root_id,
@@ -1401,6 +1440,7 @@ async fn lineage_reads_nested_forks() {
         .await
         .expect("first nested descending page");
     assert_eq!(turn_ids(&first_descending_page), vec!["child", "middle"]);
+    assert_eq!(first_descending_page.turns[0].root_turn_id, None);
     let second_descending_page = store
         .list_turns(turn_params(
             child_id,
@@ -1412,6 +1452,10 @@ async fn lineage_reads_nested_forks() {
         .await
         .expect("second nested descending page");
     assert_eq!(turn_ids(&second_descending_page), vec!["shared", "root"]);
+    assert_eq!(
+        second_descending_page.turns[0].root_turn_id.as_deref(),
+        Some("causal-root")
+    );
     assert_eq!(
         second_descending_page.turns[0].status,
         StoredTurnStatus::Interrupted
@@ -1467,6 +1511,10 @@ async fn lineage_reads_nested_forks() {
         .await
         .expect("navigate to effective occurrence turn");
     assert_eq!(turn_ids(&occurrence_turn), vec!["shared"]);
+    assert_eq!(
+        occurrence_turn.turns[0].root_turn_id.as_deref(),
+        Some("causal-root")
+    );
 }
 
 async fn store_with_mode(history_mode: ThreadHistoryMode) -> (TempDir, LocalThreadStore, ThreadId) {
@@ -1682,6 +1730,7 @@ fn item_params(
     sort_direction: SortDirection,
 ) -> ListItemsParams {
     ListItemsParams {
+        item_ids: None,
         thread_id,
         turn_id: turn_id.map(str::to_owned),
         include_archived: false,
@@ -1702,6 +1751,19 @@ fn updated_item_params(thread_id: ThreadId, after_updated_at_ordinal: u64) -> Li
             /*turn_id*/ None,
             /*cursor*/ None,
             /*page_size*/ 2,
+            SortDirection::Asc,
+        )
+    }
+}
+
+fn item_lookup_params(thread_id: ThreadId, turn_id: &str, item_ids: &[&str]) -> ListItemsParams {
+    ListItemsParams {
+        item_ids: Some(item_ids.iter().map(ToString::to_string).collect()),
+        ..item_params(
+            thread_id,
+            Some(turn_id),
+            /*cursor*/ None,
+            item_ids.len(),
             SortDirection::Asc,
         )
     }

@@ -95,6 +95,7 @@ use codex_config::clear_user_plugin;
 use codex_config::set_user_plugin_enabled;
 use codex_config::skill_config_rules_from_stack;
 use codex_config::types::PluginConfig;
+use codex_config::types::PluginsConfigToml;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_connectors::ConnectorSnapshot;
@@ -122,6 +123,7 @@ use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
 use std::collections::BTreeSet;
@@ -156,6 +158,7 @@ type EffectivePluginsChangedCallback = Arc<dyn Fn(EffectivePluginsChange) + Send
 #[derive(Debug, Clone)]
 pub struct PluginsConfigInput {
     pub config_layer_stack: ConfigLayerStack,
+    pub plugins: PluginsConfigToml,
     pub model_provider_id: String,
     pub plugins_enabled: bool,
     pub remote_plugin_enabled: bool,
@@ -166,8 +169,11 @@ pub struct PluginsConfigInput {
 }
 
 impl PluginsConfigInput {
+    // Require validated policy at construction; a default followed by a setter could fail open.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config_layer_stack: ConfigLayerStack,
+        plugins: PluginsConfigToml,
         model_provider_id: String,
         plugins_enabled: bool,
         remote_plugin_enabled: bool,
@@ -177,6 +183,7 @@ impl PluginsConfigInput {
     ) -> Self {
         Self {
             config_layer_stack,
+            plugins,
             model_provider_id,
             plugins_enabled,
             remote_plugin_enabled,
@@ -469,7 +476,7 @@ pub struct PluginDetail {
     pub installed: bool,
     pub enabled: bool,
     pub skills: Vec<SkillMetadata>,
-    pub disabled_skill_paths: HashSet<AbsolutePathBuf>,
+    pub disabled_skill_paths: HashSet<PathUri>,
     /// Packaged onboarding path; callers apply visibility and enablement.
     pub onboarding_skill: Option<AbsolutePathBuf>,
     pub hooks: Vec<PluginHookSummary>,
@@ -632,6 +639,7 @@ impl LoadedPluginsCache {
 #[derive(Clone, PartialEq, Eq)]
 struct PluginLoadCacheKey {
     configured_plugins: HashMap<String, PluginConfig>,
+    plugin_policy: PluginsConfigToml,
     skill_config_rules: SkillConfigRules,
     remote_global_catalog_active: bool,
     auth_identity: Option<RemoteInstalledPluginsAuthIdentity>,
@@ -649,6 +657,7 @@ impl PluginLoadCacheKey {
                 &config.config_layer_stack,
                 codex_home,
             ),
+            plugin_policy: config.plugins.clone(),
             skill_config_rules: skill_config_rules_from_stack(&config.config_layer_stack),
             remote_global_catalog_active,
             // Local curated loads are auth-independent; only remote snapshots vary by account.
@@ -881,6 +890,7 @@ impl PluginsManager {
             let load_started = Instant::now();
             let plugins = load_plugins_from_layer_stack(
                 &config.config_layer_stack,
+                &config.plugins,
                 self.remote_installed_plugins_snapshot(),
                 &self.store,
                 Some(&plugin_skill_snapshots),
@@ -1002,6 +1012,7 @@ impl PluginsManager {
         let target_curated_marketplace = target_curated_marketplace(self.auth_mode());
         load_plugin_hooks_from_layer_stack(
             config_layer_stack,
+            &config.plugins,
             self.remote_installed_plugin_configs(),
             &self.store,
             target_curated_marketplace,
@@ -2729,10 +2740,11 @@ impl PluginsManager {
             if !path.as_path().starts_with(plugin_root.as_path()) {
                 return None;
             }
+            let path_uri = PathUri::from_abs_path(&path);
             resolved_skills
                 .skills
                 .iter()
-                .any(|skill| skill.path_to_skills_md == path)
+                .any(|skill| skill.path_to_skills_md == path_uri)
                 .then_some(path)
         });
         let plugin_data_root = self.store.plugin_data_root(&plugin_id);
@@ -3575,7 +3587,10 @@ impl PluginsManager {
             .collect::<HashSet<_>>();
         let enabled = configured_plugins
             .into_iter()
-            .filter_map(|(plugin_key, plugin)| plugin.enabled.then_some(plugin_key))
+            .filter_map(|(plugin_key, plugin)| {
+                (plugin.enabled.unwrap_or(true) && config.plugins.allows_plugin(&plugin_key))
+                    .then_some(plugin_key)
+            })
             .collect::<HashSet<_>>();
         ConfiguredPluginStates { installed, enabled }
     }

@@ -67,6 +67,12 @@ enum InputKind {
 }
 
 #[derive(Clone, Copy)]
+enum InferenceCompletion {
+    Response,
+    Interrupt,
+}
+
+#[derive(Clone, Copy)]
 enum FirstInputKind {
     User,
     InterAgentCommunication,
@@ -104,7 +110,7 @@ impl ThreadStore for GatedCheckpointStore {
 
     delegate_store_methods! {
         fn create_thread(params: CreateThreadParams) -> ();
-        fn resume_thread(params: ResumeThreadParams) -> ();
+        fn resume_thread(params: ResumeThreadParams) -> Arc<Vec<RolloutItem>>;
         fn append_items(params: AppendThreadItemsParams) -> ();
         fn discard_thread(thread_id: ThreadId) -> ();
         fn load_history(params: LoadThreadHistoryParams) -> StoredThreadHistory;
@@ -174,13 +180,16 @@ impl ThreadStore for GatedCheckpointStore {
     }
 }
 
-#[test_case(CheckpointPolicy::Background, InputKind::User; "background_user_input")]
-#[test_case(CheckpointPolicy::Synchronous, InputKind::User; "synchronous_store")]
-#[test_case(CheckpointPolicy::Background, InputKind::ToolOutput; "tool_output_stays_synchronous")]
+#[test_case(CheckpointPolicy::Background, InputKind::User, InferenceCompletion::Response; "background_user_input")]
+#[test_case(CheckpointPolicy::Synchronous, InputKind::User, InferenceCompletion::Response; "synchronous_store")]
+#[test_case(CheckpointPolicy::Background, InputKind::ToolOutput, InferenceCompletion::Response; "tool_output_stays_synchronous")]
+#[test_case(CheckpointPolicy::Background, InputKind::User, InferenceCompletion::Interrupt; "background_user_input_interrupts")]
+#[test_case(CheckpointPolicy::Synchronous, InputKind::User, InferenceCompletion::Interrupt; "synchronous_store_interrupts")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steered_input_checkpoint_controls_next_request(
     policy: CheckpointPolicy,
     input_kind: InputKind,
+    inference_completion: InferenceCompletion,
 ) -> anyhow::Result<()> {
     let (first_completed, first_completion) = oneshot::channel();
     let (second_completed, second_completion) = oneshot::channel();
@@ -225,7 +234,23 @@ async fn steered_input_checkpoint_controls_next_request(
     let test = test_codex()
         .with_thread_store(store.clone())
         .with_history_mode(ThreadHistoryMode::Legacy)
-        .with_config(move |config| config.model_provider.base_url = Some(base_url))
+        .with_config(move |config| {
+            config.model_provider.base_url = Some(base_url);
+            // Tool outputs must wait for response completion even with interruption enabled.
+            if matches!(inference_completion, InferenceCompletion::Response)
+                && input_kind == InputKind::User
+            {
+                config
+                    .features
+                    .disable(Feature::InstantInterrupt)
+                    .expect("disable interruption for response completion");
+            } else {
+                config
+                    .features
+                    .enable(Feature::InstantInterrupt)
+                    .expect("enable interruption for steered input");
+            }
+        })
         .build_with_auto_env(&config_server)
         .await?;
     let first = test
@@ -235,7 +260,7 @@ async fn steered_input_checkpoint_controls_next_request(
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = first else {
+    let TurnInputSubmission::Started { turn_id, .. } = first else {
         panic!("first input should start a turn");
     };
     wait_for_event(&test.codex, |event| {
@@ -259,11 +284,22 @@ async fn steered_input_checkpoint_controls_next_request(
     };
     assert_eq!(
         test.codex.start_or_steer_turn(input).await?,
-        TurnInputSubmission::Steered { turn_id }
+        TurnInputSubmission::Steered {
+            root_turn_id: turn_id.clone(),
+            turn_id
+        }
     );
-    // Steering still waits for the existing inference stream to finish.
-    assert!(checkpoint_requests.try_recv().is_err());
-    first_completed.send(()).expect("finish original inference");
+    let first_completed = match inference_completion {
+        InferenceCompletion::Response => {
+            // Without preemption, steering waits for the existing inference stream.
+            assert!(checkpoint_requests.try_recv().is_err());
+            first_completed.send(()).expect("finish original inference");
+            None
+        }
+        // Keep the first response gated until the follow-up request proves that
+        // interruption, rather than server completion, advanced the turn.
+        InferenceCompletion::Interrupt => Some(first_completed),
+    };
     let checkpoint = timeout(Duration::from_secs(10), checkpoint_requests.recv())
         .await?
         .expect("Core should checkpoint the accepted input");
@@ -295,6 +331,11 @@ async fn steered_input_checkpoint_controls_next_request(
     assert_eq!(requests.len(), 2);
     assert!(!String::from_utf8_lossy(&requests[0]).contains("steered input"));
     assert!(String::from_utf8_lossy(&requests[1]).contains("steered input"));
+    if let Some(first_completed) = first_completed {
+        first_completed
+            .send(())
+            .expect("release interrupted response");
+    }
     second_completed
         .send(())
         .expect("finish follow-up inference");
@@ -509,6 +550,7 @@ async fn local_preparation_is_durable_before_first_input_and_survives_restart(
         .resume_thread_with_history(
             initial.config.clone(),
             InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
                 conversation_id: context.thread_id,
                 history: Arc::new(context.items),
                 rollout_path: Some(rollout_path),

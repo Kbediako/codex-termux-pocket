@@ -291,7 +291,7 @@ pub(crate) async fn finalize_non_tool_response_item(
                     Some(combined)
                 };
                 let defers_mailbox_delivery_to_next_turn =
-                    !matches!(agent_message.phase, Some(MessagePhase::Commentary))
+                    matches!(agent_message.phase, Some(MessagePhase::FinalAnswer) | None)
                         && last_agent_message.is_some();
                 (
                     agent_message.memory_citation.clone(),
@@ -438,28 +438,8 @@ pub(crate) async fn handle_non_tool_response_item(
     item: &ResponseItem,
     plan_mode: bool,
 ) -> Option<TurnItem> {
-    let item_type = match item {
-        ResponseItem::AdditionalTools { .. } => "additional_tools",
-        ResponseItem::Message { .. } => "message",
-        ResponseItem::AgentMessage { .. } => "agent_message",
-        ResponseItem::Reasoning { .. } => "reasoning",
-        ResponseItem::LocalShellCall { .. } => "local_shell_call",
-        ResponseItem::FunctionCall { .. } => "function_call",
-        ResponseItem::ToolSearchCall { .. } => "tool_search_call",
-        ResponseItem::FunctionCallOutput { .. } => "function_call_output",
-        ResponseItem::CustomToolCall { .. } => "custom_tool_call",
-        ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
-        ResponseItem::ToolSearchOutput { .. } => "tool_search_output",
-        ResponseItem::WebSearchCall { .. } => "web_search_call",
-        ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
-        ResponseItem::Compaction { .. } => "compaction",
-        ResponseItem::ConfigurationUpdate { .. } => "configuration_update",
-        ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
-        ResponseItem::ContextCompaction { .. } => "context_compaction",
-        ResponseItem::Other => "other",
-    };
     debug!(
-        item_type,
+        item_type = item.item_type(),
         item_id = item.id().map(ResponseItemId::as_str),
         "Output item"
     );
@@ -532,7 +512,7 @@ fn completed_item_defers_mailbox_delivery_to_next_turn(
 ) -> bool {
     match item {
         ResponseItem::Message { role, phase, .. } => {
-            if role != "assistant" || matches!(phase, Some(MessagePhase::Commentary)) {
+            if role != "assistant" || !matches!(phase, Some(MessagePhase::FinalAnswer) | None) {
                 return false;
             }
             // Treat `None` like final-answer text so untagged providers default

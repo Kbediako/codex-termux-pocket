@@ -60,12 +60,14 @@ pub(super) async fn page_turn_rows(
         if remaining == 0 {
             break;
         }
-        let mut query =
-            QueryBuilder::<Sqlite>::new(if matches!(items_view, StoredTurnItemsView::Summary) {
-                r#"
-WITH page_turns AS (
-SELECT
+        let mut query = QueryBuilder::<Sqlite>::new("");
+        if matches!(items_view, StoredTurnItemsView::Summary) {
+            query.push("WITH page_turns AS (");
+        }
+        query.push(
+            r#"SELECT
     turn_id,
+    root_turn_id,
     rollout_ordinal,
     status,
     error_json,
@@ -76,23 +78,8 @@ SELECT
     final_agent_item_id
 FROM thread_turns
 WHERE thread_id =
-            "#
-            } else {
-                r#"
-SELECT
-    turn_id,
-    rollout_ordinal,
-    status,
-    error_json,
-    started_at,
-    completed_at,
-    duration_ms,
-    first_user_item_id,
-    final_agent_item_id
-FROM thread_turns
-WHERE thread_id =
-            "#
-            });
+            "#,
+        );
         query.push_bind(segment.rollout_id().to_string());
         push_segment_range(&mut query, segment)?;
         for newer_segment in &lineage.segments()[segment_index + 1..] {
@@ -318,6 +305,14 @@ WHERE thread_id =
         }
         if let Some(turn_id) = params.turn_id.as_deref() {
             query.push(" AND turn_id = ").push_bind(turn_id);
+        }
+        if let Some(item_ids) = params.item_ids.as_deref() {
+            query.push(" AND item_id IN (");
+            let mut ids = query.separated(", ");
+            for item_id in item_ids {
+                ids.push_bind(item_id);
+            }
+            ids.push_unseparated(")");
         }
         push_cursor_clause(&mut query, params.sort_direction, segment_cursor)?;
         push_order_and_limit(&mut query, params.sort_direction, remaining);

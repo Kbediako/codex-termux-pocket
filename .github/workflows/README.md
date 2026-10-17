@@ -49,6 +49,23 @@ tests. This does not change production CA handling, certificate validation, TLS
 fallback/replay rules, or the sandbox step. A clean entry environment is not
 proof of a passing TLS test; all suites and source/lock-drift checks still block.
 
+The same matrix also runs `codex-core-plugins`, `codex-skills-extension`,
+`codex-external-agent-migration`, `codex-skills`, and `codex-tcp-tunnel` separately
+with `just test --locked --cargo-profile ci-test`. These permanent suites cover
+the YAML and QUIC consumers and retain each package's command, full nextest log,
+and test/log exit codes, plus a separate checkout/tree/workflow/lock identity.
+Their source directories are included in both push and pull-request filters.
+Linux setup includes `libasound2-dev` for the migration consumer's `codex-core`
+audio dependency. This is a CI build dependency, not a shipped runtime change.
+
+The YAML/QUIC runs come after the existing scoped reqwest compiler evidence has
+been captured, so their feature selections cannot replace that evidence. They
+run without the HTTP fixture's synthetic target runner or CA-environment changes.
+Every package is attempted even when an earlier package fails. Any test or log
+failure fails the step, and the existing always-run artifact upload retains the
+results and `yaml-quic-consumer-tests.exit`; missing results are not a pass.
+The original HTTP/TLS tests, launch receipts and sandbox assertions are unchanged.
+
 These tests do not replace the production ARM64 or real-Termux gates. A PR that
 changes workflow definitions remains ineligible for `dispatch-pr-build` until
 its workflow tree agrees with trusted main; do not bypass that guard. Merge
@@ -91,7 +108,8 @@ independent verification semantically identical without sharing write authority.
   helpers, shell tests, release controls, workflow topology, and the complete
   locked dependency graph.
 - `termux-linux-sandbox.yml` runs the scoped Linux sandbox suite on public x64
-  and ARM64 Ubuntu runners, followed by the scoped image/HTTP consumer suites.
+  and ARM64 Ubuntu runners, followed by scoped image/HTTP and YAML/QUIC consumer
+  suites.
 - `termux-mobile-artifact.yml` builds, validates, attests, and retains the
   production ARM64 runtime. It is build-only and has no release-write authority.
 - `termux-android-emulator.yml` builds its fixture from the triggering source and
