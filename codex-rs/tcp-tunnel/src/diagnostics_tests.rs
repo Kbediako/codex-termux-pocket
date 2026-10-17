@@ -112,10 +112,12 @@ fn legacy_errors_and_successful_shutdown_produce_no_json() {
 #[test]
 fn handshake_timeout_preserves_legacy_debug_output() {
     let error = anyhow!(Code::HandshakeTimeout);
-    assert_eq!(
-        format!("{error:?}"),
-        "QUIC handshake failed: QUIC handshake timed out"
-    );
+    // Anyhow may append a backtrace in CI; the complete legacy message must stay exact.
+    let debug = format!("{error:?}");
+    let message = debug
+        .split_once("\n\nStack backtrace:\n")
+        .map_or(debug.as_str(), |(message, _)| message);
+    assert_eq!(message, "QUIC handshake failed: QUIC handshake timed out");
     let mut output = Vec::new();
     Diagnostics::write(
         &mut output,
