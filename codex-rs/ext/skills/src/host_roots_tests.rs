@@ -424,7 +424,10 @@ async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
         );
     }
     let mut config = empty_config();
-    config["project_root_markers"] = toml::Value::Array(vec![toml::Value::String(marker)]);
+    config.as_table_mut().expect("config table").insert(
+        "project_root_markers".to_string(),
+        toml::Value::Array(vec![toml::Value::String(marker)]),
+    );
     let config_stack = stack(vec![ConfigLayerEntry::new(
         ConfigLayerSource::SessionFlags,
         config,

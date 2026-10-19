@@ -1,30 +1,19 @@
 {
   "format_version": 1,
-  "request_id": "issue168-prepare-yaml-quic-fixtures-20261017",
+  "request_id": "issue168-prepare-skills-table-insert-20261019",
   "operation": "prepare-source",
   "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
-  "prepared_commit": "5f6b015dc4e4432222bad835d095bfc75feab401",
-  "expected_input_tree": "d3183a9e3b2998c927384cc53ef0f5a89669f3ea",
+  "prepared_commit": "0690eb6ca75464064c6beacbd6f24ef7b6e40bca",
+  "expected_input_tree": "8089417f0aac31ec017b253e54542d3cc068f43f",
   "edits": [
     {
       "path": "codex-rs/ext/skills/src/host_roots_tests.rs",
-      "before": "fa8cb7d8dc2a8e354d9850ceca7aa49c4f65cc07",
-      "after": "5d7dc86d09aaa71fdfeb7c364a63afc9bc2db7b5",
+      "before": "aade9a1e6ea73c80c871f333fda2cd04fdf6d02f",
+      "after": "cd6362c34020c17e203b3fc395d944e343c32662",
       "replacements": [
         {
-          "old": "    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &stack(Vec::new()), &cwd)\n        .await\n        .into_iter()\n        .map(|root| root.path)\n        .collect::<Vec<_>>();\n\n    assert_eq!(roots, vec![cwd.join(\".agents/skills\")]);",
-          "new": "    // Keep the no-marker precondition independent of ambient ancestor repositories.\n    let marker = format!(\n        \".codex-absent-project-marker-{}\",\n        temp_dir.path().file_name().expect(\"temp dir name\").to_string_lossy()\n    );\n    for ancestor in cwd.ancestors() {\n        assert_eq!(\n            fs::symlink_metadata(ancestor.join(&marker))\n                .expect_err(\"fixture project marker must be absent\")\n                .kind(),\n            std::io::ErrorKind::NotFound\n        );\n    }\n    let mut config = empty_config();\n    config[\"project_root_markers\"] = toml::Value::Array(vec![toml::Value::String(marker)]);\n    let config_stack = stack(vec![ConfigLayerEntry::new(\n        ConfigLayerSource::SessionFlags,\n        config,\n    )]);\n\n    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &cwd)\n        .await\n        .into_iter()\n        .map(|root| root.path)\n        .collect::<Vec<_>>();\n\n    assert_eq!(roots, vec![cwd.join(\".agents/skills\")]);"
-        }
-      ]
-    },
-    {
-      "path": "codex-rs/tcp-tunnel/src/diagnostics_tests.rs",
-      "before": "7e9b86209457e3e41aefc93f42f822a5f3b333c7",
-      "after": "841139c6990acd3c879016069a2884351173fa0d",
-      "replacements": [
-        {
-          "old": "    let error = anyhow!(Code::HandshakeTimeout);\n    assert_eq!(\n        format!(\"{error:?}\"),\n        \"QUIC handshake failed: QUIC handshake timed out\"\n    );",
-          "new": "    let error = anyhow!(Code::HandshakeTimeout);\n    // Anyhow may append a backtrace in CI; the complete legacy message must stay exact.\n    let debug = format!(\"{error:?}\");\n    let message = debug\n        .split_once(\"\\n\\nStack backtrace:\\n\")\n        .map_or(debug.as_str(), |(message, _)| message);\n    assert_eq!(message, \"QUIC handshake failed: QUIC handshake timed out\");"
+          "old": "    config[\"project_root_markers\"] = toml::Value::Array(vec![toml::Value::String(marker)]);",
+          "new": "    config.as_table_mut().expect(\"config table\").insert(\n        \"project_root_markers\".to_string(),\n        toml::Value::Array(vec![toml::Value::String(marker)]),\n    );"
         }
       ]
     }
