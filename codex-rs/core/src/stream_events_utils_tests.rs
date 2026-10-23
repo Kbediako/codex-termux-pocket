@@ -41,9 +41,13 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 
 fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase,
@@ -55,12 +59,14 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> 
 fn external_context_pollution_items_include_web_search_and_tool_search() {
     let polluting_items = [
         ResponseItem::WebSearchCall {
+            encrypted_content: None,
             id: None,
             status: Some("completed".to_string()),
             action: None,
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::ToolSearchCall {
+            encrypted_content: None,
             id: None,
             call_id: Some("search-1".to_string()),
             status: None,
@@ -97,6 +103,7 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
 fn external_context_pollution_items_exclude_local_tool_calls() {
     let non_polluting_items = [
         ResponseItem::LocalShellCall {
+            encrypted_content: None,
             id: None,
             call_id: Some("shell-1".to_string()),
             status: LocalShellStatus::Completed,
@@ -110,6 +117,8 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "shell".to_string(),
             namespace: None,
@@ -127,6 +136,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
+            encrypted_content: None,
             id: None,
             status: None,
             call_id: "custom-1".to_string(),
@@ -304,6 +314,7 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
         step_context,
         turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
         tool_runtime,
+        defer_tool_dispatch: false,
         cancellation_token: CancellationToken::new(),
     }
 }
@@ -538,13 +549,20 @@ fn last_assistant_message_from_item_returns_none_for_plan_only_hidden_message() 
     );
 }
 
-#[test]
-fn completed_item_defers_mailbox_delivery_for_unknown_phase_messages() {
-    let item = assistant_output_text("final answer");
+#[test_case::test_case(Some(MessagePhase::FinalAnswer), "", true; "explicit_empty_final")]
+#[test_case::test_case(None, "final answer", true; "untagged_visible_answer")]
+#[test_case::test_case(None, "", false; "untagged_empty_message")]
+fn completed_item_defers_mailbox_delivery_for_final_answers(
+    phase: Option<MessagePhase>,
+    text: &str,
+    expected: bool,
+) {
+    let item = assistant_output_text_with_phase(text, phase);
 
-    assert!(completed_item_defers_mailbox_delivery_to_next_turn(
-        &item, /*plan_mode*/ false,
-    ));
+    assert_eq!(
+        completed_item_defers_mailbox_delivery_to_next_turn(&item, /*plan_mode*/ false),
+        expected
+    );
 }
 
 #[test_case::test_case(MessagePhase::Commentary; "commentary")]

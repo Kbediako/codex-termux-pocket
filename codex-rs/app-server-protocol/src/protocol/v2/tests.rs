@@ -2671,6 +2671,7 @@ fn mcp_server_elicitation_response_serializes_nullable_content() {
 fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "not-ready".to_string(),
@@ -2696,6 +2697,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
                 "httpOrigin": null,
                 "serverInfo": null,
                 "serverCapabilities": null,
+                "toolListMeta": null,
                 "tools": {},
                 "toolsError": null,
                 "resources": [],
@@ -2722,6 +2724,7 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
     assert_eq!(
         status,
         McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "older-server".to_string(),
@@ -2796,6 +2799,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
 fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "initialized".to_string(),
@@ -2827,6 +2831,7 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
                 "pluginId": "lookup@test",
                 "httpOrigin": null,
                 "serverCapabilities": null,
+                "toolListMeta": null,
                 "serverInfo": {
                     "name": "lookup-server",
                     "title": null,
@@ -5089,6 +5094,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         root_turn_id: None,
         tool_output: None,
         responsesapi_client_metadata: None,
+        responsesapi_client_metadata_patch: None,
         additional_context: None,
         environments: None,
         cwd: None,
@@ -5446,4 +5452,33 @@ fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
             auto_resolution_ms: Some(60_000),
         }
     );
+}
+
+/// Native path spelling survives serialization so the receiving host can validate it.
+#[test]
+fn feedback_paths_preserve_native_wire_spelling_before_host_validation() {
+    for path in [
+        "/tmp/feedback.zip",
+        r"C:\Users\test\feedback.zip",
+        r"\\server\share\feedback.zip",
+        "relative.zip",
+    ] {
+        let request: FeedbackSaveParams = serde_json::from_value(json!({
+            "classification": "bug", "savePath": path
+        }))
+        .expect("wire paths remain uninterpreted");
+        assert_eq!(request.save_path.as_str(), path);
+        assert_eq!(
+            serde_json::to_value(&request).expect("serialize request")["savePath"],
+            path
+        );
+        let response: FeedbackSaveResponse = serde_json::from_value(json!({
+            "threadId": "synthetic", "savedPath": path, "promptHash": null
+        }))
+        .expect("wire response");
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize response")["savedPath"],
+            path
+        );
+    }
 }

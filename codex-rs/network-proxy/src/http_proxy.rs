@@ -190,6 +190,12 @@ async fn http_connect_accept(
     environment_id: Option<String>,
     mut req: Request,
 ) -> Result<(Response, Request), Response> {
+    if req.headers().get_all(header::HOST).iter().nth(1).is_some() {
+        return Err(text_response(
+            StatusCode::BAD_REQUEST,
+            "multiple Host headers",
+        ));
+    }
     let started_at = Instant::now();
     let app_state = req
         .extensions()
@@ -559,6 +565,13 @@ async fn http_plain_proxy(
     environment_id: Option<String>,
     mut req: Request,
 ) -> Result<Response, Infallible> {
+    // Policy and upstream parsers must not select different Host field lines.
+    if req.headers().get_all(header::HOST).iter().nth(1).is_some() {
+        return Ok(text_response(
+            StatusCode::BAD_REQUEST,
+            "multiple Host headers",
+        ));
+    }
     let started_at = Instant::now();
     let app_state = match req.extensions().get::<Arc<NetworkProxyState>>().cloned() {
         Some(state) => state,
@@ -923,8 +936,16 @@ async fn http_plain_proxy(
         };
     // Evaluate the original Authorization header before replacing brokered dummy credentials.
     // Otherwise an unhooked provider alias can receive the real credential without hook policy.
+    let origin = crate::mitm_hook::MitmHookOrigin {
+        scheme: req
+            .uri()
+            .scheme()
+            .cloned()
+            .unwrap_or(rama_http::uri::Scheme::HTTP),
+        port,
+    };
     match app_state
-        .evaluate_mitm_hook_request(&host, &req, &credential_destinations)
+        .evaluate_mitm_hook_request(&host, &req, &origin, &credential_destinations)
         .await
     {
         Ok(HookEvaluation::HookedHostNoMatch) => {
@@ -1260,6 +1281,10 @@ struct BlockedResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "http_proxy/host_header_tests.rs"]
+mod host_header_tests;
 
 #[cfg(test)]
 mod tests {

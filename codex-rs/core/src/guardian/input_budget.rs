@@ -3,7 +3,9 @@
 //! recording. Budget failures preserve it for a compaction retry; successful
 //! finalization consumes it. Checkpoint recovery skips startup compaction and
 //! budgets the fresh full input against the preserved checkpoint.
+//! Loss telemetry describes accepted inputs, excluding feasibility checks and failed retries.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -83,12 +85,14 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
     let maximum = effective_input_token_limit(turn.model_info(), turn.config.model_context_window)
         .saturating_sub(super::request_budget::INPUT_TOKEN_MARGIN);
     let mut context = pending.0.clone();
-    context.retain_new_instructions(
-        &session
-            .clone_history()
-            .await
-            .for_prompt_annotated(&turn.model_info().input_modalities),
-    );
+    let history = session
+        .clone_history()
+        .await
+        .for_prompt_annotated(&turn.model_info().input_modalities);
+    context.retain_new_instructions(&history);
+    context
+        .retain_new_agent_messages(&history)
+        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
     if context.estimated_tokens().saturating_add(minimum_prefix) > maximum {
         context
             .enforce_budget(
@@ -96,7 +100,10 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
                     max_input_tokens: maximum,
                     existing_context_tokens: minimum_prefix,
                 },
-                GuardianBudgetOmission.render(),
+                GuardianBudgetOmission
+                    .render()
+                    .into_text()
+                    .unwrap_or_default(),
                 HistoryTruncation::Allow,
             )
             .map_err(|_error| {
@@ -148,6 +155,9 @@ pub(crate) async fn finalize(
     // Use the history that will actually reach the model. Recompute after every
     // compaction retry; evidence removed by compaction must be delivered again.
     context.retain_new_instructions(&history);
+    context
+        .retain_new_agent_messages(&history)
+        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
     let prompt = build_prompt(
         history
             .into_iter()
@@ -224,8 +234,15 @@ pub(crate) async fn finalize(
     } else {
         history_truncation
     };
-    let context = context
-        .enforce_budget(budget, GuardianBudgetOmission.render(), history_truncation)
+    let mut context = context
+        .enforce_budget(
+            budget,
+            GuardianBudgetOmission
+                .render()
+                .into_text()
+                .unwrap_or_default(),
+            history_truncation,
+        )
         .map_err(|error| {
             session
                 .services
@@ -255,6 +272,7 @@ pub(crate) async fn finalize(
                 );
         }
     }
+    let observations = std::mem::take(&mut context.truncations);
     match context.clone().into_annotated_user_inputs() {
         Ok((user_input, metadata)) => {
             if metadata.is_some() {
@@ -303,6 +321,47 @@ pub(crate) async fn finalize(
                 .collect::<CodexResult<Vec<_>>>()?;
         }
         Err(error) => return Err(CodexErr::InvalidRequest(error.to_string())),
+    }
+    // Match async classification accounting: one count per component/disposition
+    // for this accepted input, with byte totals across all reduction stages.
+    let mut truncations: BTreeMap<(&str, &str), (usize, usize)> = BTreeMap::new();
+    for observation in observations {
+        let disposition = if observation.retained_bytes == 0 {
+            "omitted"
+        } else {
+            "truncated"
+        };
+        let totals = truncations
+            .entry((observation.component, disposition))
+            .or_default();
+        totals.0 = totals.0.saturating_add(observation.original_bytes);
+        totals.1 = totals.1.saturating_add(observation.retained_bytes);
+    }
+    for ((component, disposition), (original_bytes, retained_bytes)) in truncations {
+        session.services.session_telemetry.counter(
+            codex_otel::GUARDIAN_REVIEW_TRUNCATION_METRIC,
+            /*inc*/ 1,
+            &[("component", component), ("disposition", disposition)],
+        );
+        for (measurement, bytes) in [
+            ("original", original_bytes),
+            ("retained", retained_bytes),
+            ("omitted", original_bytes.saturating_sub(retained_bytes)),
+        ] {
+            session
+                .services
+                .session_telemetry
+                .histogram_with_boundaries(
+                    codex_otel::GUARDIAN_REVIEW_TRUNCATION_BYTES_METRIC,
+                    i64::try_from(bytes).unwrap_or(i64::MAX),
+                    codex_guardian_context::SECTION_COST_BOUNDARIES,
+                    &[
+                        ("component", component),
+                        ("disposition", disposition),
+                        ("measurement", measurement),
+                    ],
+                );
+        }
     }
     step.turn.extension_data.insert(RetainedReviewContext {
         context: pending.0.retained_instructions(),

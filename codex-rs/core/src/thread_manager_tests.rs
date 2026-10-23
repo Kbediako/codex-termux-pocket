@@ -28,6 +28,7 @@ use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
@@ -520,11 +521,12 @@ async fn child_session_inherits_client_mcp_extensions() {
         .await
         .expect("start parent thread");
 
+    let (client_mcp_extensions, _) = manager
+        .state
+        .inherited_child_settings(Some(parent.thread_id))
+        .await;
     assert_eq!(
-        manager
-            .state
-            .client_mcp_extensions_for_child(Some(parent.thread_id))
-            .await,
+        client_mcp_extensions,
         ClientMcpExtensions::new(HashMap::from([
             (OPENAI_FORM_EXTENSION_ID.to_string(), serde_json::json!({})),
             (
@@ -582,9 +584,13 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
 
 fn user_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase: None,
@@ -593,9 +599,13 @@ fn user_msg(text: &str) -> ResponseItem {
 }
 fn assistant_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase: None,
@@ -696,6 +706,8 @@ fn truncates_before_requested_user_message() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             call_id: "c1".to_string(),
             name: "tool".to_string(),
@@ -1025,6 +1037,10 @@ async fn mcp_invalidation_refreshes_threads_that_are_still_starting() {
 
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
+    // Resolve the model locally before waiting for the MCP lifecycle hook.
+    config.model_catalog = Some(
+        codex_models_manager::bundled_models_response().expect("bundled model catalog should load"),
+    );
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
@@ -1660,6 +1676,10 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                 vec![codex_extension_api::SelectedPlugin {
                     selected_root_id: selected_root_id.clone(),
                     plugin_id: plugin_id.clone(),
+                    identity: codex_core_plugins::PluginIdentity::Local {
+                        plugin_id: plugin_id.clone(),
+                    },
+                    enabled: true,
                     mcp: Box::pin(async move {
                         mcp_loaded.fetch_add(1, Ordering::Relaxed);
                         codex_extension_api::SelectedPluginContribution {
@@ -1769,6 +1789,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             },
             /*ready_selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
+            /*executor_capability_discovery_v2*/ None,
         )
         .await;
     let second_session = &second_thread.thread.session;
@@ -1791,6 +1812,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             },
             /*ready_selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
+            /*executor_capability_discovery_v2*/ None,
         )
         .await;
 
@@ -1907,6 +1929,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                 },
                 /*ready_selected_capability_roots*/ &[],
                 /*executor_capability_discovery*/ None,
+                /*executor_capability_discovery_v2*/ None,
             )
             .await;
         assert_eq!(
@@ -1937,6 +1960,42 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             mcp_loaded.load(Ordering::Relaxed) - loaded_before,
             expected_mcp_loads
         );
+        // Installation-derived rejections must not become global plugin-ID denials.
+        let ready_roots = vec![SelectedCapabilityRoot {
+            id: "selected-a".to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: "env-a".to_string(),
+                path: PathUri::parse("file:///plugins/selected-a").expect("plugin root URI"),
+            },
+        }];
+        let selected = first_session
+            .services
+            .mcp_manager
+            .selected_plugins_for_step(
+                codex_extension_api::McpServerContributionContext::for_step(
+                    &config,
+                    &first_session.services.mcp_thread_init,
+                    &first_session.services.thread_extension_data,
+                    &first_originator,
+                    &ready_roots,
+                    /*executor_capability_discovery*/ None,
+                    /*executor_capability_discovery_v2*/ None,
+                )
+                .with_selected_environments(&[])
+                .with_session_source(&SessionSource::Exec),
+                &config.plugins,
+                &disabled_plugin_ids,
+            )
+            .await;
+        let mut selected_disabled_ids = selected.disabled_plugin_ids;
+        selected_disabled_ids.sort();
+        selected_disabled_ids.dedup();
+        assert_eq!(selected_disabled_ids, disabled_plugin_ids);
+        assert_eq!(
+            selected.disabled_plugin_roots,
+            projection.selected_plugins.disabled_plugin_roots
+        );
+        assert_eq!(selected.plugins.len(), usize::from(selected_enabled));
     }
 }
 
@@ -1963,7 +2022,7 @@ async fn selected_capability_roots_round_trip_through_fork() {
     }];
     let inherited = manager
         .start_thread(StartThreadOptions {
-            initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(
+            initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(Box::new(
                 SessionMetaLine {
                     meta: SessionMeta {
                         selected_capability_roots: selected_roots.clone(),
@@ -1971,7 +2030,7 @@ async fn selected_capability_roots_round_trip_through_fork() {
                     },
                     git: None,
                 },
-            )]),
+            ))]),
             environments: Some(Vec::new()),
             ..StartThreadOptions::new(config)
         })
@@ -2058,7 +2117,7 @@ async fn selected_capability_roots_respect_startup_precedence_and_isolation() {
         }
         let child = manager
             .start_thread(StartThreadOptions {
-                initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(
+                initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(Box::new(
                     SessionMetaLine {
                         meta: SessionMeta {
                             selected_capability_roots: vec![root("saved")],
@@ -2066,7 +2125,7 @@ async fn selected_capability_roots_respect_startup_precedence_and_isolation() {
                         },
                         git: None,
                     },
-                )]),
+                ))]),
                 inherited_environments: Some(parent_environments.clone()),
                 thread_extension_init,
                 ..StartThreadOptions::new(config.clone())
@@ -3060,6 +3119,8 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
     assert_eq!(
         developer_interrupted_marker(),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3074,6 +3135,7 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
                     content_item_kinds: Some(vec![ContentItemKind(
                         "generic.turn_aborted".to_string()
                     )]),
+                    content_item_metadata: Some(vec![ContentItemMetadata::harness()]),
                     ..Default::default()
                 }
             ),

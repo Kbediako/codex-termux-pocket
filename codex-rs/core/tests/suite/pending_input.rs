@@ -697,22 +697,38 @@ async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum WaitInput {
+    UserSteer,
+    PendingInjection,
+    LiveInjection,
+}
+
+#[test_case(WaitInput::UserSteer; "user_steer")]
+#[test_case(WaitInput::PendingInjection; "already_pending_injection")]
+#[test_case(WaitInput::LiveInjection; "injection_while_waiting")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
+async fn input_interrupts_wait_agent_and_is_sent_in_follow_up_request(input: WaitInput) {
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
     const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
+    let (release_wait, wait_gate) = oneshot::channel();
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
-            WAIT_CALL_ID,
-            MULTI_AGENT_V2_NAMESPACE,
-            "wait_agent",
-            r#"{"timeout_ms":10000}"#,
-        )),
-        chunk(ev_completed("resp-1")),
+        gated_chunk(
+            wait_gate,
+            vec![
+                ev_function_call_with_namespace(
+                    WAIT_CALL_ID,
+                    MULTI_AGENT_V2_NAMESPACE,
+                    "wait_agent",
+                    r#"{"timeout_ms":10000}"#,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
     ];
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
@@ -730,12 +746,28 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
         .codex;
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
+    server.wait_for_request_count(/*count*/ 1).await;
+    if matches!(input, WaitInput::PendingInjection) {
+        // Hold the tool call until the injection and its activity signal are queued.
+        codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn");
+    }
+    release_wait.send(()).expect("release wait tool call");
     wait_for_event(&codex, |event| {
         matches!(event, EventMsg::CollabWaitingBegin(_))
     })
     .await;
 
-    steer_user_input(&codex, STEER_PROMPT).await;
+    match input {
+        WaitInput::UserSteer => steer_user_input(&codex, STEER_PROMPT).await,
+        WaitInput::LiveInjection => codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn"),
+        WaitInput::PendingInjection => {}
+    }
     wait_for_turn_complete(&codex).await;
 
     let requests = server.requests().await;
@@ -761,8 +793,11 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     server.shutdown().await;
 }
 
+#[test_case(WaitInput::UserSteer; "user_steer")]
+#[test_case(WaitInput::PendingInjection; "already_pending_injection")]
+#[test_case(WaitInput::LiveInjection; "injection_while_waiting")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn any_new_input_interrupts_sleep() {
+async fn any_new_input_interrupts_sleep(input: WaitInput) {
     const FIRST_SLEEP_CALL_ID: &str = "sleep-call-1";
     const SECOND_SLEEP_CALL_ID: &str = "sleep-call-2";
     const SLEEP_DURATION_MS: u64 = 3_600_000;
@@ -770,15 +805,21 @@ async fn any_new_input_interrupts_sleep() {
     const STEER_PROMPT: &str = "stop sleeping and continue";
     let sleep_arguments = json!({ "duration_ms": SLEEP_DURATION_MS }).to_string();
 
+    let (release_sleep, sleep_gate) = oneshot::channel();
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
-            FIRST_SLEEP_CALL_ID,
-            "clock",
-            "sleep",
-            &sleep_arguments,
-        )),
-        chunk(ev_completed("resp-1")),
+        gated_chunk(
+            sleep_gate,
+            vec![
+                ev_function_call_with_namespace(
+                    FIRST_SLEEP_CALL_ID,
+                    "clock",
+                    "sleep",
+                    &sleep_arguments,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
     ];
     let second_chunks = vec![
         chunk(ev_response_created("resp-2")),
@@ -814,9 +855,24 @@ async fn any_new_input_interrupts_sleep() {
     let codex = test.codex.clone();
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
+    server.wait_for_request_count(/*count*/ 1).await;
+    if matches!(input, WaitInput::PendingInjection) {
+        codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn");
+    }
+    release_sleep.send(()).expect("release sleep tool call");
     wait_for_sleep_item_started(&codex, FIRST_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
 
-    steer_user_input(&codex, STEER_PROMPT).await;
+    match input {
+        WaitInput::UserSteer => steer_user_input(&codex, STEER_PROMPT).await,
+        WaitInput::LiveInjection => codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn"),
+        WaitInput::PendingInjection => {}
+    }
     wait_for_sleep_item_completed(&codex, FIRST_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
     wait_for_sleep_item_started(&codex, SECOND_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
 
@@ -1096,19 +1152,22 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_ite
     server.shutdown().await;
 }
 
+#[test_case("first answer"; "visible_final")]
+#[test_case(""; "empty_final")]
+#[test_case(" \n\t"; "whitespace_final")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_inter_agent_mail_does_not_restart_after_final_answer() {
+async fn queued_inter_agent_mail_does_not_restart_after_final_answer(final_answer: &str) {
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
         chunk(ev_message_item_added("msg-1", "")),
-        chunk(ev_output_text_delta("first answer")),
+        chunk(ev_output_text_delta(final_answer)),
         chunk(json!({
             "type": "response.output_item.done",
             "item": {
                 "type": "message",
                 "role": "assistant",
                 "id": "msg-1",
-                "content": [{"type": "output_text", "text": "first answer"}],
+                "content": [{"type": "output_text", "text": final_answer}],
                 "phase": "final_answer",
             }
         })),
@@ -1239,16 +1298,23 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     server.shutdown().await;
 }
 
-#[test_case(false; "completed_reasoning")]
-#[test_case(true; "discarded_reasoning")]
+#[test_case(false, Some("response.interrupt.accepted"); "completed_reasoning")]
+#[test_case(true, Some("response.interrupt.accepted"); "discarded_reasoning")]
+#[test_case(false, Some("response.interrupt.failed"); "rejected_interrupt")]
+#[test_case(false, None; "missing_acknowledgement")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow::Result<()> {
+async fn steer_interrupts_and_drains_websocket(
+    discard_partial: bool,
+    acknowledgement: Option<&str>,
+) -> anyhow::Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));
 
     let mut interrupted = ev_completed_with_tokens("resp-interrupted", /*total_tokens*/ 42);
-    interrupted["type"] = json!("response.incomplete");
-    interrupted["response"]["status"] = json!("incomplete");
-    interrupted["response"]["incomplete_details"] = json!({"reason": "interrupted"});
+    if acknowledgement == Some("response.interrupt.accepted") {
+        interrupted["type"] = json!("response.incomplete");
+        interrupted["response"]["status"] = json!("incomplete");
+        interrupted["response"]["incomplete_details"] = json!({"reason": "interrupted"});
+    }
     let server = responses::start_websocket_server(vec![vec![
         vec![ev_response_created("warm-1"), ev_completed("warm-1")],
         vec![
@@ -1256,13 +1322,15 @@ async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow:
             ev_reasoning_item_added("reason-1", &["thinking"]),
         ],
         // Finish the active response only after receiving response.interrupt.
-        vec![
-            json!({
-                "type": "response.interrupt.accepted",
-                "response_id": "resp-interrupted",
-                "sequence_number": 3,
+        [
+            acknowledgement.map(|kind| {
+                json!({
+                    "type": kind,
+                    "response_id": "resp-interrupted",
+                    "sequence_number": 3,
+                })
             }),
-            if discard_partial {
+            Some(if discard_partial {
                 json!({
                     "type": "response.output_item.interrupted",
                     "response_id": "resp-interrupted",
@@ -1272,9 +1340,12 @@ async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow:
                 })
             } else {
                 ev_reasoning_item("reason-1", &["thinking"], &[])
-            },
-            interrupted,
-        ],
+            }),
+            Some(interrupted),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         vec![
             ev_response_created("resp-follow-up"),
             ev_completed("resp-follow-up"),

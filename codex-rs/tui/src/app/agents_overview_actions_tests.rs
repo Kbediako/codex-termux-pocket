@@ -467,7 +467,8 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             app.agents_overview.visible_thread_ids = view.thread_ids();
             app.chat_widget.show_bottom_pane_view(Box::new(view));
             let expected = match (grouping, filtered) {
-                (AgentsOverviewGrouping::Status, false) => vec![3, 2, 1, 4],
+                // The preceding filtered case retains Other 2; rediscovered tasks append.
+                (AgentsOverviewGrouping::Status, false) => vec![3, 1, 4, 2],
                 (AgentsOverviewGrouping::Status, true) => vec![3, 1, 4],
                 (AgentsOverviewGrouping::Project | AgentsOverviewGrouping::Model, false) => {
                     vec![3, 4, 2, 1]
@@ -583,6 +584,7 @@ async fn hiding_rename_target_does_not_transfer_draft_to_neighbor() -> Result<()
 async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resume() -> Result<()> {
     let (mut app, mut rx, _op_rx) = crate::app::tests::make_test_app_with_channels().await;
     let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let backend_id = app_server.backend_id();
     let started = app_server.start_thread(&app.config).await?;
     let id = started.session.thread_id;
     app.enqueue_primary_thread_session(started.session, started.turns)
@@ -645,6 +647,7 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
         &mut tui,
         &mut app_server,
         SessionTarget {
+            backend_id,
             thread_id: id,
             path: None,
             cwd: None,

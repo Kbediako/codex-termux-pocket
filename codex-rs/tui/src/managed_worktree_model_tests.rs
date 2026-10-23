@@ -56,12 +56,16 @@ async fn model_call(
     let approvals = tokio::time::timeout(Duration::from_secs(/*secs*/ 30), async {
         let mut approvals = 0;
         while let Some(event) = server.next_event().await {
-            match event {
+            match event.event {
                 AppServerEvent::ServerRequest(request) => {
                     let ServerRequest::McpServerElicitationRequest { request_id, params } = *request else { panic!("unexpected server request: {request:?}"); };
                     assert_eq!(params.thread_id, thread);
                     approvals += 1;
-                    server.resolve_server_request(request_id, json!({"action":"accept","content":null,"_meta":null})).await?;
+                    server
+                        .request_handle()
+                        .server_request_reply_handle(request_id)
+                        .resolve(json!({"action":"accept","content":null,"_meta":null}))
+                        .await?;
                 }
                 AppServerEvent::ServerNotification(notification) if matches!(notification.as_ref(), ServerNotification::TurnCompleted(event) if event.thread_id == thread) => break,
                 _ => {},

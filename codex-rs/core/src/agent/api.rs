@@ -53,6 +53,9 @@ pub trait AgentControl: Send + Sync {
     ) -> BoxFuture<'a, Result<ThreadId>>;
 
     /// Start a child and accept its initial input, returning its effective settings.
+    /// Retain provisional-child ownership until this future returns its acceptance receipt.
+    /// Once returned, caller cancellation does not retract the accepted child. Subsequent
+    /// tool-result or transport publication belongs to the caller, outside this boundary.
     /// V2 snapshots resolve effort against captured startup metadata without changing the
     /// child's configured effort (for example, Ultra still enables proactive behavior).
     fn spawn(
@@ -67,10 +70,7 @@ pub trait AgentControl: Send + Sync {
 
     /// Take queued, non-turn-starting mail in order, without loading the recipient.
     /// This in-memory operation performs no I/O; returning transfers ownership to the caller.
-    fn take_mailbox(
-        &self,
-        agent: ThreadId,
-    ) -> Vec<codex_protocol::protocol::InterAgentCommunication>;
+    fn take_mailbox(&self, agent: ThreadId) -> Vec<crate::PendingAgentMessage>;
 
     /// Observe whether unread mail is available. Subscribe before the first read so
     /// arrivals cannot be missed; notifications do not consume mail or start a turn.

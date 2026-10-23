@@ -23,11 +23,13 @@ use crate::BudgetPriority;
 use crate::Budgeted;
 use crate::ContextSection;
 use crate::ConversationTranscriptEntry;
+use crate::Retention;
 use crate::SectionError;
 use crate::TranscriptContent;
 use crate::TranscriptFormat;
 use crate::TranscriptRecord;
 use crate::TruncationObservation;
+use crate::retained_instructions::RetainedInstructionKind;
 
 /// Consumer framing after the host has selected a full or delta transcript.
 pub enum ContextPresentation<'a> {
@@ -239,7 +241,14 @@ impl CollectedContext {
                                 content: ContentItem::InputText {
                                     text: format!("{}\n", item.content),
                                 },
-                                retention: item.retention,
+                                retention: match item.kind {
+                                    RetainedInstructionKind::UserInstruction
+                                    | RetainedInstructionKind::HostNotice
+                                    | RetainedInstructionKind::Framing => Retention::Required,
+                                    RetainedInstructionKind::AssistantContext => {
+                                        Retention::Optional(BudgetPriority::Commentary)
+                                    }
+                                },
                                 source: item.source,
                             })
                             .collect(),
@@ -566,6 +575,8 @@ pub(super) fn bounded_text_parts(text: &str) -> impl Iterator<Item = &str> {
 
 pub(super) fn user_message(content: Vec<ContentItem>) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_owned(),
         content,

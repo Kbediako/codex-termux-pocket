@@ -152,7 +152,7 @@ pub struct GuardianV2ConfigToml {
     /// Transcript encoding for synchronous Guardian review and asynchronous scoring. Defaults to line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_mode: Option<codex_protocol::TranscriptFormat>,
-    /// Classifier experiment override. Otherwise use the model default, then snapshots.
+    /// Classifier mode override. Otherwise use the model default, then conversation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub async_classifier_mode: Option<codex_protocol::openai_models::AsyncClassifierMode>,
     /// Reset retained async history when the next request exceeds this token estimate.
@@ -314,7 +314,7 @@ pub struct MultiAgentV2ConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_developer_instructions: Option<String>,
     /// Preserve the parent's model-visible history on full forks and append child instructions.
-    /// Defaults to false. Legacy compaction without a reusable context baseline still rebuilds.
+    /// Defaults to true. Legacy compaction without a reusable context baseline still rebuilds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserve_fork_prefix: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,6 +331,9 @@ pub struct MultiAgentV2ConfigToml {
     /// Expose the multi-agent v2 `wait_agent` tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_agent_enabled: Option<bool>,
+    /// Hide native multi-agent tools while retaining the V2 runtime for host-provided tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_native_tools: Option<bool>,
     /// Disable the model's direct-message tools; spawning and automatic child results remain available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_direct_message: Option<bool>,
@@ -563,4 +566,23 @@ pub enum NetworkProxyDomainPermissionToml {
 pub enum NetworkProxyUnixSocketPermissionToml {
     Allow,
     Deny,
+}
+
+/// Background compaction settings. A threshold alone does not enable the feature.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncCompactionConfigToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Percentage of the model's full context window that starts background compaction.
+    /// Defaults to 65; valid values are 1–100, including when disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub model_async_compact_threshold_percent: Option<u8>,
+}
+
+impl FeatureConfig for AsyncCompactionConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
 }

@@ -1,6 +1,6 @@
 //! Bridges the board extension to the selected controller, clock and active-turn services.
 //!
-//! The extension owns storage and tools. This adapter never starts or restores
+//! The shared board library owns storage; the extension owns tools. This adapter never starts or restores
 //! recipients and never queues a notification for an idle agent.
 
 use crate::CodexThread;
@@ -13,16 +13,18 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_agent_message_board_client::AccessToken;
 use codex_agent_message_board_client::RemoteAgentMessageBoard;
-use codex_agent_message_board_extension::AgentMessageBoard;
-use codex_agent_message_board_extension::InMemoryMessageBoards;
-use codex_agent_message_board_extension::LocalAgentMessageBoard;
-use codex_agent_message_board_extension::MessageBoardHost;
-use codex_agent_message_board_extension::NotificationDelivery;
-use codex_agent_message_board_extension::PostPreview;
+use codex_agent_message_board_extension::local_board_options;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
 use codex_http_client::ClientRouteClass;
+use codex_message_board::AgentMessageBoard;
+use codex_message_board::InMemoryMessageBoards;
+use codex_message_board::LocalAgentMessageBoard;
+use codex_message_board::LocalBoardConnection;
+use codex_message_board::MessageBoardHost;
+use codex_message_board::NotificationDelivery;
+use codex_message_board::PostPreview;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -58,28 +60,31 @@ pub fn install_agent_message_board(
         |config: &Config| config.multi_agent_v2.tool_namespace.clone(),
         move |input: &ThreadStartInput<'_, Config>, tree, caller| {
             let config = input.config;
+            let connection = input.thread_store.get::<LocalBoardConnection>();
             let in_memory = config.multi_agent_v2.message_board_in_memory;
-            // MAv2 supplies tree paths; ephemeral runtimes must not open local SQLite.
-            if !config.features.enabled(Feature::AgentMessageBoard)
-                || !config.features.enabled(Feature::MultiAgentV2)
-                || (config.ephemeral
-                    && !in_memory
-                    && config.multi_agent_v2.message_board_remote.is_none())
+            // Automatic boards need MAv2 and persistent storage. An explicit host
+            // connection also works for isolated, ephemeral runtimes.
+            if connection.is_none()
+                && (!config.features.enabled(Feature::AgentMessageBoard)
+                    || !config.features.enabled(Feature::MultiAgentV2)
+                    || (config.ephemeral
+                        && !in_memory
+                        && config.multi_agent_v2.message_board_remote.is_none()))
             {
                 return Box::pin(async { Ok(None) });
             }
-            let sqlite = config.sqlite_config().clone();
-            let remote = config.multi_agent_v2.message_board_remote.clone();
-            let http_factory = config.http_client_factory();
             let in_memory_boards = Arc::clone(&in_memory_boards);
             let host = Arc::new(LocalBoardHost {
                 manager: manager.clone(),
                 tree,
                 caller,
                 expected_turn_id: None,
+                connection: connection.clone(),
             });
             Box::pin(async move {
-                let board: Arc<dyn AgentMessageBoard> = if let Some(remote) = remote {
+                let board: Arc<dyn AgentMessageBoard> = if let Some(connection) = connection {
+                    Arc::new(connection.open(host).await?)
+                } else if let Some(remote) = config.multi_agent_v2.message_board_remote.clone() {
                     let token = match remote.bearer_token_env_var {
                         Some(name) => std::env::var(name).map_err(|_| CodexErr::InvalidRequest(
                             "message-board credential environment variable is missing or invalid".into(),
@@ -90,7 +95,8 @@ pub fn install_agent_message_board(
                     };
                     let token = AccessToken::new(token)
                         .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
-                    let http = http_factory
+                    let http = config
+                        .http_client_factory()
                         .build_client(&remote.url, ClientRouteClass::Api)
                         .map_err(|err| CodexErr::Io(std::io::Error::other(err)))?;
                     input.thread_store.insert(host.as_ref().clone());
@@ -104,7 +110,15 @@ pub fn install_agent_message_board(
                 } else if in_memory {
                     Arc::new(in_memory_boards.open(tree, host).await)
                 } else {
-                    Arc::new(LocalAgentMessageBoard::open(&sqlite, tree, host).await?)
+                    Arc::new(
+                        LocalAgentMessageBoard::open(
+                            config.sqlite_config(),
+                            &local_board_options(),
+                            tree,
+                            host,
+                        )
+                        .await?,
+                    )
                 };
                 Ok(Some(board))
             })
@@ -118,6 +132,7 @@ struct LocalBoardHost {
     tree: SessionId,
     caller: ThreadId,
     expected_turn_id: Option<String>,
+    connection: Option<Arc<LocalBoardConnection>>,
 }
 
 impl LocalBoardHost {
@@ -126,8 +141,16 @@ impl LocalBoardHost {
             .manager
             .upgrade()
             .ok_or_else(|| CodexErr::ThreadNotFound(caller))?;
+        if let Some(connection) = &self.connection {
+            return manager.get_thread_for_board(caller, connection).await;
+        }
         let actor = manager.get_thread(caller).await?;
-        if actor.session.session_id() != self.tree {
+        if actor.session.session_id() != self.tree
+            || actor
+                .thread_extension_data()
+                .get::<LocalBoardConnection>()
+                .is_some()
+        {
             return Err(CodexErr::InvalidRequest(
                 "agent belongs to another message board".into(),
             ));
@@ -137,6 +160,9 @@ impl LocalBoardHost {
 
     async fn registered_path(&self, actor: &CodexThread) -> Result<AgentPath> {
         let caller = actor.session.thread_id;
+        if let Some(connection) = &self.connection {
+            return connection.caller_path(caller);
+        }
         let path = actor
             .session_source
             .get_agent_path()
@@ -172,6 +198,19 @@ impl MessageBoardHost for LocalBoardHost {
 
     fn resolve_agent(&self, path: AgentPath) -> BoxFuture<'_, Result<ThreadId>> {
         Box::pin(async move {
+            if self.connection.is_some() {
+                let caller = path
+                    .as_str()
+                    .strip_prefix("/root/")
+                    .and_then(|id| ThreadId::from_string(id).ok())
+                    .ok_or_else(|| {
+                        CodexErr::InvalidRequest("invalid connected board agent path".into())
+                    })?;
+                return self
+                    .actor(caller)
+                    .await
+                    .map(|actor| actor.session.thread_id);
+            }
             let actor = self.actor(self.caller).await?;
             actor
                 .session
@@ -207,28 +246,20 @@ impl MessageBoardHost for LocalBoardHost {
         post: PostPreview,
     ) -> BoxFuture<'_, Result<NotificationDelivery>> {
         Box::pin(async move {
-            let Some(manager) = self.manager.upgrade() else {
-                return Ok(NotificationDelivery::SkippedInactive);
-            };
-            let recipient = match manager.get_thread(recipient_id).await {
+            let recipient = match self.actor(recipient_id).await {
                 Ok(thread) => thread,
                 Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     return Ok(NotificationDelivery::SkippedInactive);
                 }
                 Err(error) => return Err(error),
             };
-            if recipient.session.session_id() != self.tree {
-                return Err(CodexErr::InvalidRequest(
-                    "notification recipient belongs to another board".into(),
-                ));
-            }
             let recipient_path = self.registered_path(&recipient).await?;
             let notice = AgentMessageBoardNotification(post);
             let communication = InterAgentCommunication::new(
                 notice.0.metadata.author.clone(),
                 recipient_path,
                 Vec::new(),
-                notice.render(),
+                notice.render().into_text().unwrap_or_default(),
                 /*trigger_turn*/ false,
             );
             // Remote metadata is untrusted. Skip an oversized notice without closing

@@ -56,7 +56,10 @@ fn cloud_config_eligible_auth(auth: &CodexAuth) -> bool {
     auth.uses_codex_backend()
         && (plan_type.is_business_like()
             || plan_type.is_education_like()
-            || plan_type == PlanType::Enterprise)
+            || matches!(
+                plan_type,
+                PlanType::Enterprise | PlanType::Sci | PlanType::SciPlus
+            ))
 }
 
 fn optional_bundle(bundle: CloudConfigBundle) -> Option<CloudConfigBundle> {
@@ -130,6 +133,7 @@ where
         self.latest_bundle
             .get_or_init(|| async {
                 let mut snapshot = CloudConfigBundleSnapshot {
+                    config_server: None,
                     bundle: self.load_startup_bundle_with_timeout().await,
                     binding: None,
                 };
@@ -576,6 +580,7 @@ where
         let mut latest = latest.lock().await;
         if result.is_ok() {
             *latest = CloudConfigBundleSnapshot {
+                config_server: None,
                 bundle: result,
                 binding: None,
             };

@@ -33,6 +33,8 @@ use crate::config_types::Verbosity;
 use crate::protocol::MultiAgentVersion;
 
 mod access_programs;
+mod incremental_tools;
+pub use incremental_tools::IncrementalToolMessages;
 #[path = "openai_models/guardian.rs"]
 mod guardian;
 pub use guardian::GuardianModelPolicy;
@@ -583,6 +585,9 @@ pub struct ConfirmationPolicies {
 /// Model-owned tool messages and description prefixes.
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ToolMessages {
+    /// Optional wording for incremental catalog notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental_tools: Option<IncrementalToolMessages>,
     /// Prefixes for individual functions in the `functions` namespace, keyed by unqualified name.
     /// Applies to direct declarations, Code Mode, and tool search, including custom tools.
     /// Values are trimmed; empty values and unavailable functions add nothing. The trimmed
@@ -779,6 +784,10 @@ pub struct PermissionMessages {
     pub danger_full_access: Option<String>,
     pub workspace_write: Option<String>,
     pub read_only: Option<String>,
+    /// Supports `{{ approved_prefixes }}`. Missing or null uses the bundled text;
+    /// an empty string suppresses the approved-prefix section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_prefixes: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
@@ -1305,6 +1314,7 @@ mod tests {
                 danger_full_access: None,
                 workspace_write: Some(String::new()),
                 read_only: None,
+                approved_prefixes: None,
             })
         );
     }
@@ -1549,6 +1559,7 @@ mod tests {
                 danger_full_access: None,
                 workspace_write: Some("workspace".to_string()),
                 read_only: None,
+                approved_prefixes: None,
             }),
             multi_agent: None,
             token_budget: None,

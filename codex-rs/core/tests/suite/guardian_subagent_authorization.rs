@@ -801,7 +801,7 @@ async fn run_guardian_subagent_review(
         test.codex = super::guardian_checkpoint_migration::resume(
             &test,
             &test.codex,
-            vec![RolloutItem::Compacted(checkpoint)],
+            vec![RolloutItem::Compacted(Box::new(checkpoint))],
         )
         .await?;
         assert_eq!(
@@ -1016,6 +1016,8 @@ async fn run_guardian_subagent_review(
             ]
             .into_iter()
             .map(|text| ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text }],
@@ -1027,6 +1029,8 @@ async fn run_guardian_subagent_review(
     if matches!(root_context, RootContext::RetainedAtMessageLimit) {
         // The newest final answer must share the cap with user instructions and Q&A.
         root_history_items.extend((0..14).map(|index| ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: Some(ResponseItemId::with_suffix("root-instruction", index)),
             role: "user".to_owned(),
             content: vec![ContentItem::InputText {
@@ -1674,7 +1678,7 @@ async fn run_guardian_subagent_review(
                 ));
             }
             checkpoint.replacement_history = Some(replacement_history);
-            root.append_rollout_items(&[RolloutItem::Compacted(checkpoint)])
+            root.append_rollout_items(&[RolloutItem::Compacted(Box::new(checkpoint))])
                 .await?;
             root.shutdown_and_wait().await?;
             test.thread_manager.remove_thread(&root_thread_id).await;

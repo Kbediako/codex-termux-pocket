@@ -102,6 +102,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use tempfile::tempdir;
@@ -1271,6 +1272,7 @@ fn config_toml_deserializes_model_availability_nux() {
             fullscreen_transcript: true,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
+            copy_on_select_clear_selection: false,
             right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::default(),
             status_line: None,
@@ -1283,6 +1285,7 @@ fn config_toml_deserializes_model_availability_nux() {
             agents_overview_grouping: Default::default(),
             resume_cwd: None,
             keymap: TuiKeymap::default(),
+            quick_dials: BTreeMap::new(),
             model_availability_nux: ModelAvailabilityNuxConfig {
                 shown_count: HashMap::from([
                     ("gpt-bar".to_string(), 4),
@@ -1363,6 +1366,13 @@ async fn runtime_config_uses_tui_raw_output_mode() {
     let toml = r#"
         [tui]
         raw_output_mode = true
+
+        [tui.presets.1]
+        input = "/model gpt-5.6-sol high fast"
+        label = "fast coding"
+
+        [tui.presets.2]
+        input = "Review the current changes"
     "#;
     let cfg_toml: ConfigToml = toml::from_str(toml).expect("deserialize raw_output_mode=true");
     let cfg = Config::load_from_base_config_with_overrides(
@@ -1374,6 +1384,26 @@ async fn runtime_config_uses_tui_raw_output_mode() {
     .expect("load config");
 
     assert!(cfg.tui_raw_output_mode);
+    assert_eq!(
+        cfg.tui_quick_dials,
+        [
+            (
+                "1".into(),
+                QuickDial {
+                    input: "/model gpt-5.6-sol high fast".into(),
+                    label: Some("fast coding".into()),
+                },
+            ),
+            (
+                "2".into(),
+                QuickDial {
+                    input: "Review the current changes".into(),
+                    label: None,
+                },
+            ),
+        ]
+        .into(),
+    );
 }
 
 #[tokio::test]
@@ -1504,9 +1534,12 @@ strip_request_headers = ["authorization"]
                         unix_sockets: None,
                         allow_local_binding: None,
                         mitm: Some(NetworkMitmToml {
+                            version: None,
                             hooks: Some(IndexMap::from([(
                                 "github_write".to_string(),
                                 NetworkMitmHookToml {
+                                    schemes: Vec::new(),
+                                    ports: Vec::new(),
                                     host: "api.github.com".to_string(),
                                     methods: vec!["POST".to_string(), "PUT".to_string()],
                                     path_prefixes: vec!["/repos/openai/".to_string()],
@@ -1585,9 +1618,12 @@ fn permissions_profile_network_to_proxy_config_preserves_mitm_hooks() {
     let network = NetworkToml {
         mode: Some(NetworkMode::Full),
         mitm: Some(NetworkMitmToml {
+            version: None,
             hooks: Some(IndexMap::from([(
                 "github_write".to_string(),
                 NetworkMitmHookToml {
+                    schemes: Vec::new(),
+                    ports: Vec::new(),
                     host: "api.github.com".to_string(),
                     methods: vec!["POST".to_string()],
                     path_prefixes: vec!["/repos/openai/".to_string()],
@@ -2610,6 +2646,71 @@ async fn permission_profile_override_populates_runtime_permissions() -> std::io:
     assert_eq!(
         &config.legacy_sandbox_policy(),
         &SandboxPolicy::DangerFullAccess
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_permissions_initialize_proxy_with_expandable_managed_allowlist()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "default_permissions = \":danger-full-access\"\n",
+    )?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .harness_overrides(ConfigOverrides {
+            persisted_permission_profile: Some(PermissionProfile::read_only()),
+            ..Default::default()
+        })
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "[experimental_network]\nenabled = true\n[experimental_network.domains]\n'managed.example' = 'allow'\n",
+            ),
+        )
+        .build()
+        .await?;
+    assert_eq!(
+        (
+            config.permissions.permission_profile(),
+            config.permissions.active_permission_profile()
+        ),
+        (&PermissionProfile::read_only(), None),
+    );
+
+    let mut rules = codex_execpolicy::Policy::empty();
+    rules.add_network_rule(
+        "remembered.example",
+        codex_execpolicy::NetworkRuleProtocol::Https,
+        codex_execpolicy::Decision::Allow,
+        /*justification*/ None,
+    )?;
+    let spec = config
+        .permissions
+        .network
+        .as_ref()
+        .expect("managed proxy")
+        .with_exec_policy_network_rules(&rules)?;
+    let state = spec.build_state_with_audit_metadata(
+        Default::default(),
+        codex_utils_path_uri::Platform::native(),
+        codex_network_proxy::LocalBindingPolicy::DefaultFalse,
+    )?;
+    let proxy = codex_network_proxy::NetworkProxy::builder()
+        .state(Arc::new(state))
+        .managed_by_codex(/*managed_by_codex*/ false)
+        .build()
+        .await?;
+    proxy.add_allowed_domain("newly-approved.example").await?;
+    assert_eq!(
+        proxy.current_cfg().await?.allowed_domains(),
+        Some(vec![
+            "managed.example".to_string(),
+            "remembered.example".to_string(),
+            "newly-approved.example".to_string(),
+        ]),
     );
     Ok(())
 }
@@ -4417,6 +4518,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             fullscreen_transcript: true,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
+            copy_on_select_clear_selection: false,
             right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
@@ -4429,6 +4531,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             agents_overview_grouping: Default::default(),
             resume_cwd: None,
             keymap: TuiKeymap::default(),
+            quick_dials: BTreeMap::new(),
             model_availability_nux: ModelAvailabilityNuxConfig::default(),
             terminal_resize_reflow_max_rows: None,
         }
@@ -4640,21 +4743,6 @@ async fn legacy_remote_thread_store_endpoint_is_rejected() {
             .contains("experimental_thread_store_endpoint")
     );
     assert!(err.to_string().contains("no longer supported"));
-}
-
-#[test]
-fn profile_tui_rejects_unsupported_settings() {
-    let err = toml::from_str::<ConfigToml>(
-        r#"profile = "work"
-
-[profiles.work.tui]
-theme = "dark"
-"#,
-    )
-    .expect_err("profile TUI config should only accept supported fields");
-
-    assert!(err.to_string().contains("unknown field"));
-    assert!(err.to_string().contains("theme"));
 }
 
 #[tokio::test]
@@ -5453,6 +5541,10 @@ fn filter_plugin_mcp_servers_by_matchers_enforces_name_and_invocation() {
 
 #[tokio::test]
 async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result<()> {
+    let service_config = codex_config::ConfigServer {
+        base_url: "https://policy.example/settings".into(),
+        oauth: None,
+    };
     let codex_home = TempDir::new()?;
     let user_file = AbsolutePathBuf::resolve_path_against_base(CONFIG_TOML_FILE, codex_home.path());
     let project_dot_codex =
@@ -5492,6 +5584,7 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         ),
     ]);
     let requirements_toml = codex_config::ConfigRequirementsToml {
+        config_server: Some(service_config.clone()),
         mcp_servers: Some(mcp_requirements.clone()),
         ..Default::default()
     };
@@ -5538,7 +5631,8 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         requirements,
         requirements_toml,
     )
-    .map_err(std::io::Error::other)?;
+    .map_err(std::io::Error::other)?
+    .with_applied_config_server(Some(service_config));
     let thread_layer_stack = ConfigLayerStack::new(
         vec![
             ConfigLayerEntry::new(
@@ -5613,6 +5707,26 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         codex_home.abs(),
     )
     .await?;
+    assert_eq!(
+        config.config_layer_stack.applied_config_server(),
+        refreshed_layer_stack.applied_config_server()
+    );
+
+    // User-only refreshes keep this policy; managed refreshes must supply it.
+    let mut missing_policy = config.clone();
+    missing_policy.config_layer_stack = missing_policy
+        .config_layer_stack
+        .with_applied_config_server(/*service_config*/ None);
+    assert!(
+        config
+            .resolve_runtime_refresh(&missing_policy, RuntimeConfigRefresh::User)
+            .is_ok()
+    );
+    assert!(
+        config
+            .resolve_runtime_refresh(&missing_policy, RuntimeConfigRefresh::Mcp)
+            .is_err()
+    );
 
     assert_eq!(
         config.mcp_servers.get(),
@@ -6048,8 +6162,83 @@ async fn sqlite_home_defaults_to_codex_home_for_workspace_write() -> std::io::Re
     )
     .await?;
 
-    assert_eq!(config.sqlite.home(), codex_home.path());
+    assert_eq!(
+        (
+            config.sqlite.home(),
+            config.sqlite.logs_db_path(),
+            &config.log_dir
+        ),
+        (
+            codex_home.path(),
+            codex_home.path().join("logs_2.sqlite"),
+            &codex_home.path().join("log"),
+        ),
+    );
+    assert_eq!(config.configured_log_dir(), None);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn log_dir_routes_logs_without_moving_state() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let diagnostics = home.path().join("diagnostics").abs();
+    std::fs::write(
+        home.path().join(CONFIG_TOML_FILE),
+        format!("log_dir = {:?}\n", diagnostics.as_path()),
+    )?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await?;
+    assert_eq!(
+        (
+            config.sqlite.home(),
+            config.sqlite.logs_db_path().parent(),
+            config.log_dir.as_path(),
+            config.configured_log_dir()
+        ),
+        (
+            home.path(),
+            Some(diagnostics.as_path()),
+            diagnostics.as_path(),
+            Some(diagnostics.as_path())
+        ),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_sqlite_home_preserves_configured_log_dir() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let diagnostics = home.path().join("diagnostics");
+    let state = home.path().join("managed-state");
+    for (user_config, requirements) in [
+        (
+            format!("log_dir = {diagnostics:?}\n"),
+            format!("sqlite_home = {state:?}"),
+        ),
+        (
+            String::new(),
+            format!("sqlite_home = {state:?}\nlog_dir = {diagnostics:?}"),
+        ),
+    ] {
+        std::fs::write(home.path().join(CONFIG_TOML_FILE), user_config)?;
+        let config = load_with_enterprise_requirement(&home, requirements).await?;
+        assert_eq!(
+            (
+                config.sqlite.logs_db_path().parent(),
+                config.log_dir.as_path(),
+                config.configured_log_dir(),
+            ),
+            (
+                Some(state.as_path()),
+                diagnostics.as_path(),
+                Some(diagnostics.as_path()),
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -10251,6 +10440,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
     let fixture = create_test_fixture()?;
 
     let requirements_toml = codex_config::ConfigRequirementsToml {
+        config_server: None,
         model_provider: None,
         model_providers: None,
         allowed_login_methods: None,
@@ -11842,6 +12032,8 @@ shell_tool = false
 
 #[test_case::test_case(Feature::Personality; "personality")]
 #[test_case::test_case(Feature::GuardianThreadContext; "guardian thread context")]
+#[test_case::test_case(Feature::Worktrees; "worktrees")]
+#[test_case::test_case(Feature::RealtimeConversation; "realtime conversation")]
 #[test_case::test_case(Feature::ShellZshFork; "shell zsh fork")]
 #[test_case::test_case(Feature::UnifiedExecZshFork; "unified exec zsh fork")]
 fn retired_feature_requirements_do_not_pin_configured_values(
@@ -11893,6 +12085,13 @@ fn retired_feature_requirements_do_not_pin_configured_values(
                 usize::from(feature != Feature::Personality),
             ),
         );
+        if matches!(feature, Feature::Worktrees | Feature::RealtimeConversation) {
+            assert!(
+                warnings[0].contains(&format!("Ignoring removed `features` requirement `{key}`"))
+            );
+            assert!(warnings[0].contains("enterprise"));
+            assert!(warnings[0].contains("availability no longer depends on this feature flag"));
+        }
     }
 
     Ok(())
@@ -12143,12 +12342,13 @@ usage_hint_text = "Custom delegation guidance."
 root_agent_usage_hint_text = "Root guidance."
 subagent_usage_hint_text = "Subagent guidance."
 subagent_developer_instructions = "  Delegate carefully.  "
-preserve_fork_prefix = true
+preserve_fork_prefix = false
 multi_agent_mode_hint_text = "Custom mode guidance."
 tool_namespace = "agents"
 hide_spawn_agent_metadata = true
 expose_spawn_agent_model_overrides = false
 wait_agent_enabled = false
+disable_native_tools = true
 disable_direct_message = true
 message_board_in_memory = true
 non_code_mode_only = true
@@ -12204,9 +12404,10 @@ max_concurrent_threads_per_session = 9
         Some("agents")
     );
     assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
-    assert!(config.multi_agent_v2.preserve_fork_prefix);
+    assert!(!config.multi_agent_v2.preserve_fork_prefix);
     assert!(!config.multi_agent_v2.expose_spawn_agent_model_overrides);
     assert!(!config.multi_agent_v2.wait_agent_enabled);
+    assert!(config.multi_agent_v2.disable_native_tools);
     assert!(config.multi_agent_v2.disable_direct_message);
     assert!(config.multi_agent_v2.message_board_in_memory);
     assert!(config.multi_agent_v2.non_code_mode_only);
@@ -12266,7 +12467,10 @@ max_concurrent_threads_per_session = 17
             &config, messages, /*omit_update_plan_instructions*/ false,
         );
         for hint in [usage_hints.root, usage_hints.subagent] {
-            let hint = hint.expect("default usage hints should be present").body();
+            let hint = hint
+                .expect("default usage hints should be present")
+                .body()
+                .expect_text();
             assert!(hint.contains(concurrency_guidance));
             assert_eq!(
                 hint.contains("When calling `wait_agent`, prefer longer waits"),
@@ -12316,8 +12520,8 @@ expose_spawn_agent_model_overrides = true
     );
     assert_eq!(
         (
-            usage_hints.root.map(|hint| hint.body()),
-            usage_hints.subagent.map(|hint| hint.body()),
+            usage_hints.root.map(|hint| hint.body().expect_text()),
+            usage_hints.subagent.map(|hint| hint.body().expect_text()),
         ),
         (
             Some("## Plan tool\nRoot guidance.".to_string()),
@@ -12349,10 +12553,14 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
             usage_hints_without_model_overrides.subagent,
         ),
     ] {
-        let hint = hint.expect("default usage hints should be present").body();
+        let hint = hint
+            .expect("default usage hints should be present")
+            .body()
+            .expect_text();
         let hint_without_model_overrides = hint_without_model_overrides
             .expect("default usage hints should be present without model overrides")
-            .body();
+            .body()
+            .expect_text();
 
         let model_override_guidance = hint
             .strip_prefix(hint_without_model_overrides.as_str())
@@ -13418,6 +13626,8 @@ async fn load_with_enterprise_requirement(
 #[tokio::test]
 async fn exact_requirements_apply_to_runtime_config() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
+    let unused_diagnostics = codex_home.path().join("unused-diagnostics");
+    std::fs::write(&unused_diagnostics, "not a directory")?;
     let catalog_path = codex_home.path().join("required-models.json");
     let mut catalog = bundled_models_response()
         .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
@@ -13428,13 +13638,16 @@ async fn exact_requirements_apply_to_runtime_config() -> std::io::Result<()> {
     )?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
+        format!(
+            r#"
+log_dir = {unused_diagnostics:?}
 check_for_update_on_startup = true
 allow_login_shell = true
 
 [feedback]
 enabled = true
-"#,
+"#
+        ),
     )?;
 
     let required_sqlite_home = codex_home.path().join("required-state");
@@ -13458,6 +13671,16 @@ enabled = false
 
     assert_eq!(config.sqlite.home(), required_sqlite_home.as_path());
     assert_eq!(config.log_dir, required_log_dir);
+    assert_eq!(
+        (
+            config.sqlite.logs_db_path().parent(),
+            config.configured_log_dir(),
+        ),
+        (
+            Some(required_sqlite_home.as_path()),
+            Some(required_log_dir.as_path())
+        ),
+    );
     assert_eq!(config.model_catalog, Some(catalog));
     assert!(!config.check_for_update_on_startup);
     assert!(!config.permissions.allow_login_shell);

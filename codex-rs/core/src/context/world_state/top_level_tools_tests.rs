@@ -25,7 +25,7 @@ fn item(tools: Vec<Value>) -> ResponseItem {
     ResponseItem::AdditionalTools {
         id: None,
         role: "developer".to_string(),
-        tools,
+        tools: Arc::from(tools),
     }
 }
 
@@ -42,12 +42,32 @@ fn snapshots_catalog_transitions() {
         "description": "Search tools.",
         "parameters": {"type": "object", "properties": {}}});
     let web = json!({"type": "web_search", "external_web_access": true});
-    let original = TopLevelToolsState::new(vec![search.clone()], /*metrics*/ None).unwrap();
+    let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![search.clone()],
+        /*metrics*/ None,
+    )
+    .unwrap();
     let mut changed = search;
     changed["parameters"]["properties"] = json!({"query": {"type": "string"}});
-    let updated = TopLevelToolsState::new(vec![changed, web.clone()], /*metrics*/ None).unwrap();
-    let only_web = TopLevelToolsState::new(vec![web], /*metrics*/ None).unwrap();
-    let empty = TopLevelToolsState::new(Vec::new(), /*metrics*/ None).unwrap();
+    let updated = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![changed, web.clone()],
+        /*metrics*/ None,
+    )
+    .unwrap();
+    let only_web = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![web],
+        /*metrics*/ None,
+    )
+    .unwrap();
+    let empty = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        Vec::new(),
+        /*metrics*/ None,
+    )
+    .unwrap();
 
     insta::assert_snapshot!(render_section_cases(&[
         (Absent, Known(&original)),
@@ -90,6 +110,7 @@ async fn snapshots_namespace_transitions() {
         .with_metrics_without_metadata_tags(metrics.clone()),
     );
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![
             namespace(
                 "functions",
@@ -107,6 +128,7 @@ async fn snapshots_namespace_transitions() {
     let mut changed = declaration("changed");
     changed["parameters"]["properties"] = json!({"query": {"type": "string"}});
     let updated = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![
             namespace(
                 "functions",
@@ -118,17 +140,25 @@ async fn snapshots_namespace_transitions() {
     )
     .unwrap();
     let only_other = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace("other", vec![declaration("lookup")])],
         Some(Arc::clone(&telemetry)),
     )
     .unwrap();
     let only_functions = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace("functions", vec![declaration("unchanged")])],
         Some(Arc::clone(&telemetry)),
     )
     .unwrap();
-    let empty = TopLevelToolsState::new(Vec::new(), Some(Arc::clone(&telemetry))).unwrap();
+    let empty = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        Vec::new(),
+        Some(Arc::clone(&telemetry)),
+    )
+    .unwrap();
     let restored = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace(
             "functions",
             vec![declaration("unchanged"), declaration("restored")],
@@ -168,19 +198,59 @@ async fn snapshots_namespace_transitions() {
                 .attributes()
                 .map(|attribute| (attribute.key.as_str(), attribute.value.as_str().to_string()))
                 .collect::<BTreeMap<_, _>>();
-            assert_eq!(tags.len(), 1);
-            (tags["action"].clone(), point.value())
+            assert_eq!(tags.len(), 2);
+            (
+                (tags["action"].clone(), tags["tool"].clone()),
+                point.value(),
+            )
         })
         .collect::<BTreeMap<_, _>>();
     // Initial/full snapshots and unchanged catalogs contribute nothing; namespace
     // headers do not count, and removing a whole namespace counts each member.
     assert_eq!(
         counts,
-        BTreeMap::from([
-            ("added".to_string(), 6),
-            ("removed".to_string(), 11),
-            ("schema_changed".to_string(), 1),
-        ])
+        [
+            ("added", "functions.added", 1),
+            ("added", "functions.changed", 1),
+            ("added", "functions.removed", 1),
+            ("added", "functions.restored", 1),
+            ("added", "functions.unchanged", 2),
+            ("removed", "functions.added", 3),
+            ("removed", "functions.changed", 3),
+            ("removed", "functions.removed", 1),
+            ("removed", "functions.unchanged", 2),
+            ("removed", "other.lookup", 2),
+            ("schema_changed", "functions.changed", 1),
+        ]
+        .into_iter()
+        .map(|(action, tool, count)| ((action.to_string(), tool.to_string()), count))
+        .collect()
+    );
+    let histogram = snapshot
+        .scope_metrics()
+        .flat_map(ScopeMetrics::metrics)
+        .find(|metric| metric.name() == TOOL_SPEC_DESCRIPTION_BYTES_METRIC)
+        .expect("tool description byte histogram");
+    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = histogram.data() else {
+        panic!("tool description bytes must be a histogram");
+    };
+    assert_eq!(
+        histogram
+            .data_points()
+            .map(|point| (
+                point
+                    .attributes()
+                    .map(|tag| (tag.key.as_str(), tag.value.to_string()))
+                    .collect::<Vec<_>>(),
+                point.count(),
+                point.sum(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            vec![("tool", "functions.changed".to_string())],
+            1,
+            "Look up a value.".len() as f64
+        )],
     );
     metrics.shutdown().unwrap();
 }
@@ -191,38 +261,71 @@ fn initial_catalog_preserves_order_and_unchanged_catalog_emits_nothing() {
         namespace("zebra", vec![declaration("lookup")]),
         namespace("alpha", vec![declaration("lookup")]),
     ];
-    let state = TopLevelToolsState::new(definitions.clone(), /*metrics*/ None).unwrap();
+    let state = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        definitions.clone(),
+        /*metrics*/ None,
+    )
+    .unwrap();
     let (snapshot, updates) = state.render_diff(PreviousSectionState::Absent);
     assert_eq!(
         merge_world_state_updates(updates),
         vec![item(definitions.clone())]
     );
     let (_, updates) = state.render_diff(PreviousSectionState::Unknown);
-    assert_eq!(merge_world_state_updates(updates), vec![item(definitions)]);
+    assert_eq!(
+        merge_world_state_updates(updates),
+        vec![item(definitions.clone())]
+    );
     let snapshot = snapshot.unwrap();
     assert_eq!(
         snapshot.keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["alpha", "alpha.lookup", "zebra", "zebra.lookup"]
     );
     let (unchanged_snapshot, updates) = state.render_diff(PreviousSectionState::Known(&snapshot));
-    assert_eq!(unchanged_snapshot, Some(snapshot));
+    assert_eq!(unchanged_snapshot, Some(snapshot.clone()));
+    assert!(updates.is_empty());
+
+    let reworded = TopLevelToolsState::new(
+        ResolvedIncrementalToolMessages {
+            tool_update_hint: "New wording".to_string(),
+            removed_tools_header: "Removed".to_string(),
+            ..Default::default()
+        },
+        definitions,
+        /*metrics*/ None,
+    )
+    .unwrap();
+    let (reworded_snapshot, updates) = reworded.render_diff(PreviousSectionState::Known(&snapshot));
+    assert_eq!(reworded_snapshot, Some(snapshot));
     assert!(updates.is_empty());
 }
 
 #[test]
 fn empty_catalog_is_persisted_and_can_add_tools_again() {
     let definitions = vec![namespace("functions", vec![declaration("lookup")])];
-    let original = TopLevelToolsState::new(definitions.clone(), /*metrics*/ None).unwrap();
+    let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        definitions.clone(),
+        /*metrics*/ None,
+    )
+    .unwrap();
     let previous = original
         .render_diff(PreviousSectionState::Absent)
         .0
         .unwrap();
-    let empty = TopLevelToolsState::new(Vec::new(), /*metrics*/ None).unwrap();
+    let empty = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        Vec::new(),
+        /*metrics*/ None,
+    )
+    .unwrap();
     let (snapshot, updates) = empty.render_diff(PreviousSectionState::Known(&previous));
     assert_eq!(snapshot, Some(BTreeMap::new()));
     assert_eq!(
         merge_world_state_updates(updates),
         vec![ContextualUserFragment::into(RemovedTools {
+            messages: Default::default(),
             namespaces: vec!["functions".to_string()],
             ..Default::default()
         })]
@@ -231,7 +334,9 @@ fn empty_catalog_is_persisted_and_can_add_tools_again() {
     assert_eq!(
         merge_world_state_updates(updates),
         vec![
-            ContextualUserFragment::into(IncrementalToolsHint),
+            ContextualUserFragment::into(IncrementalToolsHint(
+                ResolvedIncrementalToolMessages::default().tool_update_hint
+            )),
             item(definitions),
         ]
     );
@@ -240,6 +345,7 @@ fn empty_catalog_is_persisted_and_can_add_tools_again() {
 #[test]
 fn namespace_diff_contains_only_changed_and_added_tools() {
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![
             namespace(
                 "functions",
@@ -262,6 +368,7 @@ fn namespace_diff_contains_only_changed_and_added_tools() {
     changed["parameters"]["properties"] = json!({"query": {"type": "string"}});
     let added = declaration("added");
     let current = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![
             namespace(
                 "functions",
@@ -277,9 +384,12 @@ fn namespace_diff_contains_only_changed_and_added_tools() {
     assert_eq!(
         merge_world_state_updates(updates),
         vec![
-            ContextualUserFragment::into(IncrementalToolsHint),
+            ContextualUserFragment::into(IncrementalToolsHint(
+                ResolvedIncrementalToolMessages::default().tool_update_hint
+            )),
             item(vec![expected]),
             ContextualUserFragment::into(RemovedTools {
+                messages: Default::default(),
                 tools: vec!["functions.removed".to_string()],
                 ..Default::default()
             }),
@@ -296,13 +406,19 @@ fn namespace_diff_contains_only_changed_and_added_tools() {
 #[test]
 fn new_namespaces_share_one_notice_before_their_declarations() {
     let original = namespace("original", vec![declaration("lookup")]);
-    let state = TopLevelToolsState::new(vec![original.clone()], /*metrics*/ None).unwrap();
+    let state = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![original.clone()],
+        /*metrics*/ None,
+    )
+    .unwrap();
     let previous = state.render_diff(PreviousSectionState::Absent).0.unwrap();
     let additions = vec![
         namespace("second", vec![declaration("lookup")]),
         namespace("third", vec![declaration("lookup")]),
     ];
-    let state = TopLevelToolsState::new(
+    let mut state = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         std::iter::once(original).chain(additions.clone()).collect(),
         /*metrics*/ None,
     )
@@ -312,10 +428,17 @@ fn new_namespaces_share_one_notice_before_their_declarations() {
     assert_eq!(
         prefix,
         vec![
-            ContextualUserFragment::into(IncrementalToolsHint),
-            item(additions),
+            ContextualUserFragment::into(IncrementalToolsHint(
+                ResolvedIncrementalToolMessages::default().tool_update_hint
+            )),
+            item(additions.clone()),
         ]
     );
+    assert!(remaining.is_empty());
+    state.messages.tool_update_hint.clear();
+    let (_, updates) = state.render_diff(PreviousSectionState::Known(&previous));
+    let (prefix, remaining) = super::super::split_prefix_updates(updates);
+    assert_eq!(prefix, vec![item(additions)]);
     assert!(remaining.is_empty());
     assert!(
         state
@@ -325,9 +448,34 @@ fn new_namespaces_share_one_notice_before_their_declarations() {
     );
 }
 
-#[test]
-fn namespace_description_change_does_not_repeat_unchanged_tools() {
+#[test_case::test_case(
+    None,
+    "Updated namespace guidance.",
+    "Updated instructions for the functions namespace:\nUpdated namespace guidance."
+)]
+#[test_case::test_case(
+    Some(("Catalog {name}: ", "Cleared {name}.")),
+    "Literal {name} and {instructions}.",
+    "Catalog functions: Literal {name} and {instructions}."
+)]
+#[test_case::test_case(
+    Some(("", "Cleared {name}.")),
+    "Runtime instructions.",
+    "Runtime instructions."
+)]
+#[test_case::test_case(
+    Some(("Catalog {name}: ", "Cleared {name}.")),
+    "",
+    "Cleared functions."
+)]
+#[test_case::test_case(Some(("Catalog {name}: ", "")), "", "")]
+fn namespace_description_change_does_not_repeat_unchanged_tools(
+    wording: Option<(&str, &str)>,
+    instructions: &str,
+    expected: &str,
+) {
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace("functions", vec![declaration("lookup")])],
         /*metrics*/ None,
     )
@@ -337,14 +485,27 @@ fn namespace_description_change_does_not_repeat_unchanged_tools() {
         .0
         .unwrap();
     let mut updated = namespace("functions", vec![declaration("lookup")]);
-    updated["description"] = json!("Updated namespace guidance.");
-    let current = TopLevelToolsState::new(vec![updated], /*metrics*/ None).unwrap();
+    updated["description"] = json!(instructions);
+    let mut messages = ResolvedIncrementalToolMessages::default();
+    if let Some((prefix, cleared_template)) = wording {
+        messages.namespace_instructions_prefix = prefix.to_string();
+        messages.namespace_instructions_cleared = cleared_template.to_string();
+    }
+    let current = TopLevelToolsState::new(messages, vec![updated], /*metrics*/ None).unwrap();
     let (snapshot, updates) = current.render_diff(PreviousSectionState::Known(&snapshot));
     assert_eq!(
         merge_world_state_updates(updates),
-        vec![ContextualUserFragment::into(DeveloperInstructions::new(
-            "Updated instructions for the functions namespace:\nUpdated namespace guidance."
-        ))]
+        if expected.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContextualUserFragment::into(
+                DeveloperInstructions::new(expected).with_metadata(
+                    codex_protocol::models::ContentItemMetadata::tool(Some(
+                        codex_protocol::models::ContentItemNamespace::Functions,
+                    )),
+                ),
+            )]
+        }
     );
     assert!(
         current
@@ -357,6 +518,7 @@ fn namespace_description_change_does_not_repeat_unchanged_tools() {
 #[test]
 fn tool_type_change_keeps_the_callable_name_available() {
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace(
             "functions",
             vec![declaration("lookup"), declaration("removed")],
@@ -371,14 +533,22 @@ fn tool_type_change_keeps_the_callable_name_available() {
     let custom = json!({"type": "custom", "name": "lookup", "description": "Look up a value.",
         "format": {"type": "text"}});
     let updated = namespace("functions", vec![custom]);
-    let current = TopLevelToolsState::new(vec![updated.clone()], /*metrics*/ None).unwrap();
+    let current = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![updated.clone()],
+        /*metrics*/ None,
+    )
+    .unwrap();
     let (_, updates) = current.render_diff(PreviousSectionState::Known(&snapshot));
     assert_eq!(
         merge_world_state_updates(updates),
         vec![
-            ContextualUserFragment::into(IncrementalToolsHint),
+            ContextualUserFragment::into(IncrementalToolsHint(
+                ResolvedIncrementalToolMessages::default().tool_update_hint
+            )),
             item(vec![updated]),
             ContextualUserFragment::into(RemovedTools {
+                messages: Default::default(),
                 tools: vec!["functions.removed".to_string()],
                 ..Default::default()
             }),
@@ -389,6 +559,7 @@ fn tool_type_change_keeps_the_callable_name_available() {
 #[test]
 fn namespace_removals_emit_one_notice() {
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![
             namespace(
                 "functions",
@@ -410,6 +581,7 @@ fn namespace_removals_emit_one_notice() {
         .0
         .unwrap();
     let current = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace("functions", vec![declaration("lookup")])],
         /*metrics*/ None,
     )
@@ -418,6 +590,7 @@ fn namespace_removals_emit_one_notice() {
     assert_eq!(
         merge_world_state_updates(updates),
         vec![ContextualUserFragment::into(RemovedTools {
+            messages: Default::default(),
             namespaces: vec!["function".to_string(), "other".to_string()],
             tools: vec![
                 "functions.also_removed".to_string(),
@@ -431,6 +604,7 @@ fn namespace_removals_emit_one_notice() {
 #[test]
 fn namespace_replaced_by_builtin_keeps_the_replacement_available() {
     let original = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
         vec![namespace("web_search", vec![declaration("lookup")])],
         /*metrics*/ None,
     )
@@ -440,13 +614,19 @@ fn namespace_replaced_by_builtin_keeps_the_replacement_available() {
         .0
         .unwrap();
     let replacement = json!({"type": "web_search"});
-    let current = TopLevelToolsState::new(vec![replacement.clone()], /*metrics*/ None).unwrap();
+    let current = TopLevelToolsState::new(
+        /*messages*/ Default::default(),
+        vec![replacement.clone()],
+        /*metrics*/ None,
+    )
+    .unwrap();
     let (_, updates) = current.render_diff(PreviousSectionState::Known(&snapshot));
     assert_eq!(
         merge_world_state_updates(updates),
         vec![
             item(vec![replacement]),
             ContextualUserFragment::into(RemovedTools {
+                messages: Default::default(),
                 tools: vec!["web_search.lookup".to_string()],
                 ..Default::default()
             }),

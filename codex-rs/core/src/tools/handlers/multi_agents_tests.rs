@@ -14,6 +14,7 @@ use crate::init_state_db;
 use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_auth_config_home_and_rx;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
@@ -2804,6 +2805,8 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
             config.clone(),
             InitialHistory::Forked(vec![RolloutItem::ResponseItem(
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3035,7 +3038,8 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 Vec::new(),
                 "hello from worker".to_string(),
                 /*trigger_turn*/ false,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -3535,7 +3539,8 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 Vec::new(),
                 "completed".to_string(),
                 /*trigger_turn*/ false,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -3611,7 +3616,8 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 Vec::new(),
                 "already queued".to_string(),
                 /*trigger_turn*/ false,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -3713,7 +3719,8 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 Vec::new(),
                 "from worker b".to_string(),
                 /*trigger_turn*/ false,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -3804,7 +3811,8 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 Vec::new(),
                 "sensitive child output".to_string(),
                 /*trigger_turn*/ false,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -3936,7 +3944,16 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
 
 #[tokio::test]
 async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
-    let (mut session, mut turn) = make_session_and_context().await;
+    let codex_home = tempfile::tempdir().expect("create codex home");
+    let (session, turn, _) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        codex_home.path(),
+        |_config| {},
+    )
+    .await;
+    let mut session = Arc::into_inner(session).expect("unshared test session");
+    let mut turn = Arc::into_inner(turn).expect("unshared test turn");
     let mut config = (*turn.config).clone();
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     config
@@ -4271,7 +4288,14 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
 
 #[tokio::test]
 async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
-    let (_session, turn) = make_session_and_context().await;
+    let codex_home = tempfile::tempdir().expect("create codex home");
+    let (_session, turn, _) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        codex_home.path(),
+        |_config| {},
+    )
+    .await;
     let mut config = turn.config.as_ref().clone();
     config.agent_max_depth = 3;
     config

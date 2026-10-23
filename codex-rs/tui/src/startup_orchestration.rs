@@ -11,7 +11,7 @@ pub(super) async fn run_main_inner(
     mut cli: Cli,
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
-    explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
+    mut explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
     if cli.no_daemon && explicit_remote_endpoint.is_some() {
         return Err(std::io::Error::other(
@@ -76,7 +76,7 @@ pub(super) async fn run_main_inner(
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
     // `oss` model provider.
     let overrides_cli = codex_utils_cli::CliConfigOverrides { raw_overrides };
-    let cli_kv_overrides = match overrides_cli.parse_overrides() {
+    let mut cli_kv_overrides = match overrides_cli.parse_overrides() {
         // Parse `-c` overrides from the CLI.
         Ok(v) => v,
         #[allow(clippy::print_stderr)]
@@ -106,6 +106,33 @@ pub(super) async fn run_main_inner(
         }
     };
 
+    // A bound socket at the default path may be an SSH forward. Keep a verified
+    // endpoint so replacing the advertised alias cannot redirect local config.
+    let explicit_local_daemon_socket = match &explicit_remote_endpoint {
+        Some(RemoteAppServerEndpoint::UnixSocket { socket_path })
+            if codex_app_server_client::app_server_control_socket_path(&codex_home)
+                .is_ok_and(|default_socket| default_socket == *socket_path) =>
+        {
+            // An explicit attachment requires the server to be present. Do not
+            // classify a missing daemon as remote during its restart window.
+            if !socket_path.as_path().try_exists()? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the requested app-server socket is not available",
+                ));
+            }
+            codex_app_server_client::verified_local_daemon_socket(socket_path.as_path())
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    if let Some(socket_path) = &explicit_local_daemon_socket {
+        explicit_remote_endpoint = Some(RemoteAppServerEndpoint::UnixSocket {
+            socket_path: socket_path.clone(),
+        });
+    }
+
     let mut launch_loader_overrides = loader_overrides.clone();
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
         let user_config_path = resolve_profile_v2_config_path(&codex_home, profile_v2);
@@ -119,7 +146,7 @@ pub(super) async fn run_main_inner(
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         let validation_target = app_server_target_for_launch(
             explicit_remote_endpoint.clone(),
-            /*default_daemon_socket*/ None,
+            explicit_local_daemon_socket.clone(),
             /*can_reuse_implicit_local_daemon*/ false,
             workload_identity_selected,
             std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -228,7 +255,7 @@ pub(super) async fn run_main_inner(
     // remote selection and the environment without opening a server connection.
     let presentation_target = app_server_target_for_launch(
         explicit_remote_endpoint.clone(),
-        /*default_daemon_socket*/ None,
+        explicit_local_daemon_socket.clone(),
         reuse_implicit_local_daemon,
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -285,6 +312,9 @@ pub(super) async fn run_main_inner(
     })
     .await
     .map_err(std::io::Error::other)??;
+    // Snapshot the backend size sampled during init, before any viewport changes or resizes.
+    let initial_terminal_size = initialized_terminal.terminal.last_known_screen_size;
+    let terminal_size_tags = crate::terminal_size_telemetry::tags(initial_terminal_size);
     let startup_presentation::StartupPresentation {
         bootstrap_config,
         config_cwd,
@@ -308,12 +338,13 @@ pub(super) async fn run_main_inner(
         screen,
     )?;
 
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
+    let implicit_connection = explicit_remote_endpoint.is_none();
+    let default_daemon = if implicit_connection && reuse_implicit_local_daemon {
         startup_draft
             .run_until(maybe_probe_default_daemon_socket(&codex_home))
             .await?
     } else {
-        None
+        explicit_local_daemon_socket
     };
     let mut app_server_target = app_server_target_for_launch(
         explicit_remote_endpoint,
@@ -418,6 +449,15 @@ pub(super) async fn run_main_inner(
         None
     };
 
+    // Pass the --oss provider to the embedded app-server so catalog reloads keep
+    // the launch choice after workspace requirements are removed.
+    if let Some(provider) = &model_provider_override {
+        cli_kv_overrides.push((
+            "model_provider".to_string(),
+            toml::Value::String(provider.clone()),
+        ));
+    }
+
     // When using `--oss`, let the bootstrapper pick the model based on selected provider
     let model = if let Some(model) = &cli.model {
         Some(model.clone())
@@ -506,6 +546,7 @@ pub(super) async fn run_main_inner(
         None
     };
     let auto_start_daemon = config.features.enabled(Feature::DaemonAutoStart)
+        && implicit_connection
         && !cli.agents_overview
         && !cli.no_daemon
         && !app_server_target.uses_remote_workspace();
@@ -539,16 +580,15 @@ pub(super) async fn run_main_inner(
     {
         daemon_exclusion = Some(daemon_startup::WSL_DRVFS_EXCLUSION);
     }
-    let mut daemon_features = daemon_startup::server_features(&cli_kv_overrides);
-    // Disabling shared services requires confirmation, even on a fresh auto-start.
-    daemon_features.retain(|_, enabled| *enabled);
-    let mut managed_daemon = false;
+    let mut managed_daemon = cli.managed_daemon;
     if auto_start_daemon && daemon_exclusion.is_none() {
         let output = startup_draft
             .run_until(async {
                 // Daemon startup needs no terminal input. Keep the composer visible and
                 // responsive while it checks the running server or prepares an installation.
-                let result = codex_app_server_daemon::start_with_features(&daemon_features).await;
+                // Preserve saved daemon settings until any mismatch is confirmed in recovery.
+                let result =
+                    codex_app_server_daemon::start_with_features(&Default::default()).await;
                 daemon_telemetry::record_start(&config, &result).await;
                 match result {
                     Ok(output) => Ok(Some(output)),
@@ -684,6 +724,7 @@ pub(super) async fn run_main_inner(
         Vec::new()
     };
     let mut launch_tags = daemon_settings.to_vec();
+    launch_tags.extend(terminal_size_tags);
     launch_tags.extend([
         ("daemon_selection_reason", selection_reason),
         (
@@ -697,7 +738,9 @@ pub(super) async fn run_main_inner(
     ]);
     // Record the first connection attempt's actual mode, including embedded fallback; never reconnects.
     let launch_telemetry = move |target: &AppServerTarget, connected: bool| {
-        let Some(metrics) = metrics else { return };
+        let Some(metrics) = metrics else {
+            return Vec::new();
+        };
         let app_server_mode = match (connected, target) {
             (false, _) => "unconfirmed",
             (true, AppServerTarget::Embedded) => "in_process",
@@ -733,6 +776,8 @@ pub(super) async fn run_main_inner(
             ("multiplexer", multiplexer),
         ]);
         let _ = metrics.counter("codex.tui.start", /*inc*/ 1, &launch_tags);
+        launch_tags.retain(|(key, _)| !matches!(*key, "terminal_columns" | "terminal_rows"));
+        launch_tags
     };
     let launch_telemetry = daemon_telemetry::Launch(Some(launch_telemetry));
     let state_db = startup_draft
@@ -905,6 +950,7 @@ pub(super) async fn run_main_inner(
         embedded_network_policy,
         managed_worktree.clone(),
         daemon_startup_warning,
+        managed_daemon,
         launch_telemetry,
         startup_draft,
     ))

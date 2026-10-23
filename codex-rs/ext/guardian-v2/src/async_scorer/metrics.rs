@@ -47,6 +47,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
             ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
             ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
+            ApiError::ResponseIncomplete(_) => "incomplete_response",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",
             ApiError::UsageNotIncluded => "usage_not_included",
@@ -144,10 +145,17 @@ pub(super) fn record_section_costs(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RequestAdmission {
+    Admitted,
+    Rejected,
+}
+
 pub(super) fn record_request_tokens(
     metrics: Option<&dyn ExtensionMetrics>,
     existing: usize,
     total: usize,
+    admission: RequestAdmission,
 ) {
     let Some(metrics) = metrics else {
         return;
@@ -157,11 +165,19 @@ pub(super) fn record_request_tokens(
         ("new_input", total.saturating_sub(existing)),
         ("total", total),
     ] {
+        let mut tags = vec![("target", "async"), ("component", component)];
+        // Histogram Count grouped by token_bucket counts only admitted complete inputs.
+        if component == "total" && matches!(admission, RequestAdmission::Admitted) {
+            tags.push((
+                "token_bucket",
+                codex_guardian_context::request_token_bucket(total),
+            ));
+        }
         metrics.histogram_with_boundaries(
             codex_guardian_context::REQUEST_TOKENS_METRIC,
             i64::try_from(tokens).unwrap_or(i64::MAX),
             codex_guardian_context::REQUEST_TOKENS_BOUNDARIES,
-            &[("target", "async"), ("component", component)],
+            &tags,
         );
     }
 }
@@ -183,9 +199,12 @@ pub(super) fn record_decisions_comparison_outcome(
 // Keep all backend diagnostics bounded and free of raw transport data.
 pub(super) fn decisions_failure_reason(error: DecisionsError) -> &'static str {
     match error {
-        DecisionsError::Credentials => "provider_error",
+        DecisionsError::Credentials => "credentials_unavailable",
         DecisionsError::ClientSetup => "request_build_error",
-        DecisionsError::UnsupportedEvidence => "decisions_unsupported_evidence",
+        DecisionsError::UnexpectedRequestSetup => "unexpected_request_setup",
+        DecisionsError::UnsupportedInputItem => "unsupported_input_item",
+        DecisionsError::UnsupportedImage => "image",
+        DecisionsError::UnsupportedAudio => "audio",
         DecisionsError::InputTooLarge => "input_too_large",
         DecisionsError::Timeout => "transport_timeout",
         // The adapter erases transport details; do not claim a specific network failure.
@@ -213,9 +232,12 @@ pub(super) fn record_decisions_comparison(
         Ok((result, duration)) => {
             let outcome = match &result {
                 Ok(_) => "success",
-                Err(DecisionsError::UnsupportedEvidence | DecisionsError::InputTooLarge) => {
-                    "skipped"
-                }
+                Err(
+                    DecisionsError::UnsupportedInputItem
+                    | DecisionsError::UnsupportedImage
+                    | DecisionsError::UnsupportedAudio
+                    | DecisionsError::InputTooLarge,
+                ) => "skipped",
                 Err(_) => "failure",
             };
             record_decisions_comparison_outcome(

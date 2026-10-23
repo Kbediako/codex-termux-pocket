@@ -134,6 +134,8 @@ fn older_thread_settings_snapshot_defaults_disabled_plugins_to_empty() -> Result
 #[test]
 fn response_item_envelope_accessors_preserve_item() {
     let expected_item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -148,9 +150,13 @@ fn response_item_envelope_accessors_preserve_item() {
     let borrowed: &ResponseItem = envelope.borrow();
     assert_eq!(borrowed, &expected_item);
     let replacement_item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: "goodbye".to_string(),
         }],
         phase: None,
@@ -299,7 +305,7 @@ fn delivered_assistant_rollout_survives_an_earlier_read_and_rewrite() -> Result<
         // The preceding client's Guardian projection excludes commentary.
         assert_eq!(phase, &None);
         assert_eq!(metadata.user_input_order, Some(7));
-        let [ContentItem::OutputText { text }] = content.as_slice() else {
+        let [ContentItem::OutputText { text, .. }] = content.as_slice() else {
             panic!("older readers need plain assistant text");
         };
         if complete {
@@ -676,7 +682,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         ])?)?,
         crate::GuardianHistoryCheckpoint(vec![response_item.clone().into()]),
     );
-    let compacted_line = serde_json::to_value(RolloutItem::Compacted(CompactedItem {
+    let compacted_line = serde_json::to_value(RolloutItem::Compacted(Box::new(CompactedItem {
         message: "summary".to_string(),
         replacement_history: Some(vec![envelope]),
         retained_context: None,
@@ -694,7 +700,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
             turn_attribution: None,
             previous_turn_settings: None,
         }),
-    }))?;
+    })))?;
 
     let restored: RolloutItem = serde_json::from_value(compacted_line.clone())?;
     let RolloutItem::Compacted(restored) = restored else {
@@ -877,6 +883,8 @@ fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<(
 
 fn response_message(role: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: role.to_string(),
         content: vec![ContentItem::InputText {
@@ -951,7 +959,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
 #[test]
 fn copied_history_uses_persisted_history_mode() -> Result<()> {
     let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")?;
-    let session_meta = RolloutItem::SessionMeta(SessionMetaLine {
+    let session_meta = RolloutItem::SessionMeta(Box::new(SessionMetaLine {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
@@ -959,7 +967,7 @@ fn copied_history_uses_persisted_history_mode() -> Result<()> {
             ..SessionMeta::default()
         },
         git: None,
-    });
+    }));
     let history = InitialHistory::Resumed(ResumedHistory {
         history_revision: None,
         conversation_id: thread_id,
@@ -1017,8 +1025,8 @@ fn multi_agent_version_uses_newest_present_session_meta_value() -> Result<()> {
     assert_eq!(
         multi_agent_version_from_items(
             &[
-                RolloutItem::SessionMeta(older_meta),
-                RolloutItem::SessionMeta(newer_meta_without_version),
+                RolloutItem::SessionMeta(Box::new(older_meta)),
+                RolloutItem::SessionMeta(Box::new(newer_meta_without_version)),
             ],
             Some(thread_id),
         ),
@@ -1037,7 +1045,8 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
     }))?;
 
     assert_eq!(
-        InitialHistory::Forked(vec![RolloutItem::Compacted(compacted)]).get_multi_agent_version(),
+        InitialHistory::Forked(vec![RolloutItem::Compacted(Box::new(compacted))])
+            .get_multi_agent_version(),
         Some(MultiAgentVersion::V2)
     );
     Ok(())

@@ -1,4 +1,6 @@
 mod connect_options;
+mod discovery_recovery;
+mod discovery_v2;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -69,8 +71,18 @@ pub const CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR: &str =
 pub enum EnvironmentConnectionState {
     /// An initialized exec-server connection is available.
     Connected,
+    /// An established session is unavailable while its transport is being recovered.
+    Recovering,
     /// No initialized exec-server connection is currently available.
     Disconnected,
+}
+
+/// Outcome of an initial connection operation, including its internal retries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionAttemptOutcome {
+    Success,
+    Failure,
+    Cancelled,
 }
 
 /// Owns the execution/filesystem environments available to the Codex runtime.
@@ -907,6 +919,17 @@ impl Environment {
             })
     }
 
+    /// Observes initial connection attempts from the end of provisioning through client installation.
+    /// Register before connecting. The first observer wins; past attempts and reconnections are omitted.
+    pub fn observe_connection_attempts(
+        &self,
+        observer: impl Fn(std::time::Duration, ConnectionAttemptOutcome) + Send + Sync + 'static,
+    ) {
+        if let Some(client) = &self.remote_client {
+            let _ = client.connection_observer.set(Arc::new(observer));
+        }
+    }
+
     /// Subscribes to the current connection state for this remote environment.
     pub fn subscribe_connection_state(
         &self,
@@ -1044,7 +1067,7 @@ impl Environment {
     ) -> Result<CapabilityRootsDiscoverResponse, ExecServerError> {
         match &self.remote_client {
             Some(client) => {
-                let mut connection_state = client.subscribe_connection_state();
+                let connection_state = client.subscribe_connection_state();
                 let client = client.get().await?;
                 let discover = || async {
                     if params.roots.iter().any(|root| {
@@ -1064,37 +1087,8 @@ impl Environment {
                     }
                     client.discover_capability_roots(params.clone()).await
                 };
-                match discover().await {
-                    Err(error) if crate::client::is_retryable_recovery_error(&error) => {
-                        tracing::warn!(%error, "replaying capability discovery after executor recovery");
-                        let recovered =
-                            tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                                loop {
-                                    match self.readiness_result() {
-                                        Some(Ok(())) => return Some(Ok(())),
-                                        Some(Err(error))
-                                            if !crate::client::is_retryable_recovery_error(
-                                                &error,
-                                            ) =>
-                                        {
-                                            return Some(Err(error));
-                                        }
-                                        Some(Err(_)) | None => {}
-                                    }
-                                    if connection_state.changed().await.is_err() {
-                                        return None;
-                                    }
-                                }
-                            })
-                            .await;
-                        match recovered {
-                            Ok(Some(Ok(()))) => discover().await,
-                            Ok(Some(Err(error))) => Err(error),
-                            Ok(None) | Err(_) => Err(error),
-                        }
-                    }
-                    response => response,
-                }
+                self.discover_with_recovery(connection_state, discover)
+                    .await
             }
             None => crate::discover_capability_roots(self.filesystem.as_ref(), params)
                 .await
@@ -1850,6 +1844,16 @@ mod tests {
         let environment = manager
             .get_environment("executor-a")
             .expect("first remote environment");
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+        environment.observe_connection_attempts(move |_, outcome| {
+            observed_tx
+                .send(outcome)
+                .expect("record cancelled connection");
+        });
+        let _connection = timeout(Duration::from_secs(1), first_listener.accept())
+            .await
+            .expect("connection should start")
+            .expect("accept initial connection");
         let startup_abort = environment
             .startup_task
             .lock()
@@ -1880,6 +1884,11 @@ mod tests {
         })
         .await
         .expect("replacing the environment should cancel its startup task");
+        assert_eq!(
+            observed_rx.try_recv(),
+            Ok(super::ConnectionAttemptOutcome::Cancelled)
+        );
+        assert!(observed_rx.try_recv().is_err());
     }
 
     #[tokio::test]

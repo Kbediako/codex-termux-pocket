@@ -45,12 +45,14 @@ use super::ConfiguredHandler;
 use super::ConfiguredHandlerKind;
 use super::HandlerSourcePath;
 use super::HookListEntryHandler;
+use super::discovery::DiscoveryMode;
 use crate::events::interrupt::InterruptRequest;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::stop::StopHookTarget;
 use crate::events::stop::StopRequest;
 use crate::mcp::HookMcpCall;
 use crate::mcp::HookMcpExecutor;
+use crate::mcp::HookMcpOutput;
 
 fn cwd() -> AbsolutePathBuf {
     AbsolutePathBuf::current_dir().expect("current dir")
@@ -91,6 +93,7 @@ fn permission_request_timeout_only_counts_synchronous_handlers() {
     let command = "echo synchronous permission hook";
     let synchronous_handler = ConfiguredHandler {
         builtin: false,
+        plugin_trust: None,
         event_name: HookEventName::PermissionRequest,
         matcher: None,
         timeout_sec: 5,
@@ -115,13 +118,13 @@ fn permission_request_timeout_only_counts_synchronous_handlers() {
         ..synchronous_handler.clone()
     };
 
-    engine.handlers = vec![synchronous_handler, asynchronous_handler.clone()];
+    engine.handlers = Arc::new(vec![synchronous_handler, asynchronous_handler.clone()]);
     assert_eq!(
         engine.max_permission_request_timeout(),
         Duration::from_secs(5)
     );
 
-    engine.handlers = vec![asynchronous_handler];
+    engine.handlers = Arc::new(vec![asynchronous_handler]);
     assert_eq!(engine.max_permission_request_timeout(), Duration::ZERO);
 }
 
@@ -141,7 +144,7 @@ fn managed_hooks_for_current_platform(
         } else {
             None
         },
-        hooks,
+        hooks: Box::new(hooks),
     }
 }
 
@@ -814,6 +817,7 @@ fn unknown_requirement_source_hooks_stay_managed() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert_eq!(discovered.hook_entries[0].source, HookSource::Unknown);
@@ -901,6 +905,7 @@ fn user_disablement_filters_non_managed_hooks_but_not_managed_hooks() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.hook_entries.len(), 2);
     assert_eq!(discovered.hook_entries[0].key, managed_disabled_key);
@@ -968,6 +973,7 @@ fn user_disablement_does_not_filter_managed_layer_hooks() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert_eq!(discovered.hook_entries[0].key, managed_key);
@@ -1037,15 +1043,18 @@ fn trusted_plugin_hook_stack(
         plugin_hook_sources.to_vec(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     let state = discovered
         .hook_entries
         .into_iter()
         .map(|entry| {
+            let (declaration, content) = entry.current_hash.split_once('/').unwrap();
             (
                 entry.key,
                 serde_json::json!({
-                    "trusted_hash": entry.current_hash,
+                    "trusted_hash": declaration,
+                    "trusted_content_hash": content,
                 }),
             )
         })
@@ -1194,6 +1203,7 @@ fn allow_managed_hooks_only_false_keeps_unmanaged_hooks() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert!(!discovered.hook_entries[0].is_managed);
@@ -1252,6 +1262,7 @@ fn allow_managed_hooks_only_in_config_toml_does_not_enable_policy() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert!(!discovered.hook_entries[0].is_managed);
@@ -1455,6 +1466,7 @@ fn allow_managed_hooks_only_keeps_managed_requirement_and_config_layer_hooks() {
         Vec::new(),
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert!(discovered.hook_entries.iter().all(|entry| entry.is_managed));
 }
@@ -1764,6 +1776,7 @@ fn bundled_cleanup_hooks_are_trusted_without_saved_hashes() {
                 vec![bundled_cleanup_source(plugin_id, server, event)],
                 Vec::new(),
                 /*bypass_hook_trust*/ false,
+                DiscoveryMode::Listing,
             );
             assert_eq!(discovered.handlers.len(), 1, "{plugin_id} {event}");
             assert_eq!(
@@ -1788,7 +1801,9 @@ fn bundled_cleanup_hooks_are_trusted_without_saved_hashes() {
 
 #[test]
 fn bundled_cleanup_trust_does_not_extend_to_other_handlers() {
+    let temp = tempdir().expect("create plugin directory");
     let mut source = bundled_cleanup_source("browser@openai-bundled", "node_repl", "Stop");
+    source.plugin_root = AbsolutePathBuf::try_from(temp.path()).expect("plugin root");
     let cleanup = source.hooks.stop[0].hooks[0].clone();
     source.hooks.stop[0].hooks.extend([
         HookHandlerConfig::McpTool {
@@ -1823,6 +1838,7 @@ fn bundled_cleanup_trust_does_not_extend_to_other_handlers() {
         vec![source],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(discovered.handlers.len(), 1);
     assert_eq!(
@@ -1843,6 +1859,7 @@ fn bundled_cleanup_trust_does_not_extend_to_other_handlers() {
 
 #[test]
 fn bundled_cleanup_trust_requires_matching_plugin_server_and_event() {
+    let temp = tempdir().expect("create plugin directory");
     for (plugin_id, server, event) in [
         ("other@openai-bundled", "node_repl", "Stop"),
         ("browser@other", "node_repl", "Stop"),
@@ -1857,11 +1874,14 @@ fn bundled_cleanup_trust_requires_matching_plugin_server_and_event() {
             "PreToolUse",
         ),
     ] {
+        let mut source = bundled_cleanup_source(plugin_id, server, event);
+        source.plugin_root = AbsolutePathBuf::try_from(temp.path()).expect("plugin root");
         let discovered = super::discovery::discover_handlers(
             /*config_layer_stack*/ None,
-            vec![bundled_cleanup_source(plugin_id, server, event)],
+            vec![source],
             Vec::new(),
             /*bypass_hook_trust*/ false,
+            DiscoveryMode::Listing,
         );
         assert!(discovered.handlers.is_empty(), "{plugin_id} {event}");
         assert_eq!(discovered.hook_entries.len(), 1);
@@ -1874,7 +1894,9 @@ fn bundled_cleanup_trust_requires_matching_plugin_server_and_event() {
 
 #[test]
 fn local_hosted_app_cleanup_hooks_require_saved_trust() {
+    let temp = tempdir().expect("create plugin directory");
     let mut source = bundled_cleanup_source("browser@openai-curated-remote", "codex_apps", "Stop");
+    source.plugin_root = AbsolutePathBuf::try_from(temp.path()).expect("plugin root");
     source.hooks.stop[0].hooks[0] = HookHandlerConfig::McpTool {
         server: "codex_apps".to_string(),
         tool: "browser.turn_ended".to_string(),
@@ -1887,6 +1909,7 @@ fn local_hosted_app_cleanup_hooks_require_saved_trust() {
         vec![source],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert!(discovered.handlers.is_empty());
     assert_eq!(
@@ -1907,6 +1930,7 @@ fn builtin_cleanup_ignores_disablement_but_preserves_managed_only_policy() {
         vec![source.clone()],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     let expected_entry = discovered.hook_entries[0].clone();
     let disabled_stack = ConfigLayerStack::new(
@@ -1926,6 +1950,7 @@ fn builtin_cleanup_ignores_disablement_but_preserves_managed_only_policy() {
         vec![source.clone()],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert_eq!(disabled.handlers, discovered.handlers);
     assert_eq!(disabled.hook_entries, vec![expected_entry]);
@@ -1940,6 +1965,7 @@ fn builtin_cleanup_ignores_disablement_but_preserves_managed_only_policy() {
         vec![source.clone()],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Listing,
     );
     assert!(managed_only.handlers.is_empty());
     assert!(managed_only.hook_entries.is_empty());
@@ -1960,13 +1986,15 @@ fn builtin_cleanup_ignores_disablement_but_preserves_managed_only_policy() {
             }),
             mcp_executor(),
         );
-        assert_eq!(feature_disabled.handlers, expected);
+        assert_eq!(feature_disabled.handlers.as_ref(), &expected);
     }
 }
 
 #[test]
 fn disabled_hooks_feature_keeps_builtin_cleanup_but_not_trusted_plugin_hooks() {
+    let temp = tempdir().expect("create plugin directory");
     let mut source = bundled_cleanup_source("browser@openai-bundled", "node_repl", "Stop");
+    source.plugin_root = AbsolutePathBuf::try_from(temp.path()).expect("plugin root");
     source.hooks.stop[0].hooks.push(HookHandlerConfig::Command {
         command: "echo ordinary hook".to_string(),
         command_windows: None,
@@ -1981,6 +2009,7 @@ fn disabled_hooks_feature_keeps_builtin_cleanup_but_not_trusted_plugin_hooks() {
         vec![source.clone()],
         Vec::new(),
         /*bypass_hook_trust*/ false,
+        DiscoveryMode::Runtime,
     );
     assert_eq!(discovered.handlers.len(), 2);
 
@@ -1996,7 +2025,10 @@ fn disabled_hooks_feature_keeps_builtin_cleanup_but_not_trusted_plugin_hooks() {
         }),
         mcp_executor(),
     );
-    assert_eq!(engine.handlers, vec![discovered.handlers[0].clone()]);
+    assert_eq!(
+        engine.handlers.as_slice(),
+        &[discovered.handlers[0].clone()]
+    );
 }
 
 #[tokio::test]
@@ -2140,6 +2172,7 @@ fn plugin_hook_sources_expand_plugin_placeholders() {
         AbsolutePathBuf::try_from(temp.path().join("demo-plugin")).expect("plugin root");
     let plugin_data_root =
         AbsolutePathBuf::try_from(temp.path().join("plugin-data")).expect("plugin data root");
+    fs::create_dir_all(&plugin_root).expect("create plugin directory");
     let source_path = plugin_root.join("hooks/hooks.json");
     let plugin_id = PluginId::parse("demo-plugin@test-marketplace").expect("plugin id");
     let plugin_hook_sources = vec![PluginHookSource {
@@ -2237,7 +2270,7 @@ struct StaticMcpExecutor {
 }
 
 impl HookMcpExecutor for StaticMcpExecutor {
-    fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
+    fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<HookMcpOutput>> {
         async move {
             let output = self
                 .outputs_by_tool
@@ -2245,7 +2278,10 @@ impl HookMcpExecutor for StaticMcpExecutor {
                 .unwrap_or(&self.output)
                 .clone();
             self.calls.lock().expect("lock MCP calls").push(call);
-            Ok(output)
+            Ok(HookMcpOutput {
+                text: output,
+                source_tool_namespace: None,
+            })
         }
         .boxed()
     }
@@ -2310,9 +2346,10 @@ fn executor_stop_hook_fixture() -> (
     };
     engine.set_executor_hooks(vec![source.clone()]);
     assert_eq!(
-        engine.handlers,
-        vec![ConfiguredHandler {
+        engine.handlers.as_slice(),
+        &[ConfiguredHandler {
             builtin: true,
+            plugin_trust: None,
             event_name: HookEventName::Stop,
             matcher: None,
             timeout_sec: 5,
@@ -2400,8 +2437,9 @@ async fn executor_stop_hooks_run_unless_regular_hooks_block_without_stopping() {
         vec![expected_executor_call.clone()]
     );
 
-    engine.handlers.push(ConfiguredHandler {
+    Arc::make_mut(&mut engine.handlers).push(ConfiguredHandler {
         builtin: false,
+        plugin_trust: None,
         event_name: HookEventName::Stop,
         matcher: None,
         timeout_sec: 30,
@@ -2435,8 +2473,9 @@ async fn executor_stop_hooks_run_unless_regular_hooks_block_without_stopping() {
         ]
     );
 
-    engine.handlers.push(ConfiguredHandler {
+    Arc::make_mut(&mut engine.handlers).push(ConfiguredHandler {
         builtin: false,
+        plugin_trust: None,
         event_name: HookEventName::Stop,
         matcher: None,
         timeout_sec: 30,
@@ -2493,7 +2532,8 @@ async fn executor_stop_hooks_run_unless_regular_hooks_block_without_stopping() {
 #[test]
 fn executor_stop_hooks_register_each_target_environment_once() {
     let (mut engine, _, _, _, first_source) = executor_stop_hook_fixture();
-    let mut expected_handlers = engine.handlers.clone();
+    let previous = engine.clone();
+    let mut expected_handlers = engine.handlers.as_ref().clone();
     let mut duplicate_target = first_source.clone();
     duplicate_target.plugin_id = PluginId::parse("chrome@openai-bundled").expect("valid plugin ID");
     let mut second_source = first_source.clone();
@@ -2508,7 +2548,8 @@ fn executor_stop_hooks_register_each_target_environment_once() {
     expected_handlers.push(second_handler);
     engine.set_executor_hooks(vec![first_source, duplicate_target, second_source]);
 
-    assert_eq!(engine.handlers, expected_handlers);
+    assert_eq!(engine.handlers.as_ref(), &expected_handlers);
+    assert_eq!(previous.handlers.as_slice(), &expected_handlers[..1]);
 }
 
 #[tokio::test]
@@ -2558,7 +2599,7 @@ fn executor_hooks_register_events_from_each_environment() {
     let (mut engine, _, _, _, mut first_source) = executor_stop_hook_fixture();
     first_source.hooks.interrupt = std::mem::take(&mut first_source.hooks.stop);
     engine.set_executor_hooks(vec![first_source.clone()]);
-    let mut expected_handlers = engine.handlers.clone();
+    let mut expected_handlers = engine.handlers.as_ref().clone();
     let mut second_source = first_source.clone();
     second_source.environment_id = "executor-b".to_string();
     second_source.hooks.stop = std::mem::take(&mut second_source.hooks.interrupt);
@@ -2574,7 +2615,7 @@ fn executor_hooks_register_events_from_each_environment() {
 
     engine.set_executor_hooks(vec![first_source, second_source]);
 
-    assert_eq!(engine.handlers, expected_handlers);
+    assert_eq!(engine.handlers.as_ref(), &expected_handlers);
 }
 
 #[tokio::test]
@@ -2624,7 +2665,7 @@ async fn memory_consolidation_stop_preserves_policy_and_executor_cleanup() {
             tool: policy_call.tool.clone(),
             input: policy_call.input.clone(),
         };
-        engine.handlers.push(handler);
+        Arc::make_mut(&mut engine.handlers).push(handler);
         assert_eq!(
             engine.preview_stop(&request).len(),
             usize::from(runs_policy)
@@ -2650,11 +2691,14 @@ async fn executor_stop_hooks_do_not_delay_stop_completion() {
     }
 
     impl HookMcpExecutor for BlockingMcpExecutor {
-        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
+        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<HookMcpOutput>> {
             async move {
                 self.started.notify_one();
                 self.release.notified().await;
-                Ok(String::new())
+                Ok(HookMcpOutput {
+                    text: String::new(),
+                    source_tool_namespace: None,
+                })
             }
             .boxed()
         }

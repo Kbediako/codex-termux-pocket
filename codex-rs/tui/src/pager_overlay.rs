@@ -61,6 +61,13 @@ impl Overlay {
         Self::Transcript(overlay)
     }
 
+    pub(crate) fn with_copy_on_select_clear_selection(mut self, enabled: bool) -> Self {
+        if let Self::Transcript(overlay) = &mut self {
+            overlay.view.copy_on_select_clear_selection = enabled;
+        }
+        self
+    }
+
     pub(crate) fn new_static_with_lines(
         lines: Vec<Line<'static>>,
         title: String,
@@ -144,7 +151,9 @@ fn render_navigation_hints(area: Rect, buf: &mut Buffer, keymap: &PagerKeymap) {
         ("jump_bottom", &keymap.jump_bottom),
     ];
     let hints = actions
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .zip(["to scroll", "to page", "to jump"])
         .map(|(actions, description)| {
             (

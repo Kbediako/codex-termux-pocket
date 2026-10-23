@@ -48,7 +48,7 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
 }
 
 fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
-    RolloutItem::SessionMeta(SessionMetaLine {
+    RolloutItem::SessionMeta(Box::new(SessionMetaLine {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
@@ -61,7 +61,7 @@ fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
             ..SessionMeta::default()
         },
         git: None,
-    })
+    }))
 }
 
 fn agent_message_item(message: &str) -> RolloutItem {
@@ -174,6 +174,31 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn open_log_file_materializes_rollout_when_acl_denies_timestamp_changes() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let rollout_path = home.path().join("rollout.jsonl");
+    let compressed_path = rollout_path.with_extension("jsonl.zst");
+    fs::write(
+        &compressed_path,
+        zstd::stream::encode_all(&b"original\n"[..], 0)?,
+    )?;
+    let acl = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone deny writeattr"])
+        .arg(&compressed_path)
+        .output()?;
+    assert!(acl.status.success(), "{acl:?}");
+
+    let mut file = open_log_file(&rollout_path)?;
+    file.write_all(b"appended\n")?;
+    drop(file);
+
+    assert!(!compressed_path.exists());
+    assert_eq!(fs::read(&rollout_path)?, b"original\nappended\n");
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -223,7 +248,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             ordinal: None,
-            item: RolloutItem::SessionMeta(session_meta_line),
+            item: RolloutItem::SessionMeta(Box::new(session_meta_line)),
         },
         RolloutLine {
             timestamp: "2026-01-27T12:34:57Z".to_string(),
@@ -638,14 +663,14 @@ async fn recorder_preserves_additional_tools_in_both_history_modes() -> std::io:
             ResponseItem::AdditionalTools {
                 id: None,
                 role: "developer".to_string(),
-                tools: vec![serde_json::json!({
+                tools: Arc::from([serde_json::json!({
                     "type": "namespace",
                     "name": "functions",
                     "description": "Available tools.",
                     "tools": [{"type": "function", "name": "lookup",
                         "description": "Look up a value.",
                         "parameters": {"type": "object", "properties": {}}}]
-                })],
+                })]),
             }
             .into(),
         );
@@ -797,10 +822,20 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
     )
     .await?;
     let rollout_path = recorder.rollout_path().to_path_buf();
+    let initial_meta = recorder
+        .unpersisted_session_meta()
+        .await?
+        .expect("new rollout retains its creation metadata");
+    assert!(!rollout_path.exists());
     recorder.persist().await?;
+    assert!(recorder.unpersisted_session_meta().await?.is_none());
     recorder.shutdown().await?;
 
     let meta = crate::read_session_meta_line(&rollout_path).await?.meta;
+    assert_eq!(
+        serde_json::to_value(&initial_meta)?,
+        serde_json::to_value(&meta)?
+    );
     assert_eq!(
         meta.forked_from_ordinal_exclusive,
         Some(history_base.end_ordinal_exclusive)
@@ -808,6 +843,7 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
 
     let resumed =
         RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    assert!(resumed.unpersisted_session_meta().await?.is_none());
     resumed
         .record_canonical_items(&[agent_message_item("first child record")])
         .await?;

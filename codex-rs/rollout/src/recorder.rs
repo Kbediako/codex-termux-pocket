@@ -127,6 +127,9 @@ pub enum RolloutRecorderParams {
 
 enum RolloutCmd {
     AddItems(Vec<RolloutItem>),
+    ReadUnpersistedSessionMeta {
+        ack: oneshot::Sender<Option<SessionMeta>>,
+    },
     Persist {
         ack: oneshot::Sender<std::io::Result<()>>,
     },
@@ -1045,6 +1048,19 @@ impl RolloutRecorder {
         self.rollout_path.as_path()
     }
 
+    /// Reads the creation metadata while this writer still defers its rollout file.
+    ///
+    /// The writer orders this read with persistence. Resumed or already materialized rollouts
+    /// return `None`, so callers must keep using their durable metadata.
+    pub async fn unpersisted_session_meta(&self) -> std::io::Result<Option<SessionMeta>> {
+        let (ack, result) = oneshot::channel();
+        self.tx
+            .send(RolloutCmd::ReadUnpersistedSessionMeta { ack })
+            .await
+            .map_err(IoError::other)?;
+        result.await.map_err(IoError::other)
+    }
+
     pub async fn record_canonical_items(&self, items: &[RolloutItem]) -> std::io::Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -1776,10 +1792,20 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
         .create(true)
         .open(path)?;
     if refresh_modified_time {
-        file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+        refresh_rollout_modified_time(&file)?;
     }
     ensure_rollout_is_newline_terminated(&mut file)?;
     Ok(file)
+}
+
+fn refresh_rollout_modified_time(file: &File) -> std::io::Result<()> {
+    match file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now())) {
+        Ok(()) => Ok(()),
+        // A preserved ACL can permit appending while denying explicit timestamp changes.
+        // The append itself will update mtime, so this refresh must not prevent it.
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Mutable state owned by the background rollout writer.
@@ -1956,6 +1982,14 @@ async fn rollout_writer(
     // Process rollout commands
     while let Some(cmd) = rx.recv().await {
         match cmd {
+            RolloutCmd::ReadUnpersistedSessionMeta { ack } => {
+                let metadata = if state.is_deferred() {
+                    state.meta.clone()
+                } else {
+                    None
+                };
+                let _ = ack.send(metadata);
+            }
             RolloutCmd::AddItems(items) => {
                 state.add_items(items);
                 state.flush_if_materialized().await;
@@ -2005,7 +2039,7 @@ async fn write_session_meta(
         git: git_info,
     };
 
-    let rollout_item = RolloutItem::SessionMeta(session_meta_line);
+    let rollout_item = RolloutItem::SessionMeta(Box::new(session_meta_line));
     if let Some(writer) = writer.as_mut() {
         let ordinal = ordinal_state.current()?;
         writer.write_rollout_item(&rollout_item, ordinal).await?;
@@ -2045,7 +2079,7 @@ async fn open_rollout_for_append(
             .append(true)
             .open(path_for_open.as_path())?;
         if refresh_modified_time {
-            file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+            refresh_rollout_modified_time(&file)?;
         }
         ensure_rollout_is_newline_terminated(&mut file)?;
         let ordinal_state = ordinal_state_for_rollout(&mut file, path_for_open.as_path())?;

@@ -62,6 +62,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
@@ -254,6 +255,8 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
             turn.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -264,6 +267,8 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     name: "gh_repo_view".to_string(),
                     namespace: None,
@@ -283,9 +288,13 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "The repo is public; I now need approval to push the docs fix."
                             .to_string(),
                     }],
@@ -302,7 +311,9 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
         return false;
     };
     content.iter().any(|item| match item {
-        ContentItem::InputText { text } | ContentItem::OutputText { text } => text.contains(needle),
+        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+            text.contains(needle)
+        }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
     })
 }
@@ -775,6 +786,8 @@ async fn build_guardian_prompt_delta_mode_preserves_original_numbering() -> anyh
             turn.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -784,9 +797,13 @@ async fn build_guardian_prompt_delta_mode_preserves_original_numbering() -> anyh
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "I need approval for the second push.".to_string(),
                     }],
                     phase: None,
@@ -916,6 +933,8 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
         .replace_history(
             vec![
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -925,9 +944,13 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "Compacted summary of earlier guardian context.".to_string(),
                     }],
                     phase: None,
@@ -943,6 +966,8 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
             turn.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -952,9 +977,13 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "I need approval for the post-compaction push.".to_string(),
                     }],
                     phase: None,
@@ -1021,6 +1050,8 @@ fn collect_guardian_transcript_entries(
 fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
     let items = vec![
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1030,9 +1061,13 @@ fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: "hello".to_string(),
             }],
             phase: None,
@@ -1058,6 +1093,8 @@ fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
 fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
     let mut items = vec![
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1067,6 +1104,8 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "read_file".to_string(),
             namespace: None,
@@ -1086,9 +1125,13 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: "I need to push a fix".to_string(),
             }],
             phase: None,
@@ -1762,6 +1805,8 @@ fn build_guardian_transcript_reserves_separate_budget_for_tool_evidence() {
     ]
     .into_iter()
     .map(|(role, text)| ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: role.to_string(),
         content: vec![ContentItem::InputText {
@@ -1772,6 +1817,8 @@ fn build_guardian_transcript_reserves_separate_budget_for_tool_evidence() {
     })
     .collect::<Vec<_>>();
     items.extend((0..12).map(|index| ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
         id: None,
         name: format!("tool_{index}"),
         namespace: None,
@@ -1815,6 +1862,8 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
     let repeated = "authorization ".repeat(6_000);
     let mut items = (0..8)
         .map(|_| ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1826,6 +1875,8 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
         .collect::<Vec<_>>();
     items.extend([
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "shell".to_string(),
             namespace: None,
@@ -2269,6 +2320,8 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
             turn.as_ref(),
             turn.model_info(),
             &[ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2555,6 +2608,8 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
             turn.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2564,9 +2619,13 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "I need approval for the second docs fix.".to_string(),
                     }],
                     phase: None,
@@ -2642,6 +2701,8 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2651,9 +2712,13 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
+                        annotations: None,
+                        logprobs: None,
                         text: "I need approval for the third docs fix.".to_string(),
                     }],
                     phase: None,
@@ -2702,6 +2767,8 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     session
         .replace_history(
             vec![ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3632,6 +3699,8 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                 turn.as_ref(), turn.model_info(),
                 &[
                     ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         role: "user".to_string(),
                         content: vec![ContentItem::InputText {
@@ -3640,9 +3709,13 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                         phase: None,
                         internal_chat_message_metadata_passthrough: None,},
                     ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         role: "assistant".to_string(),
                         content: vec![ContentItem::OutputText {
+                            annotations: None,
+                            logprobs: None,
                             text: "I need approval to run git diff.".to_string(),
                         }],
                         phase: None,
@@ -3709,6 +3782,8 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                 turn.as_ref(), turn.model_info(),
                 &[
                     ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         role: "user".to_string(),
                         content: vec![ContentItem::InputText {
@@ -3717,9 +3792,13 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                         phase: None,
                         internal_chat_message_metadata_passthrough: None,},
                     ResponseItem::Message {
+                        status: None,
+                        encrypted_content: None,
                         id: None,
                         role: "assistant".to_string(),
                         content: vec![ContentItem::OutputText {
+                            annotations: None,
+                            logprobs: None,
                             text: "I need approval to push after the diff check.".to_string(),
                         }],
                         phase: None,
@@ -4076,6 +4155,7 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
                 guardian_output_contract_prompt(),
             )
             .render()
+            .expect_text()
         )
     );
 }
@@ -4199,6 +4279,7 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
                 guardian_output_contract_prompt(),
             )
             .render()
+            .expect_text()
         )
     );
 }

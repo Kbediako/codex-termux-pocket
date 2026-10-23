@@ -88,13 +88,14 @@ impl ChatWidget {
             config.http_client_factory(),
             codex_http_client::ClientRouteClass::Other,
         );
-        pets::start_configured_pet_load_if_needed(
+        let configured_pet_load_generation = pets::start_configured_pet_load_if_needed(
             &local_settings,
             /*ambient_pet_missing*/ true,
             frame_requester.clone(),
             app_event_tx.clone(),
             pet_http_client.clone(),
         );
+        let config_panel_tui = local_settings.tui.clone();
         let mut widget = Self {
             empty_state_animation: std::cell::RefCell::new(empty_state_animation),
             daybreak_enabled: false,
@@ -116,6 +117,7 @@ impl ChatWidget {
             raw_output_mode: local_settings.tui.raw_output_mode,
             config,
             local_settings,
+            config_panel_tui,
             effective_service_tier,
             skills_all: Vec::new(),
             skills_initial_state: None,
@@ -126,8 +128,10 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
+            permission_popup_pending: false,
             permission_popup_request_id: None,
             permission_discovery: None,
+            inline_permission_profile_selection: None,
             worktree_popup_request_id: None,
             permission_profiles_menu_opened: false,
             model_popup_model_ids: Vec::new(),
@@ -220,6 +224,7 @@ impl ChatWidget {
             active_hook_cell: None,
             pet_http_client,
             ambient_pet: None,
+            configured_pet_load_generation,
             pet_picker_preview_state: crate::pets::PetPickerPreviewState::default(),
             pet_picker_preview_pet: None,
             pet_picker_preview_request_id: 0,
@@ -250,6 +255,8 @@ impl ChatWidget {
             suppress_initial_user_message_submit: false,
             pending_notification: None,
             quit_shortcut_expires_at: None,
+            quick_dial_menu: false,
+            quick_dial_menu_key_guard: None,
             quit_shortcut_key: None,
             turn_runtime_metrics: RuntimeMetricsSummary::default(),
             last_rendered_width: std::cell::Cell::new(None),
@@ -264,6 +271,7 @@ impl ChatWidget {
             last_terminal_title: None,
             last_terminal_title_requires_action: false,
             terminal_title_setup_original_items: None,
+            status_surface_overrides: StatusSurfaceOverrides::default(),
             terminal_title_animation_origin: Instant::now(),
             terminal_title_next_refresh: None,
             status_line_project_root_name_cache: None,
@@ -291,6 +299,10 @@ impl ChatWidget {
             test_codex_home: None,
         };
 
+        widget.bottom_pane.set_mention_usage_home(
+            widget.local_settings.codex_home.as_path(),
+            widget.local_settings.history.persistence,
+        );
         widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);

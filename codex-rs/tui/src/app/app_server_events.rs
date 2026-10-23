@@ -6,6 +6,7 @@ use super::ThreadBufferedEvent;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use super::app_server_requests::BufferedServerRequest;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::RateLimitRefreshOrigin;
@@ -18,6 +19,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -30,9 +32,37 @@ use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::request_permissions::RequestPermissionProfile as CoreRequestPermissionProfile;
 use std::time::Duration;
 
 impl App {
+    async fn reject_unsupported_app_server_request(
+        &mut self,
+        unsupported: super::app_server_requests::UnsupportedAppServerRequest,
+        request: &BufferedServerRequest,
+    ) {
+        tracing::warn!(
+            request_id = ?unsupported.request_id,
+            message = unsupported.message,
+            "rejecting unsupported app-server request"
+        );
+        self.chat_widget
+            .add_error_message(unsupported.message.clone());
+        let result = request
+            .reply
+            .clone()
+            .reject(JSONRPCErrorError {
+                code: -32000,
+                message: unsupported.message,
+                data: None,
+            })
+            .await
+            .map_err(|err| format!("failed to reject app-server request: {err}"));
+        if let Err(err) = result {
+            tracing::warn!("{err}");
+        }
+    }
+
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
         if self
             .current_displayed_thread_id()
@@ -110,11 +140,19 @@ impl App {
                 }
             }
             AppServerEvent::ServerRequest(request) => {
-                self.handle_server_request_event(app_server_client, *request)
+                let request =
+                    BufferedServerRequest::new(*request, &app_server_client.request_handle());
+                self.handle_server_request_event(app_server_client, request)
                     .await;
                 self.repaint_agents_overview();
             }
             AppServerEvent::Disconnected { message } => {
+                // The request result distinguishes a refused start from a lost reply.
+                if self.pending_startup_thread_start
+                    && !matches!(self.app_server_target, crate::AppServerTarget::Embedded)
+                {
+                    return;
+                }
                 if self.begin_reconnect() {
                     return;
                 }
@@ -273,16 +311,20 @@ impl App {
                     && let Some(requests) =
                         self.agents_overview.dispatched_requests.get_mut(&thread_id)
                 {
-                    requests.retain(|request| request.id() != &notification.request_id);
+                    requests.retain(|request| request.request.id() != &notification.request_id);
                 }
-                if let Some(request) = self
+                if let Some(resolved) = self
                     .pending_app_server_requests
                     .resolve_notification(&notification.thread_id, &notification.request_id)
+                    && self.chat_widget.thread_id().map(|id| id.to_string())
+                        == Some(resolved.thread_id)
                 {
-                    self.chat_widget.dismiss_app_server_request(&request);
+                    self.chat_widget
+                        .dismiss_app_server_request(&resolved.request);
                     if self.startup_pending_protected_request {
                         self.startup_pending_protected_request =
-                            self.chat_widget.has_pending_protected_request();
+                            self.chat_widget.has_active_modal()
+                                || self.chat_widget.has_pending_protected_request();
                     }
                 }
             }
@@ -501,7 +543,8 @@ impl App {
 
         #[cfg(any(target_os = "windows", test))]
         if let ServerNotification::WindowsSandboxSetupCompleted(result) = notification {
-            let Some((mode, preset, profile_selection)) = self.windows_sandbox.pending_setup.take()
+            let Some((mode, preset, profile_selection)) =
+                self.windows_sandbox.pending_setup.clone()
             else {
                 return;
             };
@@ -514,7 +557,6 @@ impl App {
                 }
             };
             if result.mode != expected_mode {
-                self.windows_sandbox.pending_setup = Some((mode, preset, profile_selection));
                 return;
             }
             if result.success {
@@ -531,10 +573,18 @@ impl App {
                         profile_selection,
                     });
             } else {
+                self.windows_sandbox.pending_setup = None;
                 self.chat_widget.clear_windows_sandbox_setup_status();
                 self.windows_sandbox.setup_started_at = None;
-                self.chat_widget
-                    .retain_input_after_failed_permission_selection();
+                if self
+                    .chat_widget
+                    .recover_inline_permission_profile_selection()
+                {
+                    self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+                } else {
+                    self.chat_widget
+                        .retain_input_after_failed_permission_selection();
+                }
                 self.chat_widget.add_error_message(format!(
                     "Windows sandbox setup failed: {}",
                     result.error.unwrap_or_else(|| "unknown error".to_string())
@@ -547,26 +597,26 @@ impl App {
             .handle_server_notification(notification, /*replay_kind*/ None);
     }
 
-    async fn handle_server_request_event(
+    pub(in crate::app) async fn handle_server_request_event(
         &mut self,
         app_server_client: &AppServerSession,
-        request: ServerRequest,
+        buffered_request: BufferedServerRequest,
     ) {
-        let thread_id = server_request_thread_id(&request);
+        let request = &buffered_request.request;
+        let thread_id = server_request_thread_id(request);
         if thread_id
             .is_some_and(|thread_id| self.temporary_structured_requests.contains_key(&thread_id))
         {
-            if let Err(err) = self
-                .reject_app_server_request(
-                    app_server_client,
-                    request.id().clone(),
-                    "temporary structured threads cannot request tools or user interaction"
-                        .to_string(),
-                )
-                .await
-            {
-                tracing::debug!("{err}");
-            }
+            self.reject_unsupported_app_server_request(
+                super::app_server_requests::UnsupportedAppServerRequest {
+                    request_id: request.id().clone(),
+                    message:
+                        "temporary structured threads cannot request tools or user interaction"
+                            .to_string(),
+                },
+                &buffered_request,
+            )
+            .await;
             return;
         }
         if let ServerRequest::DynamicToolCall { request_id, params } = &request {
@@ -665,16 +715,14 @@ impl App {
                 && owner.thread_id() == thread_id
         });
         if thread_id.is_some_and(|thread_id| self.abandoned_side_threads.contains(&thread_id)) {
-            if let Err(err) = self
-                .reject_app_server_request(
-                    app_server_client,
-                    request.id().clone(),
-                    "side conversation was closed".to_string(),
-                )
-                .await
-            {
-                tracing::warn!("{err}");
-            }
+            self.reject_unsupported_app_server_request(
+                super::app_server_requests::UnsupportedAppServerRequest {
+                    request_id: request.id().clone(),
+                    message: "side conversation was closed".to_string(),
+                },
+                &buffered_request,
+            )
+            .await;
             return;
         }
         if thread_id.is_some()
@@ -682,8 +730,18 @@ impl App {
             && !background_voice
             && self.pending_startup_thread_start
         {
+            if let Some(unsupported) = self
+                .pending_app_server_requests
+                .note_buffered_request(&buffered_request)
+            {
+                self.reject_unsupported_app_server_request(unsupported, &buffered_request)
+                    .await;
+                return;
+            }
             self.pending_primary_events
-                .push_back(ThreadBufferedEvent::Request(Box::new(request)));
+                .push_back(ThreadBufferedEvent::Request(Box::new(
+                    buffered_request.request,
+                )));
             return;
         }
         let unsupported_request = matches!(
@@ -694,9 +752,22 @@ impl App {
                 | ServerRequest::ApplyPatchApproval { .. }
                 | ServerRequest::ExecCommandApproval { .. }
         );
+        if let ServerRequest::PermissionsRequestApproval { request_id, params } = &request
+            && let Err(err) = CoreRequestPermissionProfile::try_from(params.permissions.clone())
+        {
+            self.reject_unsupported_app_server_request(
+                super::app_server_requests::UnsupportedAppServerRequest {
+                    request_id: request_id.clone(),
+                    message: format!("failed to localize requested filesystem paths: {err}"),
+                },
+                &buffered_request,
+            )
+            .await;
+            return;
+        }
         if self
             .pending_app_server_requests
-            .contains_server_request(&request)
+            .contains_server_request(request)
         {
             return;
         }
@@ -707,7 +778,7 @@ impl App {
             && !background_voice
             && let Some(requests) = self.agents_overview.dispatched_requests.get_mut(&thread_id)
         {
-            requests.push(request);
+            requests.push(buffered_request);
             return;
         }
         if thread_id.is_some()
@@ -755,33 +826,18 @@ impl App {
                         .dispatched_requests
                         .entry(thread_id)
                         .or_default()
-                        .push(request);
+                        .push(buffered_request);
                 }
                 return;
             }
         }
 
-        if let Some(unsupported) = self
+        let unsupported = self
             .pending_app_server_requests
-            .note_server_request(&request)
-        {
-            tracing::warn!(
-                request_id = ?unsupported.request_id,
-                message = unsupported.message,
-                "rejecting unsupported app-server request"
-            );
-            self.chat_widget
-                .add_error_message(unsupported.message.clone());
-            if let Err(err) = self
-                .reject_app_server_request(
-                    app_server_client,
-                    unsupported.request_id,
-                    unsupported.message,
-                )
-                .await
-            {
-                tracing::warn!("{err}");
-            }
+            .note_buffered_request(&buffered_request);
+        if let Some(unsupported) = unsupported {
+            self.reject_unsupported_app_server_request(unsupported, &buffered_request)
+                .await;
             return;
         }
 
@@ -791,9 +847,11 @@ impl App {
         };
 
         let result = if self.primary_thread_id.is_none() && !background_voice {
-            self.enqueue_primary_thread_request(request).await
+            self.enqueue_primary_thread_request(buffered_request.request)
+                .await
         } else {
-            self.enqueue_thread_request(thread_id, request).await
+            self.enqueue_thread_request(thread_id, buffered_request.request)
+                .await
         };
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");

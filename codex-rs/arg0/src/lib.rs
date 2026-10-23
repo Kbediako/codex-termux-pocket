@@ -37,8 +37,10 @@ pub struct Arg0DispatchPaths {
 
 /// Keeps the per-session PATH entry alive and locked for the process lifetime.
 pub struct Arg0PathEntryGuard {
-    _temp_dir: TempDir,
+    // Fields drop in declaration order. Close the lock before removing its
+    // directory so NFS does not retain the open file as a `.nfs*` entry.
     _lock_file: File,
+    _temp_dir: TempDir,
     paths: Arg0DispatchPaths,
 }
 
@@ -324,9 +326,21 @@ fn prepare_path_entry_for_codex_aliases(
         }
     }
 
-    std::fs::create_dir_all(&codex_home)?;
-    // Use a CODEX_HOME-scoped temp root to avoid cluttering the top-level directory.
-    let temp_root = codex_home.join("tmp").join("arg0");
+    prepare_aliases_in_home(&codex_home, existing_path)
+}
+
+// The production entry point validates the home before reaching this filesystem seam.
+fn prepare_aliases_in_home(
+    codex_home: &Path,
+    existing_path: Option<OsString>,
+) -> std::io::Result<(Arg0PathEntryGuard, OsString)> {
+    std::fs::create_dir_all(codex_home)?;
+    // Windows and WSL can share CODEX_HOME without sharing a lock namespace.
+    // Keep each OS outside the legacy `tmp/arg0` root so older clients cannot
+    // delete these helpers while their owning process is still running.
+    let temp_root = codex_home
+        .join("tmp")
+        .join(format!("arg0-{}", std::env::consts::OS));
     std::fs::create_dir_all(&temp_root)?;
     #[cfg(unix)]
     {
@@ -477,7 +491,23 @@ fn janitor_cleanup(temp_root: &Path) -> std::io::Result<()> {
             continue;
         };
 
-        match std::fs::remove_dir_all(&path) {
+        #[cfg(unix)]
+        let removal = {
+            // Rename while locked so initializers cannot publish at the old path,
+            // then close the lock before deletion to avoid NFS silly rename.
+            let retired_dir = TempDir::new_in(temp_root)?;
+            match std::fs::rename(&path, retired_dir.path()) {
+                Ok(()) => {
+                    drop(_lock_file);
+                    retired_dir.close()
+                }
+                Err(err) => Err(err),
+            }
+        };
+        #[cfg(not(unix))]
+        let removal = std::fs::remove_dir_all(&path);
+
+        match removal {
             Ok(()) => {}
             // Expected TOCTOU race: directory can disappear after read_dir/lock checks.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -515,9 +545,7 @@ mod tests {
     use super::LOCK_FILENAME;
     use super::janitor_cleanup;
     use super::linux_sandbox_exe_path;
-    #[cfg(unix)]
     use super::run_main_with_arg0_guard;
-    #[cfg(unix)]
     use anyhow::ensure;
     use codex_install_context::CodexPackageLayout;
     use codex_install_context::InstallContext;
@@ -704,10 +732,10 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_main_with_arg0_guard_keeps_aliases_alive_until_main_returns() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
+        let temp_path = temp_dir.path().to_path_buf();
         let alias_path = temp_dir.path().join("codex-helper-alias");
         fs::write(&alias_path, b"")?;
         let lock_file = create_lock(temp_dir.path())?;
@@ -740,7 +768,52 @@ mod tests {
                 );
                 Ok(())
             },
-        ))
+        ))?;
+        assert!(!temp_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn helper_cleanup_is_isolated_from_other_platforms_and_legacy_clients() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let temporary = home.path().join("tmp");
+        let own_root = temporary.join(format!("arg0-{}", std::env::consts::OS));
+        let foreign_os = if cfg!(windows) { "linux" } else { "windows" };
+        let foreign_root = temporary.join(format!("arg0-{foreign_os}"));
+        let legacy_root = temporary.join("arg0");
+        // Unlocked foreign directories model a live peer whose lock is invisible
+        // to this kernel. Only stale directories in our own namespace may go.
+        for root in [&own_root, &foreign_root, &legacy_root] {
+            let stale = root.join("codex-arg0-existing");
+            fs::create_dir_all(&stale)?;
+            create_lock(&stale)?;
+            fs::write(stale.join("helper"), b"keep foreign helpers")?;
+        }
+
+        let (guard, _) = super::prepare_aliases_in_home(home.path(), /*existing_path*/ None)?;
+        assert!(!own_root.join("codex-arg0-existing").exists());
+        assert_eq!(
+            [&foreign_root, &legacy_root]
+                .map(|root| fs::read(root.join("codex-arg0-existing/helper")))
+                .into_iter()
+                .collect::<std::io::Result<Vec<_>>>()?,
+            vec![b"keep foreign helpers".to_vec(); 2],
+        );
+
+        // Older versions clean only this root. Run that cleanup while a new
+        // helper is live, then confirm the advertised helper remains usable.
+        janitor_cleanup(&legacy_root)?;
+        let helper = guard._temp_dir.path().join(if cfg!(windows) {
+            "apply_patch.bat"
+        } else {
+            "apply_patch"
+        });
+        assert!(helper.is_file());
+        assert_eq!(
+            fs::read(foreign_root.join("codex-arg0-existing/helper"))?,
+            b"keep foreign helpers",
+        );
+        Ok(())
     }
 
     #[test]
@@ -778,7 +851,7 @@ mod tests {
 
         janitor_cleanup(root.path())?;
 
-        assert!(!dir.exists());
+        assert_eq!(fs::read_dir(root.path())?.count(), 0);
         Ok(())
     }
 }

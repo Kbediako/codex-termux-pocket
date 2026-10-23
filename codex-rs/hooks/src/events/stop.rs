@@ -8,7 +8,6 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
-use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Map;
 use serde_json::Value;
@@ -70,24 +69,7 @@ impl StopHookTarget {
             .into_iter()
             .filter(|handler| {
                 !matches!(self, Self::MemoryConsolidation)
-                    || matches!(
-                        handler.source_path,
-                        HandlerSourcePath::ExecutorScoped { .. }
-                    )
-                    || match handler.source {
-                        HookSource::User
-                        | HookSource::Project
-                        | HookSource::SessionFlags
-                        | HookSource::Plugin => false,
-                        HookSource::System
-                        | HookSource::Mdm
-                        | HookSource::CloudRequirements
-                        | HookSource::CloudManagedConfig
-                        | HookSource::LegacyManagedConfigFile
-                        | HookSource::LegacyManagedConfigMdm
-                        // Required hooks can have unknown attribution; retain them fail-closed.
-                        | HookSource::Unknown => true,
-                    }
+                    || handler.runs_for_memory_consolidation()
             })
             .collect()
     }
@@ -390,10 +372,11 @@ fn parse_completed(
     };
     let continuation_fragments = continuation_prompt
         .map(|prompt| {
-            vec![HookPromptFragment::from_single_hook(
-                prompt,
-                completed.run.id.clone(),
-            )]
+            vec![HookPromptFragment {
+                text: prompt,
+                hook_run_id: completed.run.id.clone(),
+                metadata: run_result.context_metadata,
+            }]
         })
         .unwrap_or_default();
 
@@ -497,6 +480,7 @@ mod tests {
                 continuation_fragments: vec![HookPromptFragment {
                     text: "retry with tests".to_string(),
                     hook_run_id: parsed.completed.run.id.clone(),
+                    metadata: codex_protocol::models::ContentItemMetadata::harness(),
                 }],
             }
         );
@@ -574,6 +558,7 @@ mod tests {
                 continuation_fragments: vec![HookPromptFragment {
                     text: "retry with tests".to_string(),
                     hook_run_id: parsed.completed.run.id.clone(),
+                    metadata: codex_protocol::models::ContentItemMetadata::harness(),
                 }],
             }
         );
@@ -693,6 +678,7 @@ mod tests {
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
             builtin: false,
+            plugin_trust: None,
             event_name: HookEventName::Stop,
             matcher: None,
             timeout_sec: 600,
@@ -711,6 +697,7 @@ mod tests {
 
     fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
         HandlerRunResult {
+            context_metadata: codex_protocol::models::ContentItemMetadata::harness(),
             started_at: 1,
             completed_at: 2,
             duration_ms: 1,

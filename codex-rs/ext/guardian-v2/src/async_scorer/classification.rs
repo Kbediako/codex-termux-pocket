@@ -1,5 +1,7 @@
 //! Builds context and samples a captured observation in the background.
 //! Successful results require current authorization and review context and a newer sample timestamp.
+//! Requests outside every active action's lag allowance stop as superseded, not failed.
+//! Expiry also cancels metadata waits before transcript preparation, releasing reservations.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -49,6 +51,7 @@ use super::sampler::LunaSampler;
 use super::sampler::LunaSamplerError;
 use super::sampler::LunaSamplingRequest;
 use super::score::GuardianV2ScoreProgress;
+use super::score::PendingScore;
 use super::transcript::CollectedTranscript;
 use super::transcript::ContextInput;
 use super::truncation::ClassificationTruncations;
@@ -162,18 +165,44 @@ impl Classification {
         let generation = reservation
             .as_ref()
             .map(|reservation| reservation.generation.clone());
+        let pending_score = PendingScore {
+            progress: Arc::clone(&score_progress),
+            index: tool_call_index,
+            max_lag: guardian_config.max_tool_call_lag,
+        };
+        let metadata = tokio::select! {
+            biased;
+            () = pending_score.expired() => None,
+            metadata = async {
+                let trusted_tool_context = match mcp_tool.as_ref() {
+                    Some(tool) => {
+                        trusted_tool_context(tool.tool_info(), tool.source(), &manager, &config).await
+                    }
+                    None => None,
+                };
+                let root_snapshot = if context_mode != GuardianContextMode::Legacy {
+                    root_snapshot
+                } else {
+                    thread.guardian_root_snapshot().await
+                };
+                (trusted_tool_context, root_snapshot)
+            } => Some(metadata),
+        };
+        // Metadata can become ready in the same poll as expiry. Do not start
+        // synchronous transcript preparation for an observation that is already stale.
+        let Some((trusted_tool_context, root_snapshot)) =
+            metadata.filter(|_| !pending_score.is_expired())
+        else {
+            record_classification(
+                metrics.as_deref(),
+                context_mode,
+                classification_started_at.elapsed(),
+                "superseded",
+                /*failure_reason*/ None,
+            );
+            return;
+        };
         let mut truncations = ClassificationTruncations::default();
-        let trusted_tool_context = match mcp_tool.as_ref() {
-            Some(tool) => {
-                trusted_tool_context(tool.tool_info(), tool.source(), &manager, &config).await
-            }
-            None => None,
-        };
-        let root_snapshot = if context_mode != GuardianContextMode::Legacy {
-            root_snapshot
-        } else {
-            thread.guardian_root_snapshot().await
-        };
         let mut trusted_skills = TrustedSkillInvocations::default();
         for path in local_trusted_skill_paths.iter().chain(
             root_snapshot
@@ -224,7 +253,10 @@ impl Classification {
                 truncations.extend(rendered.truncations);
                 codex_guardian_context::PreviousReview {
                     id: review.delivery_id.clone(),
-                    fragment: GuardianReviewEvidenceFragment::new(rendered.body).render(),
+                    fragment: GuardianReviewEvidenceFragment::new(rendered.body)
+                        .render()
+                        .into_text()
+                        .unwrap_or_default(),
                 }
             })
             .collect::<Vec<_>>();
@@ -281,6 +313,9 @@ impl Classification {
             truncations.extend(std::mem::take(&mut context.truncations));
             super::metrics::record_section_costs(metrics.as_deref(), context.section_costs());
         }
+        let decisions_comparison_enabled = config
+            .features
+            .enabled(codex_features::Feature::GuardianV2DecisionsComparison);
         let mut decisions_task = None;
         let mut responses_duration = None;
         let mut failure_reason = "invalid_output";
@@ -324,17 +359,18 @@ impl Classification {
                 reasoning_effort: guardian_config.reasoning_effort.clone(),
                 parent_turn_id: turn_id.clone(),
                 root_turn_id,
+                pending_score: None,
             };
             let result = match transcript {
                 ClassificationContext::Snapshot(context) => {
+                    sampling.pending_score = Some(pending_score.clone());
                     sampling.input = context.into_messages();
                     if let Some(decisions_sampler) = decisions_sampler.as_ref() {
-                        decisions_task =
-                            Some(decisions_sampler.spawn(&sampling, sampler.max_input_tokens()));
-                    } else if config
-                        .features
-                        .enabled(codex_features::Feature::GuardianV2DecisionsComparison)
-                    {
+                        decisions_task = Some(decisions_sampler.start_snapshot_comparison(
+                            &sampling,
+                            sampler.max_input_tokens(),
+                        ));
+                    } else if decisions_comparison_enabled {
                         super::metrics::record_decisions_comparison_outcome(
                             metrics.as_deref(),
                             "skipped",
@@ -342,7 +378,11 @@ impl Classification {
                         );
                     }
                     let sampling_started = Instant::now();
-                    let result = sampler.sample(sampling).await;
+                    let result = tokio::select! {
+                        biased;
+                        () = pending_score.expired() => Err(LunaSamplerError::Superseded),
+                        result = sampler.sample(sampling) => result,
+                    };
                     responses_duration = Some(sampling_started.elapsed());
                     result
                 }
@@ -351,29 +391,55 @@ impl Classification {
                     evidence,
                     reservation,
                 } => {
-                    // The retained prefix is owned by the conversation backend, not this snapshot.
-                    if config
-                        .features
-                        .enabled(codex_features::Feature::GuardianV2DecisionsComparison)
-                    {
-                        super::metrics::record_decisions_comparison_outcome(
-                            metrics.as_deref(),
-                            "skipped",
-                            "unsupported_evidence",
-                        );
-                    }
                     let (ready, score) = tokio::sync::oneshot::channel();
-                    tokio::spawn(reservation.run(ConversationRequest {
+                    let request = ConversationRequest {
                         evidence,
                         sampling,
-                        reset_token_limit:
-                            guardian_config.async_classifier_conversation_token_limit,
+                        reset_token_limit: guardian_config
+                            .async_classifier_conversation_token_limit,
                         ready,
                         authorization: score_authorization.clone(),
                         thread: Arc::clone(&thread),
                         metrics: metrics.clone(),
-                    }));
-                    score.await.unwrap_or(Err(LunaSamplerError::Superseded))
+                        pending_score: pending_score.clone(),
+                        sampled_at,
+                    };
+                    let mut sampling_started = None;
+                    if let Some(prepared) = reservation.prepare(request).await {
+                        if let Some(decisions_sampler) = decisions_sampler.as_ref() {
+                            decisions_task = Some(
+                                decisions_sampler
+                                    .start_conversation_comparison(&prepared.request.input),
+                            );
+                        } else if decisions_comparison_enabled {
+                            super::metrics::record_decisions_comparison_outcome(
+                                metrics.as_deref(),
+                                "skipped",
+                                "not_initialized",
+                            );
+                        }
+                        sampling_started = Some(Instant::now());
+                        tokio::spawn(prepared.run());
+                    }
+                    let result = tokio::select! {
+                        biased;
+                        () = pending_score.expired() => Err(LunaSamplerError::Superseded),
+                        result = score => result.unwrap_or(Err(LunaSamplerError::Superseded)).map(super::sampler::SampledScore::accept),
+                    };
+                    // Stop at the usable score, before draining and committing history.
+                    responses_duration = sampling_started.map(|started| started.elapsed());
+                    if sampling_started.is_none() && decisions_comparison_enabled {
+                        super::metrics::record_decisions_comparison_outcome(
+                            metrics.as_deref(),
+                            "skipped",
+                            if matches!(result, Err(LunaSamplerError::Superseded)) {
+                                "superseded"
+                            } else {
+                                "preparation_failed"
+                            },
+                        );
+                    }
+                    result
                 }
             };
             let output = match result {
@@ -508,9 +574,7 @@ impl Classification {
                 baseline_risk.zip(responses_duration),
                 metrics.as_deref(),
             );
-        } else if config
-            .features
-            .enabled(codex_features::Feature::GuardianV2DecisionsComparison)
+        } else if decisions_comparison_enabled
             && let Some(risk) = baseline_risk
             && let Some(metrics) = metrics.as_deref()
         {

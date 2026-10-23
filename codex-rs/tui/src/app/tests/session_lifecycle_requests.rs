@@ -1,6 +1,7 @@
 use super::*;
 use crate::app_event::TranscriptExportDestination;
 use crate::bottom_pane::BottomPaneView;
+use crate::test_support::boxed_future;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
@@ -38,10 +39,25 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 
 pub(super) type RecordedRequests = Arc<Mutex<Vec<JSONRPCRequest>>>;
 pub(super) type RecordingAppServer = (AppServerSession, RecordedRequests, JoinHandle<Result<()>>);
+
+fn is_recording_client_disconnect(error: &WebSocketError) -> bool {
+    match error {
+        WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        WebSocketError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        ),
+        _ => false,
+    }
+}
 
 #[tokio::test]
 async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
@@ -49,9 +65,6 @@ async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
     use codex_protocol::turn_input::CyberAccessProgram;
 
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
-    app.config.features.enable(Feature::CliDaybreak)?;
-    app.chat_widget
-        .set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     let (mut server, requests, proxy) = start_recording_app_server(
         &app.config,
         /*blocked_thread_list*/ None,
@@ -190,6 +203,9 @@ async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
     app.chat_widget
         .set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     app.chat_widget.set_daybreak_enabled(/*enabled*/ true);
+    app.chat_widget
+        .set_feature_enabled(Feature::ApiKeyCyberAccessPrograms, /*enabled*/ false);
+    let models = app.chat_widget.model_catalog().models.clone();
     app.chat_widget.update_account_state(
         Some(crate::status::StatusAccountDisplay::ApiKey),
         /*plan_type*/ None,
@@ -197,6 +213,14 @@ async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
         /*has_codex_backend_auth*/ false,
     );
     assert!(!app.chat_widget.daybreak_enabled);
+    let request_id = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::FetchModels { request_id } => Some(request_id),
+            _ => None,
+        })
+        .last()
+        .expect("account model refresh");
+    assert!(app.chat_widget.on_models_loaded(request_id, Ok(models)));
     for (cli_daybreak, api_key_cyber_access_programs, enabled) in [
         (false, false, true),
         (false, true, true),
@@ -298,6 +322,7 @@ async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()>
         /*failed_thread_name*/ None,
     )
     .await?;
+    let backend_id = app_server.backend_id();
     app.enqueue_primary_thread_session(
         test_thread_session(thread_id, test_path_buf("/tmp/project")),
         Vec::new(),
@@ -319,6 +344,7 @@ async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()>
         &mut tui,
         &mut app_server,
         crate::resume_picker::SessionTarget {
+            backend_id,
             path,
             thread_id,
             cwd: None,
@@ -349,8 +375,11 @@ pub(super) enum HistoryCapabilities {
     ItemsAndSummaryTurnsFail,
     ThreadListFails,
     ThreadStartFails,
+    ThreadStartWhileShuttingDown,
+    ThreadStartDuringLegacyShutdown,
     ConfigReadUnsupported(i64),
     ConfigReadFails,
+    SuperBindingsUnsupported,
     ConfigReadUnknownVoice,
     VoiceCatalogCustom,
     VoiceCatalogUnavailable,
@@ -492,20 +521,19 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                     if let codex_app_server_client::InProcessServerEvent::ServerNotification(notification) = event
                         && matches!(*notification, ServerNotification::ThreadSettingsUpdated(_))
                     {
-                        websocket.send(Message::Text(serde_json::to_string(&notification)?.into())).await?;
+                        let result = websocket.send(Message::Text(serde_json::to_string(&notification)?.into())).await;
+                        if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                            break;
+                        }
+                        result?;
                     }
                     continue;
                 }
             };
             let Some(frame) = frame else { break };
-            // The client can close with an unread settings notification during shutdown.
-            match &frame {
-                Err(tokio_tungstenite::tungstenite::Error::Protocol(
-                    tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
-                )) => break,
-                Err(tokio_tungstenite::tungstenite::Error::Io(error))
-                    if matches!(error.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset) => break,
-                _ => {}
+            // The client can close with requests or notifications pending during shutdown.
+            if frame.as_ref().is_err_and(is_recording_client_disconnect) {
+                break;
             }
             let Message::Text(text) = frame? else {
                 continue;
@@ -513,7 +541,7 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
             let message = serde_json::from_str::<JSONRPCMessage>(&text)?;
             match message {
                 JSONRPCMessage::Request(request) if request.method == "initialize" => {
-                    websocket
+                    let result = websocket
                         .send(Message::Text(
                             serde_json::to_string(&JSONRPCMessage::Response(JSONRPCResponse {
                                 id: request.id,
@@ -524,7 +552,11 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                             }))?
                             .into(),
                         ))
-                        .await?;
+                        .await;
+                    if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                        break;
+                    }
+                    result?;
                 }
                 JSONRPCMessage::Request(request) => {
                     request_sink
@@ -626,6 +658,18 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                                 message: "config temporarily unavailable".to_string(),
                             },
                         })
+                    } else if history_capabilities == HistoryCapabilities::SuperBindingsUnsupported
+                        && request.method == "config/value/write"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32600,
+                                data: None,
+                                message: "Invalid configuration: unknown key `super-left`"
+                                    .to_string(),
+                            },
+                        })
                     } else if history_capabilities == HistoryCapabilities::VoiceCatalogUnavailable
                         && request.method == "thread/realtime/listVoices"
                     {
@@ -637,15 +681,30 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                                 message: "method not found".to_string(),
                             },
                         })
-                    } else if history_capabilities == HistoryCapabilities::ThreadStartFails
-                        && request.method == "thread/start"
+                    } else if matches!(
+                        history_capabilities,
+                        HistoryCapabilities::ThreadStartFails
+                            | HistoryCapabilities::ThreadStartWhileShuttingDown
+                            | HistoryCapabilities::ThreadStartDuringLegacyShutdown
+                    ) && request.method == "thread/start"
                     {
+                        let (code, message, data) = match history_capabilities {
+                            HistoryCapabilities::ThreadStartWhileShuttingDown => (
+                                -32600,
+                                "not accepting new actions",
+                                Some(serde_json::json!({ "reason": "serverShuttingDown" })),
+                            ),
+                            HistoryCapabilities::ThreadStartDuringLegacyShutdown => {
+                                (-32600, "Server is draining; retry after reconnecting", None)
+                            }
+                            _ => (-32603, "replacement unavailable", None),
+                        };
                         JSONRPCMessage::Error(JSONRPCError {
                             id: request_id,
                             error: JSONRPCErrorError {
-                                code: -32603,
-                                data: None,
-                                message: "replacement unavailable".to_string(),
+                                code,
+                                data,
+                                message: message.to_string(),
                             },
                         })
                     } else if request.method == "thread/list"
@@ -785,9 +844,13 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                             }
                         }
                     };
-                    websocket
+                    let result = websocket
                         .send(Message::Text(serde_json::to_string(&response)?.into()))
-                        .await?;
+                        .await;
+                    if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                        break;
+                    }
+                    result?;
                 }
                 JSONRPCMessage::Notification(notification)
                     if notification.method == "initialized" => {}
@@ -832,8 +895,12 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
     .await?;
 
     Ok((
-        AppServerSession::new(app_server, thread_params_mode)
-            .with_local_codex_home(&config.codex_home),
+        AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            app_server,
+            thread_params_mode,
+        )
+        .with_local_codex_home(&config.codex_home),
         requests,
         proxy,
     ))
@@ -876,6 +943,89 @@ async fn make_history_test_app() -> Result<(Box<App>, tempfile::TempDir)> {
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
     Ok((app, codex_home))
+}
+
+#[tokio::test]
+async fn in_app_remote_resume_picker_preserves_remote_cwd_filter() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    let remote_root = tempdir()?;
+    let remote_cwd = remote_root.path().join("project");
+    std::fs::create_dir(&remote_cwd)?;
+    let (app_server, _requests, active_proxy) =
+        start_recording_remote_app_server(&app.config).await?;
+    let mut app_server = app_server.with_remote_cwd_override(Some(remote_cwd.clone()));
+    app.harness_overrides.model_provider = Some(app.config.model_provider_id.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?,
+    };
+    let (request_tx, request_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let codex_home = app.config.codex_home.display().to_string();
+    let recorder = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await?;
+        let mut websocket = accept_async(socket).await?;
+        while let Some(frame) = websocket.next().await {
+            let Message::Text(text) = frame? else {
+                continue;
+            };
+            match serde_json::from_str::<JSONRPCMessage>(&text)? {
+                JSONRPCMessage::Request(request) if request.method == "initialize" => {
+                    let response = JSONRPCMessage::Response(JSONRPCResponse {
+                        id: request.id,
+                        result: serde_json::json!({
+                            "userAgent": "codex-tui-test",
+                            "codexHome": codex_home,
+                        }),
+                    });
+                    websocket
+                        .send(Message::Text(serde_json::to_string(&response)?.into()))
+                        .await?;
+                }
+                JSONRPCMessage::Request(request) if request.method == "thread/list" => {
+                    let _ = request_tx.send(request.params.unwrap_or_default());
+                    let _ = release_rx.await;
+                    return Ok::<(), color_eyre::Report>(());
+                }
+                _ => {}
+            }
+        }
+        Err(color_eyre::eyre::eyre!(
+            "picker disconnected before requesting its thread list"
+        ))
+    });
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_alt_screen_enabled(/*enabled*/ false);
+    tui.pause_events();
+    let mut picker = Box::pin(app.open_resume_picker(&mut tui, &mut app_server));
+    let params = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
+        tokio::select! {
+            biased;
+            params = request_rx => params.map_err(|_| {
+                color_eyre::eyre::eyre!("picker request recorder closed")
+            }),
+            result = &mut picker => {
+                result?;
+                Err(color_eyre::eyre::eyre!(
+                    "picker exited before requesting its thread list"
+                ))
+            }
+        }
+    })
+    .await??;
+    drop(picker);
+    let _ = release_tx.send(());
+    recorder.await??;
+    app_server.shutdown().await?;
+    active_proxy.await??;
+
+    assert_eq!(
+        params["cwd"],
+        serde_json::Value::String(remote_cwd.display().to_string())
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -1321,9 +1471,14 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
 
 #[tokio::test]
 async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() -> Result<()> {
+    boxed_future!(local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_scenario())
+        .await
+}
+
+async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_scenario()
+-> Result<()> {
     let (mut app, events, _ops) = Box::pin(make_test_app_with_channels()).await;
     // Invalid optional worktree settings must preserve both daemon start paths.
-    app.config.features.enable(Feature::Worktrees)?;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
@@ -1754,7 +1909,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 6);
-    for attempts in starts.chunks_exact(3) {
+    for attempts in starts.as_chunks::<3>().0 {
         assert_eq!(attempts[0]["dynamicTools"][0]["type"], "namespace");
         assert_eq!(attempts[0]["historyMode"], "paginated");
         assert_eq!(attempts[1]["dynamicTools"], serde_json::Value::Null);
@@ -1805,11 +1960,44 @@ async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
 
 #[tokio::test]
 async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace() -> Result<()> {
-    check_dynamic_tool_requests(/*rollout_enabled*/ true).await?;
-    check_dynamic_tool_requests(/*rollout_enabled*/ false).await
+    use HistoryCapabilities::ConfigReadUnsupported;
+    use HistoryCapabilities::Current;
+    use codex_app_server_protocol::AuthMode::ApiKey;
+    use codex_app_server_protocol::AuthMode::Chatgpt;
+
+    for (
+        rollout_enabled,
+        auth_mode,
+        api_key_cyber_access_programs,
+        history_capabilities,
+        expected_program,
+    ) in [
+        (true, Chatgpt, false, Current, Some("daybreakBlue")),
+        (false, Chatgpt, false, Current, None),
+        (true, ApiKey, false, Current, None),
+        (true, ApiKey, true, Current, Some("daybreakBlue")),
+        (true, Chatgpt, false, ConfigReadUnsupported(-32601), None),
+        (true, Chatgpt, false, ConfigReadUnsupported(-32600), None),
+    ] {
+        boxed_future!(check_dynamic_tool_requests(
+            rollout_enabled,
+            auth_mode,
+            api_key_cyber_access_programs,
+            history_capabilities,
+            expected_program,
+        ))
+        .await?;
+    }
+    Ok(())
 }
 
-async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
+async fn check_dynamic_tool_requests(
+    rollout_enabled: bool,
+    auth_mode: codex_app_server_protocol::AuthMode,
+    api_key_cyber_access_programs: bool,
+    history_capabilities: HistoryCapabilities,
+    expected_program: Option<&str>,
+) -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     app.config
         .features
@@ -1817,6 +2005,8 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
     let codex_home = tempdir()?;
     let backend = wiremock::MockServer::start().await;
     let backend_url = format!("{}/backend-api", backend.uri());
+    let api_url = format!("{}/v1", backend.uri());
+    app.config.model_provider.base_url = Some(api_url.clone());
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
     let mut catalog = codex_models_manager::bundled_models_response()?;
@@ -1828,10 +2018,11 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
     }
     let catalog_path = codex_home.path().join("models.json");
     std::fs::write(&catalog_path, serde_json::to_vec(&catalog)?)?;
+    // The server's target-thread config may differ from the launching TUI's defaults.
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
-            "daybreak = true\nmodel_catalog_json = {:?}\nchatgpt_base_url = {backend_url:?}\ncli_auth_credentials_store = \"file\"\n",
+            "daybreak = true\nmodel_catalog_json = {:?}\nchatgpt_base_url = {backend_url:?}\ncli_auth_credentials_store = \"file\"\nopenai_base_url = {api_url:?}\nfeatures.cli_daybreak = {rollout_enabled}\nfeatures.api_key_cyber_access_programs = {api_key_cyber_access_programs}\n",
             catalog_path.display().to_string()
         ),
     )?;
@@ -1846,6 +2037,14 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
         codex_login::AuthCredentialsStoreMode::File,
     )
     .expect("write fixture auth");
+    if auth_mode == codex_app_server_protocol::AuthMode::ApiKey {
+        codex_login::login_with_api_key(
+            codex_home.path(),
+            "test-key",
+            codex_login::AuthCredentialsStoreMode::File,
+            codex_login::AuthKeyringBackendKind::default(),
+        )?;
+    }
     app.config
         .permissions
         .set_permission_profile(PermissionProfile::workspace_write_with(
@@ -1854,10 +2053,13 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
             /*exclude_tmpdir_env_var*/ true,
             /*exclude_slash_tmp*/ true,
         ))?;
-    let (mut app_server, requests, proxy) = start_recording_app_server(
+    let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
         &app.config,
+        history_capabilities,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ Some("Unavailable name"),
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::without_managed_config_for_tests(),
     )
     .await?;
     let thread_id = app_server
@@ -2126,7 +2328,10 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
     );
     assert_eq!(
         recorded_params(&requests, "thread/start").last().unwrap()["daybreakEnabled"],
-        serde_json::json!(rollout_enabled.then_some(true))
+        serde_json::json!(
+            (rollout_enabled && history_capabilities == HistoryCapabilities::Current)
+                .then_some(true)
+        )
     );
     assert_eq!(
         recorded_params(&requests, "thread/start")
@@ -2143,7 +2348,7 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
         .expect("background task turn request");
     assert_eq!(
         turn["cyberAccessProgram"],
-        serde_json::json!(rollout_enabled.then_some("daybreakBlue"))
+        serde_json::json!(expected_program)
     );
     assert_eq!(turn["input"], serde_json::json!([]));
     assert_eq!(
@@ -2228,7 +2433,7 @@ async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {
     let turn = &recorded_params(&requests, "turn/start")[1];
     assert_eq!(
         turn["cyberAccessProgram"],
-        serde_json::json!(rollout_enabled.then_some("daybreakBlue"))
+        serde_json::json!(expected_program)
     );
     assert_eq!(turn["input"], serde_json::json!([]));
     assert_eq!(
@@ -4389,6 +4594,16 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     let source = codex_utils_path_uri::PathUri::from_abs_path(&agents.abs());
     assert!(configured.instruction_source_paths.contains(&source));
     assert_eq!(configured.approvals_reviewer, ApprovalsReviewer::AutoReview);
+    let earlier_skills_requests = recorded_params(&requests, "skills/list");
+    app.submit_active_thread_op(
+        &mut server,
+        AppCommand::list_skills(vec![current.clone()], /*force_reload*/ true),
+    )
+    .await?;
+    assert_eq!(
+        recorded_params(&requests, "skills/list"),
+        earlier_skills_requests
+    );
     let (cwd, result) = (current.clone(), Err("stale skills".into()));
     let skills = AppEvent::SkillsListLoaded { cwd, result };
     let (cwd, plugins) = (current.clone(), Some(vec![]));
@@ -4605,6 +4820,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     Some("Failed Fork"),
                 )
                 .await?;
+                let backend_id = app_server.backend_id();
                 let root = app_server
                     .resume_thread(
                         &app.local_settings,
@@ -4721,6 +4937,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         &mut tui,
                         &mut app_server,
                         crate::resume_picker::SessionTarget {
+                            backend_id,
                             path: Some(root_rollout_path),
                             thread_id: root_thread_id,
                             cwd: None,
@@ -5163,3 +5380,6 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
     }
     Ok(())
 }
+
+#[path = "backend_ownership_tests.rs"]
+mod backend_ownership_tests;

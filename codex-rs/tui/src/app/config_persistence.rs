@@ -271,6 +271,8 @@ impl App {
         mut selection: PermissionProfileSelection,
     ) {
         if self.reject_pending_permission_change() {
+            self.chat_widget
+                .retain_input_after_failed_permission_selection();
             return;
         }
         let Some(thread_id) = self.chat_widget.thread_id() else {
@@ -282,22 +284,21 @@ impl App {
             return;
         };
         let config = self.chat_widget.config_ref();
-        if !self
+        let already_selected = !self
             .agents_overview
             .requested_permission_profiles
             .contains_key(&thread_id)
-            && selection.profile_id.starts_with(':')
             && config
                 .permissions
                 .active_permission_profile()
                 .is_some_and(|profile| profile.id == selection.profile_id)
-            && selection
-                .approval_policy
-                .is_none_or(|policy| config.permissions.approval_policy.value() == policy.to_core())
+            && selection.approval_policy.is_none_or(|policy| {
+                config.permissions.approval_policy.value() == policy.to_core()
+            })
             && selection
                 .approvals_reviewer
-                .is_none_or(|reviewer| config.approvals_reviewer == reviewer)
-        {
+                .is_none_or(|reviewer| config.approvals_reviewer == reviewer);
+        if already_selected && selection.profile_id.starts_with(':') {
             self.agents_overview
                 .selected_permission_profiles
                 .insert(thread_id, selection.profile_id);
@@ -330,9 +331,13 @@ impl App {
                 self.agents_overview
                     .selected_permission_profiles
                     .insert(thread_id, selection.profile_id.clone());
-                self.agents_overview
-                    .requested_permission_profiles
-                    .insert(thread_id, selection.clone());
+                // Custom profiles still go to the server so edited definitions are reloaded.
+                // An unchanged selection may not emit a settings notification.
+                if !already_selected {
+                    self.agents_overview
+                        .requested_permission_profiles
+                        .insert(thread_id, selection.clone());
+                }
                 self.chat_widget.add_info_message(
                     format!(
                         "Permission selection requested: {}",
@@ -411,8 +416,6 @@ impl App {
                 .selected_permission_profiles
                 .get(&thread_id)
                 != Some(&active.id)
-                && self.app_server_target.thread_params_mode()
-                    == crate::app_server_session::ThreadParamsMode::Embedded
                 && self
                     .config
                     .custom_permission_profiles
@@ -474,12 +477,16 @@ impl App {
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All)?;
         self.local_settings = self.local_settings.reloaded(&config);
         self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
-        // Other preferences have runtime caches and are adopted when the widget is replaced.
+        // Copy preferences read directly by the live widget. Other preferences have runtime
+        // caches and are adopted when the widget is replaced.
         self.chat_widget
             .local_settings
             .tui
             .terminal_resize_reflow_max_rows =
             self.local_settings.tui.terminal_resize_reflow_max_rows;
+        self.chat_widget.local_settings.tui.session_picker_view =
+            self.local_settings.tui.session_picker_view;
+        self.chat_widget.local_settings.tui.resume_cwd = self.local_settings.tui.resume_cwd;
         self.config = config;
         self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
@@ -1925,10 +1932,13 @@ enabled = false
     }
 
     #[tokio::test]
-    async fn refresh_in_memory_config_from_disk_updates_resize_reflow_config() -> Result<()> {
+    async fn refresh_in_memory_config_from_disk_updates_live_widget_preferences() -> Result<()> {
         let mut app = make_test_app().await;
         let mut expected_widget_settings = app.chat_widget.local_settings.clone();
         expected_widget_settings.tui.terminal_resize_reflow_max_rows = Some(9000);
+        expected_widget_settings.tui.session_picker_view =
+            Some(codex_config::types::SessionPickerViewMode::Comfortable);
+        expected_widget_settings.tui.resume_cwd = Some(codex_config::types::ResumeCwdMode::Current);
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         std::fs::write(
@@ -1936,6 +1946,8 @@ enabled = false
             r#"
 [tui]
 terminal_resize_reflow_max_rows = 9000
+session_picker_view = "comfortable"
+resume_cwd = "current"
 theme = "dracula"
 "#,
         )?;
@@ -1945,6 +1957,10 @@ theme = "dracula"
         assert_eq!(
             app.local_settings.terminal_resize_reflow().max_rows,
             crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(9000)
+        );
+        assert_eq!(
+            app.local_settings.tui.session_picker_view,
+            Some(codex_config::types::SessionPickerViewMode::Comfortable)
         );
         assert_eq!(app.local_settings.tui.theme.as_deref(), Some("dracula"));
         assert_eq!(app.chat_widget.local_settings, expected_widget_settings);
@@ -2056,6 +2072,10 @@ theme = "dracula"
         assert_eq!(app.local_settings.tui.theme.as_deref(), Some("dracula"));
         assert_eq!(
             app.chat_widget.local_settings.tui.theme.as_deref(),
+            Some("dracula")
+        );
+        assert_eq!(
+            app.chat_widget.config_panel_tui.theme.as_deref(),
             Some("dracula")
         );
     }

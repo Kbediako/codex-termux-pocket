@@ -1,3 +1,7 @@
+mod executor;
+
+pub(crate) use executor::prepare_executor_hook_sources;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,9 +9,6 @@ use std::time::Duration;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
-use codex_connectors::AppToolPolicyEvaluator;
-use codex_connectors::AppToolPolicyInput;
-use codex_core_plugins::executor_plugin_hook_sources;
 use codex_hooks::InterruptRequest;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
@@ -25,10 +26,8 @@ use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
 use codex_hooks::hook_execution_mode_label;
 use codex_hooks::hook_handler_type_label;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
-use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -75,7 +74,7 @@ use crate::turn_metadata::ExecutionMetadata;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<codex_hooks::HookContext>,
 }
 
 pub(crate) enum PreToolUseHookResult {
@@ -327,48 +326,6 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
-fn executor_hook_sources_for_step(step_context: &StepContext) -> Vec<ExecutorPluginHookSource> {
-    step_context
-        .executor_capability_discovery
-        .as_deref()
-        .map(|snapshot| {
-            let config = step_context.mcp.config();
-            let app_tool_policy = AppToolPolicyEvaluator::new(&config.config_layer_stack);
-            executor_plugin_hook_sources(snapshot, &config.plugins, |server, tool| {
-                step_context
-                    .mcp
-                    .tool_info(server, tool)
-                    .filter(|tool_info| {
-                        if server != CODEX_APPS_MCP_SERVER_NAME {
-                            return true;
-                        }
-                        let annotations = tool_info.tool.annotations.as_ref();
-                        app_tool_policy
-                            .policy(AppToolPolicyInput {
-                                connector_id: tool_info.connector_id.as_deref(),
-                                link_id: None,
-                                tool_name: &tool_info.tool.name,
-                                tool_title: tool_info.tool.title.as_deref(),
-                                destructive_hint: annotations
-                                    .and_then(|annotations| annotations.destructive_hint),
-                                open_world_hint: annotations
-                                    .and_then(|annotations| annotations.open_world_hint),
-                            })
-                            .enabled
-                    })
-            })
-            .into_iter()
-            .filter(|source| {
-                !step_context
-                    .turn
-                    .disabled_plugin_ids
-                    .contains(&source.plugin_id.as_key())
-            })
-            .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn build_request_metadata(
     step_context: Option<&StepContext>,
     turn_context: &TurnContext,
@@ -458,7 +415,7 @@ pub(crate) async fn run_turn_stop_hooks(
         last_assistant_message,
         target,
     };
-    let executor_hook_sources = executor_hook_sources_for_step(step_context);
+    let executor_hook_sources = step_context.executor_hook_sources.clone();
     let hooks = sess.hooks().with_executor_hooks(executor_hook_sources);
     emit_hook_started_events(sess, turn_context, hooks.preview_stop(&request)).await;
 
@@ -512,7 +469,7 @@ pub(crate) async fn run_turn_interrupt_hooks(
     let last_known_step_context = turn_state.lock().await.last_known_step_context.clone();
     let executor_hook_sources = last_known_step_context
         .as_deref()
-        .map(executor_hook_sources_for_step)
+        .map(|step| step.executor_hook_sources.clone())
         .unwrap_or_default();
     let has_executor_hooks = !executor_hook_sources.is_empty();
     let hooks = sess.hooks().with_executor_hooks(executor_hook_sources);
@@ -718,7 +675,7 @@ pub(crate) async fn record_pending_input(
     turn_context: &Arc<TurnContext>,
     model_info: &ModelInfo,
     pending_input: TurnInput,
-    additional_contexts: Vec<String>,
+    additional_contexts: Vec<codex_hooks::HookContext>,
     persist_context: PersistContext,
 ) {
     match pending_input {
@@ -790,7 +747,10 @@ pub(crate) async fn drain_async_hook_results(
             .entries
             .iter()
             .filter(|entry| entry.kind == HookOutputEntryKind::Context)
-            .map(|entry| entry.text.clone())
+            .map(|entry| codex_hooks::HookContext {
+                text: entry.text.clone(),
+                metadata: codex_protocol::models::ContentItemMetadata::command_hook(),
+            })
             .collect::<Vec<_>>();
 
         if before_user_prompt {
@@ -849,7 +809,7 @@ impl HookRuntimeOutcome {
 pub(crate) async fn record_additional_contexts(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    additional_contexts: Vec<String>,
+    additional_contexts: Vec<codex_hooks::HookContext>,
 ) {
     let developer_messages = additional_context_messages(additional_contexts);
     if developer_messages.is_empty() {
@@ -864,7 +824,9 @@ pub(crate) async fn record_additional_contexts(
     .await;
 }
 
-fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<ResponseItem> {
+fn additional_context_messages(
+    additional_contexts: Vec<codex_hooks::HookContext>,
+) -> Vec<ResponseItem> {
     additional_contexts
         .into_iter()
         .map(HookAdditionalContext::new)
@@ -989,6 +951,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PreModelRequest => "PreModelRequest",
+        HookEventName::PostModelRequest => "PostModelRequest",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -1067,6 +1031,42 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
     }
 }
 
+pub(crate) fn hooks_for_model_request(
+    session: &Session,
+    step: &StepContext,
+) -> Arc<codex_hooks::Hooks> {
+    let hooks = session.hooks();
+    match step.turn.session_source {
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+        | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => {
+            Arc::new(hooks.for_memory_consolidation(step.executor_hook_sources.clone()))
+        }
+        _ => hooks,
+    }
+}
+
+pub(crate) async fn run_model_request_hooks(
+    session: &Arc<Session>,
+    step: &StepContext,
+    hooks: &codex_hooks::Hooks,
+    event: codex_hooks::ModelRequestHookEvent,
+) {
+    let subagent = thread_spawn_subagent_hook_context(session, &step.turn);
+    let request = codex_hooks::ModelRequestHookInput {
+        session_id: session.session_id().to_string(),
+        turn_id: step.turn.sub_id.clone(),
+        cwd: tool_hook_cwd(&step.environments, &step.turn),
+        transcript_path: session.hook_transcript_path().await,
+        model: step.settings.model_info.slug.clone(),
+        event,
+        agent_id: subagent.as_ref().map(|context| context.agent_id.clone()),
+        agent_type: subagent.map(|context| context.agent_type),
+    };
+    emit_hook_started_events(session, &step.turn, hooks.preview_model_request(&request)).await;
+    let events = hooks.run_model_request(request).await;
+    emit_hook_completed_events(session, &step.turn, events).await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1104,8 +1104,8 @@ mod tests {
     #[test]
     fn additional_context_messages_stay_separate_and_ordered() {
         let messages = additional_context_messages(vec![
-            "first tide note".to_string(),
-            "second tide note".to_string(),
+            codex_hooks::HookContext::harness("first tide note".to_string()),
+            codex_hooks::HookContext::harness("second tide note".to_string()),
         ]);
 
         assert_eq!(messages.len(), 2);

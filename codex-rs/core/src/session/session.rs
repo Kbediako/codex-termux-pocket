@@ -61,6 +61,9 @@ pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
+    /// Installed by Guardian before its first review; forwards items and cancellation without
+    /// transferring ownership of the private session's event receiver.
+    pub(crate) parent_observer_event_tx: OnceLock<Sender<Event>>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
     pub(super) state: Mutex<SessionState>,
     /// Orders accepted settings commits and their persisted events with compaction checkpoints.
@@ -163,7 +166,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) thread_source: Option<ThreadSource>,
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub(super) originator: String,
-    pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    /// Fixed at thread startup and shared with turn snapshots.
+    pub(super) dynamic_tools: Arc<[DynamicToolSpec]>,
     pub(super) user_shell_override: Option<shell::Shell>,
 }
 
@@ -646,11 +650,13 @@ async fn warm_plugins_and_skills_for_session_init(
         return Vec::new();
     }
 
-    let fs = turn_environments.primary_filesystem();
     let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-    let plugin_skill_snapshots = plugins_manager.plugin_skill_snapshots_for_config(&plugins_input);
-    let skills_input = skills_load_input_from_config(config.as_ref(), effective_skill_roots)
-        .with_plugin_skill_snapshots(plugin_skill_snapshots);
+    let (skills_input, fs) = crate::skills::skills_load_input_for_environments(
+        &config,
+        &plugins_manager,
+        effective_skill_roots,
+        turn_environments,
+    );
     skills_service
         .snapshot_for_config(&skills_input, fs)
         .await
@@ -660,6 +666,25 @@ async fn warm_plugins_and_skills_for_session_init(
 }
 
 impl Session {
+    pub(super) async fn effective_thread_config_snapshot(
+        &self,
+        configuration: &SessionConfiguration,
+        environments: Vec<TurnEnvironmentSelection>,
+    ) -> ThreadConfigSnapshot {
+        let mut snapshot = configuration.thread_config_snapshot(environments);
+        let model_info = Box::pin(configuration.step_settings.resolve_model_info(
+            self.services.models_manager.as_ref(),
+            &configuration.model_info_overrides,
+        ))
+        .await;
+        snapshot.service_tier = get_service_tier(
+            snapshot.service_tier.take(),
+            &configuration.original_config_do_not_use.features,
+            &model_info,
+        );
+        snapshot
+    }
+
     /// Returns the concrete identity for this thread.
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
@@ -676,8 +701,11 @@ impl Session {
     }
 
     pub(crate) async fn dynamic_tools(&self) -> Vec<DynamicToolSpec> {
-        let state = self.state.lock().await;
-        state.session_configuration.dynamic_tools.clone()
+        let dynamic_tools = {
+            let state = self.state.lock().await;
+            Arc::clone(&state.session_configuration.dynamic_tools)
+        };
+        dynamic_tools.to_vec()
     }
 
     pub(crate) async fn responses_metadata(
@@ -692,6 +720,7 @@ impl Session {
             request_kind,
         );
         ExecutionMetadata::from_settings(&step_context.settings).apply_to(&mut responses_metadata);
+        responses_metadata.guardian_recorded_items = self.parent_observer_event_tx.get().is_some();
         responses_metadata.tool_namespaces_info = if step_context
             .turn
             .config
@@ -719,7 +748,19 @@ impl Session {
         turn_context: &TurnContext,
         compaction_metadata: CompactionTurnMetadata,
     ) -> CodexResponsesMetadata {
-        let (window_id, window_number, context_window_id) = self.current_window().await;
+        self.compaction_responses_metadata_for_window(
+            turn_context,
+            compaction_metadata,
+            self.current_window().await,
+        )
+    }
+
+    pub(crate) fn compaction_responses_metadata_for_window(
+        &self,
+        turn_context: &TurnContext,
+        compaction_metadata: CompactionTurnMetadata,
+        (window_id, window_number, context_window_id): (String, u64, uuid::Uuid),
+    ) -> CodexResponsesMetadata {
         let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
             self.installation_id.clone(),
             window_id,
@@ -764,6 +805,7 @@ impl Session {
     pub(crate) async fn new(
         startup: Option<Arc<super::startup::SessionStartup>>,
         mut session_configuration: SessionConfiguration,
+        prompt_cache_key: PromptCacheKey,
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
         mut instructions: SessionInstructions,
@@ -793,6 +835,7 @@ impl Session {
         analytics_events_client: Option<AnalyticsEventsClient>,
         image_store: Arc<dyn AttachmentStore>,
         thread_store: Arc<dyn ThreadStore>,
+        resume_preparation: Option<ThreadStoreResumePreparation>,
         parent_rollout_thread_trace: ThreadTraceContext,
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         external_time_provider: Option<Arc<dyn TimeProvider>>,
@@ -1051,7 +1094,7 @@ impl Session {
                                 text: session_configuration.base_instructions.clone(),
                                 provenance: base_instructions_provenance.clone(),
                             },
-                            dynamic_tools: session_configuration.dynamic_tools.clone(),
+                            dynamic_tools: session_configuration.dynamic_tools.to_vec(),
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
                             history_mode: session_configuration.history_mode,
@@ -1116,8 +1159,13 @@ impl Session {
                         let (context_tx, context_rx) = tokio::sync::oneshot::channel();
                         let live_thread = guard
                             .acquire(async move {
-                                let (live_thread, history) =
-                                    LiveThread::resume(store, history_mode, params).await?;
+                                let (live_thread, history) = LiveThread::resume(
+                                    store,
+                                    history_mode,
+                                    params,
+                                    resume_preparation,
+                                )
+                                .await?;
                                 // Cancellation still leaves the writer with the acquisition guard.
                                 let _ = context_tx.send(history);
                                 Ok(live_thread)
@@ -1161,11 +1209,6 @@ impl Session {
         let mcp_originator = session_configuration.originator.clone();
         let mcp_session_source = session_configuration.session_source.clone();
         let mcp_disabled_plugin_ids = session_configuration.disabled_plugin_ids.clone();
-        let mcp_runtime_cwd = environment_selections
-            .first()
-            .and_then(|environment| environment.cwd.to_abs_path().ok())
-            .map(|cwd| cwd.to_path_buf())
-            .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
         let auth_and_mcp_fut = async move {
             let auth = mcp_auth.await;
             if config_for_mcp.features.plugin_recommendations_enabled() {
@@ -1196,6 +1239,7 @@ impl Session {
                     },
                     /*ready_selected_capability_roots*/ &[],
                     /*executor_capability_discovery*/ None,
+                    /*executor_capability_discovery_v2*/ None,
                 )
                 .await;
             (auth, mcp_projection)
@@ -1463,18 +1507,20 @@ impl Session {
                 inherited_environments.clone(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
+            turn_environments.update_configured_selections(environment_selections);
             turn_environments.update_selections(environment_selections);
             session_configuration.environments = turn_environments.selections();
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(instructions));
-            let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
+            // Keep discovery's future out of the large embedded startup/resume frame.
+            let plugin_skill_warmup = Box::pin(warm_plugins_and_skills_for_session_init(
                 Arc::clone(&config),
                 Arc::clone(&plugins_manager),
                 Arc::clone(&skills_service),
                 &resolved_environments,
                 extensions.as_ref(),
                 &session_configuration.session_source,
-            )
+            ))
             .instrument(info_span!(
                 "session_init.plugin_skill_warmup",
                 otel.name = "session_init.plugin_skill_warmup",
@@ -1776,6 +1822,7 @@ impl Session {
                     config
                         .features
                         .enabled(Feature::ConcurrentReasoningSummaries),
+                    config.features.enabled(Feature::OutputTokenReplay),
                     attestation_provider,
                     config.http_client_factory(),
                     workspace_routing.as_ref().clone(),
@@ -1787,6 +1834,7 @@ impl Session {
                     InitialHistory::Resumed(_) | InitialHistory::Forked(_)
                 ))
                 .with_session_context(
+                    prompt_cache_key,
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
                         session_configuration.parent_thread_id,
@@ -1811,6 +1859,7 @@ impl Session {
                 thread_id,
                 installation_id,
                 tx_event: tx_event.clone(),
+                parent_observer_event_tx: OnceLock::new(),
                 agent_status,
                 state: Mutex::new(state),
                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
@@ -1854,8 +1903,12 @@ impl Session {
                 *guard = Arc::downgrade(&sess);
             }
             // Dispatch the SessionConfiguredEvent first and then report any errors.
-            let thread_config =
-                session_configuration.thread_config_snapshot(turn_environments.selections());
+            let thread_config = sess
+                .effective_thread_config_snapshot(
+                    &session_configuration,
+                    turn_environments.selections(),
+                )
+                .await;
             let events = std::iter::once(Event {
                 id: INITIAL_SUBMIT_ID.to_owned(),
                 msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
@@ -1918,18 +1971,19 @@ impl Session {
                         },
                         /*ready_selected_capability_roots*/ &[],
                         /*executor_capability_discovery*/ None,
+                        /*executor_capability_discovery_v2*/ None,
                     )
                     .await
             } else {
                 mcp_projection
             };
-            sess.install_initial_mcp_runtime(
+            // Keep MCP startup's large future out of the surrounding session initialization frame.
+            Box::pin(sess.install_initial_mcp_runtime(
                 &session_configuration,
                 latest_auth,
                 mcp_projection,
                 &resolved_environments,
-                mcp_runtime_cwd,
-            )
+            ))
             .await?;
             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
             sess.follow_inherited_environment_configurations(

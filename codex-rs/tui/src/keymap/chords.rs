@@ -33,6 +33,8 @@ pub(crate) const KEY_CHORD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 const FIRST_DISPATCH_FUNCTION_KEY: u8 = codex_config::types::MAX_FUNCTION_KEY + 1;
 const LAST_DISPATCH_FUNCTION_KEY: u8 = u8::MAX;
 const MAX_LEADER_CHORD_BINDINGS: usize = 1024;
+
+pub(super) mod quick_dial_defaults;
 const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
     ("cancel", ctrl(KeyCode::Char('c'))),
     ("resume_picker.toggle_transcript", ctrl(KeyCode::Char('t'))),
@@ -140,6 +142,11 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if action.context == KeymapContext::Chat && action.action == "open_presets" {
+            return self.contains(KeymapContext::Chat)
+                && self.contains(KeymapContext::Global)
+                && !self.contains(KeymapContext::List);
+        }
         if action.context == KeymapContext::Chat && action.action == "toggle_voice" {
             return self.0 & VOICE_TOGGLE_BLOCKED == 0
                 && (self.0 & VOICE_TOGGLE != 0 || self.contains(KeymapContext::Chat));
@@ -199,7 +206,7 @@ pub(crate) struct KeyChord {
 pub(crate) struct RuntimeChordBinding {
     pub(crate) action: KeymapActionId,
     pub(crate) chord: KeyChord,
-    spec: String,
+    pub(crate) spec: String,
 }
 
 impl RuntimeChordBinding {
@@ -325,11 +332,10 @@ or a two-stroke chord such as `ctrl-x ctrl-t`.",
             });
         }
         super::leader::resolve(keymap, &mut keymap_chords)?;
-        if leader_bindings
+        let explicit_count = leader_bindings
             .len()
-            .saturating_mul(keymap_chords.leader.len())
-            > MAX_LEADER_CHORD_BINDINGS
-        {
+            .saturating_mul(keymap_chords.leader.len());
+        if explicit_count > MAX_LEADER_CHORD_BINDINGS {
             return Err(format!(
                 "Too many leader shortcut combinations (maximum {MAX_LEADER_CHORD_BINDINGS}). \
 Reduce `tui.keymap.global.leader` alternatives or `leader ...` bindings."
@@ -394,23 +400,29 @@ Reduce `tui.keymap.global.leader` alternatives or `leader ...` bindings."
         action: KeymapActionId,
         bindings: &[KeyBinding],
     ) -> Option<crate::key_hint::ShortcutHint> {
-        if let Some(spec) = self.configured_specs(action).and_then(|specs| {
-            specs
-                .iter()
-                .find(|spec| !spec.starts_with("leader ") || !self.leader.is_empty())
+        if let Some(hint) = self.configured_specs(action).and_then(|specs| {
+            specs.iter().find_map(|spec| {
+                if let Some((prefix, completion)) = spec.split_once(' ') {
+                    Some(crate::key_hint::ShortcutHint::Chord {
+                        prefix: if prefix == "leader" {
+                            *self.leader.first()?
+                        } else {
+                            parse_keybinding(prefix)?
+                        },
+                        completion: parse_keybinding(completion)?,
+                    })
+                } else {
+                    parse_keybinding(spec)
+                        .filter(|configured| {
+                            bindings.iter().any(|binding| {
+                                binding.normalized_parts() == configured.normalized_parts()
+                            })
+                        })
+                        .map(crate::key_hint::ShortcutHint::Single)
+                }
+            })
         }) {
-            return if let Some((prefix, completion)) = spec.split_once(' ') {
-                Some(crate::key_hint::ShortcutHint::Chord {
-                    prefix: if prefix == "leader" {
-                        *self.leader.first()?
-                    } else {
-                        parse_keybinding(prefix)?
-                    },
-                    completion: parse_keybinding(completion)?,
-                })
-            } else {
-                parse_keybinding(spec).map(crate::key_hint::ShortcutHint::Single)
-            };
+            return Some(hint);
         }
 
         super::primary_binding(bindings)
@@ -480,6 +492,7 @@ impl KeyChordMatcher {
             .take(/*n*/ 6)
         {
             let label = match binding.action.action {
+                "open_presets" if pending.started_at.is_none() => "presets",
                 "focus_activity" => "activity",
                 "find_transcript" => "find",
                 "open_warnings" => "warnings",
@@ -763,13 +776,13 @@ Windows. Choose a different chord and retry.",
     }
 
     if matches!(prefix_key, KeyCode::Char(_))
-        && !crate::key_hint::has_ctrl_or_alt(prefix_modifiers)
+        && crate::key_hint::is_plain_text_key_event(KeyEvent::new(prefix_key, prefix_modifiers))
         && !binding.action.context.allows_plain_chord_prefix()
         && binding.action.context != KeymapContext::Agents
     {
         return Err(format!(
             "Invalid `{path}` = `{}`: a chord prefix outside Vim or the command center must use ctrl, \
-alt, or a non-character key so ordinary text input is not intercepted.",
+alt, super, or a non-character key so ordinary text input is not intercepted.",
             binding.spec
         ));
     }

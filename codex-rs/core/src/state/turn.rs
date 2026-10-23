@@ -29,6 +29,9 @@ use codex_protocol::protocol::TokenUsage;
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
     pub(crate) task: Option<RunningTask>,
+    /// Present when input admission is closed; cancelled when the final batch is recorded.
+    /// Reservations that have not started still accept inputs.
+    pub(crate) finishing: Option<CancellationToken>,
     pub(crate) turn_state: Arc<Mutex<TurnState>>,
 }
 
@@ -37,9 +40,8 @@ pub(crate) struct ActiveTurn {
 /// State machine:
 /// - A turn starts in `CurrentTurn`, so queued child mail can join the next
 ///   model request for that turn.
-/// - After user-visible terminal output is recorded, we switch to `NextTurn`
-///   to leave late child mail queued instead of extending an already shown
-///   answer.
+/// - After a terminal answer is recorded, even an empty one, we switch to
+///   `NextTurn` to leave late child mail queued instead of extending the answer.
 /// - If the same task later gets explicit same-turn work again (a steered user
 ///   prompt or a tool call after an untagged preamble), we reopen `CurrentTurn`
 ///   so that pending child mail is drained into that follow-up request.
@@ -48,7 +50,7 @@ pub(crate) enum MailboxDeliveryPhase {
     /// Incoming mailbox messages can still be consumed by the current turn.
     #[default]
     CurrentTurn,
-    /// The current turn already emitted visible final answer text; mailbox
+    /// The current turn already emitted a terminal answer; mailbox
     /// messages should remain queued for a later turn.
     NextTurn,
 }
@@ -57,6 +59,7 @@ impl Default for ActiveTurn {
     fn default() -> Self {
         Self {
             task: None,
+            finishing: None,
             turn_state: Arc::new(Mutex::new(TurnState::default())),
         }
     }

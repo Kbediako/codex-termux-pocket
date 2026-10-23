@@ -133,9 +133,6 @@ impl ChatWidget {
             self.refresh_effective_service_tier();
             self.sync_service_tier_commands();
         }
-        if feature == Feature::Worktrees {
-            self.sync_worktrees_enabled();
-        }
         if feature == Feature::Plugins {
             self.sync_plugins_command_enabled();
             self.refresh_plugin_mentions();
@@ -149,21 +146,6 @@ impl ChatWidget {
                 self.turn_lifecycle.budget_limited_turn_ids.clear();
                 self.update_collaboration_mode_indicator();
             }
-        }
-        if feature == Feature::RealtimeConversation && !enabled {
-            self.realtime_conversation_available_for_thread = false;
-            self.bottom_pane
-                .set_voice_command_enabled(/*enabled*/ false);
-            self.stop_realtime_conversation();
-        }
-        if feature == Feature::RealtimeConversation
-            && enabled
-            && !self.realtime_conversation_available_for_thread
-        {
-            self.add_info_message(
-                "Voice conversations will be available in new threads.".into(),
-                /*hint*/ None,
-            );
         }
         if feature == Feature::MentionsV2 {
             self.sync_mentions_v2_enabled();
@@ -260,6 +242,8 @@ impl ChatWidget {
         // Account-update notifications are the identity boundary. The visible account fields can
         // be identical across two accounts, so always invalidate account-scoped requests and data.
         self.model_popup_request_id = None;
+        let api_key_changed = self.status_account_display == Some(StatusAccountDisplay::ApiKey)
+            || status_account_display == Some(StatusAccountDisplay::ApiKey);
         self.invalidate_permission_discovery();
         self.permission_discovery = None;
         self.invalidate_connector_scope();
@@ -292,6 +276,9 @@ impl ChatWidget {
         self.status_account_display = status_account_display;
         self.plan_type = plan_type;
         self.has_chatgpt_account = has_chatgpt_account;
+        if api_key_changed {
+            self.refresh_account_scoped_models();
+        }
         self.set_daybreak_enabled(self.daybreak_enabled);
         self.has_codex_backend_auth = has_codex_backend_auth;
         self.bottom_pane
@@ -304,6 +291,7 @@ impl ChatWidget {
 
     /// Set the syntax theme override in the widget's config copy.
     pub(crate) fn set_tui_theme(&mut self, theme: Option<String>) {
+        self.config_panel_tui.theme.clone_from(&theme);
         self.local_settings.tui.theme = theme;
     }
 
@@ -347,9 +335,8 @@ impl ChatWidget {
     }
 
     pub(super) fn sync_worktrees_enabled(&mut self) {
-        self.bottom_pane.set_worktrees_enabled(
-            self.config.features.enabled(Feature::Worktrees) && self.local_worktree_operations,
-        );
+        self.bottom_pane
+            .set_worktrees_enabled(self.local_worktree_operations);
     }
 
     pub(super) fn sync_plugins_command_enabled(&mut self) {

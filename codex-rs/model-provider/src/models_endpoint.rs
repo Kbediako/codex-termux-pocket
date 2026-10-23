@@ -134,7 +134,8 @@ impl OpenAiModelsEndpoint {
             .map_err(map_api_error)?,
             None => ModelsClient::<ReqwestTransport>::request_url(&api_provider, client_version),
         };
-        let auth_telemetry = auth_header_telemetry(api_auth.as_ref());
+        let auth_telemetry = auth_header_telemetry(api_auth.as_ref())
+            .map_err(|error| map_api_error(error.into()))?;
         let agent_identity_telemetry = if let Some(CodexAuth::AgentIdentity(auth)) = auth.as_ref() {
             Some(agent_identity_telemetry(auth))
         } else {
@@ -762,6 +763,12 @@ mod tests {
         let bundled = codex_models_manager::bundled_models_response().unwrap();
         assert_eq!(manager.get_remote_models().await, bundled.models);
         assert_eq!(manager.try_get_remote_models().unwrap(), bundled.models);
+        assert_eq!(
+            manager
+                .get_model_info(&model.slug, &Default::default())
+                .await,
+            model_info_from_slug(&model.slug)
+        );
         assert_eq!(
             manager
                 .raw_model_catalog(
