@@ -295,6 +295,21 @@ for _ in \$(seq 1 60); do
 done
 test -s "\${HOME}/daemon-start.json"
 CODEX_HOME="\${daemon_home}" codex app-server daemon version >"\${HOME}/daemon-version.json"
+node - "\${daemon_home}" >"\${HOME}/daemon-socket-path.json" <<'EOF_SOCKET'
+const fs = require("fs");
+const path = require("path");
+const socket = fs.realpathSync(path.join(process.argv[2], "app-server-control/app-server-control.sock"));
+const expected = path.join(fs.realpathSync("/data/data/com.termux/files"), ".codex-d");
+const directory = path.dirname(socket);
+const metadata = fs.statSync(directory);
+if (directory !== expected || Buffer.byteLength(socket) > 107 || metadata.uid !== process.getuid() || (metadata.mode & 0o777) !== 0o700) {
+  throw new Error("daemon socket is outside its protected Termux directory: " + socket);
+}
+let systemTmp;
+try { systemTmp = fs.realpathSync("/tmp"); } catch (error) { systemTmp = error.code; }
+console.log(JSON.stringify({ socket, directory, uid: metadata.uid, mode: metadata.mode & 0o777, systemTmp }));
+EOF_SOCKET
+cat "\${HOME}/daemon-socket-path.json"
 CODEX_HOME="\${daemon_home}" codex app-server daemon stop >"\${HOME}/daemon-stop.json"
 wait "\${daemon_start_pid}"
 node - "\${HOME}/daemon-version.json" "\${EXPECTED_PACKAGE_VERSION}" <<'EOF_DAEMON'
@@ -423,6 +438,7 @@ for file in \
   codex-app-server.log \
   daemon-start.json \
   daemon-version.json \
+  daemon-socket-path.json \
   daemon-stop.json \
   sandbox-read-only.log \
   sandbox-workspace-write.log \

@@ -127,6 +127,10 @@ executes the ripgrep installed by the Termux bootstrap. The Android surrogate's
 descriptor names its actual x64 build target so it exercises the same platform
 validation. Release acceptance rejects a display banner or source hash in the
 descriptor and rejects a missing required ripgrep entrypoint.
+On Termux, listeners and sandbox masking share the fixed app-private
+`/data/data/com.termux/files/.codex-d` root instead of Android's unusable `/tmp`.
+This short root leaves room for the full socket hash. The native gate verifies
+the running socket's canonical directory, path length, ownership and private mode.
 
 `.github/scripts/validate-termux-workflow-topology.py` enforces this exact
 inventory, rejects issue-triggered or temporary maintenance jobs and scripts,

@@ -11,6 +11,15 @@ use std::path::PathBuf;
 
 /// Returns the fixed executor-local directory that every sandbox must hide.
 pub fn shared_daemon_socket_directory() -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        // Keep the fixed app-private root short enough for a full socket hash,
+        // and independent of caller environment so sandbox masking agrees.
+        let termux_files = std::path::Path::new("/data/data/com.termux/files");
+        if termux_files.is_dir() {
+            return Ok(fs::canonicalize(termux_files)?.join(".codex-d"));
+        }
+    }
     // Resolve the system alias /tmp -> /private/tmp on macOS.
     let temporary_root = fs::canonicalize("/tmp")?;
     let uid = unsafe { libc::geteuid() };
