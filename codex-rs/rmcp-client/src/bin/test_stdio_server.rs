@@ -28,7 +28,7 @@ use rmcp::model::Resource;
 use rmcp::model::ResourceContents;
 use rmcp::model::ResourceTemplate;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
 use serde::Deserialize;
@@ -43,11 +43,13 @@ struct TestToolServer {
     resources: Arc<Vec<Resource>>,
     resource_templates: Arc<Vec<ResourceTemplate>>,
     supports_openai_form_elicitation: Arc<AtomicBool>,
+    tools_discovered: Arc<AtomicBool>,
+    invalidated_listing: Arc<AtomicBool>,
 }
 
 const MEMO_URI: &str = "memo://codex/example-note";
 const MEMO_CONTENT: &str = "This is a sample MCP resource served by the rmcp test server.";
-const SANDBOX_STATE_META_CAPABILITY: &str = "codex/sandbox-state-meta";
+const SANDBOX_STATE_CAPABILITY: &str = "codex/sandbox-state";
 const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
 const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
@@ -181,6 +183,8 @@ impl TestToolServer {
             resources: Arc::new(resources),
             resource_templates: Arc::new(resource_templates),
             supports_openai_form_elicitation: Arc::new(AtomicBool::new(false)),
+            tools_discovered: Arc::default(),
+            invalidated_listing: Arc::default(),
         }
     }
 
@@ -527,18 +531,18 @@ impl ServerHandler for TestToolServer {
         Ok(self.get_info())
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_tool_list_changed()
             .enable_resources()
             .build();
         capabilities.experimental = Some(BTreeMap::from([(
-            SANDBOX_STATE_META_CAPABILITY.to_string(),
+            SANDBOX_STATE_CAPABILITY.to_string(),
             JsonObject::new(),
         )]));
 
-        let server_info = ServerInfo::new(capabilities);
+        let server_info = ServerConfig::new(capabilities);
         let server_info = match dynamic_server_process_label() {
             Some(process_label) => server_info
                 .with_server_info(
@@ -559,7 +563,7 @@ impl ServerHandler for TestToolServer {
     fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tools = self.tools.clone();
         async move {
@@ -571,6 +575,49 @@ impl ServerHandler for TestToolServer {
                 cwd.meta
                     .get_or_insert_with(MetaObject::new)
                     .insert("ui".to_string(), json!({ "visibility": ["app"] }));
+            }
+            if std::env::var_os("MCP_TEST_DISCOVER_TOOLS").is_some() {
+                tools.retain(|tool| tool.name == "echo");
+                let mut search = tools[0].clone();
+                search.name = Cow::Borrowed("search_tools");
+                search.description = Some(Cow::Borrowed("Discover the echo tool."));
+                let discovered = self.tools_discovered.load(Ordering::Acquire);
+                if !discovered {
+                    tools.clear();
+                }
+                let invalidation = std::env::var("MCP_TEST_INVALIDATE_LISTING");
+                let cursor = request.as_ref().and_then(|request| request.cursor.as_ref());
+                if invalidation.as_deref() == Ok("pagination")
+                    && discovered
+                    && !self.invalidated_listing.load(Ordering::Acquire)
+                    && cursor.is_none()
+                {
+                    return Ok(ListToolsResult {
+                        tools: vec![search],
+                        next_cursor: Some("stale".to_string()),
+                        ..Default::default()
+                    });
+                }
+                let invalidate = match invalidation.as_deref() {
+                    Ok("startup") => !discovered,
+                    Ok("discovery") => discovered,
+                    Ok("pagination") => discovered && cursor.is_some(),
+                    _ => false,
+                };
+                if invalidate && !self.invalidated_listing.swap(true, Ordering::AcqRel) {
+                    self.tools_discovered.store(true, Ordering::Release);
+                    // Invalidate an incomplete listing before returning its response.
+                    tools.clear();
+                    context
+                        .peer
+                        .notify_tool_list_changed()
+                        .await
+                        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                    if invalidation.as_deref() == Ok("pagination") {
+                        return Err(McpError::invalid_params("expired tool-list cursor", None));
+                    }
+                }
+                tools.insert(0, search);
             }
             let mut result = ListToolsResult::with_all_items(tools);
             match (
@@ -642,6 +689,14 @@ impl ServerHandler for TestToolServer {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         match request.name.as_ref() {
+            "search_tools" if std::env::var_os("MCP_TEST_DISCOVER_TOOLS").is_some() => {
+                self.tools_discovered.store(true, Ordering::Release);
+                context.peer.notify_tool_list_changed().await
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                Ok(Self::structured_result(json!({
+                    "tools": self.tools.iter().filter(|tool| tool.name == "echo").collect::<Vec<_>>()
+                })))
+            }
             "js" => {
                 let args = Self::parse_call_args::<JsArgs>(&request, "js")?;
                 if args.code == "nodeRepl.fail()" {

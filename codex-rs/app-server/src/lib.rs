@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -53,6 +54,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
+use codex_app_server_transport::WebSocketCompression;
 use codex_app_server_transport::daemon_recovery_file_path;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
@@ -83,7 +85,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
 
-const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
+const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database";
 
 fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool {
     err.get_ref().is_some_and(
@@ -103,6 +105,10 @@ mod code_mode_host;
 mod codex_home_metrics;
 mod command_exec;
 mod config_layer;
+mod startup_config;
+pub use startup_config::StartupConfigArgs;
+pub use startup_config::print_startup_config;
+
 mod config_manager;
 mod config_manager_service;
 mod connection_cleanup;
@@ -122,6 +128,8 @@ mod gateway_oauth_notifications;
 mod image_url;
 pub mod in_process;
 mod log_write_warning;
+#[cfg(unix)]
+mod managed_daemon;
 mod mcp_refresh;
 mod message_processor;
 mod model_catalog;
@@ -135,6 +143,7 @@ mod request_processors;
 mod request_serialization;
 mod server_request_error;
 mod skills_watcher;
+mod thread_sample;
 mod thread_state;
 mod thread_status;
 mod transport;
@@ -151,6 +160,7 @@ pub use crate::transport::AppServerTransport;
 pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
 pub use crate::transport::take_remote_control_disabled_env;
+pub use crate::transport::verified_local_daemon_socket;
 
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
 const OTEL_SERVICE_NAME: &str = "codex-app-server";
@@ -471,6 +481,8 @@ pub enum PluginStartupTasks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
+    /// Optional host-owned frozen cloud skill catalog and resources, loaded once at startup.
+    pub cloud_skills_snapshot: Option<std::path::PathBuf>,
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
@@ -481,6 +493,7 @@ pub struct AppServerRuntimeOptions {
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
+            cloud_skills_snapshot: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
@@ -502,8 +515,24 @@ pub async fn run_main_with_transport_options(
     auth: WebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<AppServerExit> {
+    let cloud_skill_provider = match runtime_options.cloud_skills_snapshot {
+        Some(path) => {
+            let provider = tokio::task::spawn_blocking(move || {
+                codex_skills_extension::FrozenCloudSkillProvider::from_file(&path)
+            })
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;
+            Some(Arc::new(provider) as Arc<dyn codex_skills_extension::SkillProvider>)
+        }
+        None => None,
+    };
     #[cfg(target_os = "windows")]
     let _registered_core = codex_windows_sandbox::registered_core_requested();
+    let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
+        && runtime_options.managed_daemon;
+    #[cfg(unix)]
+    let nofile_limit_result = managed_daemon.then(managed_daemon::raise_nofile_limit);
     let loader_overrides = loader_overrides_with_test_user_config_file(
         loader_overrides,
         test_user_config_file_from_env(),
@@ -523,6 +552,7 @@ pub async fn run_main_with_transport_options(
         )
     })?;
     let codex_home = find_codex_home()?;
+    let startup_cwd = std::env::current_dir().ok();
     let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
@@ -537,24 +567,12 @@ pub async fn run_main_with_transport_options(
         arg0_paths.clone(),
         Arc::new(NoopThreadConfigLoader),
     );
-    let bootstrap_config = config_manager
-        .load_startup_config(/*fallback_cwd*/ None)
+    let startup = config_manager
+        .load_cloud_startup_config(startup_cwd.clone())
         .await?;
-    let bootstrap_auth =
-        AuthManager::shared_from_config(&bootstrap_config, /*enable_codex_api_key_env*/ false)
-            .await
-            .map_err(std::io::Error::other)?;
-    config_manager.replace_cloud_config_bundle_loader(
-        bootstrap_auth,
-        bootstrap_config.chatgpt_base_url.clone(),
-        bootstrap_config.http_client_factory(),
-    );
     let mut config_warnings = Vec::new();
     let mut plugin_startup_config = PluginStartupConfig::Current;
-    let config = match config_manager
-        .load_latest_config(/*fallback_cwd*/ None)
-        .await
-    {
+    let config = match startup.config {
         Ok(config) => config,
         Err(err) if is_unsupported_untrusted_approval_policy_error(&err) => {
             return Err(err);
@@ -575,6 +593,7 @@ pub async fn run_main_with_transport_options(
             })?
         }
     };
+    config.validate_windows_mxc_requirement()?;
     config.auth_config().validate()?;
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
@@ -686,9 +705,10 @@ pub async fn run_main_with_transport_options(
             range: None,
         });
     }
-    if let Some(warning) =
-        codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
-    {
+    if let Some(warning) = codex_core::config::system_bwrap_warning(
+        &config.permissions.effective_permission_profile(),
+        &config.cwd,
+    ) {
         config_warnings.push(ConfigWarningNotification {
             summary: warning,
             details: None,
@@ -714,12 +734,12 @@ pub async fn run_main_with_transport_options(
     let stderr_fmt: StderrLogLayer = match log_format_from_env() {
         LogFormat::Json => tracing_subscriber::fmt::layer()
             .json()
-            .with_writer(std::io::stderr)
+            .with_writer(codex_app_server_daemon::stderr_writer)
             .with_span_events(stderr_span_events())
             .with_filter(EnvFilter::from_default_env())
             .boxed(),
         LogFormat::Default => tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
+            .with_writer(codex_app_server_daemon::stderr_writer)
             .with_span_events(stderr_span_events())
             .with_filter(EnvFilter::from_default_env())
             .boxed(),
@@ -746,6 +766,10 @@ pub async fn run_main_with_transport_options(
         .with(log_db_layer)
         .with(otel_layers)
         .try_init();
+    #[cfg(unix)]
+    if let Some(Err(err)) = nofile_limit_result {
+        warn!(%err, "failed to raise managed app-server file descriptor limit");
+    }
     for warning in &config_warnings {
         match &warning.details {
             Some(details) => error!("{} {}", warning.summary, details),
@@ -780,11 +804,17 @@ pub async fn run_main_with_transport_options(
     let remote_control_shutdown_token = transport_shutdown_token.child_token();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
+    let websocket_compression = if config
+        .features
+        .enabled(Feature::AppServerWebSocketCompression)
+    {
+        WebSocketCompression::Zstd
+    } else {
+        WebSocketCompression::Plain
+    };
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let graceful_signal_restart_enabled =
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
-    let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
-        && runtime_options.managed_daemon;
     let mut app_server_client_name_rx = None;
 
     match &transport {
@@ -812,6 +842,7 @@ pub async fn run_main_with_transport_options(
                 } else {
                     DaemonShutdownAccess::Disabled
                 },
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);
@@ -822,6 +853,7 @@ pub async fn run_main_with_transport_options(
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
                 policy_from_settings(&auth)?,
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);
@@ -965,15 +997,23 @@ pub async fn run_main_with_transport_options(
     });
 
     let recovery_file = daemon_recovery_file_path(&config.codex_home);
+    let daemon_settings_file = managed_daemon.then(|| {
+        config
+            .codex_home
+            .as_path()
+            .join("app-server-daemon/settings.json")
+    });
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
-        let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        let mut processor = MessageProcessor::new(MessageProcessorArgs {
+            cloud_skill_provider,
             outgoing: outgoing_message_sender,
             analytics_events_client,
             arg0_paths,
             config: Arc::new(config),
+            startup_cwd,
             config_manager,
             environment_manager,
             feedback: feedback.clone(),
@@ -994,7 +1034,9 @@ pub async fn run_main_with_transport_options(
                 PluginStartupTasks::Start
             )
             .then_some(plugin_startup_config),
-        }));
+        });
+        processor.remote_control_processor.daemon_settings_file = daemon_settings_file;
+        let processor = Arc::new(processor);
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
         let mut active_admissions_rx = processor.turn_admission.subscribe_active();
@@ -1379,74 +1421,71 @@ struct StateDbInitResult {
 async fn init_sqlite_state_db_with_fresh_start_on_corruption(
     config: &Config,
 ) -> anyhow::Result<StateDbInitResult> {
-    let mut attempted_backups = HashSet::new();
-    let mut recovered_databases = Vec::new();
-    loop {
-        let err = match rollout_state_db::try_init(config).await {
-            Ok(state_db) => {
-                let recovery_notice = sqlite_recovery_notice(&recovered_databases);
-                if recovery_notice.is_some() {
-                    emit_state_db_backup_warning(SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY);
-                    for recovered_database in &recovered_databases {
-                        emit_state_db_backup_warning(&format!(
-                            "Database path: {}",
-                            recovered_database.database_path
-                        ));
-                        emit_state_db_backup_warning(&format!(
-                            "Backup folder: {}",
-                            recovered_database.backup_folder
-                        ));
-                    }
-                }
-                return Ok(StateDbInitResult {
-                    state_db: Some(state_db),
-                    recovery_notice,
-                });
+    let (result, backups) = codex_state::collect_runtime_db_backups(async {
+        let mut attempted_backups = HashSet::new();
+        loop {
+            let err = match rollout_state_db::try_init(config).await {
+                Ok(state_db) => return Ok(state_db),
+                Err(err) => err,
+            };
+            let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
+                .unwrap_or_else(|| config.sqlite_config().state_db_path());
+            if !codex_state::is_sqlite_corruption_error(&err)
+                && !sqlite_home_is_blocking_file(database_path.as_path())
+            {
+                return Err(err);
             }
-            Err(err) => err,
-        };
-        let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
-            .unwrap_or_else(|| config.sqlite_config().state_db_path());
-        if !codex_state::is_sqlite_corruption_error(&err)
-            && !sqlite_home_is_blocking_file(database_path.as_path())
-        {
-            return Err(err);
-        }
 
-        if !attempted_backups.insert(database_path.clone()) {
-            return Err(anyhow::anyhow!(
-                "failed to initialize sqlite state runtime after moving damaged database file into a backup folder: {err}"
-            ));
-        }
+            if !attempted_backups.insert(database_path.clone()) {
+                return Err(anyhow::anyhow!(
+                    "failed to initialize sqlite state runtime after moving damaged database file into a backup folder: {err}"
+                ));
+            }
 
-        let original_error = err.to_string();
-        emit_state_db_backup_warning(&format!(
-            "Codex local database at {} appears damaged. Moving it into a backup folder so the app server can rebuild it from saved data.",
-            database_path.display()
-        ));
-        let backups = codex_state::backup_runtime_db_for_fresh_start(database_path.as_path())
-            .await
-            .map_err(|backup_err| {
-                anyhow::anyhow!(
-                    "failed to move damaged sqlite state database files into a backup folder: {backup_err}; original error: {original_error}"
-                )
-            })?;
-        for backup in &backups {
+            let original_error = err.to_string();
             emit_state_db_backup_warning(&format!(
-                "Moved damaged Codex local database file {} to {}",
-                backup.original_path.display(),
-                backup.backup_path.display()
+                "Codex local database at {} appears damaged. Moving it into a backup folder so the app server can rebuild it from saved data.",
+                database_path.display()
             ));
+            let backups = codex_state::backup_runtime_db_for_fresh_start(database_path.as_path())
+                .await
+                .map_err(|backup_err| {
+                    anyhow::anyhow!(
+                        "failed to move damaged sqlite state database files into a backup folder: {backup_err}; original error: {original_error}"
+                    )
+                })?;
+            for backup in &backups {
+                emit_state_db_backup_warning(&format!(
+                    "Moved damaged Codex local database file {} to {}",
+                    backup.original_path.display(),
+                    backup.backup_path.display()
+                ));
+            }
         }
-        if let Some(first_backup) = backups.first()
-            && let Some(backup_folder) = first_backup.backup_path.parent()
+    })
+    .await;
+    let state_db = result?;
+    let mut recovered_databases = Vec::new();
+    let mut backup_folders = HashSet::new();
+    for backup in backups {
+        if let Some(folder) = backup.backup_path.parent()
+            && backup_folders.insert(folder.to_path_buf())
         {
             recovered_databases.push(RecoveredSqliteDatabase {
-                database_path: first_backup.original_path.display().to_string(),
-                backup_folder: backup_folder.display().to_string(),
+                database_path: backup.original_path.display().to_string(),
+                backup_folder: folder.display().to_string(),
             });
         }
     }
+    let recovery_notice = sqlite_recovery_notice(&recovered_databases);
+    if let Some(notice) = &recovery_notice {
+        emit_state_db_backup_warning(SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY);
+        emit_state_db_backup_warning(&notice.details);
+    }
+    Ok(StateDbInitResult {
+        state_db: Some(state_db),
+        recovery_notice,
+    })
 }
 
 fn sqlite_home_is_blocking_file(database_path: &Path) -> bool {
@@ -1473,16 +1512,18 @@ fn sqlite_recovery_notice(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    Some(SqliteRecoveryNotice { details })
+    Some(SqliteRecoveryNotice {
+        details: format!(
+            "Damaged local databases were rebuilt. Saved conversations remain in rollout files and can restore the thread list and history. Some database-only metadata may be unavailable. The original database files were preserved at the backup locations below.\n\n{details}"
+        ),
+    })
 }
 
 fn emit_state_db_backup_warning(message: &str) {
     warn!("{message}");
     if !tracing::dispatcher::has_been_set() {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("{message}");
-        }
+        let _ =
+            codex_app_server_daemon::stderr_writer().write_all(format!("{message}\n").as_bytes());
     }
 }
 

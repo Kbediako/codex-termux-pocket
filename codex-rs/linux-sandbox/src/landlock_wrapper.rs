@@ -13,7 +13,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::models::PermissionProfile;
 
-#[path = "landlock.rs"]
+#[path = "seccomp.rs"]
 mod original;
 #[path = "termux_read_only_seccomp.rs"]
 mod termux_read_only_seccomp;

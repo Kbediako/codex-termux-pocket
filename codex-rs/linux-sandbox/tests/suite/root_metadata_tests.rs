@@ -18,7 +18,10 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
     if should_skip_bwrap_tests().await {
         return;
     }
-    let Some(bwrap) = codex_sandboxing::find_system_bwrap_in_path() else {
+    let Some(bwrap) = codex_sandboxing::find_system_bwrap_in_path(
+        &PermissionProfile::read_only().file_system_sandbox_policy(),
+        &std::env::current_dir().expect("current directory"),
+    ) else {
         eprintln!("skipping root metadata test: system bubblewrap is unavailable");
         return;
     };
@@ -30,7 +33,8 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
     fs::write(work.join("public/secret"), "outside").unwrap();
     fs::write(private.join("reopened/secret"), "private").unwrap();
     fs::write(private.join("sibling"), "sibling").unwrap();
-    fs::copy(codex_linux_sandbox_exe(), work.join("sandbox")).unwrap();
+    codex_utils_cargo_bin::copy_executable(&codex_linux_sandbox_exe(), &work.join("sandbox"))
+        .unwrap();
 
     let path_entry = |path: &str, access| {
         FileSystemSandboxEntry::new(
@@ -50,7 +54,14 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
         policy
             .entries
             .push(path_entry(denied, FileSystemAccessMode::Deny));
-        policy.for_approved_command(&context)
+        let mut policy = policy.for_approved_command(&context);
+        // The outer fixture makes / writable by its mapped root user. Describe
+        // its read-only system mount so pre-sandbox executable selection cannot
+        // treat bubblewrap as replaceable through that writable ancestor.
+        policy
+            .entries
+            .push(path_entry("/usr", FileSystemAccessMode::Read));
+        policy
     };
     let run = |policy: &FileSystemSandboxPolicy,
                private_mount: &str,

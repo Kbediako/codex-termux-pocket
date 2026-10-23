@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use codex_execpolicy::Decision;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -15,18 +17,26 @@ fn renders_only_newly_approved_prefixes() {
         .add_prefix_rule(&["cargo".to_string(), "test".to_string()], Decision::Allow)
         .expect("test prefix should be valid");
     let with_new_prefix = CompactPermissionsState::new(&exec_policy);
-    let existing_snapshot = with_existing_prefix.snapshot();
-    let current_snapshot = with_new_prefix.snapshot();
+    let existing_snapshot = with_existing_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+    let current_snapshot = with_new_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
 
     assert_eq!(
         with_new_prefix
-            .render_diff(Known(&existing_snapshot))
-            .map(|fragment| fragment.render()),
+            .render_fragment_diff(Known(&existing_snapshot))
+            .1
+            .map(|fragment| fragment.render().expect_text()),
         Some("Approved command prefix saved:\n- [\"cargo\", \"test\"]".to_string())
     );
     assert!(
         with_new_prefix
-            .render_diff(Known(&current_snapshot))
+            .render_fragment_diff(Known(&current_snapshot))
+            .1
             .is_none()
     );
 }
@@ -42,7 +52,10 @@ fn does_not_duplicate_a_retained_legacy_update() {
     let state = CompactPermissionsState::new(&exec_policy);
 
     assert_eq!(
-        state.render_diff(Unknown).map(|fragment| fragment.render()),
+        state
+            .render_fragment_diff(Unknown)
+            .1
+            .map(|fragment| fragment.render().expect_text()),
         None
     );
 }
@@ -58,7 +71,8 @@ fn does_not_render_existing_prefixes_without_a_previous_snapshot() {
 
     assert!(
         CompactPermissionsState::new(&exec_policy)
-            .render_diff(Absent)
+            .render_fragment_diff(Absent)
+            .1
             .is_none()
     );
 }

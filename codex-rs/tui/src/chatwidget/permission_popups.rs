@@ -284,7 +284,6 @@ impl ChatWidget {
                 /*summary*/ None,
                 /*service_tier*/ None,
                 /*collaboration_mode*/ None,
-                /*personality*/ None,
             )));
             tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
             tx.send(AppEvent::UpdateActivePermissionProfile(
@@ -338,8 +337,7 @@ impl ChatWidget {
                 Self::permission_profile_selection_actions,
             )
         };
-        let requires_confirmation =
-            approvals_reviewer == ApprovalsReviewer::User && preset.id == "full-access";
+        let requires_confirmation = preset.id == "full-access";
         #[cfg(target_os = "windows")]
         if preset.id == "auto"
             && matches!(
@@ -513,7 +511,7 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             items,
             header: Box::new(header),
-            ..SelectionViewParams::picker()
+            ..SelectionViewParams::confirmation()
         });
     }
 }

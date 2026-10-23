@@ -88,7 +88,7 @@ jobs:
             --no-install-recommends libubsan1 python3
 
       - name: Install pinned Rust toolchain target
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           targets: x86_64-unknown-linux-musl
 
@@ -224,7 +224,7 @@ jobs:
           test "$(sed -n 's/^package_version=//p' "$fixture")" = "$EXPECTED_PACKAGE_VERSION"
 
       - name: Upload Android emulator fixture
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: codex-termux-android-emulator-fixture
           path: dist/android-emulator/
@@ -371,7 +371,7 @@ jobs:
 
       - name: Upload native validation evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: termux-android-native-validation-evidence
           path: android-termux-logs/

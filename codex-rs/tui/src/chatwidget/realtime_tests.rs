@@ -7,6 +7,7 @@ mod recording_controls_tests;
 mod session_metrics_tests;
 
 use super::RealtimeConversationPhase;
+use super::RealtimeFailureCause;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::chatwidget::ChatWidget;
@@ -126,6 +127,7 @@ fn finish_turn(
             thread_id: thread_id.to_string(),
             turn: Turn {
                 id: turn_id.to_string(),
+                root_turn_id: None,
                 items,
                 items_view: TurnItemsView::Summary,
                 status,
