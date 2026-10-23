@@ -553,3 +553,6 @@ subject	ci: update artifact upload to v7.0.2 (#169)	tooling	Records the separate
 sha	c357015dac5a184c95660c559f1216423f753f58	tooling	Retains the reviewed original PR 171 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
 subject	ci: update artifact download to v8.0.2	tooling	Reconciles PR 171 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
 subject	ci: update artifact download to v8.0.2 (#171)	tooling	Records the separately reviewed PR 171 merge without changing the source release contract or publisher authority.
+sha	48b2ed31c2e97197de9e91c04dcb88d9ca55c72a	tooling	Retains the reviewed original PR 174 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
+subject	ci: update pinned installer action to v2.87.28	tooling	Reconciles PR 174 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
+subject	ci: update pinned installer action to v2.87.28 (#174)	tooling	Records the separately reviewed PR 174 merge without changing the source release contract or publisher authority.
