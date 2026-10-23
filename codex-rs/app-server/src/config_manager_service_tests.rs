@@ -2757,20 +2757,13 @@ async fn permission_config_reload_merges_session_layers() -> Result<()> {
     use codex_config::ConfigLayerSource;
     use codex_config::ConfigLayerStack;
     let tmp = tempdir()?;
-    let wrapper_dir = tmp.path().join("tmp/arg0/session");
-    std::fs::create_dir_all(&wrapper_dir)?;
-    let wrapper = wrapper_dir.join("codex-execve-wrapper");
-    std::fs::write(&wrapper, "")?;
     let service = ConfigManager::new(
         tmp.path().to_path_buf(),
         Vec::new(),
         LoaderOverrides::without_managed_config_for_tests(),
         /*strict_config*/ false,
         CloudConfigBundleLoader::default(),
-        codex_arg0::Arg0DispatchPaths {
-            main_execve_wrapper_exe: Some(wrapper),
-            ..Default::default()
-        },
+        codex_arg0::Arg0DispatchPaths::default(),
         std::sync::Arc::new(codex_config::NoopThreadConfigLoader),
     );
 
@@ -2815,16 +2808,70 @@ async fn permission_config_reload_merges_session_layers() -> Result<()> {
             .collect::<Vec<_>>(),
         vec!["first", "second"]
     );
-    let policy = loaded.permissions.file_system_sandbox_policy();
-    assert_eq!(
-        (
-            policy.can_read_local_path_with_cwd(&wrapper_dir, loaded.cwd.as_path()),
-            policy.can_read_local_path_with_cwd(
-                &tmp.path().join("tmp/arg0/other"),
-                loaded.cwd.as_path()
-            ),
-        ),
-        (true, false),
-    );
     Ok(())
+}
+
+/// Cloud storage requirements override user config and reject leaf or whole-table writes without touching the file.
+#[tokio::test]
+async fn cloud_desktop_storage_requirements_control_reads_and_writes() {
+    let tmp = tempdir().expect("tempdir");
+    let path = tmp.path().join(CONFIG_TOML_FILE);
+    let original = "[desktop]\ndefaultProjectParent = 'user'\nprojectlessWorkspaceRoot = 'user'\nlocaleOverride = 'en-US'\n";
+    std::fs::write(&path, original).unwrap();
+    let service = ConfigManager::new_for_tests(
+        tmp.path().to_path_buf(),
+        vec![],
+        LoaderOverrides::without_managed_config_for_tests(),
+        CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
+            "[application.storage]\ndefault_project_parent = \"{}\"\nprojectless_workspace_root = \"{}\"",
+            toml_path(tmp.path(), "projects"),
+            toml_path(tmp.path(), "chats"),
+        )),
+    );
+    let response = service
+        .read(ConfigReadParams {
+            include_layers: false,
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(response.config.desktop).unwrap(),
+        serde_json::json!({
+            "defaultProjectParent": tmp.path().join("projects"),
+            "projectlessWorkspaceRoot": tmp.path().join("chats"),
+            "localeOverride": "en-US",
+        })
+    );
+    for key in [
+        "desktop.defaultProjectParent",
+        "desktop.projectlessWorkspaceRoot",
+        "desktop",
+    ] {
+        let error = service
+            .write_value(ConfigValueWriteParams {
+                file_path: Some(path.display().to_string()),
+                key_path: key.into(),
+                value: serde_json::Value::Null,
+                merge_strategy: MergeStrategy::Replace,
+                expected_version: None,
+            })
+            .await
+            .expect_err("managed storage is read-only");
+        assert_eq!(
+            error.write_error_code(),
+            Some(ConfigWriteErrorCode::ConfigRequirementReadonly)
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    service
+        .write_value(ConfigValueWriteParams {
+            file_path: Some(path.display().to_string()),
+            key_path: "desktop.localeOverride".into(),
+            value: serde_json::json!("fr-FR"),
+            merge_strategy: MergeStrategy::Replace,
+            expected_version: None,
+        })
+        .await
+        .expect("unmanaged desktop settings stay writable");
 }

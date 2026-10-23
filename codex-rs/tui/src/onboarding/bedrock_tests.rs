@@ -1,14 +1,76 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-fn render_visible(state: &BedrockState) -> String {
+#[test]
+fn gov_cloud_guidance_requires_acknowledgement() {
+    let mut state = BedrockState::guidance();
+    insta::assert_snapshot!("gov_cloud_warning", render_visible(&state));
+    assert!(!state.handle_guidance_key_event(&KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    )));
+    assert!(state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
     let area = Rect::new(0, 0, 72, 24);
+    let mut buffer = Buffer::empty(area);
+    state.render(area, &mut buffer, /*error*/ None);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains(GOV_CLOUD_GUIDANCE_URL))
+    );
+}
+
+#[test]
+fn gov_cloud_guidance_scrolls_in_short_panes() {
+    let mut state = BedrockState::guidance();
+    let area = Rect::new(0, 0, 24, 6);
+    let initial = render_visible_at(&state, area);
+    insta::assert_snapshot!("gov_cloud_warning_short", initial);
+
+    // Even a one-row disclosure viewport must expose every line and the link.
+    for height in [6, 2] {
+        let area = Rect::new(0, 0, 24, height);
+        let mut seen = String::new();
+        for _ in 0..20 {
+            let mut buffer = Buffer::empty(area);
+            state.render(area, &mut buffer, /*error*/ None);
+            seen.extend(buffer.content.iter().map(ratatui::buffer::Cell::symbol));
+            assert!(render_visible_at(&state, area).contains("Acknowledge"));
+            assert!(
+                !state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            );
+        }
+        assert!(seen.contains("Using Codex with AWS"));
+        assert!(seen.contains("proceeding."));
+        assert!(seen.contains(GOV_CLOUD_GUIDANCE_URL));
+        for _ in 0..20 {
+            state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            render_visible_at(&state, area);
+        }
+        assert!(render_visible_at(&state, area).starts_with("Using Codex with AWS"));
+    }
+    assert_eq!(render_visible_at(&state, area), initial);
+    state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    render_visible(&state);
+    assert_eq!(render_visible_at(&state, area), initial);
+}
+
+fn render_visible(state: &BedrockState) -> String {
+    render_visible_at(state, Rect::new(0, 0, 72, 24))
+}
+
+fn render_visible_at(state: &BedrockState, area: Rect) -> String {
     let mut buffer = Buffer::empty(area);
     state.render(area, &mut buffer, /*error*/ None);
     let mut rows = (area.top()..area.bottom())
         .map(|row| {
             (area.left()..area.right())
-                .map(|column| buffer[(column, row)].symbol())
+                .map(|column| {
+                    crate::terminal_hyperlinks::strip_osc8(buffer[(column, row)].symbol())
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -21,7 +83,7 @@ fn render_visible(state: &BedrockState) -> String {
 }
 
 #[test]
-fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
+fn discovery_prioritizes_profiles_and_groups_other_sign_in_methods() {
     let discovering = BedrockState::discovering(RequestId::Integer(1));
     insta::assert_snapshot!(render_visible(&discovering), @r###"
     > Set up Amazon Bedrock
@@ -64,7 +126,6 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
                 BedrockMethod::Profile(0),
                 BedrockMethod::Environment,
                 BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
             ],
         ),
         (
@@ -81,17 +142,12 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
                 BedrockMethod::Profile(1),
                 BedrockMethod::Environment,
                 BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
             ],
         ),
         (
             Vec::new(),
             vec![environment],
-            vec![
-                BedrockMethod::Environment,
-                BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
-            ],
+            vec![BedrockMethod::Environment, BedrockMethod::OtherMethods],
         ),
         (
             Vec::new(),
@@ -124,7 +180,6 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
             BedrockMethod::Profile(0),
             BedrockMethod::Environment,
             BedrockMethod::OtherMethods,
-            BedrockMethod::ApiKey,
         ]
     );
     insta::assert_snapshot!(render_visible(&profile_and_bearer), @r###"
@@ -140,10 +195,8 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Use your existing Amazon Bedrock API key
 
       3. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      4. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -156,6 +209,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
             BedrockMethod::ManualProfile,
             BedrockMethod::AccessKeys,
             BedrockMethod::EnvironmentInstructions,
+            BedrockMethod::ApiKey,
         ]
     );
     insta::assert_snapshot!(render_visible(&profile_and_bearer), @r"
@@ -171,6 +225,9 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
 
       3. Environment variables
          Configure AWS credentials in your environment, then return here
+
+      4. Bedrock API key
+         Enter a Bedrock API key
 
 
       Press enter to continue
@@ -191,10 +248,8 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Use your existing AWS credentials
 
       2. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      3. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -226,10 +281,8 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          us-west-2
 
       3. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      4. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -251,8 +304,6 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
     > 1. Continue with detected credentials
 
       2. Other AWS sign-in methods
-
-      3. Bedrock API key
 
 
       Press enter to continue
@@ -303,7 +354,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
         .flat_map(|row| (area.left()..area.right()).map(move |column| (column, row)))
         .map(|position| buffer[position].symbol())
         .collect::<String>();
-    assert!(visible.contains("Bedrock API key"));
+    assert!(visible.contains("Other AWS sign-in methods"));
     assert!(visible.contains("Press enter to continue"));
     assert!(visible.contains("Press esc to go back"));
 

@@ -4,6 +4,7 @@
 
 use super::*;
 use codex_config::ConfigLayerSource;
+use codex_protocol::config_types::ServiceTier;
 
 pub(crate) fn has_launch_setting(
     config: &Config,
@@ -40,13 +41,29 @@ pub(super) fn overlay_new_session_defaults(
     if !has_launch_setting(config, cli_kv_overrides, "model_reasoning_effort") {
         config.model_reasoning_effort = defaults.model_reasoning_effort.clone();
     }
+    if harness_overrides.service_tier.is_none()
+        && !has_launch_setting(config, cli_kv_overrides, "service_tier")
+    {
+        config.service_tier = defaults.service_tier.as_deref().map(|service_tier| {
+            ServiceTier::from_request_value(service_tier)
+                .map(|tier| tier.request_value().to_string())
+                .unwrap_or_else(|| service_tier.to_string())
+        });
+    }
+    if !has_launch_setting(config, cli_kv_overrides, "daybreak") {
+        config.daybreak_enabled = defaults
+            .additional
+            .get("daybreak")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    }
 }
 
 impl App {
     pub(super) async fn load_new_session_config(
         &mut self,
         app_server: &AppServerSession,
-    ) -> Result<Config> {
+    ) -> Result<(Config, crate::local_settings::LocalSettings)> {
         let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
         let defaults_cwd = match app_server.thread_params_mode() {
             crate::app_server_session::ThreadParamsMode::Embedded => cwd.as_path(),
@@ -60,11 +77,14 @@ impl App {
         )
         .await?;
         // Stage local preferences and permission carryover without changing the active task.
-        let mut config = match self.rebuild_config_for_cwd(cwd).await {
-            Ok(config) => config,
+        let (mut config, local_settings) = match self.rebuild_config_for_cwd(cwd).await {
+            Ok(config) => {
+                let settings = self.local_settings.reloaded(&config);
+                (config, settings)
+            }
             Err(err) => {
                 tracing::warn!(%err, "failed to refresh local settings before a new thread");
-                self.config.clone()
+                (self.config.clone(), self.local_settings.clone())
             }
         };
         if let Some(defaults) = defaults.as_ref() {
@@ -77,7 +97,6 @@ impl App {
             );
         }
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::ExplicitOnly)?;
-        config.service_tier = self.chat_widget.configured_service_tier();
         if let Some(defaults) = defaults.as_ref() {
             overlay_new_session_defaults(
                 &mut config,
@@ -86,6 +105,6 @@ impl App {
                 &self.harness_overrides,
             );
         }
-        Ok(config)
+        Ok((config, local_settings))
     }
 }

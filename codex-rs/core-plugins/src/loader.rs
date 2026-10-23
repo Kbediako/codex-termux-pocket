@@ -1,6 +1,7 @@
 use crate::PluginGitMode;
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
 use crate::app_mcp_routing::apps_route_available;
+use crate::app_mcp_routing::plugin_supports_apps;
 use crate::is_openai_curated_marketplace_name;
 use crate::manifest::ManifestCache;
 use crate::manifest::PluginManifest;
@@ -30,6 +31,7 @@ use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::PluginConfig;
 use codex_config::types::PluginMcpServerConfig;
+use codex_config::types::PluginsConfigToml;
 use codex_connectors::parse_plugin_app_config;
 use codex_connectors::parse_plugin_app_config_value;
 use codex_mcp::parse_agent_plugin_mcp_config;
@@ -48,11 +50,13 @@ use codex_skills::SkillRootLoadRequest;
 use codex_skills::SkillRootLoader;
 use codex_skills::SkillRootSnapshots;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::SkillDiscoveryMode;
 use codex_utils_plugins::find_plugin_manifest_path;
 use codex_utils_plugins::migrated_command_skills_root;
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -130,8 +134,11 @@ pub(crate) fn log_plugin_load_errors(plugins: &[LoadedPlugin<McpServerConfig>]) 
 
 /// Load configured plugins without applying auth-dependent runtime policies.
 #[instrument(level = "trace", skip_all)]
+// Keep validated policy with the existing snapshot inputs instead of reparsing layers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_plugins_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
+    plugin_policy: &codex_config::types::PluginsConfigToml,
     remote_installed_plugins_snapshot: RemoteInstalledPluginsSnapshot,
     store: &PluginStore,
     plugin_skill_snapshots: Option<&SkillRootSnapshots<PluginSkillRoot>>,
@@ -146,6 +153,7 @@ pub(crate) async fn load_plugins_from_layer_stack(
     } = remote_installed_plugins_snapshot;
     load_plugins_from_layer_stack_with_scope(
         config_layer_stack,
+        plugin_policy,
         extra_plugins,
         store,
         remote_global_catalog_active,
@@ -162,17 +170,22 @@ pub(crate) async fn load_plugins_from_layer_stack(
 
 async fn load_plugins_from_layer_stack_with_scope(
     config_layer_stack: &ConfigLayerStack,
+    plugin_policy: &codex_config::types::PluginsConfigToml,
     extra_plugins: HashMap<String, PluginConfig>,
     store: &PluginStore,
     remote_global_catalog_active: bool,
     scope: PluginLoadScope<'_>,
 ) -> Vec<LoadedPlugin<McpServerConfig>> {
-    let configured_plugins = merge_configured_plugins_with_remote_installed(
+    let mut configured_plugins = merge_configured_plugins_with_remote_installed(
         configured_plugins_from_stack(config_layer_stack, store.codex_home().as_path()),
         extra_plugins,
         store,
         remote_global_catalog_active,
     );
+    for (plugin_id, plugin) in &mut configured_plugins {
+        plugin.enabled =
+            Some(plugin.enabled.unwrap_or(true) && plugin_policy.allows_plugin(plugin_id));
+    }
     let mut configured_plugins: Vec<_> = configured_plugins.into_iter().collect();
     configured_plugins.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
@@ -201,6 +214,7 @@ async fn load_plugins_from_layer_stack_with_scope(
 /// Load hooks from enabled plugins without loading their skills, MCP servers, or apps.
 pub async fn load_plugin_hooks_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
+    plugin_policy: &codex_config::types::PluginsConfigToml,
     extra_plugins: HashMap<String, PluginConfig>,
     store: &PluginStore,
     target_curated_marketplace: TargetCuratedMarketplace,
@@ -208,6 +222,7 @@ pub async fn load_plugin_hooks_from_layer_stack(
 ) -> PluginHookLoadOutcome {
     let mut plugins = load_plugins_from_layer_stack_with_scope(
         config_layer_stack,
+        plugin_policy,
         extra_plugins,
         store,
         remote_global_catalog_active,
@@ -242,6 +257,9 @@ fn merge_configured_plugins_with_remote_installed(
         // SSH app-server. A cached remote install takes precedence, even when disabled.
         if extra_plugins.contains_key("sites@openai-curated-remote") {
             configured_plugins.remove("sites@openai-bundled");
+        }
+        if extra_plugins.contains_key("visualize@openai-curated-remote") {
+            configured_plugins.remove("visualize@openai-bundled");
         }
         configured_plugins.retain(|plugin_key, _| match PluginId::parse(plugin_key) {
             Ok(plugin_id) => plugin_id.marketplace_name != crate::OPENAI_CURATED_MARKETPLACE_NAME,
@@ -364,7 +382,10 @@ pub fn remote_installed_plugins_to_config(
             Some((
                 plugin_id.as_key(),
                 PluginConfig {
-                    enabled: plugin.enabled,
+                    enabled: Some(plugin.enabled),
+                    remote_plugin_id: None,
+                    release_id: None,
+                    auto_provision: None,
                     mcp_servers: HashMap::new(),
                 },
             ))
@@ -735,8 +756,8 @@ fn configured_plugins_from_config_value(
     let Some(plugins_value) = user_config.get("plugins") else {
         return HashMap::new();
     };
-    match plugins_value.clone().try_into() {
-        Ok(plugins) => plugins,
+    match PluginsConfigToml::deserialize(plugins_value.clone()) {
+        Ok(plugins) => plugins.plugins,
         Err(err) => {
             warn!("invalid plugins config: {err}");
             HashMap::new()
@@ -845,7 +866,7 @@ async fn load_plugin(
         plugin_namespace: None,
         manifest_description: None,
         root,
-        enabled: plugin.enabled,
+        enabled: plugin.enabled.unwrap_or(true),
         skill_roots: Vec::new(),
         skill_discovery_mode: SkillDiscoveryMode::Recursive,
         disabled_skill_paths: HashSet::new(),
@@ -857,7 +878,7 @@ async fn load_plugin(
         error: None,
     };
 
-    if !plugin.enabled {
+    if !loaded_plugin.enabled {
         return loaded_plugin;
     }
 
@@ -942,7 +963,7 @@ async fn load_plugin(
                 loaded_manifest.format,
             )
             .await;
-            if loaded_manifest.format == PluginManifestFormat::Legacy {
+            if plugin_supports_apps(loaded_manifest.format, &loaded_plugin_id) {
                 loaded_plugin.apps =
                     load_plugin_apps_from_manifest(plugin_root.as_path(), manifest_paths).await;
             }
@@ -1022,7 +1043,7 @@ impl PluginSkillInventory {
 #[derive(Debug, Clone)]
 pub struct ResolvedPluginSkills {
     pub skills: Vec<SkillMetadata>,
-    pub disabled_skill_paths: HashSet<AbsolutePathBuf>,
+    pub disabled_skill_paths: HashSet<PathUri>,
     pub had_errors: bool,
 }
 
@@ -1034,7 +1055,7 @@ impl ResolvedPluginSkills {
 
 fn contains_enabled_skill(
     skills: &[SkillMetadata],
-    disabled_skill_paths: &HashSet<AbsolutePathBuf>,
+    disabled_skill_paths: &HashSet<PathUri>,
 ) -> bool {
     skills
         .iter()
@@ -1131,9 +1152,9 @@ fn default_mcp_config_paths(plugin_root: &Path) -> Vec<AbsolutePathBuf> {
     paths
 }
 
-pub async fn load_plugin_apps(plugin_root: &Path) -> Vec<AppDeclaration> {
+pub async fn load_plugin_apps(plugin_root: &Path, plugin_id: &PluginId) -> Vec<AppDeclaration> {
     if let Some(loaded_manifest) = load_plugin_manifest_with_format(plugin_root) {
-        if loaded_manifest.format == PluginManifestFormat::AgentPlugin {
+        if !plugin_supports_apps(loaded_manifest.format, plugin_id) {
             return Vec::new();
         }
         return load_plugin_apps_from_manifest(plugin_root, &loaded_manifest.manifest.paths).await;
@@ -1377,10 +1398,10 @@ pub(crate) async fn plugin_capability_summary_from_root(
     mcp_server_names.sort_unstable();
     mcp_server_names.dedup();
 
-    let app_declarations = if manifest_format == PluginManifestFormat::AgentPlugin {
-        Vec::new()
-    } else {
+    let app_declarations = if plugin_supports_apps(manifest_format, plugin_id) {
         load_plugin_apps_from_manifest(plugin_root.as_path(), manifest_paths).await
+    } else {
+        Vec::new()
     };
     let app_connector_ids = app_connector_ids_from_declarations(&app_declarations);
 
@@ -1398,9 +1419,16 @@ pub(crate) async fn plugin_capability_summary_from_root(
 /// Loads plugin MCP servers without applying user-specific policy overrides.
 pub async fn load_plugin_mcp_servers(
     plugin_root: &Path,
+    plugin_id: &PluginId,
     auth_mode: Option<AuthMode>,
 ) -> HashMap<String, McpServerConfig> {
-    load_plugin_mcp_servers_with_policy(plugin_root, auth_mode, /*plugin_policy*/ None).await
+    load_plugin_mcp_servers_with_policy(
+        plugin_root,
+        plugin_id,
+        auth_mode,
+        /*plugin_policy*/ None,
+    )
+    .await
 }
 
 /// Loads plugin MCP servers with the effective configuration policy for an installed plugin.
@@ -1412,22 +1440,11 @@ pub async fn load_configured_plugin_mcp_servers(
     codex_home: &Path,
 ) -> HashMap<String, McpServerConfig> {
     let configured_plugins = configured_plugins_from_stack(config_layer_stack, codex_home);
-    let plugin_id = plugin_id.as_key();
     let plugin_policy = configured_plugins
-        .get(&plugin_id)
+        .get(&plugin_id.as_key())
         .map(|plugin| &plugin.mcp_servers);
 
-    load_plugin_mcp_servers_with_policy(plugin_root, auth_mode, plugin_policy).await
-}
-
-/// Resolves effective per-plugin MCP policies without validating opaque selected-root IDs.
-pub fn configured_plugin_mcp_server_policies(
-    config_layer_stack: &ConfigLayerStack,
-) -> HashMap<String, HashMap<String, PluginMcpServerConfig>> {
-    configured_plugins_from_config_value(&config_layer_stack.effective_config())
-        .into_iter()
-        .map(|(plugin_id, plugin)| (plugin_id, plugin.mcp_servers))
-        .collect()
+    load_plugin_mcp_servers_with_policy(plugin_root, plugin_id, auth_mode, plugin_policy).await
 }
 
 /// Applies user policy without widening the selected plugin's declared restrictions.
@@ -1495,6 +1512,7 @@ pub fn apply_configured_plugin_mcp_server_policies(
 
 async fn load_plugin_mcp_servers_with_policy(
     plugin_root: &Path,
+    plugin_id: &PluginId,
     auth_mode: Option<AuthMode>,
     plugin_policy: Option<&HashMap<String, PluginMcpServerConfig>>,
 ) -> HashMap<String, McpServerConfig> {
@@ -1503,7 +1521,7 @@ async fn load_plugin_mcp_servers_with_policy(
         return mcp_servers;
     }
 
-    let mut app_declarations = load_plugin_apps(plugin_root).await;
+    let mut app_declarations = load_plugin_apps(plugin_root, plugin_id).await;
     apply_app_mcp_routing_policy(
         &mut app_declarations,
         &mut mcp_servers,

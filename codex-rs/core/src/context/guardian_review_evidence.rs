@@ -9,7 +9,9 @@ use std::sync::PoisonError;
 
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_guardian_context::MAX_PREVIOUS_REVIEWS;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::GuardianAssessmentEvent;
 use serde_json::json;
 
@@ -125,6 +127,7 @@ impl GuardianReviewEvidence {
             return;
         };
         let review = Arc::new(GuardianReviewEvidenceRecord {
+            delivery_id: codex_protocol::ResponseItemId::new("guardian_review"),
             completed_at_ms,
             authorization_version,
             review_context_revision,
@@ -170,6 +173,8 @@ impl GuardianReviewEvidence {
 /// Structured synchronous-review evidence retained for Guardian V2 classification.
 #[derive(Debug)]
 pub struct GuardianReviewEvidenceRecord {
+    /// Identifies this immutable completion even if the same action is reviewed again.
+    pub delivery_id: codex_protocol::ResponseItemId,
     pub authorization_version: GuardianAuthorizationVersion,
     pub review_context_revision: u64,
     pub root_authorization_version: Option<GuardianAuthorizationVersion>,
@@ -211,7 +216,7 @@ impl ContextualUserFragment for GuardianReviewEvidenceFragment {
         ("<guardian_sync_review>", "</guardian_sync_review>")
     }
 
-    fn body(&self) -> String {
-        self.body.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.body.clone())
     }
 }

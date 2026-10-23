@@ -664,7 +664,6 @@ fn config_overrides_from_interactive(
             .flatten(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: interactive.oss.then_some(true),
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
@@ -1113,6 +1112,14 @@ fn config_check(config: &Config) -> DoctorCheck {
         config.model.as_deref().unwrap_or("<default>")
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
+    details.push(format!(
+        "configured TUI mode: {}",
+        if config.tui_fullscreen_transcript {
+            "fullscreen"
+        } else {
+            "scrollback"
+        }
+    ));
     details.push(format!("log dir: {}", config.log_dir.display()));
     details.push(format!(
         "sqlite home: {}",
@@ -1722,6 +1729,7 @@ fn terminal_check(no_color_flag: bool) -> DoctorCheck {
 
 #[cfg(windows)]
 fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     use windows_sys::Win32::System::Console::GetConsoleCP;
@@ -1745,8 +1753,8 @@ fn windows_console_details() -> Vec<String> {
         GetStdHandle(STD_ERROR_HANDLE)
     }));
 
-    fn console_mode_detail(label: &str, handle: isize) -> String {
-        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    fn console_mode_detail(label: &str, handle: HANDLE) -> String {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return format!("{label}: unavailable");
         }
         let mut mode = 0_u32;
@@ -2265,6 +2273,7 @@ fn collect_rollout_stats_inner(path: &Path, stats: &mut RolloutStats) {
 }
 
 fn is_rollout_file(path: &Path) -> bool {
+    let path = codex_rollout::plain_rollout_path(path);
     path.extension() == Some(OsStr::new("jsonl"))
         && path
             .file_name()
@@ -2430,6 +2439,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
         }
         ApiError::Stream(message) => format!("handshake stream error: {message}"),
         ApiError::ContentFilter
+        | ApiError::ResponseIncomplete(_)
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -3220,7 +3230,7 @@ mod tests {
         let arg0_paths = Arg0DispatchPaths {
             codex_self_exe: Some(PathBuf::from("/bin/codex")),
             codex_linux_sandbox_exe: Some(PathBuf::from("/bin/codex-linux-sandbox")),
-            main_execve_wrapper_exe: Some(PathBuf::from("/bin/codex-execve-wrapper")),
+            ..Default::default()
         };
 
         let overrides = config_overrides_from_interactive(&interactive, &arg0_paths);
@@ -3239,10 +3249,6 @@ mod tests {
         assert_eq!(
             overrides.codex_linux_sandbox_exe,
             arg0_paths.codex_linux_sandbox_exe
-        );
-        assert_eq!(
-            overrides.main_execve_wrapper_exe,
-            arg0_paths.main_execve_wrapper_exe
         );
     }
 
@@ -3841,7 +3847,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_rollout_stats_counts_nested_rollout_files() {
+    fn rollout_stats_details_count_plain_and_compressed_files() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let nested = temp
             .path()
@@ -3855,14 +3861,40 @@ mod tests {
             "12345",
         )
         .expect("write rollout file");
+        // Storage totals include both physical files if both representations exist.
+        std::fs::write(
+            nested.join("rollout-2026-05-13T00-00-00-test.jsonl.zst"),
+            "1234567",
+        )
+        .expect("write compressed sibling");
+        std::fs::write(
+            nested.join("rollout-2026-05-13T01-00-00-compressed.jsonl.zst"),
+            "123",
+        )
+        .expect("write compressed rollout");
         std::fs::write(nested.join("not-a-rollout.jsonl"), "ignored").expect("write ignored jsonl");
+        std::fs::write(nested.join("not-a-rollout.jsonl.zst"), "ignored")
+            .expect("write ignored compressed file");
+        std::fs::write(
+            nested.join("rollout-2026-05-13T01-00-00-compressed.jsonl.zst.tmp"),
+            "ignored",
+        )
+        .expect("write compression temp file");
 
-        let stats = collect_rollout_stats(&temp.path().join("sessions"));
+        let archived = temp.path().join("archived_sessions");
+        std::fs::create_dir(&archived).expect("create archived rollout dir");
+        std::fs::write(
+            archived.join("rollout-2026-05-13T02-00-00-archived.jsonl.zst"),
+            "1234",
+        )
+        .expect("write archived compressed rollout");
 
-        assert_eq!(stats.files, 1);
-        assert_eq!(stats.total_bytes, 5);
-        assert_eq!(stats.average_bytes(), 5);
-        assert_eq!(stats.error, None);
+        let mut details = Vec::new();
+        rollout_stats_details(&mut details, temp.path());
+        insta::assert_snapshot!(details.join("\n"), @r"
+        active rollout files: 3 files, 15 total bytes, 5 average bytes
+        archived rollout files: 1 files, 4 total bytes, 4 average bytes
+        ");
     }
 
     #[tokio::test]

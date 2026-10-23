@@ -39,12 +39,15 @@ pub fn build_guardian_review_session_config(
         .as_deref()
         .unwrap_or(auto_review.policy_template);
     let mut instructions = GuardianPolicyInstructions::new(
+        guardian_config.guardian_transcript_mode,
         tenant_policy_config,
         extra_policy,
         policy_template,
         guardian_output_contract_prompt(),
     )
-    .render();
+    .render()
+    .into_text()
+    .unwrap_or_default();
     if guardian_config
         .features
         .enabled(Feature::GuardianConversationHistoryTools)
@@ -57,7 +60,9 @@ pub fn build_guardian_review_session_config(
                     .guardian_conversation_history_prompt
                     .as_deref(),
             }
-            .render(),
+            .render()
+            .into_text()
+            .unwrap_or_default(),
         );
     }
     guardian_config.base_instructions = Some(instructions);

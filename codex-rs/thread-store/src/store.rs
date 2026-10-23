@@ -1,8 +1,11 @@
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::RolloutItem;
 use std::any::Any;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::AddThreadAttachmentOutcome;
 use crate::AddThreadAttachmentParams;
@@ -20,6 +23,7 @@ use crate::DeletedProject;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListProjectsParams;
+use crate::ListThreadAttachmentThreadsParams;
 use crate::ListThreadAttachmentsParams;
 use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
@@ -46,6 +50,7 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::ThreadAttachmentOwnerPage;
 use crate::ThreadAttachmentPage;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
@@ -60,6 +65,37 @@ use crate::UpdatedProject;
 
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
+
+/// Data a [`ThreadStore`] has already loaded while preparing a thread for resume.
+///
+/// Core does not inspect this value. It gives the value back to the store when reopening the
+/// thread, allowing the store to reuse the loaded history and writer state instead of loading them
+/// again. The value can only be used once because it may own resources that cannot be copied.
+pub struct ThreadStoreResumePreparation {
+    state: Box<dyn Any + Send>,
+}
+
+impl ThreadStoreResumePreparation {
+    pub fn new<T: Any + Send>(state: T) -> Self {
+        Self {
+            state: Box::new(state),
+        }
+    }
+
+    pub fn downcast<T: Any + Send>(self) -> Result<T, Self> {
+        match self.state.downcast::<T>() {
+            Ok(state) => Ok(*state),
+            Err(state) => Err(Self { state }),
+        }
+    }
+}
+
+impl fmt::Debug for ThreadStoreResumePreparation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadStoreResumePreparation")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,8 +174,34 @@ pub trait ThreadStore: Any + Send + Sync {
         })
     }
 
-    /// Reopens an existing thread for live appends.
-    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()>;
+    /// Reopens an existing thread for live appends and returns its authoritative replay context.
+    ///
+    /// Stored snapshots supplied by callers may predate writer acquisition. Implementations must
+    /// include writes committed before acquisition in the returned context. Explicitly supplied
+    /// histories without a canonical session header retain their import/override semantics.
+    /// A supplied revision may enable reuse of the shared snapshot after validation; missing or
+    /// unrecognized revisions must not be treated as proof that stored history is unchanged.
+    /// On failure, implementations must release any writer acquired by this operation.
+    fn resume_thread(
+        &self,
+        params: ResumeThreadParams,
+    ) -> ThreadStoreFuture<'_, Arc<Vec<RolloutItem>>>;
+
+    /// Reopens a thread using implementation-owned state prepared before Core startup.
+    ///
+    /// Stores should only override this when they also produce the preparation. The returned
+    /// history and failure cleanup guarantees are the same as [`Self::resume_thread`].
+    fn resume_thread_with_preparation(
+        &self,
+        _params: ResumeThreadParams,
+        _preparation: ThreadStoreResumePreparation,
+    ) -> ThreadStoreFuture<'_, Arc<Vec<RolloutItem>>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "resume_thread_with_preparation",
+            })
+        })
+    }
 
     /// Appends raw rollout items to a live thread.
     ///
@@ -340,6 +402,19 @@ pub trait ThreadStore: Any + Send + Sync {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "thread/attachment/list",
+            })
+        })
+    }
+
+    /// Lists owners of an exact attachment identity, without thread browser visibility filters.
+    /// Results describe persisted membership, not an atomic claim on the referenced resource.
+    fn list_thread_attachment_threads(
+        &self,
+        _params: ListThreadAttachmentThreadsParams,
+    ) -> ThreadStoreFuture<'_, ThreadAttachmentOwnerPage> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "thread/attachmentOwner/list",
             })
         })
     }

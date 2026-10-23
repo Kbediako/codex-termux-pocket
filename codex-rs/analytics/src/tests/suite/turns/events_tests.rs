@@ -25,6 +25,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DynamicToolCallStatus;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -129,6 +130,7 @@ fn turn_event_serializes_expected_shape() {
             approval_policy: "on-request".to_string(),
             approvals_reviewer: "auto_review".to_string(),
             guardian_v2_enabled: true,
+            multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
             sandbox_network_access: true,
             collaboration_mode: Some("plan"),
             personality: Some("pragmatic".to_string()),
@@ -173,6 +175,7 @@ fn turn_event_serializes_expected_shape() {
             after_last_sampling_ms: 94,
             sampling_request_count: 2,
             sampling_retry_count: 1,
+            tools_change_count: 2,
             duration_ms: Some(1234),
             started_at: Some(455),
             completed_at: Some(456),
@@ -220,6 +223,7 @@ fn turn_event_serializes_expected_shape() {
                 "approval_policy": "on-request",
                 "approvals_reviewer": "auto_review",
                 "guardian_v2_enabled": true,
+                "multi_agent_version": "v2",
                 "sandbox_network_access": true,
                 "collaboration_mode": "plan",
                 "personality": "pragmatic",
@@ -264,6 +268,7 @@ fn turn_event_serializes_expected_shape() {
                 "after_last_sampling_ms": 94,
                 "sampling_request_count": 2,
                 "sampling_retry_count": 1,
+                "tools_change_count": 2,
                 "duration_ms": 1234,
                 "started_at": 455,
                 "completed_at": 456
@@ -521,12 +526,16 @@ async fn turn_event_counts_completed_tool_items() {
             agents_states: Default::default(),
         },
         ThreadItem::SubAgentActivity {
+            model: None,
+            reasoning_effort: None,
             id: "sub-agent-activity-1".to_string(),
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
         },
         ThreadItem::SubAgentActivity {
+            model: None,
+            reasoning_effort: None,
             id: "sub-agent-activity-completed".to_string(),
             kind: SubAgentActivityKind::Completed,
             agent_thread_id: "thread-child".to_string(),
@@ -542,10 +551,13 @@ async fn turn_event_counts_completed_tool_items() {
             id: "image-1".to_string(),
             status: "completed".to_string(),
             revised_prompt: None,
-            result: "ok".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "ok".to_string(),
+            },
             transparent_background: None,
             failure: None,
             saved_path: None,
+            input_images: Vec::new(),
             imagegen_request_id: Some("req-imagegen-123".to_string()),
             generation_id: Some("gen-image-123".to_string()),
         }),

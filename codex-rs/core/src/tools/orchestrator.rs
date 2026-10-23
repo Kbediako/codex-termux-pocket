@@ -1,15 +1,13 @@
-/*
-Module: orchestrator
-
-Central place for approvals + sandbox selection + retry semantics. Drives a
-simple sequence for any ToolRuntime: approval → select sandbox → attempt →
-retry with an escalated sandbox strategy on denial (no re‑approval thanks to
-caching).
-*/
+//! Coordinates tool approval, sandbox selection, and retries after sandbox denial.
+//! Guardian approval applies to the reviewed authority; escalating a sandboxed
+//! attempt requires a fresh review of the retry.
 use crate::config::NetworkProxySpec;
 use crate::guardian::GuardianReviewContext;
 use crate::network_policy_decision::network_approval_context_from_payload;
+use crate::sandboxing::SandboxPermissions;
+use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
+use crate::tools::approvals::ApprovalResolutionSource;
 use crate::tools::flat_tool_name;
 use crate::tools::network_approval::ActiveNetworkApproval;
 use crate::tools::network_approval::DeferredNetworkApproval;
@@ -23,6 +21,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::default_exec_approval_requirement;
+use crate::tools::sandboxing::ensure_native_sandbox;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_otel::ToolDecisionSource;
@@ -83,6 +82,7 @@ impl ToolOrchestrator {
             tool_name: tool_ctx.tool_name.clone(),
         };
         let attempt_with_network_approval = SandboxAttempt {
+            sandbox_override: attempt.sandbox_override,
             sandbox: attempt.sandbox,
             sandbox_requested: attempt.sandbox_requested,
             permissions: attempt.permissions,
@@ -136,9 +136,9 @@ impl ToolOrchestrator {
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
-        let strict_auto_review = tool_ctx.session.strict_auto_review_enabled().await;
+        let strict_auto_review = turn_ctx.strict_auto_review_enabled();
         // 1) Approval
-        let mut already_approved = false;
+        let mut initial_approval_source = None;
 
         let environment = tool.turn_environment(req);
         let sandbox_manager = SandboxManager::new();
@@ -182,11 +182,12 @@ impl ToolOrchestrator {
                         retry_reason: None,
                         network_approval_context: None,
                     };
-                    tool_ctx
+                    let approval = tool_ctx
                         .session
                         .request_approval(action, approval_ctx)
-                        .await?;
-                    already_approved = true;
+                        .await;
+                    approval.result?;
+                    initial_approval_source = approval.source;
                 } else {
                     otel.tool_decision(
                         &tool_ctx.tool_name,
@@ -215,11 +216,12 @@ impl ToolOrchestrator {
                     retry_reason: None,
                     network_approval_context: None,
                 };
-                tool_ctx
+                let approval = tool_ctx
                     .session
                     .request_approval(action, approval_ctx)
-                    .await?;
-                already_approved = true;
+                    .await;
+                approval.result?;
+                initial_approval_source = approval.source;
             }
         }
 
@@ -229,7 +231,7 @@ impl ToolOrchestrator {
             tool.sandbox_permissions(req),
             &requirement,
             &file_system_sandbox_policy,
-            already_approved,
+            /*already_approved*/ initial_approval_source.is_some(),
         );
         let (escalated_profile, writable_root_metadata) = if sandbox_override
             == SandboxOverride::EscalatedSandboxWithRestrictions
@@ -347,7 +349,7 @@ impl ToolOrchestrator {
             SandboxType::None
         };
         if !executor_managed_process_sandbox {
-            sandbox_override.ensure_native_sandbox(initial_sandbox)?;
+            ensure_native_sandbox(sandbox_override, initial_sandbox)?;
         }
 
         let sandbox_policy_cwd = tool
@@ -360,6 +362,7 @@ impl ToolOrchestrator {
             turn_ctx.config.codex_linux_sandbox_exe.as_ref()
         };
         let initial_attempt = SandboxAttempt {
+            sandbox_override,
             sandbox: initial_sandbox,
             sandbox_requested,
             permissions: initial_permissions,
@@ -478,10 +481,14 @@ impl ToolOrchestrator {
                         build_denial_reason_from_output(output.as_ref())
                     };
 
-                // Strict auto-review approval covers the sandboxed attempt only;
-                // retrying without the sandbox requires a fresh guardian review.
+                // Human and policy approvals keep their existing retry scope. A
+                // Guardian verdict only covers the authority of the reviewed action.
+                let retry_preapproved = matches!(
+                    initial_approval_source,
+                    Some(ApprovalResolutionSource::User | ApprovalResolutionSource::Hook)
+                );
                 let bypass_retry_approval = !strict_auto_review
-                    && tool.should_bypass_approval(approval_policy, already_approved)
+                    && tool.should_bypass_approval(approval_policy, retry_preapproved)
                     && network_approval_context.is_none();
                 if !bypass_retry_approval {
                     let approval_reason = match &requirement {
@@ -489,11 +496,25 @@ impl ToolOrchestrator {
                         ExecApprovalRequirement::Skip { .. }
                         | ExecApprovalRequirement::Forbidden { .. } => None,
                     };
-                    let action = tool
-                        .approval_action(req, &tool_ctx.call_id)
-                        .map_err(|err| {
-                            ToolError::Rejected(format!("could not prepare approval action: {err}"))
-                        })?;
+                    let mut action =
+                        tool.approval_action(req, &tool_ctx.call_id)
+                            .map_err(|err| {
+                                ToolError::Rejected(format!(
+                                    "could not prepare approval action: {err}"
+                                ))
+                            })?;
+                    if unsandboxed_allowed
+                        && let ApprovalAction::ExecCommand {
+                            sandbox_permissions,
+                            additional_permissions,
+                            ..
+                        } = &mut action
+                    {
+                        // Review and cache the authority of the actual retry, not
+                        // the narrower permissions requested for the first attempt.
+                        *sandbox_permissions = SandboxPermissions::RequireEscalated;
+                        *additional_permissions = None;
+                    }
                     let approval_ctx = ApprovalContext {
                         review_context: GuardianReviewContext::from(&tool_ctx.step_context),
                         cancellation_token: Some(tool_ctx.cancellation_token.clone()),
@@ -508,7 +529,8 @@ impl ToolOrchestrator {
                     tool_ctx
                         .session
                         .request_approval(action, approval_ctx)
-                        .await?;
+                        .await
+                        .result?;
                 }
 
                 let retry_sandbox_requested = !unsandboxed_allowed
@@ -534,6 +556,7 @@ impl ToolOrchestrator {
                     codex_sandbox_exe
                 };
                 let retry_attempt = SandboxAttempt {
+                    sandbox_override,
                     sandbox: retry_sandbox,
                     sandbox_requested: retry_sandbox_requested,
                     permissions: initial_permissions,

@@ -30,10 +30,17 @@ pub struct HookStateToml {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_hash: Option<String>,
+    /// Approved plugin contents; kept separate for declaration-only clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_content_hash: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HookEventsToml {
+    #[serde(rename = "PreModelRequest", default)]
+    pub pre_model_request: Vec<MatcherGroup>,
+    #[serde(rename = "PostModelRequest", default)]
+    pub post_model_request: Vec<MatcherGroup>,
     #[serde(rename = "PreToolUse", default)]
     pub pre_tool_use: Vec<MatcherGroup>,
     #[serde(rename = "PermissionRequest", default)]
@@ -63,6 +70,8 @@ pub struct HookEventsToml {
 impl HookEventsToml {
     pub fn is_empty(&self) -> bool {
         let Self {
+            pre_model_request,
+            post_model_request,
             pre_tool_use,
             permission_request,
             post_tool_use,
@@ -76,7 +85,9 @@ impl HookEventsToml {
             stop,
             interrupt,
         } = self;
-        pre_tool_use.is_empty()
+        pre_model_request.is_empty()
+            && post_model_request.is_empty()
+            && pre_tool_use.is_empty()
             && permission_request.is_empty()
             && post_tool_use.is_empty()
             && pre_compact.is_empty()
@@ -92,6 +103,8 @@ impl HookEventsToml {
 
     pub fn handler_count(&self) -> usize {
         let Self {
+            pre_model_request,
+            post_model_request,
             pre_tool_use,
             permission_request,
             post_tool_use,
@@ -106,6 +119,8 @@ impl HookEventsToml {
             interrupt,
         } = self;
         [
+            pre_model_request,
+            post_model_request,
             pre_tool_use,
             permission_request,
             post_tool_use,
@@ -125,15 +140,17 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 12] {
+    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 14] {
         self.matcher_groups_mut()
             .map(|(event, groups)| (event, std::mem::take(groups)))
     }
 
-    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 12] {
+    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 14] {
         use HookEventName as Event;
 
         [
+            (Event::PreModelRequest, &mut self.pre_model_request),
+            (Event::PostModelRequest, &mut self.post_model_request),
             (Event::PreToolUse, &mut self.pre_tool_use),
             (Event::PermissionRequest, &mut self.permission_request),
             (Event::PostToolUse, &mut self.post_tool_use),
@@ -221,7 +238,7 @@ pub struct ManagedHooksRequirementsToml {
     pub managed_dir: Option<PathBuf>,
     pub windows_managed_dir: Option<PathBuf>,
     #[serde(flatten)]
-    pub hooks: HookEventsToml,
+    pub hooks: Box<HookEventsToml>,
 }
 
 impl ManagedHooksRequirementsToml {

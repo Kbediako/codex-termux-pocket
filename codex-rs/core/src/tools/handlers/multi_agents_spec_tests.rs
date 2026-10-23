@@ -64,8 +64,8 @@ fn spawn_agent_tool_v2_requires_task_name() {
     );
     assert!(!properties.contains_key("service_tier"));
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["task_name".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema").to_value()["required"],
@@ -163,14 +163,18 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     assert!(!properties.contains_key("service_tier"));
 }
 
-#[test]
-fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
+#[test_case::test_case(false; "inline_catalog")]
+#[test_case::test_case(true; "context_catalog")]
+fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden(
+    model_catalog_in_context: bool,
+) {
     let tool = create_spawn_agent_tool_v2(
         SpawnAgentToolOptions {
             agent_type_description: "role help".to_string(),
             expose_agent_type: false,
             hide_agent_type_model_reasoning: true,
             expose_spawn_agent_model_overrides: true,
+            model_catalog_in_context,
             usage_hint_text: None,
             ..Default::default()
         },
@@ -195,6 +199,10 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     assert!(properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
+    assert_eq!(
+        description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2),
+        model_catalog_in_context
+    );
 }
 
 #[test]
@@ -266,8 +274,8 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         Some("Relative or canonical task name to message (from spawn_agent).")
     );
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["target".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["target".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(output_schema, None);
 }
@@ -307,8 +315,8 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["target".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["target".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(output_schema, None);
 }
