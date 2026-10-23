@@ -142,7 +142,7 @@ tar -xzf "\${HOME}/termux-emulator-fixtures.tar.gz" -C "\${HOME}/emulator-dist"
 PREVIOUS_SHA="\$(sed -n 's/^head_sha=//p' "\${HOME}/emulator-dist/previous/release-manifest.env")"
 
 pkg update -y
-pkg install -y bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
+pkg install -y bash git curl ca-certificates coreutils findutils tar gzip libc++ nodejs proot termux-tools ripgrep
 
 mkdir -p "\${HOME}/ci-uname-shim"
 cat >"\${HOME}/ci-uname-shim/uname" <<'EOF_UNAME'

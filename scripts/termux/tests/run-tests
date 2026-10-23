@@ -387,6 +387,30 @@ test_static_architecture_guards() {
   pass 'static guards enforce artifact-first end-user and early CI lockfile validation'
 }
 
+test_installer_rejects_broken_node() {
+  local fake_bin="$test_root/broken-node-bin"
+  local output="$test_root/broken-node.log"
+  local git_marker="$test_root/broken-node-git-called"
+  local status
+  write_fake_executable "$fake_bin/uname" "printf '%s\\n' aarch64"
+  write_fake_executable "$fake_bin/pkg" 'exit 0'
+  write_fake_executable "$fake_bin/node" 'echo "cannot link node" >&2; exit 127'
+  write_fake_executable "$fake_bin/git" ': > "$CODEX_TERMUX_TEST_GIT_MARKER"; exit 99'
+  set +e
+  PATH="$fake_bin:$PATH" \
+    PREFIX="$test_root/com.termux/files/usr" \
+    TERMUX_APK_RELEASE=GITHUB \
+    CODEX_TERMUX_TEST_GIT_MARKER="$git_marker" \
+    bash "$TERMUX_DIR/install-codex-termux" >"$output" 2>&1
+  status=$?
+  set -e
+  assert_eq '1' "$status" 'broken Node.js stops installation'
+  grep -q 'Node.js could not start' "$output" || fail 'broken Node.js lacked a startup diagnostic'
+  [[ ! -e "$git_marker" ]] || fail 'installer changed the helper checkout before verifying Node.js startup'
+  pass 'installer rejects a Node.js linker failure before changing the helper checkout'
+}
+
+test_installer_rejects_broken_node
 test_remote_topology
 test_migrate_openai_origin
 test_valid_alpha_tag_selection

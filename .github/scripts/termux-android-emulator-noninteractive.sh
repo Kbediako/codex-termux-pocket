@@ -13,7 +13,7 @@ destination = Path(sys.argv[2])
 text = source.read_text(encoding="utf-8")
 
 package_old = """pkg update -y
-pkg install -y bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
+pkg install -y bash git curl ca-certificates coreutils findutils tar gzip libc++ nodejs proot termux-tools ripgrep
 """
 package_new = """export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -22,7 +22,7 @@ apt-get update
 apt-get -y \\
   -o Dpkg::Options::=--force-confdef \\
   -o Dpkg::Options::=--force-confold \\
-  install bash git curl ca-certificates coreutils findutils tar gzip nodejs proot termux-tools ripgrep
+  install bash git curl ca-certificates coreutils findutils tar gzip libc++ nodejs proot termux-tools ripgrep
 """
 package_count = text.count(package_old)
 if package_count != 1:
