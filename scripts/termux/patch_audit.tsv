@@ -1,4 +1,5 @@
 # match_kind<TAB>match_value<TAB>classification<TAB>reason
+subject	fix(deps): update ctutils for RUSTSEC-2026-0385	runtime-critical	Patch the constant-time utility advisory with matching Cargo and generated Bazel locks; no security waiver.
 subject	fix(termux): package the alpha for background server startup	runtime-critical	Use package semver and the required ripgrep entrypoint, with production and real-Termux daemon lifecycle regression checks.
 subject	Termux: use shared C++ runtime for Android audio build	runtime-critical	Android audio support needs the shared libc++ runtime on Termux.
 subject	arg0: tolerate unsupported file locks on Android	runtime-critical	Android file lock behavior differs and needs the local runtime fix.
