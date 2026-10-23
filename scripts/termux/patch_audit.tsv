@@ -565,3 +565,4 @@ subject	build(deps): update regex to 1.13.1 (#166)	runtime-critical	Records the 
 sha	2b6a757b168f8f8d946c1f58a7e0172aafbda13a	runtime-critical	Retains the original PR 167 proposal; reconciled adoption requires paired generated locks and fresh source validation.
 subject	build(deps): update prost to 0.14.4	runtime-critical	Reconciles PR 167 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
 subject	build(deps): update prost to 0.14.4 (#167)	runtime-critical	Records the separately reviewed PR 167 dependency merge and its paired generated locks.
+subject	fix(termux): align verified Rusty V8 build inputs with alpha	build-only	Pins the official 152.2.0 ARM64 and x64 musl artifacts and bindings to the Cargo-resolved V8 version; verified downloaded sizes, API digests and official checksum files before changing the immutable inputs.
