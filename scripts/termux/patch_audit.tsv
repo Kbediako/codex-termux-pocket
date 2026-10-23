@@ -562,3 +562,6 @@ subject	build(deps): update tracing-appender to 0.2.5 (#165)	runtime-critical	Re
 sha	d84e60c0ec4155cbd637fa033d31b0d8904d621d	runtime-critical	Retains the original PR 166 proposal; reconciled adoption requires paired generated locks and fresh source validation.
 subject	build(deps): update regex to 1.13.1	runtime-critical	Reconciles PR 166 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
 subject	build(deps): update regex to 1.13.1 (#166)	runtime-critical	Records the separately reviewed PR 166 dependency merge and its paired generated locks.
+sha	2b6a757b168f8f8d946c1f58a7e0172aafbda13a	runtime-critical	Retains the original PR 167 proposal; reconciled adoption requires paired generated locks and fresh source validation.
+subject	build(deps): update prost to 0.14.4	runtime-critical	Reconciles PR 167 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
+subject	build(deps): update prost to 0.14.4 (#167)	runtime-critical	Records the separately reviewed PR 167 dependency merge and its paired generated locks.
