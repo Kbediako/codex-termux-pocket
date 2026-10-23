@@ -35,6 +35,11 @@ use nucleo::pattern::AtomKind;
 use nucleo::pattern::Pattern;
 
 mod cli;
+mod snapshot;
+
+#[cfg(test)]
+#[path = "matcher_tests.rs"]
+mod matcher_tests;
 
 pub use cli::Cli;
 
@@ -67,9 +72,19 @@ pub enum MatchType {
     Directory,
 }
 
-/// Carries the entry type observed by the walker so matched paths are not restatted.
-struct IndexedEntry {
-    full_path: Arc<str>,
+/// Carries the selected root and entry type without duplicating ASCII matcher paths.
+enum IndexedEntry {
+    Ascii {
+        root_idx: usize,
+        match_type: MatchType,
+    },
+    Unicode(Box<UnicodeEntry>),
+}
+
+// Unicode matcher columns retain only one codepoint per grapheme.
+struct UnicodeEntry {
+    root_idx: usize,
+    relative_path: Box<str>,
     match_type: MatchType,
 }
 
@@ -465,23 +480,29 @@ fn walker_worker(
                 Err(_) => return ignore::WalkState::Continue,
             };
             let path = entry.path();
-            let Some(full_path) = path.to_str() else {
+            if path.to_str().is_none() {
                 return ignore::WalkState::Continue;
-            };
-            if let Some((_, relative_path)) = get_file_path(path, &search_directories) {
+            }
+            if let Some((root_idx, relative_path)) = get_file_path(path, &search_directories) {
                 let match_type = match entry.file_type() {
                     Some(file_type) if file_type.is_dir() => MatchType::Directory,
                     _ => MatchType::File,
                 };
-                injector.push(
-                    IndexedEntry {
-                        full_path: Arc::from(full_path),
+                let column = Utf32String::from(relative_path);
+                let indexed_entry = match &column {
+                    Utf32String::Ascii(_) => IndexedEntry::Ascii {
+                        root_idx,
                         match_type,
                     },
-                    |_, cols| {
-                        cols[0] = Utf32String::from(relative_path);
-                    },
-                );
+                    Utf32String::Unicode(_) => IndexedEntry::Unicode(Box::new(UnicodeEntry {
+                        root_idx,
+                        relative_path: Box::from(relative_path),
+                        match_type,
+                    })),
+                };
+                injector.push(indexed_entry, |_, cols| {
+                    cols[0] = column;
+                });
             }
             n += 1;
             if n >= CHECK_INTERVAL {
@@ -553,45 +574,15 @@ fn matcher_worker(
             recv(next_notify) -> _ => {
                 will_notify = false;
                 let status = nucleo.tick(TICK_TIMEOUT_MS);
-                if status.changed {
-                    let snapshot = nucleo.snapshot();
-                    let limit = inner.limit.min(snapshot.matched_item_count() as usize);
-                    let pattern = snapshot.pattern().column_pattern(0);
-                    let matches: Vec<_> = snapshot
-                        .matches()
-                        .iter()
-                        .take(limit)
-                        .filter_map(|match_| {
-                            let item = snapshot.get_item(match_.idx)?;
-                            let full_path = item.data.full_path.as_ref();
-                            let (root_idx, relative_path) = get_file_path(Path::new(full_path), &inner.search_directories)?;
-                            let indices = if let Some(indices_matcher) = indices_matcher.as_mut() {
-                                let mut idx_vec = Vec::<u32>::new();
-                                let haystack = item.matcher_columns[0].slice(..);
-                                let _ = pattern.indices(haystack, indices_matcher, &mut idx_vec);
-                                idx_vec.sort_unstable();
-                                idx_vec.dedup();
-                                Some(idx_vec)
-                            } else {
-                                None
-                            };
-                            Some(FileMatch {
-                                score: match_.score,
-                                path: PathBuf::from(relative_path),
-                                match_type: item.data.match_type,
-                                root: inner.search_directories[root_idx].clone(),
-                                indices,
-                            })
-                        })
-                        .collect();
-
-                    let snapshot = FileSearchSnapshot {
-                        query: last_query.clone(),
-                        matches,
-                        total_match_count: snapshot.matched_item_count() as usize,
-                        scanned_file_count: snapshot.item_count() as usize,
+                if status.changed
+                    && let Some(snapshot) = snapshot::for_query(
+                        &inner,
+                        &nucleo,
+                        &last_query,
+                        &mut indices_matcher,
                         walk_complete,
-                    };
+                    )
+                {
                     inner.reporter.on_update(&snapshot);
                 }
                 if !status.running && walk_complete {
@@ -710,7 +701,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingReporter {
+    pub(super) struct RecordingReporter {
         updates: Mutex<Vec<FileSearchSnapshot>>,
         complete_times: Mutex<Vec<Instant>>,
         complete_cv: Condvar,

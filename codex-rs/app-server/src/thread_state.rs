@@ -35,6 +35,9 @@ use tracing::error;
 
 type PendingInterruptQueue = Vec<ConnectionRequestId>;
 
+// Removing an unload entry drops its sender and wakes deferred listener attachment.
+pub(crate) type PendingThreadUnloads = Arc<Mutex<HashMap<ThreadId, watch::Sender<()>>>>;
+
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
     pub(crate) history_items: Vec<RolloutItem>,
@@ -99,6 +102,7 @@ pub(crate) struct TurnSummary {
 
 #[derive(Default)]
 pub(crate) struct ThreadState {
+    goal_resume_lock: Arc<Mutex<()>>,
     pub(crate) pending_interrupts: PendingInterruptQueue,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
@@ -361,6 +365,21 @@ pub(crate) struct ThreadStateManager {
 }
 
 impl ThreadStateManager {
+    /// Coordinates goal edits with cold/path-based resume for just this thread.
+    pub(crate) async fn lock_goal_resume(
+        &self,
+        thread_id: ThreadId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .thread_state(thread_id)
+            .await
+            .lock()
+            .await
+            .goal_resume_lock
+            .clone();
+        lock.lock_owned().await
+    }
+
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -483,6 +502,32 @@ impl ThreadStateManager {
             );
             thread_state.clear_listener();
         }
+    }
+
+    /// Removes an unsubscribed listener's entry without clearing a replacement's state.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the listener generation must stay fixed while removing its map entry"
+    )]
+    pub(crate) async fn remove_unsubscribed_listener(
+        &self,
+        thread_id: ThreadId,
+        expected: &Arc<Mutex<ThreadState>>,
+        generation: u64,
+    ) -> bool {
+        let mut thread_state = expected.lock().await;
+        let mut state = self.state.lock().await;
+        if thread_state.listener_generation != generation
+            || !state.threads.get(&thread_id).is_some_and(|entry| {
+                Arc::ptr_eq(&entry.state, expected) && entry.connection_ids.is_empty()
+            })
+        {
+            return false;
+        }
+        state.threads.remove(&thread_id);
+        self.unregister_listener_command_tx(thread_id);
+        thread_state.clear_listener();
+        true
     }
 
     pub(crate) async fn clear_all_listeners(&self) {

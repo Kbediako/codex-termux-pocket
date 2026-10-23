@@ -18,6 +18,11 @@ on:
       - "codex-rs/utils/cargo-bin/**"
       - "codex-rs/http-client/**"
       - "codex-rs/aws-auth/**"
+      - "codex-rs/core-plugins/**"
+      - "codex-rs/ext/skills/**"
+      - "codex-rs/external-agent-migration/**"
+      - "codex-rs/skills/**"
+      - "codex-rs/tcp-tunnel/**"
       - ".cargo/**"
       - "codex-rs/.cargo/**"
       - "justfile"
@@ -40,6 +45,11 @@ on:
       - "codex-rs/utils/cargo-bin/**"
       - "codex-rs/http-client/**"
       - "codex-rs/aws-auth/**"
+      - "codex-rs/core-plugins/**"
+      - "codex-rs/ext/skills/**"
+      - "codex-rs/external-agent-migration/**"
+      - "codex-rs/skills/**"
+      - "codex-rs/tcp-tunnel/**"
       - ".cargo/**"
       - "codex-rs/.cargo/**"
       - "justfile"
@@ -102,11 +112,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libssl-dev bubblewrap
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libssl-dev libasound2-dev bubblewrap
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
 
-      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: nextest@0.9.103
 
@@ -412,6 +422,47 @@ jobs:
           print(f"Retained {matched} source-matched reqwest compiler unit(s) for {target}")
           PYTHON
 
+      - name: Test YAML and QUIC dependency consumers
+        shell: bash
+        env:
+          NEXTEST_STATUS_LEVEL: all
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/termux-dependency-consumers-$CONSUMER_TARGET"
+          test -s "$evidence/source-identity.txt"
+          # Keep these builds after the scoped reqwest fingerprint capture above.
+          # Separate package runs preserve each consumer's own feature selection.
+          checkout_sha="$(git rev-parse HEAD)"
+          checkout_tree="$(git rev-parse 'HEAD^{tree}')"
+          workflow_blob="$(git rev-parse HEAD:.github/workflows/termux-linux-sandbox.yml)"
+          {
+            printf 'repository=%s\nrun_id=%s\nrun_attempt=%s\ntarget=%s\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CONSUMER_TARGET"
+            printf 'event_source_sha=%s\n' "$GITHUB_SHA"
+            printf 'checkout_sha=%s\n' "$checkout_sha"
+            printf 'checkout_tree=%s\n' "$checkout_tree"
+            printf 'workflow_blob=%s\n' "$workflow_blob"
+            sha256sum Cargo.lock ../MODULE.bazel.lock
+          } | tee "$evidence/yaml-quic-source-identity.txt"
+          printf 'package\ttest_exit\tlog_exit\n' > "$evidence/yaml-quic-results.tsv"
+          result=0
+          for package in codex-core-plugins codex-skills-extension codex-external-agent-migration codex-skills codex-tcp-tunnel; do
+            printf 'just test --locked --cargo-profile ci-test --target %s -p %s\n' \
+              "$CONSUMER_TARGET" "$package" > "$evidence/$package-command.txt"
+            set +e
+            just test --locked --cargo-profile ci-test --target "$CONSUMER_TARGET" -p "$package" \
+              2>&1 | tee "$evidence/$package-tests.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\t%s\t%s\n' "$package" "${statuses[0]}" "${statuses[1]}" \
+              >> "$evidence/yaml-quic-results.tsv"
+            if (( statuses[0] != 0 || statuses[1] != 0 )); then
+              result=1
+            fi
+          done
+          printf '%s\n' "$result" > "$evidence/yaml-quic-consumer-tests.exit"
+          exit "$result"
+
       - name: Verify dependency consumer worktree
         if: always()
         shell: bash
@@ -423,7 +474,7 @@ jobs:
 
       - name: Retain dependency consumer evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: termux-dependency-consumers-${{ matrix.target }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/termux-dependency-consumers-${{ matrix.target }}/

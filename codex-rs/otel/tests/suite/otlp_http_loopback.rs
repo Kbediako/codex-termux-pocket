@@ -11,6 +11,7 @@ use codex_otel::Result;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::set_parent_from_w3c_trace_context;
 use codex_protocol::protocol::W3cTraceContext;
+use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -143,7 +144,34 @@ fn write_http_response(stream: &mut TcpStream, status: &str) -> std::io::Result<
 }
 
 #[test]
-fn otlp_http_exporter_sends_metrics_to_collector() -> Result<()> {
+fn otlp_http_exporter_honors_cumulative_temporality_env() -> Result<()> {
+    // Isolate the environment setting from other tests, including under Bazel/libtest.
+    const CHILD_ENV: &str = "CODEX_OTEL_TEMPORALITY_TEST_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let current_thread = thread::current();
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                current_thread.name().expect("test name"),
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env(
+                "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE",
+                "cumulative",
+            )
+            .env("OTEL_METRIC_EXPORT_INTERVAL", "60000")
+            .output()
+            .expect("run test with cumulative temporality configured");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     listener.set_nonblocking(true).expect("set_nonblocking");
@@ -252,21 +280,33 @@ fn otlp_http_exporter_sends_metrics_to_collector() -> Result<()> {
         "unexpected content-type: {content_type}"
     );
 
+    let payload: serde_json::Value = serde_json::from_slice(&request.body).expect("OTLP JSON");
+    let counter = payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        .as_array()
+        .expect("exported metrics")
+        .iter()
+        .find(|metric| metric["name"] == "codex.turns")
+        .expect("exported counter");
+    assert_eq!(
+        counter["sum"]["aggregationTemporality"],
+        serde_json::json!(2)
+    );
+
     let body = String::from_utf8_lossy(&request.body);
     assert!(
         body.contains("codex.turns"),
         "expected metric name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("codex.active"),
         "expected gauge not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.api_request\""),
         "expected API-request counter not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains(EXEC_SERVER_CLIENT_REQUEST_COUNT_METRIC),
@@ -275,47 +315,47 @@ fn otlp_http_exporter_sends_metrics_to_collector() -> Result<()> {
     assert!(
         body.contains("\"codex.api_request.duration_ms\""),
         "expected API-request duration not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.conversation.turn.count\""),
         "expected conversation turn count not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.responses_api_engine_iapi_ttft.duration_ms\""),
         "expected engine IAPI TTFT duration not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.responses_api_engine_service_tbt.duration_ms\""),
         "expected engine service TBT duration not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.responses_api_engine_service_ttft.duration_ms\""),
         "expected engine service TTFT duration not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.tool.call\""),
         "expected tool-call counter not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.turn.token_usage\""),
         "expected turn-token histogram not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("\"codex.tool.call.duration_ms\""),
         "expected tool-call duration not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("component") && body.contains("test"),
         "expected gauge tag not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
 
     Ok(())
@@ -409,7 +449,7 @@ fn otlp_http_exporter_sends_logs_to_collector()
     assert!(
         body.contains("codex.test.log_exported"),
         "expected exported log event not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     Ok(())
 }
@@ -569,22 +609,22 @@ fn otlp_http_exporter_sends_traces_to_collector()
     assert!(
         body.contains("trace-loopback"),
         "expected span name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("codex-cli"),
         "expected service name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("test.configured_attribute") && body.contains("configured-value"),
         "expected configured span attribute not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("codex.test.trace_event"),
         "expected trace event not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
 
     Ok(())
@@ -686,12 +726,12 @@ async fn otlp_http_exporter_sends_traces_to_collector_with_bounded_shutdown_in_t
     assert!(
         body.contains("trace-loopback-tokio"),
         "expected span name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("codex-cli"),
         "expected service name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
 
     Ok(())
@@ -888,12 +928,12 @@ fn otlp_http_exporter_sends_traces_to_collector_in_current_thread_tokio_runtime(
     assert!(
         body.contains("trace-loopback-current-thread"),
         "expected span name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
     assert!(
         body.contains("codex-cli"),
         "expected service name not found; body prefix: {}",
-        &body.chars().take(2000).collect::<String>()
+        body.chars().take(2000).collect::<String>()
     );
 
     Ok(())

@@ -9,8 +9,10 @@ use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::agent_communication::MessageDelivery;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
+use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::emit_subagent_session_started;
@@ -19,12 +21,12 @@ use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::default_thread_id_generator;
-use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -33,6 +35,8 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ContentItemNamespace;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::Event;
@@ -58,6 +62,9 @@ use tracing::warn;
 use uuid::Uuid;
 
 pub(crate) use self::runtime::AgentControlInit;
+pub(crate) use self::runtime::AgentTreeMembership;
+pub(crate) use self::runtime::AgentTreeShutdownState;
+pub(crate) use self::runtime::AgentTreeTeardownGuard;
 pub(crate) use self::runtime::LocalAgentRuntime;
 pub(crate) use self::watch::StatusSubscription;
 
@@ -69,7 +76,9 @@ mod execution;
 mod inspection;
 mod interrupt;
 mod legacy;
+mod mailbox;
 mod residency;
+pub use residency::ThreadEvictionOutcome;
 mod resume;
 mod root_handoff;
 mod runtime;
@@ -139,7 +148,7 @@ impl LocalAgentControl {
             .start_or_steer_turn(TurnInputRequest::user_input(input).on_start(start_options))
             .await
         {
-            Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
+            Ok(TurnInputSubmission::Started { turn_id, .. }) => Ok(turn_id),
             Ok(TurnInputSubmission::Steered { .. }) => {
                 // MAv1 exposes an opaque `submission_id` to the model. The legacy
                 // `Op::UserInput` path returned a fresh ID for every steer, while the
@@ -251,12 +260,46 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        communication: InterAgentCommunication,
+        mut communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        let observers = state.extensions.message_lifecycle_contributors();
+        let delivery = (!observers.is_empty()).then(|| {
+            let message_id = communication
+                .id
+                .take()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| ResponseItemId::new("amsg"));
+            communication.id = Some(message_id.clone());
+            MessageDelivery::publish(context.sender_thread_id, message_id, observers)
+        });
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
+        {
+            // Keep unloaded delivery atomic with publication of a reloaded session.
+            let threads = state.threads.read().await;
+            if !communication.trigger_turn && !threads.contains_key(&agent_id) {
+                let _membership = self.runtime.admit_start()?;
+                self.runtime.ensure_agent_known(agent_id)?;
+                let submission_id = uuid::Uuid::now_v7().to_string();
+                self.runtime.mailboxes.enqueue(
+                    agent_id,
+                    Some(submission_id.clone()),
+                    vec![crate::PendingAgentMessage::new(communication, delivery)],
+                )?;
+                if let Some(communication) = communication_for_log {
+                    crate::agent_communication::emit_agent_communication_send(
+                        &submission_id,
+                        &context,
+                        &communication,
+                        agent_id,
+                    );
+                }
+                return Ok(submission_id);
+            }
+        }
+        // Loaded recipients retain submission ordering with follow-ups and interrupts.
         let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
             (
                 start_options.parent_turn_id.clone(),
@@ -278,6 +321,7 @@ impl LocalAgentControl {
                         },
                         parent_turn_id,
                         root_turn_id,
+                        delivery,
                     )
                     .await,
             )
@@ -307,6 +351,7 @@ impl LocalAgentControl {
                     Op::Interrupt,
                     /*parent_turn_id*/ None,
                     /*root_turn_id*/ None,
+                    /*message_delivery*/ None,
                 )
                 .await,
         )
@@ -436,12 +481,20 @@ impl LocalAgentControl {
         else {
             return;
         };
+        let Ok(membership) = self.runtime.admit_start() else {
+            return;
+        };
+        let teardown = membership.into_teardown_guard("completion_watcher", Some(child_thread_id));
         let control = self.clone();
-        tokio::spawn(async move {
+        let watcher = async move {
             let status = match control.subscribe_status(child_thread_id).await {
                 Ok(mut updates) => {
                     let mut final_status = None;
-                    while let Some(Ok(snapshot)) = updates.next().await {
+                    while let Some(Ok(snapshot)) = tokio::select! {
+                        biased;
+                        _ = control.runtime.shutdown.cancelled() => return,
+                        update = updates.next() => update,
+                    } {
                         if let Some(status) = snapshot.status()
                             && is_final(status)
                         {
@@ -456,7 +509,11 @@ impl LocalAgentControl {
                 }
                 Err(_) => control.get_status(child_thread_id).await,
             };
-            if !is_final(&status) {
+            // Tree shutdown is a lifecycle handoff, not a child result for the parent.
+            if !is_final(&status)
+                || (matches!(&status, AgentStatus::Shutdown)
+                    && control.runtime.shutdown.is_cancelled())
+            {
                 return;
             }
 
@@ -510,12 +567,32 @@ impl LocalAgentControl {
             let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
                 return;
             };
+            let config = parent_thread.config().await;
+            let namespace = match parent_thread
+                .multi_agent_version()
+                .unwrap_or_else(|| config.multi_agent_version_from_features())
+            {
+                MultiAgentVersion::Disabled => None,
+                MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
+                MultiAgentVersion::V2 => Some(
+                    config
+                        .multi_agent_v2
+                        .tool_namespace
+                        .clone()
+                        .map(ContentItemNamespace::from)
+                        .unwrap_or(ContentItemNamespace::Functions),
+                ),
+            };
             parent_thread
-                .inject_fragment_without_turn(SubagentNotification::new(
-                    child_reference.as_str(),
-                    status,
-                ))
+                .inject_fragment_without_turn(
+                    SubagentNotification::new(child_reference.as_str(), status)
+                        .with_metadata(ContentItemMetadata::tool(namespace)),
+                )
                 .await;
+        };
+        tokio::spawn(async move {
+            watcher.await;
+            teardown.complete();
         });
     }
 
@@ -588,14 +665,7 @@ impl LocalAgentControl {
         };
 
         let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        Some(
-            parent_thread
-                .session
-                .services
-                .turn_environments
-                .snapshot()
-                .await,
-        )
+        Some(parent_thread.session.inherited_environment_snapshot().await)
     }
 
     async fn inherited_exec_policy_for_source(

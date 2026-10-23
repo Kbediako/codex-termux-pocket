@@ -5,14 +5,17 @@ use crate::chatwidget::UserMessage;
 use crate::chatwidget::tests::helpers::normalize_completion_timestamps;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
+use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::models::ManagedFileSystemPermissions;
+use codex_protocol::openai_models::ModelAccessPrograms;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
@@ -119,7 +122,7 @@ async fn next_turn_started(
         .await
         .expect("app-server should emit a turn/start event")
         .expect("app-server event stream should remain open");
-        let started_turn_id = if let AppServerEvent::ServerNotification(notification) = &event
+        let started_turn_id = if let AppServerEvent::ServerNotification(notification) = &event.event
             && let ServerNotification::TurnStarted(notification) = notification.as_ref()
             && notification.thread_id == thread_id.to_string()
         {
@@ -127,7 +130,7 @@ async fn next_turn_started(
         } else {
             None
         };
-        app.handle_app_server_event(app_server, event).await;
+        app.handle_backend_event(app_server, event).await;
         drain_active_thread_events(app);
         if let Some(turn_id) = started_turn_id {
             return turn_id;
@@ -149,7 +152,7 @@ async fn wait_for_turn_completed(
         .expect("app-server should emit a turn/completed event")
         .expect("app-server event stream should remain open");
         let completed = matches!(
-            &event,
+            &event.event,
             AppServerEvent::ServerNotification(notification)
                 if matches!(
                     notification.as_ref(),
@@ -157,7 +160,7 @@ async fn wait_for_turn_completed(
                         if notification.thread_id == thread_id.to_string()
                 )
         );
-        app.handle_app_server_event(app_server, event).await;
+        app.handle_backend_event(app_server, event).await;
         drain_active_thread_events(app);
         if completed {
             return;
@@ -312,7 +315,7 @@ stream_max_retries = 0
         )
         .await?
         .expect("app-server remains open");
-        let committed_id = if let AppServerEvent::ServerNotification(notification) = &event
+        let committed_id = if let AppServerEvent::ServerNotification(notification) = &event.event
             && let ServerNotification::ItemCompleted(item) = notification.as_ref()
             && let ThreadItem::UserMessage {
                 content, client_id, ..
@@ -323,7 +326,7 @@ stream_max_retries = 0
         } else {
             None
         };
-        app.handle_app_server_event(&app_server, event).await;
+        app.handle_backend_event(&app_server, event).await;
         if let Some(client_id) = committed_id {
             let saved_input = if via_overview {
                 assert!(!app.thread_event_channels.contains_key(&thread_id));
@@ -426,7 +429,7 @@ async fn drive_until_request_count(
             () = server.wait_for_request_count(expected_request_count) => return,
             event = app_server.next_event() => {
                 let event = event.expect("app-server event stream should remain open");
-                app.handle_app_server_event(app_server, event).await;
+                app.handle_backend_event(app_server, event).await;
                 drain_active_thread_events(app);
             }
             () = &mut timeout => {
@@ -528,10 +531,21 @@ async fn run_safety_retry(
         .filter(|model| matches!(model.slug.as_str(), CURRENT_MODEL | FASTER_MODEL))
     {
         model.tool_mode = Some(ToolMode::Direct);
+        if scenario == SafetyRetryScenario::UnsupportedPermissions && model.slug == FASTER_MODEL {
+            model.available_access_programs = Some(ModelAccessPrograms {
+                cyber: vec![CyberAccessProgram::Standard],
+            });
+        }
     }
     let model_catalog_path = codex_home.path().join("models.json");
     std::fs::write(&model_catalog_path, serde_json::to_vec(&model_catalog)?)?;
     let model_catalog_path = toml::Value::String(model_catalog_path.display().to_string());
+    // The committed-steer case counts usage from the response that finishes before steering.
+    let instant_interrupt_config = if committed_steer.is_some() {
+        "instant_interrupt = false"
+    } else {
+        ""
+    };
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -549,6 +563,7 @@ stream_max_retries = 0
 
 [features]
 goals = true
+{instant_interrupt_config}
 "#,
             server.uri()
         ),
@@ -556,6 +571,16 @@ goals = true
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     app.config.model = Some(CURRENT_MODEL.to_string());
+    if scenario == SafetyRetryScenario::UnsupportedPermissions {
+        app.model_catalog = Arc::new(ModelCatalog::new(
+            model_catalog
+                .models
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+        ));
+    }
     app.config.model_catalog = Some(model_catalog);
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
@@ -752,6 +777,55 @@ goals = true
     while app_event_rx.try_recv().is_ok() {}
 
     if scenario == SafetyRetryScenario::UnsupportedPermissions {
+        app_server
+            .thread_settings_update(ThreadSettingsUpdateParams {
+                thread_id: source_thread_id.to_string(),
+                effort: Some(ReasoningEffortConfig::Low),
+                ..Default::default()
+            })
+            .await?;
+        let mut settings = next_thread_settings_updated(&mut app_server, source_thread_id).await;
+        settings.thread_settings.model_provider = "openai".to_string();
+        app.chat_widget.on_thread_settings_updated(settings);
+        app.chat_widget.update_account_state(
+            /*status_account_display*/ None, /*plan_type*/ None,
+            /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ false,
+        );
+        app.chat_widget
+            .set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
+        app.chat_widget.set_daybreak_enabled(/*enabled*/ true);
+        Box::pin(app.retry_safety_buffered_turn(
+            &mut tui,
+            &mut app_server,
+            SafetyBufferedRetry {
+                thread_id: source_thread_id,
+                turn_id: active_turn_id.clone(),
+                model: FASTER_MODEL.to_string(),
+                turn: active_turn.clone(),
+                prompt: UserMessage::from(RETRY_PROMPT),
+            },
+        ))
+        .await;
+        assert_eq!(app.chat_widget.thread_id(), Some(source_thread_id));
+        let source = app_server
+            .thread_read(source_thread_id, /*include_turns*/ true)
+            .await?;
+        assert_eq!(
+            source.turns.last().map(|turn| &turn.status),
+            Some(&TurnStatus::InProgress)
+        );
+        let error_cell = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .find_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => Some(cell),
+                _ => None,
+            })
+            .expect("unsupported Daybreak model should be added to history");
+        insta::assert_snapshot!(
+            lines_to_single_string(&error_cell.display_lines(/*width*/ 200)),
+            @"■ Daybreak support for model gpt-5.6-luna could not be confirmed by the connected server. Use /daybreak to turn it off, or choose a compatible model and server."
+        );
+        app.chat_widget.set_daybreak_enabled(/*enabled*/ false);
+
         let extra_root =
             AbsolutePathBuf::resolve_path_against_base("extra", app.config.cwd.as_path());
         let permission_profile = PermissionProfile::Managed {

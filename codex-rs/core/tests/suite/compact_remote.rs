@@ -117,6 +117,7 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
             realtime_end_instructions: None,
             prompt: Some(Some("backend prompt".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: None,
             version: None,
             voice: None,
@@ -367,6 +368,8 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
     )
     .await?;
     let developer = |text: &str| ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
