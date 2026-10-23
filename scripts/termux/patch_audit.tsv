@@ -556,3 +556,6 @@ subject	ci: update artifact download to v8.0.2 (#171)	tooling	Records the separa
 sha	48b2ed31c2e97197de9e91c04dcb88d9ca55c72a	tooling	Retains the reviewed original PR 174 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
 subject	ci: update pinned installer action to v2.87.28	tooling	Reconciles PR 174 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
 subject	ci: update pinned installer action to v2.87.28 (#174)	tooling	Records the separately reviewed PR 174 merge without changing the source release contract or publisher authority.
+sha	cb467738ffa8b742fe7bfd61cf587dcf1c868beb	runtime-critical	Retains the original PR 165 proposal; reconciled adoption requires paired generated locks and fresh source validation.
+subject	build(deps): update tracing-appender to 0.2.5	runtime-critical	Reconciles PR 165 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
+subject	build(deps): update tracing-appender to 0.2.5 (#165)	runtime-critical	Records the separately reviewed PR 165 dependency merge and its paired generated locks.
