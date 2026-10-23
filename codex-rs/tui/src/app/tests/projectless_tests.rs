@@ -110,10 +110,12 @@ sandbox = "unelevated"
         .await?;
     tui.pause_events();
     app.launch_cwd = source.path().to_path_buf();
+    let backend_id = server.backend_id();
     app.resume_target_session(
         &mut tui,
         &mut server,
         SessionTarget {
+            backend_id,
             path: None,
             thread_id: saved.session.thread_id,
             cwd: Some(source.path().to_path_buf()),
@@ -163,7 +165,7 @@ sandbox = "unelevated"
     })
     .await??;
     response.single_request();
-    let next = app.load_new_session_config(&server).await?;
+    let (next, _) = app.load_new_session_config(&server).await?;
     assert_eq!(
         next.permissions.permission_profile(),
         &PermissionProfile::workspace_write()
@@ -328,6 +330,7 @@ async fn local_projectless_defaults_respect_trust_scope_and_explicit_settings() 
         let startup = crate::app::startup::prepare_fresh_startup_config(
             &mut config,
             &server,
+            &AppServerTarget::Embedded,
             &[],
             &overrides,
             &EnvironmentManager::default_for_tests(),

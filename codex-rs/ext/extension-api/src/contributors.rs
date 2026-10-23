@@ -2,7 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_config::types::PluginsConfigToml;
 use codex_context_fragments::ContextualUserFragment;
+use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
+use codex_exec_server_protocol::ExecutorCapabilityDiscoveryV2Snapshot;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_tools::ToolCall;
@@ -44,6 +48,7 @@ pub use thread_lifecycle::ThreadReadyInput;
 pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
+pub use tool_lifecycle::CodeModeCellTiming;
 pub use tool_lifecycle::CommandStartInput;
 pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
@@ -56,6 +61,7 @@ pub use tool_lifecycle::ToolTimingBoundary;
 pub use tool_lifecycle::ToolTimingInput;
 pub use turn_input::TurnInputContext;
 pub use turn_input::TurnInputEnvironment;
+pub use turn_lifecycle::CatalogRefreshInput;
 pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
 pub use turn_lifecycle::TurnStartInput;
@@ -89,13 +95,20 @@ pub trait McpServerContributor<C: Sync>: Send + Sync {
         context: McpServerContributionContext<'a, C>,
     ) -> ExtensionFuture<'a, Vec<McpServerContribution>>;
 
+    /// Reads canonical hosted-plugin IDs from published state without discovery or MCP I/O.
+    fn hosted_plugin_ids(&self, _context: McpServerContributionContext<'_, C>) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Declares executor plugins, including those without MCP servers or connectors. Each
     /// declaration identifies the plugin once; its deferred MCP data cannot change that identity.
     /// Return plugins in precedence order: across contributors in registration order, the first
-    /// plugin wins if several provide the same server.
+    /// plugin wins if several provide the same server. Use the supplied plugin policy for both
+    /// admission and deferred projection; a step's policy may be newer than its other config.
     fn selected_plugins<'a>(
         &'a self,
         _context: McpServerContributionContext<'a, C>,
+        _plugins_config: &'a PluginsConfigToml,
     ) -> ExtensionFuture<'a, Vec<SelectedPlugin<'a>>> {
         Box::pin(async { Vec::new() })
     }
@@ -141,18 +154,6 @@ pub trait ContextContributor: Send + Sync {
             let _input = input;
             Vec::new()
         })
-    }
-
-    /// Retains bounded extension metadata when compaction discards rendered context.
-    ///
-    /// Return only this contributor's section IDs, without rendered text or availability
-    /// state. Core persists these partial sections so the next step can rebuild full
-    /// context without losing decisions that are independent of model-visible history.
-    fn retain_world_state_after_compaction(
-        &self,
-        _previous_world_state: &serde_json::Map<String, serde_json::Value>,
-    ) -> serde_json::Map<String, serde_json::Value> {
-        serde_json::Map::new()
     }
 }
 
@@ -234,6 +235,14 @@ pub trait TurnLifecycleContributor: Send + Sync {
             let _self = self;
             let _input = input;
         })
+    }
+
+    /// Refreshes catalogs before a step; returns true when MCP needs rebuilding.
+    fn refresh_catalog_for_step<'a>(
+        &'a self,
+        _input: CatalogRefreshInput<'a>,
+    ) -> ExtensionFuture<'a, bool> {
+        Box::pin(async { false })
     }
 
     /// Observes a completed item without changing it or delaying streamed deltas.
@@ -353,14 +362,39 @@ pub trait SkillInvocationContributor: Send + Sync {
     }
 }
 
+/// Runtime inputs shared by preparation, tool construction, and later context consumers.
+#[derive(Clone, Copy)]
+pub struct StepPreparationInput<'a> {
+    pub turn_id: &'a str,
+    pub ready_selected_capability_roots: &'a [SelectedCapabilityRoot],
+    pub executor_capability_discovery: Option<&'a ExecutorCapabilityDiscoverySnapshot>,
+    pub executor_capability_discovery_v2: Option<&'a [ExecutorCapabilityDiscoveryV2Snapshot]>,
+    /// Captured plugin policy; an empty snapshot represents no selected plugins.
+    pub selected_plugins: &'a SelectedPluginSnapshot,
+    pub session_store: &'a ExtensionData,
+    pub thread_store: &'a ExtensionData,
+    pub turn_store: &'a ExtensionData,
+    /// Contains captured environment handles and permissions.
+    pub step_store: &'a ExtensionData,
+}
+
 /// Extension contribution that exposes native tools owned by a feature.
 pub trait ToolContributor: Send + Sync {
+    /// Prepares step state once, before tools are built and without rendering.
+    /// Never publish partial state; discovery failures may report warnings.
+    fn prepare_for_step<'a>(&'a self, _input: StepPreparationInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     /// Returns native tools bound to the supplied extension state.
+    /// Step-only contributors can leave this empty default unchanged.
     fn tools(
         &self,
-        session_store: &ExtensionData,
-        thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>;
+        _session_store: &ExtensionData,
+        _thread_store: &ExtensionData,
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+        Vec::new()
+    }
 
     /// Returns native tools bound to one sampling step.
     fn tools_for_step(
@@ -415,6 +449,18 @@ pub trait ToolLifecycleContributor: Send + Sync {
     /// Observe handler or remote host duration as defined by `ToolTimingBoundary`.
     /// Handler timing includes cancellation. Observers must return promptly.
     fn on_tool_timing(&self, _input: ToolTimingInput<'_>) {}
+
+    /// Observe the exec that yielded a cell and the wait that collected its terminal result
+    /// or found the cell unavailable.
+    /// `call_id` identifies that dispatch. `cell_id` stays the same across waits.
+    fn on_code_mode_cell_timing(
+        &self,
+        _thread_id: &str,
+        _call_id: &str,
+        _cell_id: &str,
+        _timing: CodeModeCellTiming,
+    ) {
+    }
 }
 
 /// Owns the complete approval decision, including whether to consult a reviewer.

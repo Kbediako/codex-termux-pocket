@@ -12,12 +12,17 @@ mod errors;
 #[path = "agents_overview_loading.rs"]
 mod loading;
 
+#[path = "agents_overview_selection.rs"]
+mod selection;
+
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
+use super::app_server_requests::BufferedServerRequest;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_event::AgentsOverviewThreadRefresh;
+use crate::bottom_pane::BottomPaneView;
 use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -46,15 +51,22 @@ pub(super) struct AgentsOverviewState {
     pub(super) initialized: bool,
     pub(super) discovery: super::agents_overview_discovery::AgentsOverviewDiscovery,
     pub(super) show_more_requested: bool,
+    pub(super) refresh_show_more: bool,
     /// Vacancies left by lifecycle removals, filled without expanding the visible window.
     pub(super) refill_count: usize,
     pub(super) request_id: Option<Uuid>,
     pub(super) refresh_pending: bool,
+    pub(super) pin_refresh_requested: bool,
     pub(super) refresh_thread_ids: HashSet<ThreadId>,
+    pub(super) active_refresh_thread_ids: HashSet<ThreadId>,
+    pub(super) pinned_thread_ids: Option<Vec<ThreadId>>,
+    pub(super) pending_pin_change: Option<Uuid>,
     pub(super) refresh_task: Option<tokio::task::AbortHandle>,
     pub(super) refresh_notifications: HashMap<ThreadId, Vec<ServerNotification>>,
     pub(super) rendered_full_screen: bool,
     pub(super) visible_thread_ids: Vec<ThreadId>,
+    /// One-shot successor selected before a removal invalidates the displayed rows.
+    pub(super) selection_after_removal: Option<ThreadId>,
     pub(super) view_state:
         Arc<std::sync::Mutex<super::agents_overview_view::AgentsOverviewViewState>>,
     /// Explicit permission-profile choices for new-session carryover, retained across navigation.
@@ -65,7 +77,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) blank_sessions: HashMap<ThreadId, crate::app_server_session::AppServerStartedThread>,
     pub(super) input_states: HashMap<ThreadId, ThreadInputState>,
     pub(super) new_session_draft: Option<Box<StartupDraftPump>>,
-    pub(super) dispatched_requests: HashMap<ThreadId, Vec<ServerRequest>>,
+    pub(super) dispatched_requests: HashMap<ThreadId, Vec<BufferedServerRequest>>,
 }
 
 impl Drop for AgentsOverviewState {
@@ -133,7 +145,8 @@ impl App {
             .flatten()
             .cloned()
             .collect();
-        let view = self.agents_overview_view(threads, /*selected_thread_id*/ None);
+        let selected_thread_id = self.agents_overview.selection_after_removal.take();
+        let view = self.agents_overview_view(threads, selected_thread_id);
         self.agents_overview.visible_thread_ids = view.thread_ids();
         self.chat_widget.show_bottom_pane_view(Box::new(view));
         if self.reconnect.offline {
@@ -164,6 +177,8 @@ impl App {
             return;
         }
         self.agents_overview.request_id = None;
+        self.agents_overview.refresh_show_more = false;
+        self.agents_overview.active_refresh_thread_ids.clear();
         self.agents_overview.refresh_task = None;
         let refill_succeeded = result
             .as_ref()
@@ -179,6 +194,9 @@ impl App {
         }
         match result {
             Ok(refresh) => {
+                if let Some(pinned_thread_ids) = refresh.pinned_thread_ids {
+                    self.agents_overview.pinned_thread_ids = pinned_thread_ids;
+                }
                 self.agents_overview.initialized = refresh.recent_seed_complete;
                 if let Some(discovery) = refresh.discovery {
                     if !discovery.has_more() {
@@ -265,18 +283,23 @@ impl App {
         else {
             return;
         };
+        let previous_thread_id = self
+            .agents_overview
+            .visible_thread_ids
+            .get(selected)
+            .copied();
         let selected_thread_id = self
             .agents_overview
             .view_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .rename_target
-            .or_else(|| {
-                self.agents_overview
-                    .visible_thread_ids
-                    .get(selected)
-                    .copied()
-            });
+            .filter(|id| {
+                self.agents_overview.threads.contains_key(id)
+                    && !self.agents_overview.hidden_threads.contains(id)
+            })
+            .or(self.agents_overview.selection_after_removal.take())
+            .or(previous_thread_id);
         let threads = self
             .agents_overview
             .threads
@@ -286,20 +309,31 @@ impl App {
             .collect();
         let view = self.agents_overview_view(threads, selected_thread_id);
         self.agents_overview.visible_thread_ids = view.thread_ids();
-        if selected_thread_id
-            .is_some_and(|thread_id| !self.agents_overview.visible_thread_ids.contains(&thread_id))
-            && let Ok(mut state) = self.agents_overview.view_state.lock()
-            && state.rename_target.is_some()
+        let next_thread_id = view
+            .selected_index()
+            .and_then(|index| self.agents_overview.visible_thread_ids.get(index).copied());
+        if (previous_thread_id.is_none() || previous_thread_id != next_thread_id)
+            && self
+                .chat_widget
+                .selected_index_for_active_view(AGENTS_OVERVIEW_VIEW_ID)
+                .is_some()
+        {
+            self.cancel_pending_key_chord();
+        }
+        if let Ok(mut state) = self.agents_overview.view_state.lock()
+            && state
+                .rename_target
+                .is_some_and(|id| !self.agents_overview.visible_thread_ids.contains(&id))
         {
             self.chat_widget.add_info_message(
                 format!(
                     "The rename target disappeared. Unsubmitted title: {}",
-                    state.input
+                    state.input.text()
                 ),
                 /*hint*/ None,
             );
             state.rename_target = None;
-            state.input.clear();
+            state.input.set_text_clearing_elements("");
         }
         self.chat_widget
             .replace_bottom_pane_view_if_present(AGENTS_OVERVIEW_VIEW_ID, Box::new(view));
@@ -364,19 +398,32 @@ impl App {
             });
         }
 
-        AgentsOverviewView::new(
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .vim_enabled = self.chat_widget.composer_is_vim_enabled();
+        let mut view = AgentsOverviewView::new(
             rows,
             selected_thread_id,
-            self.config.features.enabled(Feature::Worktrees)
-                && !crate::uses_remote_workspace_or_environment(
-                    &self.app_server_target,
-                    self.environment_manager.as_ref(),
-                ),
+            !crate::uses_remote_workspace_or_environment(
+                &self.app_server_target,
+                self.environment_manager.as_ref(),
+            ),
             self.local_settings.tui.status_line_use_colors,
             self.app_event_tx.clone(),
             self.keymap.clone(),
             Arc::clone(&self.agents_overview.view_state),
-        )
+        );
+        view.pinned_thread_ranks = self.agents_overview.pinned_thread_ids.as_ref().map(|ids| {
+            ids.iter()
+                .copied()
+                .enumerate()
+                .map(|(rank, id)| (id, rank))
+                .collect()
+        });
+        view.pin_action_pending = self.agents_overview.pending_pin_change.is_some();
+        view
     }
 
     pub(super) async fn select_agents_overview_thread(
@@ -454,7 +501,13 @@ impl App {
                             .input_states
                             .insert(*thread_id, input_state);
                     }
-                    let requests = store.pending_replay_requests();
+                    let requests: Vec<_> = store
+                        .pending_replay_requests()
+                        .into_iter()
+                        .filter_map(|request| {
+                            self.pending_app_server_requests.buffered_request(request)
+                        })
+                        .collect();
                     if !requests.is_empty() {
                         previous_pending_requests.push((*thread_id, requests));
                     }
@@ -498,6 +551,7 @@ impl App {
                 (config.clone(), self.local_settings.reloaded(config))
             } else if unloaded {
                 let target_session = SessionTarget {
+                    backend_id: app_server.backend_id(),
                     path: target_thread.path.clone(),
                     thread_id: root_thread_id,
                     cwd: Some(target_thread.cwd.to_path_buf()),
@@ -531,7 +585,7 @@ impl App {
                 }
             };
             if !unloaded && started.is_none() {
-                if let Err(control) = self
+                match self
                     .confirm_directory_trust(
                         tui,
                         app_server,
@@ -545,9 +599,10 @@ impl App {
                     )
                     .await
                 {
-                    return Ok(control);
+                    Ok(Some(reloaded)) => local_settings = reloaded,
+                    Ok(None) => {}
+                    Err(control) => return Ok(control),
                 }
-                local_settings = self.local_settings.reloaded(&resume_config);
             }
             // Folder selection and trust prompts can replace or clear the loading frame.
             if startup_draft.is_none() {
@@ -654,25 +709,6 @@ impl App {
                     }
                 }
             };
-            if !previous_running_thread_ids.is_empty() {
-                for side_thread_id in Vec::from_iter(self.side_threads.keys().copied()) {
-                    let discarded = match startup_draft.as_deref_mut() {
-                        Some(draft) => {
-                            draft
-                                .run_until(
-                                    tui,
-                                    self.discard_side_thread(app_server, side_thread_id),
-                                )
-                                .await?
-                        }
-                        None => self.discard_side_thread(app_server, side_thread_id).await,
-                    };
-                    if !discarded {
-                        let _ = app_server.thread_unsubscribe(root_thread_id).await;
-                        return Ok(AppRunControl::Continue);
-                    }
-                }
-            }
             for (thread_id, requests) in previous_pending_requests {
                 self.agents_overview
                     .dispatched_requests
@@ -775,6 +811,9 @@ impl App {
                     .set_workspace_roots(self.config.permissions.workspace_roots().to_vec());
             }
             self.config = destination_config;
+            if is_new_session {
+                self.remember_launch_permissions();
+            }
             if !read_only {
                 let approval = self.config.permissions.approval_policy.value();
                 if self
@@ -810,6 +849,7 @@ impl App {
             for thread_id in previous_thread_ids {
                 if previous_running_thread_ids.is_empty()
                     && thread_id != root_thread_id
+                    && !self.side_threads.contains_key(&thread_id)
                     && self.voice_owner_thread_id() != Some(thread_id)
                     && Some(thread_id) != previous_displayed_thread_id
                     && !self.agents_overview.blank_sessions.contains_key(&thread_id)
@@ -829,7 +869,7 @@ impl App {
             || (self.thread_unavailable(root_thread_id)
                 && !self.chat_widget.is_external_writer_view())
         {
-            self.select_agent_thread_and_discard_side(tui, app_server, root_thread_id)
+            self.select_agent_thread(tui, app_server, root_thread_id)
                 .await?;
         }
         let read_only = self.chat_widget.is_external_writer_view();
@@ -882,11 +922,7 @@ impl App {
             .flat_map(|(_, requests)| requests)
             .collect::<Vec<_>>();
         for request in requests {
-            self.handle_app_server_event(
-                app_server,
-                codex_app_server_client::AppServerEvent::ServerRequest(Box::new(request)),
-            )
-            .await;
+            self.handle_server_request_event(app_server, request).await;
         }
     }
 
@@ -912,7 +948,6 @@ impl App {
             .as_ref()
             .filter(|_| remote)
             .map(AbsolutePathBuf::to_path_buf);
-        let preserve_service_tier = remote || cwd.is_none();
         let local_cwd = if remote {
             self.config.cwd.to_path_buf()
         } else {
@@ -934,9 +969,6 @@ impl App {
                 return None;
             }
         };
-        if preserve_service_tier {
-            config.service_tier = self.chat_widget.configured_service_tier();
-        }
         let trust_cwd = config.cwd.to_path_buf();
         if self
             .confirm_directory_trust(
@@ -985,7 +1017,10 @@ impl App {
         }
         .to_path_buf();
         if let Some(draft) = startup_draft.as_deref_mut() {
-            draft.apply_config(&config);
+            draft.apply_settings(
+                &crate::local_settings::LocalSettings::from(&config),
+                config.cwd.as_path(),
+            );
         }
         let mut server_model_cleared = false;
         match StartupDraftPump::run_with_optional_draft(
@@ -1059,7 +1094,8 @@ impl App {
         );
         if server_model_cleared
             && config.model.is_none()
-            && config.features.enabled(Feature::FastMode)
+            && (config.features.enabled(Feature::FastMode)
+                || config.features.enabled(Feature::UltrafastMode))
         {
             // Bootstrap's fallback model may be seeded from the client. Resolve tiers
             // against the server catalog when config/read cleared the model.
@@ -1181,7 +1217,7 @@ impl App {
 
 #[cfg(test)]
 #[path = "agents_overview_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 fn agents_overview_group(
     thread: &Thread,

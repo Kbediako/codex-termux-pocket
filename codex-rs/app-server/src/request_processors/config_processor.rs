@@ -1,9 +1,11 @@
+use codex_app_server_protocol::ApplicationStorageRequirements;
 use std::sync::Arc;
 
 use crate::config_manager::ConfigManager;
 use crate::config_manager_service::ConfigManagerError;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
+use crate::model_catalog::ModelCatalog;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
@@ -83,6 +85,7 @@ pub(crate) struct ConfigRequestProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     config_manager: ConfigManager,
     thread_manager: Arc<ThreadManager>,
+    model_catalog: Arc<ModelCatalog>,
     analytics_events_client: AnalyticsEventsClient,
 }
 
@@ -91,12 +94,14 @@ impl ConfigRequestProcessor {
         outgoing: Arc<OutgoingMessageSender>,
         config_manager: ConfigManager,
         thread_manager: Arc<ThreadManager>,
+        model_catalog: Arc<ModelCatalog>,
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
             outgoing,
             config_manager,
             thread_manager,
+            model_catalog,
             analytics_events_client,
         }
     }
@@ -143,7 +148,10 @@ impl ConfigRequestProcessor {
             self.thread_manager.auth_manager().allowed_login_methods(),
         );
 
-        Ok(ConfigRequirementsReadResponse { requirements })
+        Ok(ConfigRequirementsReadResponse {
+            supports_independent_speed_modes: Some(true),
+            requirements,
+        })
     }
 
     pub(crate) async fn value_write(
@@ -208,7 +216,6 @@ impl ConfigRequestProcessor {
         let provider = create_model_provider(config.model_provider, /*auth_manager*/ None);
         let capabilities = provider.capabilities();
         Ok(ModelProviderCapabilitiesReadResponse {
-            namespace_tools: capabilities.namespace_tools,
             image_generation: capabilities.image_generation,
             web_search: capabilities.web_search,
         })
@@ -326,6 +333,11 @@ impl ConfigRequestProcessor {
             .set_api_key_model_discovery_enabled(
                 config.features.enabled(Feature::ApiKeyModelDiscovery),
             );
+        self.model_catalog
+            .set_api_key_model_discovery_enabled(
+                config.features.enabled(Feature::ApiKeyModelDiscovery),
+            )
+            .await;
         if should_start_background_rollout_migration && config.features.enabled(feature) {
             self.thread_manager.start_background_rollout_migration();
         }
@@ -363,6 +375,7 @@ pub(super) async fn reload_user_config(
 }
 
 async fn reload_user_config_inner(config_manager: &ConfigManager, thread_manager: &ThreadManager) {
+    config_manager.revoke_mcp_ema_startups();
     if let Err(err) = config_manager.load_config_layers(/*cwd*/ None).await {
         tracing::warn!("failed to rebuild user config for runtime refresh: {err}");
         for thread_id in thread_manager.list_thread_ids().await {
@@ -427,7 +440,7 @@ async fn reload_user_config_inner(config_manager: &ConfigManager, thread_manager
     }
 }
 
-fn map_requirements_to_api(
+pub(crate) fn map_requirements_to_api(
     requirements: Option<ConfigRequirementsToml>,
     allowed_login_methods: Vec<ForcedLoginMethod>,
 ) -> Option<ConfigRequirements> {
@@ -450,6 +463,14 @@ fn map_requirements_to_api(
         allowed_login_methods: Some(allowed_login_methods),
         application: requirements.application.map(|application| {
             codex_app_server_protocol::ApplicationRequirements {
+                storage: application
+                    .storage
+                    .map(|storage| ApplicationStorageRequirements {
+                        default_project_parent: storage.default_project_parent.map(Into::into),
+                        projectless_workspace_root: storage
+                            .projectless_workspace_root
+                            .map(Into::into),
+                    }),
                 network: application.network.map(|network| {
                     codex_app_server_protocol::ApplicationNetworkRequirements {
                         enabled: network.enabled,
@@ -548,7 +569,10 @@ fn map_requirements_to_api(
         feature_requirements: requirements
             .feature_requirements
             .map(|requirements| requirements.entries),
-        hooks: requirements.hooks.map(map_hooks_requirements_to_api),
+        hooks: requirements
+            .hooks
+            .map(map_hooks_requirements_to_api)
+            .map(Box::new),
         enforce_residency: requirements
             .enforce_residency
             .map(map_residency_requirement_to_api),
@@ -627,6 +651,19 @@ fn map_browser_use_requirements_to_api(
     browser_use: codex_config::BrowserUseRequirementsToml,
 ) -> BrowserUseRequirements {
     BrowserUseRequirements {
+        extension: browser_use.extension.map(|extension| {
+            codex_app_server_protocol::BrowserUseExtensionRequirements {
+                request_headers: extension.request_headers.map(|headers| {
+                    headers
+                        .into_iter()
+                        .map(|header| codex_app_server_protocol::RequestHeader {
+                            name: header.name,
+                            value: header.value,
+                        })
+                        .collect()
+                }),
+            }
+        }),
         allow_webmcp: browser_use.allow_webmcp,
         allow_history_access: browser_use.allow_history_access,
         disable_auto_review: browser_use.disable_auto_review,
@@ -690,6 +727,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         hooks,
     } = hooks;
     let HookEventsToml {
+        pre_model_request,
+        post_model_request,
         pre_tool_use,
         permission_request,
         post_tool_use,
@@ -702,11 +741,13 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         subagent_stop,
         stop,
         interrupt,
-    } = hooks;
+    } = *hooks;
 
     ManagedHooksRequirements {
         managed_dir,
         windows_managed_dir,
+        pre_model_request: map_hook_matcher_groups_to_api(pre_model_request),
+        post_model_request: map_hook_matcher_groups_to_api(post_model_request),
         pre_tool_use: map_hook_matcher_groups_to_api(pre_tool_use),
         permission_request: map_hook_matcher_groups_to_api(permission_request),
         post_tool_use: map_hook_matcher_groups_to_api(post_tool_use),
@@ -1097,6 +1138,12 @@ client_id = "mcp-client"
         let mapped = map_test_requirements(ConfigRequirementsToml {
             allow_browser_and_computer_use: Some(false),
             browser_use: Some(BrowserUseRequirementsToml {
+                extension: Some(codex_config::BrowserUseExtensionRequirementsToml {
+                    request_headers: Some(vec![codex_config::RequestHeaderToml {
+                        name: "x-browser-agent".into(),
+                        value: "ChatGPT/{{session_id}}".into(),
+                    }]),
+                }),
                 allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
@@ -1155,6 +1202,12 @@ client_id = "mcp-client"
         assert_eq!(
             mapped.browser_use,
             Some(BrowserUseRequirements {
+                extension: Some(codex_app_server_protocol::BrowserUseExtensionRequirements {
+                    request_headers: Some(vec![codex_app_server_protocol::RequestHeader {
+                        name: "x-browser-agent".into(),
+                        value: "ChatGPT/{{session_id}}".into()
+                    }]),
+                }),
                 allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
@@ -1218,6 +1271,8 @@ client_id = "mcp-client"
                     codex_config::WindowsSandboxImplementationToml::Elevated,
                     codex_config::WindowsSandboxImplementationToml::Unelevated,
                 ]),
+                allow_mxc: None,
+                require_mxc: None,
             }),
             ..ConfigRequirementsToml::default()
         });

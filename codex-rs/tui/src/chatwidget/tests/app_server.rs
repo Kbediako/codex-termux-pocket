@@ -38,13 +38,14 @@ fn thread_settings_for_test(
                 },
             },
             multi_agent_mode: Default::default(),
-            personality: Some(Personality::Pragmatic),
+            personality: None,
         },
     }
 }
 
 fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -62,7 +63,6 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -162,6 +162,7 @@ fn start_safety_buffering_test_turn(
             thread_id: thread_id.to_string(),
             turn: AppServerTurn {
                 id: turn_id.to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -668,7 +669,6 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
             .id,
         codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
     );
-    assert_eq!(chat.config_ref().personality, Some(Personality::Pragmatic));
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
     assert!(
         drain_insert_history(&mut rx).is_empty(),
@@ -875,6 +875,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -922,6 +923,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Summary,
                 items: vec![item],
                 status: AppServerTurnStatus::Completed,
@@ -959,6 +961,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1121,31 +1124,97 @@ async fn config_warning_during_turn_retains_transcript_details() {
 }
 
 #[tokio::test]
-async fn startup_config_warning_is_not_repeated_by_thread() {
+async fn sqlite_recovery_warning_shows_backup_and_metadata_limitations() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
-
-    for notification in [
+    chat.handle_server_notification(
         ServerNotification::ConfigWarning(ConfigWarningNotification {
-            summary: message.to_string(),
-            details: None,
+            summary: "Codex rebuilt its local database".into(),
+            details: Some("Damaged local databases were rebuilt. Saved conversations remain in rollout files and can restore the thread list and history. Some database-only metadata may be unavailable. The original database files were preserved at the backup locations below.\n\nDatabase path: /codex/state_5.sqlite\nBackup folder: /codex/db-backups/recovery".into()),
             path: None,
             range: None,
         }),
-        ServerNotification::Warning(WarningNotification {
-            thread_id: Some("thread-1".to_string()),
-            message: message.to_string(),
-        }),
-    ] {
-        chat.handle_server_notification(notification, /*replay_kind*/ None);
-    }
-
+        /*replay_kind*/ None,
+    );
     let cells = drain_insert_history_transcript(&mut rx);
-    assert_eq!(cells.len(), 1);
-    insta::assert_snapshot!(lines_to_single_string(&cells[0]), @"
-    ⚠ Codex is ignoring 1 unrecognized configuration setting. Check for typos or
-      deprecated settings.
-    ");
+    insta::assert_snapshot!(
+        "sqlite_recovery_warning",
+        cells
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>()
+    );
+}
+
+#[tokio::test]
+async fn startup_config_warning_is_not_repeated_by_thread() {
+    let mut warnings = Vec::new();
+    for (local_daemon, managed_daemon) in [(false, false), (true, true), (true, false)] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        if local_daemon {
+            chat.remote_connection =
+                Some(crate::status::remote_connection::RemoteConnectionStatus {
+                    address: "local".into(),
+                    version: "v0.153.0".into(),
+                    is_local_daemon: true,
+                    is_managed_daemon: managed_daemon,
+                });
+        }
+        let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
+        for notification in [
+            ServerNotification::ConfigWarning(ConfigWarningNotification {
+                summary: message.to_string(),
+                details: None,
+                path: None,
+                range: None,
+            }),
+            ServerNotification::Warning(WarningNotification {
+                thread_id: Some("thread-1".to_string()),
+                message: message.to_string(),
+            }),
+            ServerNotification::ConfigWarning(ConfigWarningNotification {
+                summary: "Second config warning".into(),
+                details: Some("A different setting needs attention.".into()),
+                path: None,
+                range: None,
+            }),
+        ] {
+            chat.handle_server_notification(notification, /*replay_kind*/ None);
+        }
+        let cells: Vec<Arc<dyn HistoryCell>> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => Some(Arc::from(cell)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cells.len(), 2);
+        let original_warnings = history_cell::warning_entries(&cells);
+        chat.open_warnings(&cells);
+        let first = super::helpers::render_bottom_popup(&chat, /*width*/ 80);
+        if local_daemon && !managed_daemon {
+            assert!(
+                !first.contains("/daemon"),
+                "unmanaged servers cannot be restarted"
+            );
+        } else {
+            warnings.push(format!("local daemon: {local_daemon}\n{first}"));
+        }
+        chat.handle_key_event(KeyCode::Right.into());
+        let second = super::helpers::render_bottom_popup(&chat, /*width*/ 80);
+        assert!(second.contains("Second config warning"));
+        assert!(
+            !second.contains("/daemon"),
+            "one restart hint per warning panel"
+        );
+        chat.handle_key_event(KeyCode::Esc.into());
+        let dismissed = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|event| match event {
+                AppEvent::UpdateWarnings { dismissed, .. } => Some(dismissed),
+                _ => None,
+            })
+            .expect("closing the panel dismisses the viewed diagnostics");
+        assert_eq!(dismissed, original_warnings);
+    }
+    insta::assert_snapshot!("startup_config_warning_panel", warnings.join("\n\n"));
 }
 
 #[tokio::test]
@@ -1323,6 +1392,8 @@ async fn live_app_server_command_output_delta_transcript_snapshot() {
 async fn live_app_server_sub_agent_activity_renders_once() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let activity = AppServerThreadItem::SubAgentActivity {
+        model: None,
+        reasoning_effort: None,
         id: "activity-1".to_string(),
         kind: codex_app_server_protocol::SubAgentActivityKind::Completed,
         agent_thread_id: ThreadId::new().to_string(),
@@ -1517,6 +1588,7 @@ async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1552,6 +1624,7 @@ async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::Failed,
@@ -1676,6 +1749,47 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
 }
 
 #[tokio::test]
+async fn live_app_server_interleaved_flush_repairs_mismatched_completion() {
+    for (completed_item_id, completed) in [
+        ("msg-1", "The transport kept this.\nAnd dropped this."),
+        ("msg-2", "The transport kept this."),
+    ] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+        handle_turn_started(&mut chat, "turn-1");
+        while rx.try_recv().is_ok() {}
+        handle_agent_message_delta(&mut chat, "The transport kept this.");
+        chat.flush_answer_stream_with_separator();
+        while rx.try_recv().is_ok() {}
+
+        complete_assistant_message(
+            &mut chat,
+            completed_item_id,
+            completed,
+            Some(MessagePhase::FinalAnswer),
+        );
+
+        let consolidations = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::ConsolidateAgentMessage {
+                    source,
+                    scrollback_reflow,
+                    ..
+                } => Some((source, scrollback_reflow)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            consolidations,
+            vec![(
+                completed.to_string(),
+                crate::app_event::ConsolidationScrollbackReflow::IfResizeReflowRan,
+            )]
+        );
+    }
+}
+
+#[tokio::test]
 async fn live_app_server_stream_recovery_restores_previous_status_header() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -1684,6 +1798,7 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1761,6 +1876,7 @@ async fn live_app_server_server_overloaded_error_renders_error() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1804,6 +1920,7 @@ async fn live_app_server_cyber_policy_error_renders_dedicated_notice() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,

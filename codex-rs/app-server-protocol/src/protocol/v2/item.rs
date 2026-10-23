@@ -15,7 +15,9 @@ use crate::protocol::item_builders::convert_patch_changes;
 use crate::protocol::item_builders::review_output_text;
 use codex_experimental_api_macros::ExperimentalApi;
 use codex_extension_items::ExtensionItem;
+pub use codex_extension_items::image_generation::GeneratedImageRef;
 pub use codex_extension_items::image_generation::ImageGenerationFailure;
+pub use codex_extension_items::image_generation::ImageGenerationInputImage;
 pub use codex_extension_items::image_generation::ImageGenerationItem;
 pub use codex_extension_items::sleep::SleepItem;
 pub use codex_extension_items::web_search::WebSearchAction;
@@ -395,6 +397,10 @@ pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     SubAgentActivity {
+        /// Resolved model at sub-agent creation; absent from older records and other activities.
+        model: Option<String>,
+        /// Resolved reasoning effort at sub-agent creation, when known.
+        reasoning_effort: Option<ReasoningEffort>,
         id: String,
         kind: SubAgentActivityKind,
         agent_thread_id: String,
@@ -978,6 +984,8 @@ impl From<CoreTurnItem> for ThreadItem {
                     .collect(),
             },
             CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
+                model: activity.model,
+                reasoning_effort: activity.reasoning_effort,
                 id: activity.id,
                 kind: activity.kind.into(),
                 agent_thread_id: activity.agent_thread_id.to_string(),
@@ -1003,10 +1011,13 @@ impl From<CoreTurnItem> for ThreadItem {
                     id: image.id,
                     status: image.status,
                     revised_prompt: image.revised_prompt,
-                    result: image.result,
+                    image: GeneratedImageRef::Inline {
+                        result: image.result,
+                    },
                     transparent_background: None,
                     failure: None,
                     saved_path: image.saved_path,
+                    input_images: Vec::new(),
                     imagegen_request_id: None,
                     generation_id: None,
                 })

@@ -3,6 +3,7 @@
 
 #[path = "review_request.rs"]
 mod request;
+pub(super) use request::ReviewAuthorization;
 
 use codex_analytics::GuardianApprovalRequestSource;
 use codex_analytics::GuardianReviewAnalyticsResult;
@@ -13,6 +14,8 @@ use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
 use codex_guardian_reviewer::GuardianReviewSessionLimits;
 use codex_guardian_reviewer::ReviewModel;
+#[cfg(test)]
+use codex_guardian_reviewer::run_with_retry;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::openai_models::GuardianScope;
 use codex_protocol::protocol::EventMsg;
@@ -34,7 +37,6 @@ use super::ApprovalRequestReasons;
 use super::GUARDIAN_REVIEW_TIMEOUT;
 use super::GUARDIAN_REVIEWER_NAME;
 use super::GuardianApprovalRequest;
-use super::GuardianAssessmentOutcome;
 use super::GuardianReviewContext;
 use super::approval_request::format_guardian_action_pretty;
 use super::approval_request::guardian_assessment_action;
@@ -75,19 +77,6 @@ async fn plugin_attribution_for_guardian_request(
                     .ok()
                     .and_then(|cwd| turn.plugin_attribution_for_command(command, &cwd))
             }
-        }
-        #[cfg(unix)]
-        GuardianApprovalRequest::Execve {
-            program, argv, cwd, ..
-        } => {
-            let command = if argv.is_empty() {
-                vec![program.clone()]
-            } else {
-                std::iter::once(program.clone())
-                    .chain(argv.iter().skip(1).cloned())
-                    .collect()
-            };
-            turn.plugin_attribution_for_command(&command, cwd)
         }
         _ => None,
     }
@@ -172,6 +161,12 @@ pub(super) async fn guardian_review_session_config(
     })
 }
 
+struct ReviewAttemptOptions {
+    authorization: Option<ReviewAuthorization>,
+    external_cancel: Option<CancellationToken>,
+    deadline: Instant,
+}
+
 /// Runs the guardian in a locked-down reusable review session.
 ///
 /// The guardian itself should not mutate state or trigger further approvals, so
@@ -192,8 +187,7 @@ async fn run_guardian_review_session_before_deadline(
     request: GuardianApprovalRequest,
     category: GuardianScope,
     reasons: ApprovalRequestReasons,
-    external_cancel: Option<CancellationToken>,
-    deadline: Instant,
+    options: ReviewAttemptOptions,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
     let Some(pool) = session.guardian_review_session() else {
         return (
@@ -224,12 +218,13 @@ async fn run_guardian_review_session_before_deadline(
                 request,
                 category,
                 reasons,
+                authorization: options.authorization,
                 schema: guardian_output_schema(),
                 review_model: session_config.review_model,
                 reasoning_summary: context.reasoning_summary,
                 personality: context.personality,
-                external_cancel,
-                deadline,
+                external_cancel: options.external_cancel,
+                deadline: options.deadline,
             },
         ))
         .await;
@@ -270,22 +265,29 @@ async fn run_guardian_review_session_with_retry_before_deadline(
     limits: GuardianReviewSessionLimits,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
     let context = context.into();
-    let (outcome, analytics, _) =
-        codex_guardian_reviewer::run_with_retry(limits, external_cancel.as_ref(), |deadline| {
+    let (outcome, analytics, _) = run_with_retry(
+        limits,
+        external_cancel.as_ref(),
+        /*telemetry*/ None,
+        |deadline| {
             let attempt = run_guardian_review_session_before_deadline(
                 Arc::clone(&session),
                 context.clone(),
                 request.clone(),
                 request.guardian_scope(),
                 reasons.clone(),
-                external_cancel.clone(),
-                deadline,
+                ReviewAttemptOptions {
+                    authorization: None,
+                    external_cancel: external_cancel.clone(),
+                    deadline,
+                },
             );
             async move {
                 let (outcome, analytics) = attempt.await;
                 (outcome, analytics, None::<()>)
             }
-        })
-        .await;
+        },
+    )
+    .await;
     (outcome, analytics)
 }

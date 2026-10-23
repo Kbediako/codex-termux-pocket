@@ -14,8 +14,20 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_exec_server::RemoveOptions;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolFinishInput;
+use codex_extension_api::ToolLifecycleContributor;
+use codex_extension_api::ToolLifecycleFuture;
 use codex_features::Feature;
 use codex_history::RolloutItem;
+#[cfg(unix)]
+use codex_network_proxy::CredentialProviderConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookActionsConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookConfig;
+#[cfg(unix)]
+use codex_network_proxy::MitmHookMatchConfig;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_network_proxy::PROXY_ACTIVE_ENV_KEY;
 use codex_protocol::approvals::ExecApprovalKind;
@@ -49,6 +61,7 @@ use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::request_permissions::PermissionGrantScope;
@@ -80,6 +93,7 @@ use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::local;
+use core_test_support::test_codex::local_request;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -299,54 +313,81 @@ async fn strict_auto_review_routes_network_approval_to_guardian_when_user_review
         }),
         ..Default::default()
     };
-    let responses = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-strict-network-permissions"),
-                ev_function_call(
+    // Guardian and parent requests can arrive in either order after the command yields.
+    // Only Guardian requests may consume these decisions.
+    let mut guardian_responses = Vec::new();
+    for response_id in ["strict-command-guardian", "strict-network-guardian"] {
+        guardian_responses.push(
+            mount_sse_once_match(
+                &server,
+                is_guardian_request,
+                sse(vec![
+                    ev_response_created(response_id),
+                    ev_assistant_message(
+                        response_id,
+                        r#"{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"The strict-review request is safe."}"#,
+                    ),
+                    ev_completed(response_id),
+                ]),
+            )
+            .await,
+        );
+    }
+    let _parent = wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(|request: &wiremock::Request| !is_guardian_request(request))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(
+                &decoded_request_body(request).expect("decode parent request"),
+            )
+            .expect("parse parent request");
+            let input = body["input"].as_array().expect("parent input");
+            let output = input
+                .iter()
+                .rev()
+                .find(|item| item["type"] == "function_call_output");
+            let response_id = format!("strict-parent-{}", input.len());
+            let event = match output {
+                None => ev_function_call(
                     permission_call_id,
                     "request_permissions",
-                    &serde_json::to_string(&json!({
+                    &json!({
                         "reason": "Require automatic review for the rest of this turn",
                         "permissions": requested_permissions,
-                    }))?,
+                    })
+                    .to_string(),
                 ),
-                ev_completed("resp-strict-network-permissions"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-strict-network-command"),
-                ev_function_call(
+                Some(output) if output["call_id"] == permission_call_id => ev_function_call(
                     network_call_id,
                     "exec_command",
-                    &serde_json::to_string(&network_fetch_args(LOCAL_ENVIRONMENT_ID))?,
+                    &network_fetch_args(LOCAL_ENVIRONMENT_ID).to_string(),
                 ),
-                ev_completed("resp-strict-network-command"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-strict-command-guardian"),
-                ev_assistant_message(
-                    "msg-strict-command-guardian",
-                    r#"{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"The strict-review command is safe."}"#,
-                ),
-                ev_completed("resp-strict-command-guardian"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-strict-network-guardian"),
-                ev_assistant_message(
-                    "msg-strict-network-guardian",
-                    r#"{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"The strict-review network request is safe."}"#,
-                ),
-                ev_completed("resp-strict-network-guardian"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-strict-network-complete"),
-                ev_assistant_message("msg-strict-network-complete", "reviewed"),
-                ev_completed("resp-strict-network-complete"),
-            ]),
-        ],
-    )
-    .await;
+                Some(output) => {
+                    let output = output["output"].as_str().expect("process output");
+                    if let Some(session_id) = output
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Process running with session ID "))
+                    {
+                        ev_function_call(
+                            &response_id,
+                            "write_stdin",
+                            &json!({
+                                "session_id": session_id.parse::<i32>().expect("session id"),
+                                "chars": "",
+                                "yield_time_ms": 1_000,
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        assert!(output.contains("Process exited with code"), "{output}");
+                        ev_assistant_message("strict-parent-complete", "reviewed")
+                    }
+                }
+            };
+            sse_response(sse(vec![event, ev_completed(&response_id)]))
+        })
+        .mount_as_scoped(&server)
+        .await;
 
     submit_managed_network_turn(
         &test,
@@ -376,7 +417,24 @@ async fn strict_auto_review_routes_network_approval_to_guardian_when_user_review
         .await?;
     wait_for_completion_without_network_prompt(&test).await;
 
-    let actions = guardian_network_actions(&responses)?;
+    assert_eq!(
+        guardian_responses
+            .iter()
+            .flat_map(ResponseMock::requests)
+            .filter(|request| {
+                request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian"
+            })
+            .count(),
+        2,
+        "the command and network request must each receive Guardian review",
+    );
+    let actions = guardian_responses
+        .iter()
+        .map(guardian_network_actions)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     assert_eq!(actions.len(), 1);
     assert_eq!(
         actions[0]
@@ -611,10 +669,34 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
-    let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    struct HoldExecResult {
+        call_id: &'static str,
+        release: tokio::sync::Notify,
+    }
+
+    impl ToolLifecycleContributor for HoldExecResult {
+        fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
+            Box::pin(async move {
+                if input.call_id == self.call_id {
+                    self.release.notified().await;
+                }
+            })
+        }
+    }
+
     let call_id = "guardian-network-timeout";
     let poll_call_id = "guardian-network-timeout-poll";
+    let hold_result = Arc::new(HoldExecResult {
+        call_id,
+        release: tokio::sync::Notify::new(),
+    });
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.tool_lifecycle_contributor(hold_result.clone());
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_builder(&[])?
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_remote_and_local_env(&server)
+        .await?;
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
@@ -646,7 +728,9 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            !is_guardian_request(request) && request_body_contains(request, call_id)
+            !is_guardian_request(request)
+                && request_body_contains(request, call_id)
+                && request_body_contains(request, "Process running with session ID 1000")
         },
         sse(vec![
             ev_response_created("resp-guardian-timeout-parent-followup"),
@@ -666,7 +750,7 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     let parent_final = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            !is_guardian_request(request) && request_body_contains(request, poll_call_id)
+            !is_guardian_request(request) && request_body_contains(request, call_id)
         },
         sse(vec![
             ev_response_created("resp-guardian-timeout-parent-final"),
@@ -688,12 +772,33 @@ async fn timed_out_guardian_network_review_uses_timeout_outcome_without_user_fal
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(91)).await;
     tokio::time::resume();
+
+    // The clock jump expires the review, but cancellation and output drainage
+    // still run asynchronously. Hold the tool result until its terminal event
+    // so the model cannot poll before the final failure is available.
+    let completion = tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 10),
+        wait_for_event(&test.codex, |event| match event {
+            EventMsg::ExecCommandEnd(event) => event.call_id == call_id,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_) => true,
+            _ => false,
+        }),
+    )
+    .await;
+    // notify_one retains a permit if the tool-finish callback has not run yet.
+    hold_result.release.notify_one();
+    let completion = completion.context("timed out waiting for the network command to finish")?;
+    assert!(
+        matches!(completion, EventMsg::ExecCommandEnd(_)),
+        "unexpected event before command completion: {completion:?}"
+    );
     wait_for_completion_without_network_prompt(&test).await;
 
-    let tool_output = parent_final
-        .requests()
-        .iter()
-        .find_map(|request| request.function_call_output_text(poll_call_id))
+    let request = parent_final.single_request();
+    // If the initial exec call already returned its final error, no poll is needed.
+    let tool_output = request
+        .function_call_output_text(poll_call_id)
+        .or_else(|| request.function_call_output_text(call_id))
         .context("expected timed-out Guardian tool output")?;
     assert!(
         tool_output.contains(concat!(
@@ -861,9 +966,9 @@ async fn background_network_approval_uses_current_review_settings_and_original_e
                     text_elements: Vec::new(),
                 }])
                 .with_thread_settings(ThreadSettingsOverrides {
-                    environments: Some(TurnEnvironmentSelections::new(
+                    environments: Some(TurnEnvironmentRequests::new(
                         current_cwd.abs(),
-                        vec![local(current_cwd.abs())],
+                        vec![local_request(current_cwd.abs())],
                     )),
                     collaboration_mode: Some(CollaborationMode {
                         mode: ModeKind::Default,
@@ -3019,6 +3124,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
     let environments = vec![
         local(local_cwd.path().abs()),
         TurnEnvironmentSelection {
+            selected_capability_roots: Default::default(),
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&remote_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&remote_cwd)],
@@ -3093,6 +3199,134 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
         )
         .await?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_started_proxy_denies_brokered_provider_alias() -> Result<()> {
+    const REAL_CREDENTIAL: &str = "alias_aaaaaaaaaaaaaaaaaaaaaaaa";
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = upstream.local_addr()?.port();
+    let mut network = NetworkProxyConfig {
+        enabled: true,
+        proxy_url: "http://127.0.0.1:0".to_string(),
+        socks_url: "http://127.0.0.1:0".to_string(),
+        // Local requests must stay behind the proxy for their credentials to be masked.
+        allow_local_binding: Some(false),
+        allow_upstream_proxy: false,
+        mitm_hooks: vec![MitmHookConfig {
+            host: "localhost".to_string(),
+            matcher: MitmHookMatchConfig {
+                methods: vec!["GET".to_string()],
+                path_prefixes: vec!["/v1".to_string()],
+                ..MitmHookMatchConfig::default()
+            },
+            actions: MitmHookActionsConfig::default(),
+        }],
+        ..NetworkProxyConfig::default()
+    };
+    network.set_credential_broker_enabled(/*enabled*/ true);
+    network.set_allowed_domains(vec!["localhost".to_string(), "127.0.0.1".to_string()]);
+    network.credential_providers.insert(
+        "alias_test".to_string(),
+        CredentialProviderConfig {
+            env: vec!["ALIAS_TEST_TOKEN".to_string()],
+            patterns: vec!["alias_[a-z]{24}".to_string()],
+            url_prefixes: vec![
+                format!("http://localhost:{port}/v1"),
+                format!("http://127.0.0.1:{port}/v2"),
+            ],
+            ..CredentialProviderConfig::default()
+        },
+    );
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Enabled,
+        /*exclude_tmpdir_env_var*/ false,
+        /*exclude_slash_tmp*/ false,
+    );
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(move |config| {
+            for feature in [
+                Feature::UnifiedExec,
+                Feature::ShellSnapshot,
+                Feature::NetworkProxy,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable test feature");
+            }
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(permission_profile.clone())
+                .expect("set permission profile");
+            config
+                .permissions
+                .shell_environment_policy
+                .r#set
+                .insert("ALIAS_TEST_TOKEN".to_string(), REAL_CREDENTIAL.to_string());
+            config.permissions.network = Some(
+                NetworkProxySpec::from_config_and_constraints(
+                    network,
+                    /*requirements*/ None,
+                    &permission_profile,
+                )
+                .expect("build brokered managed network proxy"),
+            );
+        })
+        // Credential brokerage currently runs only in the local environment.
+        .build(&server)
+        .await?;
+    let proxy = test
+        .session_configured
+        .network_proxy
+        .as_ref()
+        .context("agent did not start its managed network proxy")?;
+    let command = r#"printf 'BROKERED:%s\nACTIVE:%s\n' "$ALIAS_TEST_TOKEN" "$CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE""#;
+    let call_id = "exec-brokered-provider-alias";
+    let mut args = network_exec_args(command);
+    args["yield_time_ms"] = json!(30_000);
+    let responses =
+        mount_exec_network_turn(&server, "resp-brokered-provider-alias", call_id, args).await?;
+    test.submit_text_turn("read the brokered credential")
+        .await?;
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("agent did not return command output")?;
+    assert!(output.contains("ACTIVE:1"), "{output}");
+    assert!(!output.contains(REAL_CREDENTIAL));
+    let token = output
+        .lines()
+        .find_map(|line| line.strip_prefix("BROKERED:"))
+        .context("agent did not expose its brokered dummy")?;
+    assert!(token.starts_with("alias_"));
+
+    // Probe after the command exits so the denial cannot interrupt the tool call.
+    let response = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        let mut connection = tokio::net::TcpStream::connect(&proxy.http_addr).await?;
+        connection
+            .write_all(
+                format!(
+                    "GET http://127.0.0.1:{port}/v2/resource HTTP/1.1\r\n\
+                     Host: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\
+                     Connection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut response = String::new();
+        connection.read_to_string(&mut response).await?;
+        Ok::<_, std::io::Error>(response)
+    })
+    .await
+    .context("alias denial did not finish")??;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("blocked-by-mitm-hook"), "{response}");
+    assert!(!response.contains(REAL_CREDENTIAL));
     Ok(())
 }
 
@@ -3264,7 +3498,7 @@ async fn submit_managed_network_turn(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(turn_environment_selections),
+                environments: Some(turn_environment_selections.into_requests()),
                 approval_policy: Some(approval_policy),
                 approvals_reviewer: Some(approvals_reviewer),
                 sandbox_policy: Some(sandbox_policy),

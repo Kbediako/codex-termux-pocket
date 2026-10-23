@@ -1,20 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
-use codex_rollout::is_persisted_rollout_item;
+use codex_rollout::into_persisted_rollout_items;
 use tracing::warn;
 
 use super::LocalThreadStore;
 use super::create_thread;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
-use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -40,52 +41,61 @@ pub(super) async fn create_thread(
 pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
-) -> ThreadStoreResult<()> {
+) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
     let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
     store.ensure_live_recorder_absent(params.thread_id).await?;
     let writer_lock = store.acquire_writer_lock(params.thread_id)?;
-    let history_mode = if let Some(history) = params.history.as_deref() {
-        canonical_history_mode_from_rollout_items(history)
-    } else if let Some(rollout_path) = params.rollout_path.as_ref() {
-        super::read_thread::read_thread_by_rollout_path(
-            store,
-            rollout_path.clone(),
-            params.include_archived,
-            /*include_history*/ false,
-        )
-        .await?
-        .history_mode
-    } else {
-        super::read_thread::read_thread(
-            store,
-            ReadThreadParams {
-                thread_id: params.thread_id,
-                include_archived: params.include_archived,
-                include_history: false,
-            },
-        )
-        .await?
-        .history_mode
-    };
-    let rollout_path = match (params.rollout_path, params.history) {
-        (Some(rollout_path), _history) => rollout_path,
-        (None, history) => {
-            let thread = super::read_thread::read_thread(
-                store,
-                ReadThreadParams {
+    let rollout_path = match params.rollout_path {
+        Some(rollout_path) => rollout_path,
+        None => {
+            let resolved = if params.include_archived {
+                super::thread_rollout_resolver::resolve_current_including_archived(
+                    store,
+                    params.thread_id,
+                )
+                .await?
+            } else {
+                super::thread_rollout_resolver::resolve_current(store, params.thread_id).await?
+            };
+            resolved
+                .ok_or(ThreadStoreError::ThreadNotFound {
                     thread_id: params.thread_id,
-                    include_archived: params.include_archived,
-                    include_history: history.is_none(),
-                },
-            )
-            .await?;
-            thread
-                .rollout_path
-                .ok_or_else(|| ThreadStoreError::Internal {
-                    message: format!("thread {} does not have a rollout path", params.thread_id),
                 })?
+                .path
         }
     };
+    let rollout_path =
+        super::read_thread::resolve_requested_rollout_path(store, rollout_path).await?;
+    if !params.include_archived
+        && super::helpers::rollout_path_is_archived(&store.config.codex_home, &rollout_path)
+    {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!("thread {} is archived", params.thread_id),
+        });
+    }
+    let history = match params.history {
+        Some(history)
+            if !matches!(
+                history.first(),
+                Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == params.thread_id
+            ) =>
+        {
+            history
+        }
+        Some(history)
+            if params.history_revision.is_some()
+                && params.history_revision
+                    == super::history_revision::read(&rollout_path).await =>
+        {
+            history
+        }
+        _ => Arc::new(
+            super::model_context::load_from_rollout_path(store, params.thread_id, &rollout_path)
+                .await?
+                .items,
+        ),
+    };
+    let history_mode = canonical_history_mode_from_rollout_items(&history);
     let cwd = params
         .metadata
         .cwd
@@ -122,7 +132,8 @@ pub(super) async fn resume_thread(
             history_mode,
             writer_lock,
         )
-        .await
+        .await?;
+    Ok(history)
 }
 
 #[tracing::instrument(
@@ -314,6 +325,24 @@ pub(super) async fn live_writer_parts(
     Ok((entry.recorder.clone(), entry.rollout_id, entry.history_mode))
 }
 
+/// Uses the writer's creation record only until its rollout has been materialized.
+pub(super) async fn unpersisted_session_meta(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> Option<(PathBuf, SessionMeta)> {
+    let (recorder, _, _) = live_writer_parts(store, thread_id).await.ok()?;
+    // Materialized reads should not queue behind unrelated transcript writes.
+    if codex_rollout::existing_rollout_path(recorder.rollout_path())
+        .await
+        .is_some()
+    {
+        return None;
+    }
+    // A writer may finish shutdown after lookup; durable reads remain the fallback.
+    let meta = recorder.unpersisted_session_meta().await.ok()??;
+    Some((recorder.rollout_path().to_path_buf(), meta))
+}
+
 async fn write_and_project(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -326,8 +355,8 @@ async fn write_and_project(
     let (recorder, rollout_id, history_mode) = live_writer_parts(store, thread_id).await?;
     let sync_rollout_path = matches!(&write_op, RolloutWriteOp::Persist | RolloutWriteOp::Flush);
     let write_op = match write_op {
-        RolloutWriteOp::AppendItems(mut items) => {
-            items.retain(|item| is_persisted_rollout_item(item, history_mode));
+        RolloutWriteOp::AppendItems(items) => {
+            let items = into_persisted_rollout_items(items, history_mode);
             if items.is_empty() {
                 return Ok(());
             }

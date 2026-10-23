@@ -21,6 +21,23 @@ fn tool(text: &str) -> ResponseItem {
 }
 
 #[test]
+fn compaction_summary_is_excluded_without_dropping_user_messages() {
+    let before = message("Earlier user message");
+    let summary: ResponseItem = serde_json::from_value(json!({
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "Summary text"}],
+        "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": [COMPACTION_SUMMARY_KIND]
+        }
+    }))
+    .unwrap();
+    let after = message("Summary text");
+    let mut history = TranscriptHistory::default();
+    history.reset([before.clone().into(), summary.into(), after.clone().into()].iter());
+    assert_eq!(history.items().collect::<Vec<_>>(), vec![&before, &after]);
+}
+
+#[test]
 fn rollback_keeps_the_earlier_prefix_or_clears_an_evicted_boundary() {
     let items = [message("keep"), message("roll back"), tool("later")];
     let mut history = TranscriptHistory::default();
@@ -31,6 +48,39 @@ fn rollback_keeps_the_earlier_prefix_or_clears_an_evicted_boundary() {
     assert!(history.generation() > generation);
     history.truncate_before(&items[1].clone().into());
     assert_eq!(history.items().count(), 0);
+}
+
+#[test]
+fn inherited_manual_approvals_stay_out_of_review_after_checkpoint_replay() {
+    for content_type in ["input_text", "output_text"] {
+        let approval: ResponseItem = serde_json::from_value(json!({
+            "type": "message", "role": "developer", "content": [{
+                "type": content_type, "text": format!("{}\nApproved action: original action", crate::MANUAL_APPROVAL_DEVELOPER_PREFIX)
+            }]
+        })).unwrap();
+        let mut inherited = ResponseItemEnvelope::new(approval.clone());
+        inherited
+            .metadata
+            .get_or_insert_default()
+            .inherited_user_message = true;
+        let mut history = TranscriptHistory::default();
+        history.reset([inherited.clone(), approval.clone().into()].iter());
+        assert_eq!(
+            history.items().cloned().collect::<Vec<_>>(),
+            vec![approval.clone()]
+        );
+        let checkpoint = history.checkpoint();
+        assert_eq!(
+            checkpoint.0[0], inherited,
+            "model history keeps the original approval and provenance"
+        );
+        let mut restored = TranscriptHistory::default();
+        restored.reset(checkpoint.0.iter());
+        assert_eq!(
+            restored.items().cloned().collect::<Vec<_>>(),
+            vec![approval]
+        );
+    }
 }
 
 #[test]
