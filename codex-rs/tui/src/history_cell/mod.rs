@@ -213,11 +213,21 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         Vec::new()
     }
 
+    /// Original Markdown for semantic copy targets, independent of presentation.
+    fn copy_source(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns the logical lines for the main chat viewport.
     fn display_lines(&self, width: u16) -> Vec<Line<'static>>;
 
     /// Returns copy-friendly plain logical lines for raw scrollback mode.
     fn raw_lines(&self) -> Vec<Line<'static>>;
+
+    /// A local artifact the owned fullscreen viewport may preview. Text surfaces ignore it.
+    fn image_path(&self) -> Option<AbsolutePathBuf> {
+        None
+    }
 
     /// Raw live presentation may omit transcript-only diagnostics without losing their source.
     fn live_raw_lines(&self) -> Vec<Line<'static>> {

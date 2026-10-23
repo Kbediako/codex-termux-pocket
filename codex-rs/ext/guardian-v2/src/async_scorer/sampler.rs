@@ -3,7 +3,13 @@
 
 mod connection_pool;
 mod execution;
+mod response;
+mod telemetry;
 
+pub(super) use telemetry::SampledScore;
+
+use super::request::PreparedRequest;
+use super::score::PendingScore;
 use connection_pool::ConnectionPool;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -16,7 +22,9 @@ use codex_api::Reasoning;
 use codex_api::ReasoningContext;
 use codex_api::ResponsesApiRequest;
 use codex_context_fragments::RenderedFragment;
+use codex_core::cyber_access_program::ApiKeyCyberAccessPrograms;
 use codex_extension_api::ExtensionMetrics;
+use codex_history::ResponseItemEnvelope;
 use codex_http_client::HttpClientFactory;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
@@ -27,6 +35,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::turn_input::CyberAccessProgram;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -42,6 +51,8 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 pub struct LunaSamplerConfig {
     /// Provider and credentials selected for the owning thread.
     pub provider: SharedModelProvider,
+    /// Provider and feature policy shared with ordinary model requests.
+    pub api_key_cyber_access_programs: ApiKeyCyberAccessPrograms,
     /// Routing scope and retained configuration layers for the owning thread.
     pub workspace_routing: WorkspaceRoutingContext,
     /// Effective proxy, custom-CA, and cookie configuration.
@@ -68,6 +79,8 @@ pub struct LunaSamplerConfig {
 
 /// One tool-less Luna classification request.
 pub struct LunaSamplingRequest {
+    /// Cyber selection captured from the owning turn; Daybreak reviews use Blue.
+    pub cyber_access_program: Option<CyberAccessProgram>,
     /// ID of the response handling the classified tool.
     pub parent_response_id: Option<String>,
     /// Trusted classifier instructions with their role and content attribution.
@@ -84,6 +97,14 @@ pub struct LunaSamplingRequest {
     pub parent_turn_id: String,
     /// Trusted causal root of the owning turn, absent when unknown or ambiguous.
     pub root_turn_id: Option<String>,
+    /// Sampling expiry remains active until its response finishes draining.
+    pub(super) pending_score: Option<PendingScore>,
+}
+
+/// Admitted retained input and Luna settings consumed together at execution.
+pub(super) struct ConversationSample {
+    pub(super) input: PreparedRequest,
+    pub(super) sampling: LunaSamplingRequest,
 }
 
 /// Failures returned while connecting or sampling the Luna model.
@@ -104,7 +125,7 @@ pub enum LunaSamplerError {
     /// The response exceeded the bounded output limit.
     #[error("Luna response exceeded the output limit")]
     OutputTooLarge,
-    /// A newer classification replaced this request when the pool was full.
+    /// The classification expired, lost its owning generation, or was replaced at capacity.
     #[error("Luna request was superseded by a newer classification")]
     Superseded,
     /// The supplied parent checkpoint cannot be consumed by this Luna configuration.
@@ -113,6 +134,9 @@ pub enum LunaSamplerError {
     /// The complete classifier input exceeded the model allowance.
     #[error("Luna input exceeds the complete request budget")]
     InputTooLarge,
+    /// The retained conversation already owns its maximum outstanding work.
+    #[error("Guardian conversation queue is full")]
+    QueueFull,
 }
 
 struct ActiveRequest {
@@ -147,15 +171,11 @@ impl LunaSampler {
     }
 
     pub(super) async fn prewarm(&self) {
-        if let Some(refill) = self.connections.replenish() {
-            let _ = refill.await;
-        }
+        self.connections.prewarm().await;
     }
 
-    /// Sends one tool-less classification request using an available transport.
-    pub async fn sample(&self, request: LunaSamplingRequest) -> Result<String, LunaSamplerError> {
-        let auth_owner_generation = self
-            .config
+    fn auth_owner_generation(&self) -> Option<u64> {
+        self.config
             .provider
             .auth_manager()
             .filter(|_| self.config.provider.info().auth.is_none())
@@ -164,31 +184,35 @@ impl LunaSampler {
                     .auth_change_state_receiver()
                     .borrow()
                     .owner_generation
-            });
-        if request.parent_compaction.is_some()
-            && !self.supports_parent_compaction(request.parent_compaction_hash.as_deref())
-        {
-            return Err(LunaSamplerError::IncompatibleCompaction);
-        }
-        // A classification is its own inference turn; retries keep that identity.
-        let turn_id = Uuid::now_v7().to_string();
-        let parent_response_id = request.parent_response_id;
-        let parent_turn_id = request.parent_turn_id;
-        let root_turn_id = request.root_turn_id;
-        let mut input = vec![
-            ResponseItem::AdditionalTools {
-                id: None,
-                role: "developer".to_owned(),
-                tools: Vec::new(),
-            },
-            ResponseItem::from(request.instructions),
-        ];
-        if let Some(parent_compaction) = request.parent_compaction {
-            input.push(parent_compaction);
-        }
-        let mut evidence = request.input;
+            })
+    }
+
+    // Normalize new evidence while preserving the retained prefix and its item IDs.
+    pub(super) fn prepare_input(
+        request: &LunaSamplingRequest,
+        history: Option<Vec<ResponseItemEnvelope>>,
+        mut evidence: Vec<ResponseItemEnvelope>,
+    ) -> (Vec<ResponseItemEnvelope>, usize) {
+        let mut input = history.unwrap_or_else(|| {
+            let mut input = vec![
+                ResponseItemEnvelope::new(ResponseItem::AdditionalTools {
+                    id: None,
+                    role: "developer".to_owned(),
+                    tools: Arc::from([]),
+                }),
+                ResponseItemEnvelope::new(ResponseItem::from(request.instructions.clone())),
+            ];
+            input.extend(
+                request
+                    .parent_compaction
+                    .clone()
+                    .map(ResponseItemEnvelope::new),
+            );
+            input
+        });
+        // Normalize only new evidence; never rewrite the committed prefix.
         for item in &mut evidence {
-            if let ResponseItem::Message { content, .. } = item {
+            if let ResponseItem::Message { content, .. } = &mut item.item {
                 for content in content {
                     if let ContentItem::InputImage { detail, .. } = content {
                         *detail = None;
@@ -205,37 +229,27 @@ impl LunaSampler {
                 item.set_id(Some(ResponseItemId::new(prefix)));
             }
         }
-        let total_tokens = input
+        let tokens = input
             .iter()
-            .map(codex_guardian_context::estimate_input_tokens)
+            .map(|item| codex_guardian_context::estimate_input_tokens(&item.item))
             .fold(0usize, usize::saturating_add);
-        if let Some(metrics) = self.config.metrics.as_deref() {
-            for (component, tokens) in [
-                ("existing_context", 0),
-                ("new_input", total_tokens),
-                ("total", total_tokens),
-            ] {
-                metrics.histogram_with_boundaries(
-                    codex_guardian_context::REQUEST_TOKENS_METRIC,
-                    i64::try_from(tokens).unwrap_or(i64::MAX),
-                    codex_guardian_context::REQUEST_TOKENS_BOUNDARIES,
-                    &[("target", "async"), ("component", component)],
-                );
-            }
-        }
-        // Oversized classifications defer to sync with the existing failure score.
-        if total_tokens > self.config.max_input_tokens.saturating_sub(/*rhs*/ 256) {
-            return Err(LunaSamplerError::InputTooLarge);
-        }
-        let request = ResponsesApiRequest {
+        (input, tokens)
+    }
+
+    fn execution(
+        &self,
+        request: &LunaSamplingRequest,
+        input: Vec<ResponseItem>,
+        auth_owner_generation: Option<u64>,
+    ) -> execution::SamplingExecution {
+        let api_request = ResponsesApiRequest {
             model: MODEL.to_owned(),
-            instructions: String::new(),
             input,
             tools: None,
             tool_choice: "none".to_owned(),
             parallel_tool_calls: false,
             reasoning: Some(Reasoning {
-                effort: Some(request.reasoning_effort),
+                effort: Some(request.reasoning_effort.clone()),
                 summary: None,
                 context: Some(ReasoningContext::AllTurns),
             }),
@@ -249,8 +263,68 @@ impl LunaSampler {
             client_metadata: None,
             access_programs: None,
         };
+        execution::SamplingExecution {
+            auth_owner_generation,
+            cyber_access_program: codex_guardian_reviewer::guardian_cyber_access_program(
+                request.cyber_access_program,
+            ),
+            config: Arc::clone(&self.config),
+            connections: Arc::clone(&self.connections),
+            request: api_request,
+            // Retries keep the classification's inference turn identity.
+            turn_id: Uuid::now_v7().to_string(),
+            parent_response_id: request.parent_response_id.clone(),
+            parent_turn_id: request.parent_turn_id.clone(),
+            root_turn_id: request.root_turn_id.clone(),
+        }
+    }
+
+    /// Sends one tool-less classification request using an available transport.
+    pub async fn sample(
+        &self,
+        mut request: LunaSamplingRequest,
+    ) -> Result<String, LunaSamplerError> {
+        if request
+            .pending_score
+            .as_ref()
+            .is_some_and(PendingScore::is_expired)
+        {
+            return Err(LunaSamplerError::Superseded);
+        }
+        let pending_score = request.pending_score.take();
+        let auth_owner_generation = self.auth_owner_generation();
+        if request.parent_compaction.is_some()
+            && !self.supports_parent_compaction(request.parent_compaction_hash.as_deref())
+        {
+            return Err(LunaSamplerError::IncompatibleCompaction);
+        }
+        let evidence = std::mem::take(&mut request.input)
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .collect();
+        let (input, total_tokens) = Self::prepare_input(&request, /*history*/ None, evidence);
+        let input = input
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect();
+        let admission =
+            if total_tokens > self.config.max_input_tokens.saturating_sub(/*rhs*/ 256) {
+                super::metrics::RequestAdmission::Rejected
+            } else {
+                super::metrics::RequestAdmission::Admitted
+            };
+        super::metrics::record_request_tokens(
+            self.config.metrics.as_deref(),
+            /*existing*/ 0,
+            total_tokens,
+            admission,
+        );
+        // Oversized classifications defer to sync with the existing failure score.
+        if matches!(admission, super::metrics::RequestAdmission::Rejected) {
+            return Err(LunaSamplerError::InputTooLarge);
+        }
         let (supersede, superseded) = oneshot::channel();
-        let scored = Arc::new(AtomicBool::new(false));
+        let scored = Arc::new(AtomicBool::new(/*v*/ false));
         {
             let mut active_requests = self
                 .active_requests
@@ -271,18 +345,87 @@ impl LunaSampler {
                 scored: Arc::clone(&scored),
             });
         }
-        execution::SamplingExecution {
-            auth_owner_generation,
-            config: Arc::clone(&self.config),
-            connections: Arc::clone(&self.connections),
-            request,
-            turn_id,
-            parent_response_id,
-            parent_turn_id,
-            root_turn_id,
-        }
-        .run(superseded, scored)
-        .await
+        // The same cancellation future moves into the detached drain after an early score.
+        let mut telemetry =
+            telemetry::SamplingTelemetry::new(self.config.metrics.clone(), pending_score.clone());
+        let superseded = Box::pin(async move {
+            tokio::select! {
+                _ = superseded => {},
+                () = async {
+                    match pending_score {
+                        Some(pending) => pending.expired().await,
+                        None => std::future::pending().await,
+                    }
+                } => {},
+            }
+        });
+        let result = self
+            .execution(&request, input, auth_owner_generation)
+            .run(
+                execution::SamplingMode::Snapshot { superseded, scored },
+                &mut telemetry,
+            )
+            .await;
+        telemetry.record_result(&result);
+        result
+    }
+
+    pub(super) fn max_input_tokens(&self) -> usize {
+        self.config.max_input_tokens
+    }
+
+    /// Publishes the early score and returns only validated, completed history.
+    pub(super) async fn sample_retained(
+        &self,
+        sample: ConversationSample,
+        ready: oneshot::Sender<Result<SampledScore, LunaSamplerError>>,
+    ) -> Option<Vec<ResponseItemEnvelope>> {
+        let ConversationSample {
+            input: review_request,
+            sampling,
+        } = sample;
+        let auth_owner_generation = self.auth_owner_generation();
+        let mut completion = execution::RetainedCompletion {
+            ready: Some(ready),
+            output: Some(Vec::new()),
+            early_score: None,
+            remaining_tokens: self
+                .config
+                .max_input_tokens
+                .saturating_sub(/*rhs*/ 256)
+                .saturating_sub(review_request.input_tokens),
+        };
+        // Transport sees model items; delivery proof follows the unchanged input prefix.
+        let (input, metadata): (Vec<_>, Vec<_>) = review_request
+            .input
+            .into_iter()
+            .map(|envelope| (envelope.item, envelope.metadata))
+            .unzip();
+        let mut execution = self.execution(&sampling, input, auth_owner_generation);
+        execution.request.include = vec!["reasoning.encrypted_content".to_owned()];
+        let mut telemetry = telemetry::SamplingTelemetry::new(
+            self.config.metrics.clone(),
+            sampling.pending_score.clone(),
+        );
+        let result = execution
+            .run(
+                execution::SamplingMode::Retained(&mut completion),
+                &mut telemetry,
+            )
+            .await;
+        execution
+            .request
+            .input
+            .extend(completion.finish(result, &mut telemetry)?);
+        Some(
+            execution
+                .request
+                .input
+                .into_iter()
+                .zip(metadata.into_iter().chain(std::iter::repeat(None)))
+                .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
+                .collect(),
+        )
     }
 }
 

@@ -413,10 +413,30 @@ async fn logout_account_succeeds_when_config_reload_fails() -> Result<()> {
     Ok(())
 }
 
+#[test_case(false, false; "local_auth_before_cloud")]
+#[test_case(true, false; "local_mxc_after_cloud_selection")]
+#[test_case(false, true; "cloud_mxc_without_default_recovery")]
 #[tokio::test]
-async fn startup_enforces_local_auth_requirements_before_cloud_fetch() -> Result<()> {
+async fn startup_enforces_requirements_at_the_correct_load_stage(
+    local_mxc: bool,
+    cloud_mxc: bool,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     let mock_server = MockServer::start().await;
+    let require_mxc = "[windows]\nrequire_mxc = true\n";
+    let fetch_cloud = local_mxc || cloud_mxc;
+    if fetch_cloud {
+        let bundle = codex_config::test_support::CloudConfigBundleFixture::enterprise_requirement(
+            if cloud_mxc { require_mxc } else { "" },
+        )
+        .add_enterprise_config(format!("[features]\nprefer_mxc = {local_mxc}\n"))
+        .into_bundle();
+        Mock::given(path("/backend-api/wham/config/bundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(bundle))
+            .expect(1..)
+            .mount(&mock_server)
+            .await;
+    }
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
@@ -426,7 +446,13 @@ async fn startup_enforces_local_auth_requirements_before_cloud_fetch() -> Result
     )?;
     std::fs::write(
         codex_home.path().join("requirements.toml"),
-        "allowed_login_methods = [\"api\"]\n",
+        if local_mxc {
+            require_mxc
+        } else if cloud_mxc {
+            ""
+        } else {
+            "allowed_login_methods = [\"api\"]\n"
+        },
     )?;
     write_chatgpt_auth(
         codex_home.path(),
@@ -441,19 +467,29 @@ async fn startup_enforces_local_auth_requirements_before_cloud_fetch() -> Result
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .build()
         .await?;
 
-    assert!(
+    if cfg!(windows) && fetch_cloud && (!local_mxc || !codex_sandboxing::windows_mxc_available()) {
+        assert!(
+            !timeout(DEFAULT_READ_TIMEOUT, mcp.wait_for_exit())
+                .await??
+                .success()
+        );
+    } else {
+        timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+        if !fetch_cloud {
+            assert_eq!(read_account(&mut mcp).await?.account, None);
+        }
+    }
+    assert_eq!(
         mock_server
             .received_requests()
             .await
             .expect("recorded requests")
             .is_empty(),
-        "disallowed ChatGPT auth must not fetch cloud requirements"
+        !fetch_cloud,
     );
-
-    assert_eq!(read_account(&mut mcp).await?.account, None);
 
     Ok(())
 }
@@ -746,12 +782,8 @@ async fn external_auth_refreshes_on_unauthorized(model_path: &str) -> Result<()>
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
 
     if model_path != "/v1" {
-        // Force discovery after login cached the same workspace's route.
-        let config_path = codex_home.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            std::fs::read_to_string(&config_path)?.replace("/backend-api\"", "/backend-api/\""),
-        )?;
+        // Arm the failure before invalidating the route cached during login. Background
+        // discovery can otherwise cache a successful response before this mock is mounted.
         Mock::given(path("/backend-api/wham/accounts/check"))
             .and(header(
                 "authorization",
@@ -762,6 +794,11 @@ async fn external_auth_refreshes_on_unauthorized(model_path: &str) -> Result<()>
             .expect(/*r*/ 1)
             .mount(&backend)
             .await;
+        let config_path = codex_home.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            std::fs::read_to_string(&config_path)?.replace("/backend-api\"", "/backend-api/\""),
+        )?;
     }
 
     let turn_req = mcp
@@ -2650,12 +2687,44 @@ async fn login_account_chatgpt_start_can_be_cancelled() -> Result<()> {
 #[serial(login_port)]
 async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
     let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            chatgpt_base_url: Some(format!("{}/backend-api", mock_server.uri())),
+            ..Default::default()
+        },
+    )?;
+    app_test_support::mount_workspace_routing(&mock_server).await;
+    let requirements = format!(
+        "model_provider = 'gateway'\n[model_providers.gateway]\nname = 'Gateway'\nrequires_openai_auth = true\nbase_url = '{0}/v1'\nmodel_catalog_url = '{0}/v1/models'",
+        mock_server.uri(),
+    );
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/config/bundle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "requirements_toml": {"enterprise_managed": [{
+                "id": "gateway", "name": "Gateway", "contents": requirements,
+            }]}
+        })))
+        .mount(&mock_server)
+        .await;
+    let mut model = codex_models_manager::bundled_models_response()?
+        .models
+        .remove(0);
+    model.slug = "workspace-gateway-model".into();
+    model.visibility = codex_protocol::openai_models::ModelVisibility::List;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer access-token-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": [model]})))
+        .expect(1..)
+        .mount(&mock_server)
+        .await;
     let id_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("staging@example.com")
-            .plan_type("pro")
+            .plan_type("enterprise")
             .chatgpt_account_id(WORKSPACE_ID_EMBEDDED),
     )?;
     mock_oauth_token(&mock_server, &id_token).await;
@@ -2673,6 +2742,15 @@ async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
         ])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
+
+    let request = mcp.send_list_models_request(Default::default()).await?;
+    let initial: codex_app_server_protocol::ModelListResponse = mcp.read_response(request).await?;
+    assert!(
+        !initial
+            .data
+            .iter()
+            .any(|model| model.id == "workspace-gateway-model")
+    );
 
     let request_id = mcp.send_login_account_chatgpt_request().await?;
     let login: LoginAccountResponse =
@@ -2752,6 +2830,18 @@ async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
             onboarding_entrypoint: None,
         }
     );
+    // Listing immediately after asynchronous login completion must use the new cloud provider.
+    let request = mcp.send_list_models_request(Default::default()).await?;
+    let models: codex_app_server_protocol::ModelListResponse = mcp.read_response(request).await?;
+    assert_eq!(
+        models
+            .data
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["workspace-gateway-model"]
+    );
+    mock_server.verify().await;
     Ok(())
 }
 
@@ -3334,6 +3424,8 @@ async fn get_account_with_chatgpt() -> Result<()> {
 #[test_case("self_serve_business_prolite", AccountPlanType::SelfServeBusinessProLite; "business_prolite")]
 #[test_case("edu_plus", AccountPlanType::EduPlus; "edu_plus")]
 #[test_case("edu_pro", AccountPlanType::EduPro; "edu_pro")]
+#[test_case("sci", AccountPlanType::Sci; "sci")]
+#[test_case("sci_plus", AccountPlanType::SciPlus; "sci_plus")]
 #[tokio::test]
 async fn get_account_with_chatgpt_plan_variants_returns_plan_type(
     plan_type: &str,

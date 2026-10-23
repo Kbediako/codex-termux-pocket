@@ -4,6 +4,8 @@ pub(crate) mod dispatcher;
 mod matcher;
 pub(crate) mod mcp_runner;
 pub(crate) mod output_parser;
+mod plugin_fingerprint;
+mod plugin_trust;
 pub(crate) mod schema_loader;
 
 pub(crate) use matcher::HookMatcher;
@@ -62,6 +64,7 @@ pub(crate) struct CommandShell {
 pub(crate) struct ConfiguredHandler {
     /// Internally admitted cleanup hook, enabled independently of per-hook state.
     pub builtin: bool,
+    pub plugin_trust: Option<plugin_trust::PluginHookTrust>,
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<HookMatcher>,
     pub timeout_sec: u64,
@@ -131,6 +134,7 @@ pub(crate) enum ConfiguredHandlerKind {
 
 #[derive(Debug)]
 pub(crate) struct HandlerRunResult {
+    pub context_metadata: codex_protocol::models::ContentItemMetadata,
     pub started_at: i64,
     pub completed_at: i64,
     pub duration_ms: i64,
@@ -141,6 +145,25 @@ pub(crate) struct HandlerRunResult {
 }
 
 impl ConfiguredHandler {
+    /// Internal memory work runs policy and executor hooks, not user or project hooks.
+    pub(crate) fn runs_for_memory_consolidation(&self) -> bool {
+        matches!(self.source_path, HandlerSourcePath::ExecutorScoped { .. })
+            || match self.source {
+                HookSource::User
+                | HookSource::Project
+                | HookSource::SessionFlags
+                | HookSource::Plugin => false,
+                HookSource::System
+                | HookSource::Mdm
+                | HookSource::CloudRequirements
+                | HookSource::CloudManagedConfig
+                | HookSource::LegacyManagedConfigFile
+                | HookSource::LegacyManagedConfigMdm
+                // Required hooks can have unknown attribution; retain them fail-closed.
+                | HookSource::Unknown => true,
+            }
+    }
+
     pub(crate) fn execution_mode(&self) -> HookExecutionMode {
         if matches!(self.source_path, HandlerSourcePath::ExecutorScoped { .. }) {
             return HookExecutionMode::Async;
@@ -174,6 +197,8 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
             codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
             codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
+            codex_protocol::protocol::HookEventName::PreModelRequest => "pre-model-request",
+            codex_protocol::protocol::HookEventName::PostModelRequest => "post-model-request",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
@@ -221,9 +246,10 @@ pub struct HookListEntry {
 
 #[derive(Clone)]
 pub(crate) struct ClaudeHooksEngine {
-    pub(crate) handlers: Vec<ConfiguredHandler>,
-    warnings: Vec<String>,
-    required_load_errors: Vec<String>,
+    // Per-turn views share configuration; executor overlays copy handlers on mutation.
+    pub(crate) handlers: Arc<Vec<ConfiguredHandler>>,
+    warnings: Arc<[String]>,
+    required_load_errors: Arc<[String]>,
     pub(crate) command_runtime: CommandHookRuntime,
     pub(crate) mcp_executor: Arc<dyn HookMcpExecutor>,
 }
@@ -240,9 +266,9 @@ impl ClaudeHooksEngine {
     ) -> Self {
         if !enabled && plugin_hook_sources.is_empty() {
             return Self {
-                handlers: Vec::new(),
-                warnings: Vec::new(),
-                required_load_errors: Vec::new(),
+                handlers: Arc::default(),
+                warnings: Arc::default(),
+                required_load_errors: Arc::default(),
                 command_runtime,
                 mcp_executor,
             };
@@ -254,6 +280,7 @@ impl ClaudeHooksEngine {
             plugin_hook_sources,
             plugin_hook_load_warnings,
             bypass_hook_trust,
+            discovery::DiscoveryMode::Runtime,
         );
         if !enabled {
             discovered.handlers.retain(|handler| handler.builtin);
@@ -262,9 +289,9 @@ impl ClaudeHooksEngine {
             discovered.required_load_errors.clear();
         }
         Self {
-            handlers: discovered.handlers,
-            warnings: discovered.warnings,
-            required_load_errors: discovered.required_load_errors,
+            handlers: Arc::new(discovered.handlers),
+            warnings: discovered.warnings.into(),
+            required_load_errors: discovered.required_load_errors.into(),
             command_runtime,
             mcp_executor,
         }
@@ -275,15 +302,26 @@ impl ClaudeHooksEngine {
     }
 
     pub(crate) fn set_executor_hooks(&mut self, executor_hooks: Vec<ExecutorPluginHookSource>) {
-        self.handlers.retain(|handler| {
+        if executor_hooks.is_empty()
+            && !self.handlers.iter().any(|handler| {
+                matches!(
+                    handler.source_path,
+                    HandlerSourcePath::ExecutorScoped { .. }
+                )
+            })
+        {
+            return;
+        }
+
+        let handlers = Arc::make_mut(&mut self.handlers);
+        handlers.retain(|handler| {
             !matches!(
                 handler.source_path,
                 HandlerSourcePath::ExecutorScoped { .. }
             )
         });
 
-        let mut display_order = self
-            .handlers
+        let mut display_order = handlers
             .iter()
             .map(|handler| handler.display_order)
             .max()
@@ -320,8 +358,9 @@ impl ClaudeHooksEngine {
                 if !seen_targets.insert(target) {
                     continue;
                 }
-                self.handlers.push(ConfiguredHandler {
+                handlers.push(ConfiguredHandler {
                     builtin: true,
+                    plugin_trust: None,
                     event_name,
                     matcher: None,
                     timeout_sec: timeout_sec.unwrap_or(5).max(1),

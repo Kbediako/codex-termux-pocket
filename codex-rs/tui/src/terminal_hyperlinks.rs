@@ -7,6 +7,8 @@ mod paragraph;
 mod source;
 
 pub(crate) use paragraph::HyperlinkParagraph;
+pub(crate) use paragraph::HyperlinkRows;
+pub(crate) use paragraph::HyperlinkText;
 pub(crate) use source::LineWrapPolicy;
 pub(crate) use source::LogicalLineSource;
 
@@ -387,10 +389,14 @@ pub(crate) fn remap_source_wrapped_line(
             let line = line_to_static(&wrapped.line);
             let displayed = line_text(&line);
             let prefix_columns = display_width(&displayed[..wrapped.prefix_bytes]);
-            source_column += display_width(&text[source_byte..wrapped.range.start]);
+            // Some wrapping paths retain a one-past-the-end cursor sentinel. Span slicing already
+            // clips that sentinel to the visible line; keep hyperlink and source projection on the
+            // same bounded range instead of indexing past the flattened text.
+            let range = wrapped.range.start.min(text.len())..wrapped.range.end.min(text.len());
+            source_column += display_width(&text[source_byte..range.start]);
             let start = source_column;
-            let end = start + display_width(&text[wrapped.range.clone()]);
-            source_byte = wrapped.range.end;
+            let end = start + display_width(&text[range.clone()]);
+            source_byte = range.end;
             source_column = end;
             let hyperlinks = source
                 .hyperlinks
@@ -408,7 +414,7 @@ pub(crate) fn remap_source_wrapped_line(
             HyperlinkLine {
                 line,
                 hyperlinks,
-                source: Some(logical.wrapped(wrapped.range, wrapped.prefix_bytes)),
+                source: Some(logical.wrapped(range, wrapped.prefix_bytes)),
             }
         })
         .collect()
@@ -586,6 +592,14 @@ fn trailing_url_end(candidate: &str) -> usize {
             unmatched
         } else {
             matches!(ch, ',' | '.' | ';' | '!' | '\'' | '"')
+                || ch == '?'
+                    && match remaining.chars().rev().nth(1) {
+                        Some(')') => balances[0] < 0,
+                        Some(']') => balances[1] < 0,
+                        Some('}') => balances[2] < 0,
+                        Some('>') => balances[3] < 0,
+                        _ => false,
+                    }
         };
         if !trim {
             break;
@@ -890,13 +904,18 @@ mod tests {
 
     #[test]
     fn discovers_punctuated_web_url_columns() {
-        assert_eq!(
-            web_links_in_text("See (https://example.com/a)."),
-            vec![TerminalHyperlink::web(
-                /*columns*/ 5..26,
-                "https://example.com/a".to_string(),
-            )]
-        );
+        for text in [
+            "See (https://example.com/a).",
+            "See (https://example.com/a)?",
+        ] {
+            assert_eq!(
+                web_links_in_text(text),
+                vec![TerminalHyperlink::web(
+                    /*columns*/ 5..26,
+                    "https://example.com/a".to_string(),
+                )]
+            );
+        }
     }
 
     #[test]
@@ -920,14 +939,18 @@ mod tests {
 
     #[test]
     fn preserves_balanced_parentheses_in_bare_web_urls() {
-        let destination = "https://en.wikipedia.org/wiki/Function_(mathematics)";
-        assert_eq!(
-            web_links_in_text(&format!("See ({destination}).")),
-            vec![TerminalHyperlink::web(
-                /*columns*/ 5..5 + usize::from(destination.cell_width()),
-                destination.to_string(),
-            )]
-        );
+        for destination in [
+            "https://en.wikipedia.org/wiki/Function_(mathematics)",
+            "https://en.wikipedia.org/wiki/Function_(mathematics)?q=(alpha)?",
+        ] {
+            assert_eq!(
+                web_links_in_text(&format!("See ({destination}).")),
+                vec![TerminalHyperlink::web(
+                    /*columns*/ 5..5 + usize::from(destination.cell_width()),
+                    destination.to_string(),
+                )]
+            );
+        }
     }
 
     #[test]

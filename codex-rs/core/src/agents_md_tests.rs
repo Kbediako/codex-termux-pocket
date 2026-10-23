@@ -32,6 +32,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
@@ -368,6 +369,7 @@ fn resolved_local_environments<const N: usize>(
             .map(|(environment_id, cwd)| {
                 TurnEnvironmentState::Ready(TurnEnvironment::new(
                     TurnEnvironmentSelection {
+                        selected_capability_roots: Default::default(),
                         environment_id: environment_id.to_string(),
                         cwd: PathUri::from_abs_path(&cwd),
                         workspace_roots: Vec::new(),
@@ -435,7 +437,7 @@ fn foreign_agents_md_uses_environment_native_paths() {
     };
 
     assert_eq!(
-        loaded.contextual_user_fragment().render(),
+        loaded.contextual_user_fragment().render().expect_text(),
         format!(
             "# AGENTS.md instructions for {rendered_cwd}
 
@@ -479,7 +481,7 @@ fn multi_environment_agents_md_renders_mixed_path_conventions() {
     };
 
     assert_eq!(
-        loaded.contextual_user_fragment().render(),
+        loaded.contextual_user_fragment().render().expect_text(),
         r#"# AGENTS.md instructions
 
 <INSTRUCTIONS>
@@ -1176,7 +1178,7 @@ secondary doc"#,
 </INSTRUCTIONS>"#
     );
     assert_eq!(
-        loaded.contextual_user_fragment().render(),
+        loaded.contextual_user_fragment().render().expect_text(),
         expected_fragment
     );
     assert_eq!(
@@ -1223,7 +1225,7 @@ async fn secondary_only_project_doc_uses_single_contributor_layout() {
         secondary.path().display()
     );
     assert_eq!(
-        loaded.contextual_user_fragment().render(),
+        loaded.contextual_user_fragment().render().expect_text(),
         expected_fragment
     );
 }
@@ -1253,7 +1255,7 @@ async fn primary_only_project_doc_preserves_legacy_layout_with_multiple_bound_en
         primary.path().display()
     );
     assert_eq!(
-        loaded.contextual_user_fragment().render(),
+        loaded.contextual_user_fragment().render().expect_text(),
         expected_fragment
     );
 }

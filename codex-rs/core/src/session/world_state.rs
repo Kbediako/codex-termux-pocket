@@ -21,6 +21,7 @@ use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
 use crate::context::world_state::ToolsState;
+use crate::context::world_state::TopLevelToolsState;
 use crate::context::world_state::WorldState;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use codex_connectors::AppToolPolicyEvaluator;
@@ -32,6 +33,7 @@ use codex_prompts::ResolvedModelMessages;
 use codex_prompts::render_model_instructions;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::BaseInstructionsProvenance;
+use codex_protocol::models::ContentItemNamespace;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolName;
 
@@ -39,48 +41,91 @@ const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
 const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
 
 impl Session {
+    pub(crate) async fn current_window_uses_incremental_tools(
+        &self,
+        step_context: &StepContext,
+    ) -> bool {
+        if !step_context.settings.model_info.use_responses_lite {
+            return false;
+        }
+        let state = self.state.lock().await;
+        if state.history.annotated_items().is_empty() {
+            return step_context.incremental_tools_enabled();
+        }
+        state.history.has_tool_declarations()
+    }
+
     #[tracing::instrument(name = "world_state.build", level = "info", skip_all)]
     pub(crate) async fn build_world_state_for_step(
         &self,
         step_context: &StepContext,
+        new_window: bool,
     ) -> CodexResult<WorldState> {
+        let incremental_tools = if new_window {
+            step_context.incremental_tools_enabled()
+        } else {
+            self.current_window_uses_incremental_tools(step_context)
+                .await
+        };
         let turn_context = step_context.turn.as_ref();
         let settings = &step_context.settings;
         let model_info = settings.model_info.as_ref();
         let model_messages = ResolvedModelMessages::from_model(model_info);
         tracing::trace!(
-            selected_capability_root_count = step_context.selected_capability_roots.len(),
+            selected_capability_root_count = step_context
+                .extension_data
+                .get::<Vec<codex_exec_server::ResolvedSelectedCapabilityRoot>>()
+                .map_or(0, |roots| roots.len()),
             "building step world state"
         );
-        let model_instructions = render_model_instructions(model_info);
-        let model_instructions = if !turn_context.config.update_plan_enabled
-            && turn_context.config.model_catalog.is_none()
-            && (turn_context.config.base_instructions.is_none()
-                || matches!(
-                    turn_context.config.base_instructions_provenance,
-                    Some(BaseInstructionsProvenance::Model { .. })
-                )) {
-            codex_prompts::without_update_plan_instructions(&model_instructions)
-        } else {
-            model_instructions
+        let render_current_instructions = || {
+            let instructions = render_model_instructions(model_info);
+            if !turn_context.config.update_plan_enabled
+                && turn_context.config.model_catalog.is_none()
+                && (incremental_tools
+                    || turn_context.config.base_instructions.is_none()
+                    || matches!(
+                        turn_context.config.base_instructions_provenance,
+                        Some(BaseInstructionsProvenance::Model { .. })
+                    ))
+            {
+                codex_prompts::without_update_plan_instructions(&instructions)
+            } else {
+                instructions
+            }
         };
-        let base_instructions = self.get_prompt_base_instructions().await.text;
-        let previous_model = {
-            let state = self.state.lock().await;
-            state
-                .previous_turn_settings()
-                .map(|previous| previous.model)
-                .or_else(|| {
-                    state
-                        .base_instructions_provenance
-                        .as_ref()
-                        .and_then(|provenance| match provenance {
-                            BaseInstructionsProvenance::Model { model } => Some(model),
-                            BaseInstructionsProvenance::Custom => None,
-                        })
-                        .filter(|_| base_instructions != model_instructions)
-                        .cloned()
-                })
+        let model_state = if incremental_tools {
+            let base_instructions = self.get_base_instructions().await;
+            let instructions = match base_instructions.provenance {
+                Some(BaseInstructionsProvenance::Model { .. }) => render_current_instructions(),
+                Some(BaseInstructionsProvenance::Custom) | None => base_instructions.text,
+            };
+            ModelInstructionsState::for_incremental_tools(&model_info.slug, instructions)
+        } else {
+            let model_instructions = render_current_instructions();
+            let base_instructions = self.get_prompt_base_instructions().await.text;
+            let previous_model = {
+                let state = self.state.lock().await;
+                state
+                    .previous_turn_settings()
+                    .map(|previous| previous.model)
+                    .or_else(|| {
+                        state
+                            .base_instructions_provenance
+                            .as_ref()
+                            .and_then(|provenance| match provenance {
+                                BaseInstructionsProvenance::Model { model } => Some(model),
+                                BaseInstructionsProvenance::Custom => None,
+                            })
+                            .filter(|_| base_instructions != model_instructions)
+                            .cloned()
+                    })
+            };
+            ModelInstructionsState::new(
+                &model_info.slug,
+                previous_model.as_deref(),
+                model_instructions,
+            )
         };
         let environment_subagents = if turn_context.config.include_environment_context {
             match turn_context.multi_agent_version {
@@ -117,11 +162,19 @@ impl Session {
             String::new()
         };
         let mut world_state = WorldState::default();
-        world_state.add_section(ModelInstructionsState::new(
-            &model_info.slug,
-            previous_model.as_deref(),
-            model_instructions,
-        ));
+        let extension_metrics = super::extension_metrics::from_session_telemetry(
+            step_context.session_telemetry.clone(),
+        );
+        if incremental_tools {
+            let specs = step_context.tool_router.model_visible_specs();
+            let definitions = codex_tools::create_tools_json_for_responses_lite(&specs)?;
+            world_state.add_section(TopLevelToolsState::new(
+                model_messages.incremental_tools(),
+                definitions,
+                Some(Arc::clone(&extension_metrics)),
+            )?);
+        }
+        world_state.add_section(model_state);
         let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget)
             && step_context
                 .settings
@@ -138,7 +191,6 @@ impl Session {
                 window_ids.first_window_id,
                 window_ids.previous_window_id,
                 window_ids.window_id,
-                /*thread_hint*/ None,
             ));
         }
         let guidance = step_context
@@ -229,15 +281,18 @@ impl Session {
             ));
         }
         if turn_context.config.include_environment_context {
-            let current_date = self
-                .read_clock_for_context(turn_context, "environment_date")
-                .await?
-                .map(|current_time| {
-                    current_time
-                        .with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d")
-                        .to_string()
-                });
+            let current_date = if turn_context.config.include_environment_context_time {
+                self.read_clock_for_context(turn_context, "environment_date")
+                    .await?
+                    .map(|current_time| {
+                        current_time
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d")
+                            .to_string()
+                    })
+            } else {
+                None
+            };
             world_state.add_section(
                 EnvironmentsState::from_turn_context_with_environments(
                     turn_context,
@@ -276,9 +331,6 @@ impl Session {
         world_state.add_section(PluginsInstructionsState::new(
             plugins_usage_instructions_available,
         ));
-        let extension_metrics = super::extension_metrics::from_session_telemetry(
-            step_context.session_telemetry.clone(),
-        );
         if turn_context
             .config
             .features
@@ -290,11 +342,6 @@ impl Session {
             ));
         }
         let environments = step_context.environments.to_selections();
-        let ready_selected_capability_roots = step_context
-            .selected_capability_roots
-            .iter()
-            .map(|root| root.selected_root().clone())
-            .collect::<Vec<_>>();
         let previous_world_state = self.state.lock().await.history.world_state_checkpoint();
         for contributor in self.services.extensions.context_contributors() {
             for section in contributor
@@ -303,14 +350,11 @@ impl Session {
                     turn_id: turn_context.sub_id.as_str(),
                     model_info: &step_context.settings.model_info,
                     environments: &environments,
-                    ready_selected_capability_roots: &ready_selected_capability_roots,
-                    executor_capability_discovery: step_context
-                        .executor_capability_discovery
-                        .as_deref(),
                     extension_metrics: Some(Arc::clone(&extension_metrics)),
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
+                    step_store: &step_context.extension_data,
                     previous_world_state: previous_world_state.as_ref().map(|state| &state.state),
                 })
                 .await
@@ -318,11 +362,20 @@ impl Session {
                 world_state.add_extension_section(section);
             }
         }
+        let v2_namespace = turn_context
+            .config
+            .multi_agent_v2
+            .tool_namespace
+            .clone()
+            .map(ContentItemNamespace::from)
+            .unwrap_or(ContentItemNamespace::Functions);
         let mut multi_agent_mode = MultiAgentModeState::new(
             super::multi_agents::effective_multi_agent_mode(step_context),
-        );
+        )
+        .with_namespace(v2_namespace.clone());
         if let Some(usage_hint_text) = super::multi_agents::usage_hint_text(step_context) {
-            let usage_hint = MultiAgentUsageHintState::new(usage_hint_text);
+            let usage_hint =
+                MultiAgentUsageHintState::new(usage_hint_text).with_namespace(v2_namespace.clone());
             multi_agent_mode = multi_agent_mode.with_usage_hint(&usage_hint);
             world_state.add_section(usage_hint);
         }
@@ -339,12 +392,7 @@ impl Session {
                 .expose_spawn_agent_model_overrides
                 .then(|| {
                     ToolName::new(
-                        turn_context
-                            .provider
-                            .capabilities()
-                            .namespace_tools
-                            .then(|| turn_context.config.multi_agent_v2.tool_namespace.clone())
-                            .flatten(),
+                        turn_context.config.multi_agent_v2.tool_namespace.clone(),
                         "spawn_agent",
                     )
                 }),
@@ -364,7 +412,12 @@ impl Session {
                 )
             } else {
                 ModelCatalogState::default()
-            },
+            }
+            .with_namespace(match turn_context.multi_agent_version {
+                MultiAgentVersion::Disabled => None,
+                MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
+                MultiAgentVersion::V2 => Some(v2_namespace),
+            }),
         );
         if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
             world_state.add_section(ManagedDeveloperInstructionsState::new(

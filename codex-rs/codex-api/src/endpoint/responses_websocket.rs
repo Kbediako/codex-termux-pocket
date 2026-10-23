@@ -1,5 +1,6 @@
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseEvent;
+use crate::common::ResponseInterrupt;
 use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
@@ -25,6 +26,7 @@ use http::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::map::Map as JsonMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -293,14 +295,38 @@ impl ResponsesWebsocketConnection {
                         .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
                         .await;
                 }
+                // Abandoned work has a cleanup deadline; ordinary steering preserves the response.
+                let interrupt = async move {
+                    match rx_interrupt.await {
+                        Ok(interrupt) => interrupt,
+                        Err(_) => std::future::pending().await,
+                    }
+                }
+                .shared();
+                let interrupt_timeout = async {
+                    match interrupt.clone().await {
+                        ResponseInterrupt::Drain => std::future::pending().await,
+                        ResponseInterrupt::Cancel { deadline } => {
+                            tokio::time::sleep_until(deadline).await;
+                        }
+                    }
+                };
+                tokio::pin!(interrupt_timeout);
                 let mut guard = tokio::select! {
                     biased;
                     _ = tx_event.closed() => return,
+                    () = &mut interrupt_timeout => {
+                        let _ = tx_event.send(Err(ApiError::Stream(
+                            "timed out draining interrupted response".into(),
+                        ))).await;
+                        return;
+                    }
                     guard = stream.lock() => guard,
                 };
                 if tx_event.is_closed() {
                     return;
                 }
+                let mut completion = None;
                 let result = {
                     let Some(ws_stream) = guard.as_mut() else {
                         let _ = tx_event
@@ -321,8 +347,12 @@ impl ResponsesWebsocketConnection {
                             telemetry,
                             turn_state.as_deref(),
                             &timing_log_context,
-                            rx_interrupt,
+                            interrupt.clone(),
+                            &mut completion,
                         ) => result,
+                        () = &mut interrupt_timeout => Err(ApiError::Stream(
+                            "timed out draining interrupted response".into(),
+                        )),
                         _ = tx_event.closed() => Err(ApiError::Stream(
                             "response event consumer dropped".to_string(),
                         )),
@@ -335,7 +365,15 @@ impl ResponsesWebsocketConnection {
                     let failed_stream = guard.take();
                     drop(guard);
                     drop(failed_stream);
-                    let _ = tx_event.send(Err(err)).await;
+                    // Failed cancellation retires the socket while preserving any received
+                    // completion and its usage for the abandoned classifier's cleanup.
+                    let event = completion.map_or_else(|| Err(err), Ok);
+                    let _ = tx_event.send(event).await;
+                } else if let Some(completed) = completion {
+                    // The handshake is finished. Consumer backpressure must not let the
+                    // interruption deadline discard completion or its usage accounting.
+                    drop(guard);
+                    let _ = tx_event.send(Ok(completed)).await;
                 }
             }
             .instrument(current_span),
@@ -348,6 +386,8 @@ impl ResponsesWebsocketConnection {
         })
     }
 }
+
+mod connector;
 
 /// Client for connecting to the Responses WebSocket endpoint for one provider.
 pub struct ResponsesWebsocketClient {
@@ -385,12 +425,6 @@ impl ResponsesWebsocketClient {
         Self { provider, auth }
     }
 
-    #[instrument(
-        name = "responses_websocket.connect",
-        level = "info",
-        skip_all,
-        fields(transport = "responses_websocket", api.path = "/responses")
-    )]
     pub async fn connect(
         &self,
         http_client_factory: &HttpClientFactory,
@@ -399,24 +433,16 @@ impl ResponsesWebsocketClient {
         turn_state: Option<Arc<OnceLock<String>>>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     ) -> Result<ResponsesWebsocketConnection, ApiError> {
-        let ws_url = self
-            .provider
-            .websocket_url_for_path("/responses")
-            .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
-
-        let mut headers =
-            merge_request_headers(&self.provider.headers, extra_headers, default_headers);
-        self.auth.add_auth_headers(&mut headers);
-
-        let (stream, _status, server_reasoning_included, server_model) =
-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
-        Ok(ResponsesWebsocketConnection::new(
-            stream,
-            self.provider.stream_idle_timeout,
-            server_reasoning_included,
-            server_model,
+        let connector = WebSocketConnector::new(http_client_factory)
+            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+        self.connect_with_connector(
+            &connector,
+            extra_headers,
+            default_headers,
+            turn_state,
             telemetry,
-        ))
+        )
+        .await
     }
 
     /// Opens a WebSocket connection long enough to validate the upgrade response.
@@ -440,12 +466,14 @@ impl ResponsesWebsocketClient {
 
         let mut headers =
             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
-        self.auth.add_auth_headers(&mut headers);
+        self.auth.add_auth_headers(&mut headers)?;
 
+        let connector = WebSocketConnector::new(http_client_factory)
+            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
         let (mut stream, status, reasoning_included, server_model) = connect_websocket(
             ws_url.clone(),
             headers,
-            http_client_factory,
+            &connector,
             /*turn_state*/ None,
         )
         .await?;
@@ -499,7 +527,7 @@ fn merge_request_headers(
 async fn connect_websocket(
     url: Url,
     headers: HeaderMap,
-    http_client_factory: &HttpClientFactory,
+    connector: &WebSocketConnector,
     turn_state: Option<Arc<OnceLock<String>>>,
 ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
     info!("connecting to websocket: {url}");
@@ -510,8 +538,6 @@ async fn connect_websocket(
         .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
     request.headers_mut().extend(headers);
 
-    let connector = WebSocketConnector::new(http_client_factory)
-        .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
     let response = connector.connect(request, websocket_config()).await;
 
     let (stream, response) = match response {
@@ -596,6 +622,8 @@ fn map_ws_error(err: WsError, url: &Url) -> ApiError {
 struct WrappedWebsocketError {
     code: Option<String>,
     message: Option<String>,
+    #[serde(default)]
+    headers: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +656,16 @@ fn map_wrapped_websocket_error_event(
         headers,
         ..
     } = event;
+    let retry_after = [
+        error
+            .as_ref()
+            .and_then(|error| error.headers.as_ref())
+            .and_then(Value::as_object),
+        headers.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|headers| RetryAfter::from_headers(&json_headers_to_http_headers(headers)));
 
     if let Some(error) = error.as_ref()
         && let Some(code) = error.code.as_deref()
@@ -644,7 +682,7 @@ fn map_wrapped_websocket_error_event(
                 .message
                 .clone()
                 .unwrap_or_else(|| fallback_message.to_string()),
-            retry_after: None,
+            retry_after,
         });
     }
 
@@ -658,8 +696,13 @@ fn map_wrapped_websocket_error_event(
         url: None,
         headers: headers.as_ref().map(json_headers_to_http_headers),
         body: Some(original_payload),
-        retry_after: None,
+        retry_after,
     }))
+}
+
+#[derive(Deserialize)]
+struct InterruptAcknowledgement {
+    response_id: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -671,10 +714,18 @@ async fn run_websocket_response_stream(
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     turn_state: Option<&OnceLock<String>>,
     timing_log_context: &ResponsesWebsocketTimingLogContext,
-    interrupt: oneshot::Receiver<()>,
+    interrupt: impl Future<Output = ResponseInterrupt> + Clone + Unpin,
+    completion: &mut Option<ResponseEvent>,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
+    if matches!(
+        interrupt.clone().now_or_never(),
+        Some(ResponseInterrupt::Cancel { .. })
+    ) {
+        // No request reached the backend, so this socket is still reusable.
+        return Ok(());
+    }
     send_websocket_request(
         ws_stream,
         request_text,
@@ -685,15 +736,18 @@ async fn run_websocket_response_stream(
     .await?;
 
     // A response owns its interrupt, and create must be sent before interrupt.
-    let mut interrupt = interrupt.fuse();
+    let mut interrupt_request = interrupt.clone().fuse();
+    let mut interruption = None;
     let mut response_id = None;
+    let mut awaiting_interrupt_ack = false;
     loop {
         let poll_start = Instant::now();
         let response = tokio::select! {
             response = tokio::time::timeout(idle_timeout, ws_stream.next()) => {
                 response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
             }
-            Ok(()) = &mut interrupt, if response_id.is_some() => {
+            request = &mut interrupt_request, if response_id.is_some() => {
+                interruption = Some(request);
                 send_websocket_request(
                     ws_stream,
                     serde_json::json!({
@@ -706,6 +760,7 @@ async fn run_websocket_response_stream(
                     timing_log_context.connection_reused,
                 )
                 .await?;
+                awaiting_interrupt_ack = matches!(request, ResponseInterrupt::Cancel { .. });
                 continue;
             }
         };
@@ -743,6 +798,34 @@ async fn run_websocket_response_stream(
                         continue;
                     }
                 };
+                if matches!(interruption, Some(ResponseInterrupt::Cancel { .. }))
+                    && matches!(
+                        event.kind(),
+                        "response.interrupt.accepted" | "response.interrupt.failed"
+                    )
+                {
+                    let acknowledgement: InterruptAcknowledgement = serde_json::from_str(&text)
+                        .map_err(|_| {
+                            ApiError::Stream("invalid interruption acknowledgement".into())
+                        })?;
+                    if !awaiting_interrupt_ack
+                        || response_id.as_ref() != Some(&acknowledgement.response_id)
+                    {
+                        return Err(ApiError::Stream(
+                            "unexpected interruption acknowledgement".into(),
+                        ));
+                    }
+                    if event.kind() == "response.interrupt.failed" {
+                        return Err(ApiError::Stream(
+                            "response interruption was rejected".into(),
+                        ));
+                    }
+                    awaiting_interrupt_ack = false;
+                    if completion.is_some() {
+                        break;
+                    }
+                    continue;
+                }
                 emit_responses_websocket_timing_event(
                     event.kind(),
                     text.as_str(),
@@ -778,7 +861,16 @@ async fn run_websocket_response_stream(
                     }
                     continue;
                 }
-                if let Some(model) = event.response_model()
+                let model = event.response_model();
+                // Preserve terminal usage before any accompanying notification can block.
+                let event = match process_responses_event(event) {
+                    Ok(Some(event @ ResponseEvent::Completed { .. })) => {
+                        *completion = Some(event);
+                        Ok(None)
+                    }
+                    event => event,
+                };
+                if let Some(model) = model
                     && last_server_model.as_deref() != Some(model.as_str())
                 {
                     let _ = tx_event
@@ -816,21 +908,35 @@ async fn run_websocket_response_stream(
                         "response event consumer dropped".to_string(),
                     ));
                 }
-                match process_responses_event(event) {
+                match event {
                     Ok(Some(event)) => {
                         if let ResponseEvent::Created { response_id: id } = &event {
                             response_id.clone_from(id);
                         }
-                        let is_completed = matches!(event, ResponseEvent::Completed { .. });
                         let _ = tx_event.send(Ok(event)).await;
-                        if is_completed {
-                            break;
-                        }
                     }
                     Ok(None) => {}
                     Err(error) => {
                         return Err(error.into_api_error());
                     }
+                }
+                if completion.is_some() {
+                    if awaiting_interrupt_ack {
+                        continue;
+                    }
+                    if matches!(
+                        interrupt.clone().now_or_never(),
+                        Some(ResponseInterrupt::Cancel { .. })
+                    ) {
+                        break;
+                    }
+                    // Ordinary responses deliver completion before releasing the socket.
+                    // Preserve it if cancellation wins while delivery is backpressured.
+                    let permit = tx_event.reserve().await;
+                    if let (Ok(permit), Some(event)) = (permit, completion.take()) {
+                        permit.send(Ok(event));
+                    }
+                    break;
                 }
             }
             Message::Binary(_) => {
@@ -945,8 +1051,9 @@ mod tests {
     fn direct_serialization_preserves_websocket_request_payload() {
         let api_request = ResponsesApiRequest {
             model: "gpt-test".to_string(),
-            instructions: "Use the available tools.".to_string(),
             input: vec![ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: Some(ResponseItemId::with_suffix("msg", "1")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -997,6 +1104,9 @@ mod tests {
         expected_payload["generate"] = json!(false);
         let request_text =
             serialize_websocket_request(&request).expect("serialize websocket request");
+        assert!(request_text.starts_with(
+            r#"{"type":"response.create","model":"gpt-test","stream":true,"service_tier":"priority","previous_response_id":"resp-1","input":"#
+        ));
         let wire_payload =
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
@@ -1059,6 +1169,35 @@ mod tests {
         let body = body.expect("expected body");
         assert!(body.contains("usage_limit_reached"));
         assert!(body.contains("The usage limit has been reached"));
+    }
+
+    /// Websocket error advice uses the shared HTTP value validation and duplicate handling.
+    #[tokio::test(start_paused = true)]
+    async fn wrapped_websocket_retry_after_uses_http_header_validation() {
+        for (error_headers, expected_seconds) in [
+            (json!("invalid"), 12),
+            (json!({"retry-after": "\n5\n"}), 12),
+            (json!({"retry-after": "\t5\t"}), 5),
+            (json!({"Retry-After": "5", "retry-after": "30"}), 30),
+        ] {
+            let payload = json!({
+                "type": "error",
+                "status": 429,
+                "error": {"code": "rate_limit_exceeded", "headers": error_headers},
+                "headers": {"retry-after": "12"}
+            })
+            .to_string();
+            let wrapped = parse_wrapped_websocket_error_event(&payload).unwrap();
+            let Some(ApiError::Transport(TransportError::Http { retry_after, .. })) =
+                map_wrapped_websocket_error_event(wrapped, payload)
+            else {
+                panic!("expected a websocket HTTP error");
+            };
+            assert_eq!(
+                retry_after,
+                RetryAfter::from_delay(Duration::from_secs(expected_seconds))
+            );
+        }
     }
 
     #[test]

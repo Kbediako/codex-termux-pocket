@@ -1,4 +1,4 @@
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use std::sync::Arc;
 
 use codex_core::CodexThread;
@@ -27,6 +27,7 @@ use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
@@ -97,7 +98,7 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
             responses::user_message_item("automatic response item"),
         )))
         .await?;
-    let StartIfIdleSubmission::Started { turn_id } = submission else {
+    let StartIfIdleSubmission::Started { turn_id, .. } = submission else {
         panic!("automatic input should start a turn");
     };
     wait_for_turn_complete(test.codex.as_ref()).await;
@@ -152,7 +153,7 @@ async fn standalone_tool_output_starts_instruction_turn() -> anyhow::Result<()> 
         .codex
         .start_or_steer_turn(TurnInputRequest::new(TurnInput::ResponseItem(output)))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = submission else {
+    let TurnInputSubmission::Started { turn_id, .. } = submission else {
         panic!("standalone output should start a turn");
     };
     wait_for_turn_complete(test.codex.as_ref()).await;
@@ -356,7 +357,7 @@ async fn submit_danger_full_access_user_turn(test: &TestCodex, text: &str) {
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -518,14 +519,25 @@ impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config>
     }
 }
 
+#[test_case(false, Some("automation"), None, false; "live_root")]
+#[test_case(true, Some("automation"), None, false; "reloaded_root")]
+#[test_case(true, Some("automation"), Some("original-parent"), false; "reloaded_delegated")]
+#[test_case(true, None, None, false; "reloaded_unknown")]
+#[test_case(false, Some("automation"), Some("original-parent"), true; "settings_while_asleep")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context() {
+async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context(
+    reload: bool,
+    trigger: Option<&str>,
+    parent: Option<&str>,
+    update_settings: bool,
+) -> anyhow::Result<()> {
     const CHILD_MESSAGE: &str = "worker completed";
 
     let server = responses::start_mock_server().await;
     let requests = responses::mount_sse_sequence(
         &server,
         vec![
+            responses::sse_completed("resp-earlier-human"),
             responses::sse_completed("resp-initial"),
             responses::sse_completed("resp-wake"),
         ],
@@ -534,41 +546,98 @@ async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context() 
     let mut extensions =
         codex_extension_api::ExtensionRegistryBuilder::<codex_core::config::Config>::new();
     extensions.thread_lifecycle_contributor(Arc::new(SleepingRootExtension));
-    let codex = test_codex()
+    let mut builder = test_codex()
         .with_model("gpt-5.4")
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_extensions(Arc::new(extensions.build()))
-        .build_with_auto_env(&server)
-        .await
-        .expect("build Codex test session")
-        .codex;
+        .with_extensions(Arc::new(extensions.build()));
+    let mut test = builder.build_with_auto_env(&server).await?;
 
-    codex
+    test.codex
         .start_or_steer_turn(
             TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "wait for the worker".to_string(),
+                text: "establish an earlier human context".to_string(),
                 text_elements: Vec::new(),
             }])
             .on_start(TurnStartOptions {
+                turn_trigger: Some("composer".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_turn_complete(&test.codex).await;
+    // Automatic turns need not replace the model-context baseline on replay.
+    let TurnInputSubmission::Started { turn_id, .. } = test
+        .codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(Vec::new()).on_start(TurnStartOptions {
+                turn_trigger: trigger.map(str::to_owned),
+                parent_turn_id: parent.map(str::to_owned),
+                root_turn_id: parent.map(|_| "original-root".to_string()),
                 cyber_access_program: Some(CyberAccessProgram::Standard),
                 ..Default::default()
             }),
         )
-        .await
-        .expect("start initial turn");
-    wait_for_turn_complete(&codex).await;
-    enqueue_queue_only_agent_mail(&codex, CHILD_MESSAGE).await;
-    wait_for_turn_complete(&codex).await;
+        .await?
+    else {
+        panic!("expected an automatic turn");
+    };
+    wait_for_turn_complete(&test.codex).await;
+    if reload {
+        if let Some(url) = test.executor_environment().exec_server_url() {
+            builder = builder.with_exec_server_url(url);
+        }
+        test = builder.restart(&server, &test).await?;
+    }
+    if update_settings {
+        core_test_support::submit_thread_settings(
+            &test.codex,
+            ThreadSettingsOverrides {
+                effort: Some(Some(ReasoningEffort::Low)),
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
+    enqueue_queue_only_agent_mail(&test.codex, CHILD_MESSAGE).await;
+    wait_for_turn_complete(&test.codex).await;
 
+    let captured = requests.requests();
+    let metadata = captured
+        .iter()
+        .skip(1)
+        .map(|request| {
+            serde_json::from_str::<Value>(
+                &request.header("x-codex-turn-metadata").expect("metadata"),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = parent.map_or(turn_id.as_str(), |_| "original-root");
     assert_eq!(
-        requests
-            .requests()
+        metadata
             .iter()
-            .map(|request| request.body_json()["access_programs"].clone())
+            .map(|value| (
+                value["turn_trigger"].as_str(),
+                value["parent_turn_id"].as_str(),
+                value["root_turn_id"].as_str(),
+            ))
             .collect::<Vec<_>>(),
-        vec![json!({"cyber": "standard"}); 2],
+        vec![(trigger, parent, Some(root)); 2],
     );
-    let history = codex
+    assert_ne!(metadata[0]["turn_id"], metadata[1]["turn_id"]);
+    // Live wake keeps the existing execution-setting behavior. Attribution after
+    // reload must use the automatic turn, not the earlier human context baseline.
+    if !reload {
+        assert_eq!(
+            captured
+                .iter()
+                .skip(1)
+                .map(|request| request.body_json()["access_programs"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!({"cyber": "standard"}); 2],
+        );
+    }
+    let history = test
+        .codex
         .load_history(/*include_archived*/ true)
         .await
         .expect("load persisted thread history");
@@ -587,24 +656,79 @@ async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context() 
                 )
         )
     }));
+
+    if parent.is_none() {
+        return Ok(());
+    }
+    let followup =
+        responses::mount_sse_once(&server, responses::sse_completed("resp-followup")).await;
+    test.codex
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").expect("worker path should parse"),
+                AgentPath::root(),
+                Vec::new(),
+                "start different work".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            start_options: TurnStartOptions {
+                turn_trigger: Some("composer".to_string()),
+                parent_turn_id: Some("new-parent".to_string()),
+                root_turn_id: Some("new-root".to_string()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    wait_for_turn_complete(&test.codex).await;
+    let followup: Value = serde_json::from_str(
+        &followup
+            .single_request()
+            .header("x-codex-turn-metadata")
+            .expect("metadata"),
+    )?;
+    assert_eq!(
+        (
+            followup["turn_trigger"].as_str(),
+            followup["parent_turn_id"].as_str(),
+            followup["root_turn_id"].as_str(),
+        ),
+        (Some("composer"), Some("new-parent"), Some("new-root")),
+    );
+    Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum WaitInput {
+    UserSteer,
+    PendingInjection,
+    LiveInjection,
+}
+
+#[test_case(WaitInput::UserSteer; "user_steer")]
+#[test_case(WaitInput::PendingInjection; "already_pending_injection")]
+#[test_case(WaitInput::LiveInjection; "injection_while_waiting")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
+async fn input_interrupts_wait_agent_and_is_sent_in_follow_up_request(input: WaitInput) {
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
     const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
+    let (release_wait, wait_gate) = oneshot::channel();
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
-            WAIT_CALL_ID,
-            MULTI_AGENT_V2_NAMESPACE,
-            "wait_agent",
-            r#"{"timeout_ms":10000}"#,
-        )),
-        chunk(ev_completed("resp-1")),
+        gated_chunk(
+            wait_gate,
+            vec![
+                ev_function_call_with_namespace(
+                    WAIT_CALL_ID,
+                    MULTI_AGENT_V2_NAMESPACE,
+                    "wait_agent",
+                    r#"{"timeout_ms":10000}"#,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
     ];
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
@@ -622,12 +746,28 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
         .codex;
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
+    server.wait_for_request_count(/*count*/ 1).await;
+    if matches!(input, WaitInput::PendingInjection) {
+        // Hold the tool call until the injection and its activity signal are queued.
+        codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn");
+    }
+    release_wait.send(()).expect("release wait tool call");
     wait_for_event(&codex, |event| {
         matches!(event, EventMsg::CollabWaitingBegin(_))
     })
     .await;
 
-    steer_user_input(&codex, STEER_PROMPT).await;
+    match input {
+        WaitInput::UserSteer => steer_user_input(&codex, STEER_PROMPT).await,
+        WaitInput::LiveInjection => codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn"),
+        WaitInput::PendingInjection => {}
+    }
     wait_for_turn_complete(&codex).await;
 
     let requests = server.requests().await;
@@ -653,8 +793,11 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     server.shutdown().await;
 }
 
+#[test_case(WaitInput::UserSteer; "user_steer")]
+#[test_case(WaitInput::PendingInjection; "already_pending_injection")]
+#[test_case(WaitInput::LiveInjection; "injection_while_waiting")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn any_new_input_interrupts_sleep() {
+async fn any_new_input_interrupts_sleep(input: WaitInput) {
     const FIRST_SLEEP_CALL_ID: &str = "sleep-call-1";
     const SECOND_SLEEP_CALL_ID: &str = "sleep-call-2";
     const SLEEP_DURATION_MS: u64 = 3_600_000;
@@ -662,15 +805,21 @@ async fn any_new_input_interrupts_sleep() {
     const STEER_PROMPT: &str = "stop sleeping and continue";
     let sleep_arguments = json!({ "duration_ms": SLEEP_DURATION_MS }).to_string();
 
+    let (release_sleep, sleep_gate) = oneshot::channel();
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
-            FIRST_SLEEP_CALL_ID,
-            "clock",
-            "sleep",
-            &sleep_arguments,
-        )),
-        chunk(ev_completed("resp-1")),
+        gated_chunk(
+            sleep_gate,
+            vec![
+                ev_function_call_with_namespace(
+                    FIRST_SLEEP_CALL_ID,
+                    "clock",
+                    "sleep",
+                    &sleep_arguments,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
     ];
     let second_chunks = vec![
         chunk(ev_response_created("resp-2")),
@@ -706,9 +855,24 @@ async fn any_new_input_interrupts_sleep() {
     let codex = test.codex.clone();
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
+    server.wait_for_request_count(/*count*/ 1).await;
+    if matches!(input, WaitInput::PendingInjection) {
+        codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn");
+    }
+    release_sleep.send(()).expect("release sleep tool call");
     wait_for_sleep_item_started(&codex, FIRST_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
 
-    steer_user_input(&codex, STEER_PROMPT).await;
+    match input {
+        WaitInput::UserSteer => steer_user_input(&codex, STEER_PROMPT).await,
+        WaitInput::LiveInjection => codex
+            .inject_if_running(vec![responses::user_message_item(STEER_PROMPT)])
+            .await
+            .expect("inject into active turn"),
+        WaitInput::PendingInjection => {}
+    }
     wait_for_sleep_item_completed(&codex, FIRST_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
     wait_for_sleep_item_started(&codex, SECOND_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
 
@@ -988,19 +1152,22 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_ite
     server.shutdown().await;
 }
 
+#[test_case("first answer"; "visible_final")]
+#[test_case(""; "empty_final")]
+#[test_case(" \n\t"; "whitespace_final")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_inter_agent_mail_does_not_restart_after_final_answer() {
+async fn queued_inter_agent_mail_does_not_restart_after_final_answer(final_answer: &str) {
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
         chunk(ev_message_item_added("msg-1", "")),
-        chunk(ev_output_text_delta("first answer")),
+        chunk(ev_output_text_delta(final_answer)),
         chunk(json!({
             "type": "response.output_item.done",
             "item": {
                 "type": "message",
                 "role": "assistant",
                 "id": "msg-1",
-                "content": [{"type": "output_text", "text": "first answer"}],
+                "content": [{"type": "output_text", "text": final_answer}],
                 "phase": "final_answer",
             }
         })),
@@ -1131,16 +1298,23 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     server.shutdown().await;
 }
 
-#[test_case(false; "completed_reasoning")]
-#[test_case(true; "discarded_reasoning")]
+#[test_case(false, Some("response.interrupt.accepted"); "completed_reasoning")]
+#[test_case(true, Some("response.interrupt.accepted"); "discarded_reasoning")]
+#[test_case(false, Some("response.interrupt.failed"); "rejected_interrupt")]
+#[test_case(false, None; "missing_acknowledgement")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow::Result<()> {
+async fn steer_interrupts_and_drains_websocket(
+    discard_partial: bool,
+    acknowledgement: Option<&str>,
+) -> anyhow::Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));
 
     let mut interrupted = ev_completed_with_tokens("resp-interrupted", /*total_tokens*/ 42);
-    interrupted["type"] = json!("response.incomplete");
-    interrupted["response"]["status"] = json!("incomplete");
-    interrupted["response"]["incomplete_details"] = json!({"reason": "interrupted"});
+    if acknowledgement == Some("response.interrupt.accepted") {
+        interrupted["type"] = json!("response.incomplete");
+        interrupted["response"]["status"] = json!("incomplete");
+        interrupted["response"]["incomplete_details"] = json!({"reason": "interrupted"});
+    }
     let server = responses::start_websocket_server(vec![vec![
         vec![ev_response_created("warm-1"), ev_completed("warm-1")],
         vec![
@@ -1148,13 +1322,15 @@ async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow:
             ev_reasoning_item_added("reason-1", &["thinking"]),
         ],
         // Finish the active response only after receiving response.interrupt.
-        vec![
-            json!({
-                "type": "response.interrupt.accepted",
-                "response_id": "resp-interrupted",
-                "sequence_number": 3,
+        [
+            acknowledgement.map(|kind| {
+                json!({
+                    "type": kind,
+                    "response_id": "resp-interrupted",
+                    "sequence_number": 3,
+                })
             }),
-            if discard_partial {
+            Some(if discard_partial {
                 json!({
                     "type": "response.output_item.interrupted",
                     "response_id": "resp-interrupted",
@@ -1164,9 +1340,12 @@ async fn steer_interrupts_and_drains_websocket(discard_partial: bool) -> anyhow:
                 })
             } else {
                 ev_reasoning_item("reason-1", &["thinking"], &[])
-            },
-            interrupted,
-        ],
+            }),
+            Some(interrupted),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         vec![
             ev_response_created("resp-follow-up"),
             ev_completed("resp-follow-up"),
@@ -1856,7 +2035,16 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
 
-    let codex = build_codex(&server).await;
+    let codex = test_codex()
+        .with_config(|config| {
+            config.update_plan_enabled = true;
+            config.features.disable(Feature::InstantInterrupt).unwrap();
+        })
+        .with_model("gpt-5.4")
+        .build_with_streaming_server(&server)
+        .await
+        .expect("build streaming Codex test session")
+        .codex;
 
     submit_user_input(&codex, "first prompt").await;
 
@@ -1924,7 +2112,7 @@ async fn interrupt_if_no_pending_input_checks_turn_and_queue(
         .build_with_auto_env(&config_server)
         .await?;
     let codex = &test.codex;
-    let TurnInputSubmission::Started { turn_id } = codex
+    let TurnInputSubmission::Started { turn_id, .. } = codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: INITIAL_PROMPT.to_string(),
             text_elements: Vec::new(),
@@ -2282,6 +2470,7 @@ async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact(
     let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
+            config.features.disable(Feature::InstantInterrupt).unwrap();
             config.model_provider.name = "OpenAI (test)".to_string();
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
@@ -2367,6 +2556,7 @@ async fn steered_user_input_follows_compact_when_only_the_steer_needs_follow_up(
     let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
+            config.features.disable(Feature::InstantInterrupt).unwrap();
             config.model_provider.name = "OpenAI (test)".to_string();
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
@@ -2484,6 +2674,7 @@ async fn steered_user_input_waits_when_tool_output_triggers_compact_before_next_
     let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
+            config.features.disable(Feature::InstantInterrupt).unwrap();
             config.model_provider.name = "OpenAI (test)".to_string();
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);

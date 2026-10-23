@@ -25,7 +25,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
 use tracing::instrument;
 use tracing::warn;
@@ -54,6 +56,26 @@ pub(crate) struct ConfigManager {
     local_network_policy: codex_http_client::NetworkPolicyController,
     network_policy_reload: Arc<tokio::sync::Semaphore>,
     network_policy_snapshot: Arc<RwLock<Option<Arc<ApplicationPolicySnapshot>>>>,
+    /// Captured before config loading so a reload also revokes pending startups.
+    mcp_ema_cancellation: Arc<Mutex<EmaCancellationRoots>>,
+}
+
+#[derive(Default)]
+struct EmaCancellationRoots {
+    startup: CancellationToken,
+    lifetime: CancellationToken,
+}
+
+/// Startup configuration, including whether loading had to fall back to defaults.
+pub(crate) struct StartupConfig {
+    pub(crate) config: Config,
+    pub(crate) used_defaults: bool,
+}
+
+/// Local auth authority and the cloud-backed configuration loaded with it.
+pub(crate) struct CloudStartupConfig {
+    pub(crate) bootstrap: Config,
+    pub(crate) config: std::io::Result<Config>,
 }
 
 /// Configuration and policy must finish loading against the same account and cloud snapshot.
@@ -93,11 +115,41 @@ impl ConfigManager {
             local_network_policy: Default::default(),
             network_policy_reload: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             network_policy_snapshot: Arc::default(),
+            mcp_ema_cancellation: Arc::default(),
         }
     }
 
     pub(crate) fn codex_home(&self) -> &Path {
         self.codex_home.as_path()
+    }
+
+    /// Explicit account, policy-owner, and enterprise-login changes revoke cached access.
+    pub(crate) fn revoke_mcp_ema(&self) {
+        let mut current = self
+            .mcp_ema_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current.startup.cancel();
+        current.lifetime.cancel();
+        *current = EmaCancellationRoots::default();
+    }
+
+    /// Published threads are validated individually by the existing refresh loop.
+    pub(crate) fn revoke_mcp_ema_startups(&self) {
+        let mut current = self
+            .mcp_ema_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current.startup.cancel();
+        current.startup = CancellationToken::new();
+    }
+
+    fn capture_mcp_ema_cancellation(&self) -> codex_config::McpEmaCancellation {
+        let current = self
+            .mcp_ema_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        codex_config::McpEmaCancellation::pending(current.startup.clone(), current.lifetime.clone())
     }
 
     pub(crate) fn with_embedded_network_policy(
@@ -165,6 +217,7 @@ impl ConfigManager {
         } else {
             warn!("failed to update cloud config bundle loader");
         }
+        self.revoke_mcp_ema();
     }
 
     pub(crate) fn clear_cloud_config_bundle_loader(&self) {
@@ -174,6 +227,7 @@ impl ConfigManager {
         } else {
             warn!("failed to clear cloud config bundle loader");
         }
+        self.revoke_mcp_ema();
     }
 
     pub(crate) async fn sync_default_client_residency_requirement(&self) {
@@ -192,11 +246,14 @@ impl ConfigManager {
         &self,
         fallback_cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
+        let Some(fallback_cwd) = fallback_cwd else {
+            return self.load_non_project_config().await;
+        };
         self.load_with_cli_overrides(
             &self.current_cli_overrides(),
             /*request_overrides*/ None,
             ConfigOverrides::default(),
-            fallback_cwd,
+            Some(fallback_cwd),
         )
         .await
     }
@@ -204,9 +261,27 @@ impl ConfigManager {
     /// Loads system, user, and runtime settings without discovering a project
     /// from the app-server process's working directory.
     pub(crate) async fn load_non_project_config(&self) -> std::io::Result<Config> {
-        let mut manager = self.clone();
-        manager.loader_overrides.ignore_project_config = true;
-        manager.load_latest_config(/*fallback_cwd*/ None).await
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
+        let policy_load = self.refresh_application_network_policy().await?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(self.codex_home.clone())
+            .cli_overrides(self.current_cli_overrides())
+            .loader_overrides(self.loader_overrides.clone())
+            .strict_config(self.strict_config)
+            .fallback_cwd(Some(self.codex_home.clone()))
+            .cloud_config_bundle(policy_load.cloud_config.clone())
+            .thread_config_loader(Arc::clone(&self.thread_config_loader))
+            .without_project_context()
+            .build()
+            .await?;
+        self.check_application_policy_load(&policy_load)?;
+        self.apply_network_policy(&mut config);
+        self.apply_runtime_feature_enablement(&mut config);
+        self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
+        Ok(config)
     }
 
     pub(crate) async fn load_latest_config_with_session_layers(
@@ -214,6 +289,7 @@ impl ConfigManager {
         session_layers: &ConfigLayerStack,
         cwd: &Path,
     ) -> std::io::Result<Config> {
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
         let codex_home = AbsolutePathBuf::from_absolute_path(&self.codex_home)?;
         let layers = self
             .load_config_layers_for_cwd(AbsolutePathBuf::from_absolute_path(cwd)?)
@@ -223,12 +299,14 @@ impl ConfigManager {
             cwd.to_path_buf(),
             &layers,
             codex_home,
-            /*default_zsh_path*/ None,
         )
         .await?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
     }
 
@@ -238,6 +316,7 @@ impl ConfigManager {
         session_layers: &ConfigLayerStack,
         cwd: &Path,
     ) -> std::io::Result<Config> {
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
         let mut manager = self.clone();
         manager.thread_config_loader = Arc::new(codex_config::NoopThreadConfigLoader);
         let refreshed_layers = manager
@@ -249,12 +328,14 @@ impl ConfigManager {
             cwd.to_path_buf(),
             &refreshed_layers,
             AbsolutePathBuf::from_absolute_path(&self.codex_home)?,
-            /*default_zsh_path*/ None,
         )
         .await?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
     }
 
@@ -316,14 +397,37 @@ impl ConfigManager {
         Ok(())
     }
 
+    /// Load local policy before auth, then fetch the account's cloud configuration.
+    /// Callers choose their error/recovery policy before initializing any runtimes.
+    pub(crate) async fn load_cloud_startup_config(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> std::io::Result<CloudStartupConfig> {
+        let bootstrap = self.load_startup_config(cwd.clone()).await?.config;
+        let auth =
+            AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
+                .await
+                .map_err(std::io::Error::other)?;
+        self.replace_cloud_config_bundle_loader(
+            auth,
+            bootstrap.chatgpt_base_url.clone(),
+            bootstrap.http_client_factory(),
+        );
+        let config = self.load_latest_config(cwd).await;
+        Ok(CloudStartupConfig { bootstrap, config })
+    }
+
     /// Installs local policy before cloud access; failed policy loads block traffic while
     /// non-strict startup remains available for configuration repair.
     pub(crate) async fn load_startup_config(
         &self,
         fallback_cwd: Option<PathBuf>,
-    ) -> std::io::Result<Config> {
+    ) -> std::io::Result<StartupConfig> {
         match self.load_latest_config(fallback_cwd).await {
-            Ok(config) => Ok(config),
+            Ok(config) => Ok(StartupConfig {
+                config,
+                used_defaults: false,
+            }),
             Err(error)
                 if self.strict_config
                     || crate::is_unsupported_untrusted_approval_policy_error(&error) =>
@@ -332,12 +436,16 @@ impl ConfigManager {
             }
             Err(error) => {
                 warn!(%error, "configuration is unavailable; using default settings");
-                self.load_default_config().await
+                Ok(StartupConfig {
+                    config: self.load_default_config().await?,
+                    used_defaults: true,
+                })
             }
         }
     }
 
     pub(crate) async fn load_default_config(&self) -> std::io::Result<Config> {
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
         let mut loader_overrides = self.loader_overrides.clone();
         loader_overrides.ignore_user_config = true;
         loader_overrides.ignore_project_config = true;
@@ -354,6 +462,9 @@ impl ConfigManager {
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
     }
 
@@ -384,6 +495,10 @@ impl ConfigManager {
             cwd,
         )
         .await
+        .and_then(|config| {
+            config.validate_windows_mxc_requirement()?;
+            Ok(config)
+        })
     }
 
     /// Reload sources using the task's session flags before materializing config.
@@ -417,12 +532,15 @@ impl ConfigManager {
                 cwd: Some(cwd.to_path_buf()),
                 default_permissions: Some(permission_profile),
                 codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-                main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
                 ..Default::default()
             },
             Some(cwd.to_path_buf()),
         )
         .await
+        .and_then(|config| {
+            config.validate_windows_mxc_requirement()?;
+            Ok(config)
+        })
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -433,6 +551,7 @@ impl ConfigManager {
         mut typesafe_overrides: ConfigOverrides,
         fallback_cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
         let policy_load = self.refresh_application_network_policy().await?;
         let mut request_overrides = request_overrides.unwrap_or_default();
         if let Some(value) = request_overrides.remove("bypass_hook_trust") {
@@ -468,6 +587,9 @@ impl ConfigManager {
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
     }
 
@@ -531,7 +653,6 @@ impl ConfigManager {
     fn apply_arg0_paths(&self, config: &mut Config) {
         config.codex_self_exe = self.arg0_paths.codex_self_exe.clone();
         config.codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
-        config.main_execve_wrapper_exe = self.arg0_paths.main_execve_wrapper_exe.clone();
     }
 
     #[cfg(test)]

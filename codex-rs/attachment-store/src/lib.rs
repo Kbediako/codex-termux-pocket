@@ -1,5 +1,6 @@
 //! Storage-neutral attachment persistence interfaces.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -38,8 +39,12 @@ pub trait AttachmentStore: Send + Sync {
 pub struct UploadRequest {
     /// Thread receiving this attachment; storage backends may use it for placement.
     pub thread_id: String,
+    /// Whether the originating thread intentionally skips durable persistence.
+    pub ephemeral: bool,
     /// Optional name associated with the attachment.
     pub file_name: Option<String>,
+    /// Caller-supplied tags used by storage backends for policy decisions.
+    pub tags: HashMap<String, String>,
     /// Attachment bytes to persist.
     pub data: Vec<u8>,
 }
@@ -49,17 +54,21 @@ impl fmt::Debug for UploadRequest {
         formatter
             .debug_struct("UploadRequest")
             .field("thread_id", &self.thread_id)
+            .field("ephemeral", &self.ephemeral)
             .field("file_name", &self.file_name)
+            .field("tags", &self.tags)
             .field("data", &"<redacted>")
             .finish()
     }
 }
 
 /// Parameters supplied to [`AttachmentStore::resolve`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRequest<'a> {
     /// Identifier assigned by the attachment store.
     pub file_id: &'a str,
+    /// Caller-supplied tags used by storage backends for policy decisions.
+    pub tags: HashMap<String, String>,
     /// Minimum remaining lifetime required for the returned file URL.
     ///
     /// When absent, implementations must omit the file URL and may return cached metadata. When
