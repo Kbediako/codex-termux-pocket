@@ -550,3 +550,6 @@ subject	feat(termux): update to Codex 0.164.0-alpha.12 (#172)	security-critical	
 sha	d0a7d2127510a5868c9736d6e4ab189fd043a45d	tooling	Retains the reviewed original PR 169 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
 subject	ci: update artifact upload to v7.0.2	tooling	Reconciles PR 169 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
 subject	ci: update artifact upload to v7.0.2 (#169)	tooling	Records the separately reviewed PR 169 merge without changing the source release contract or publisher authority.
+sha	c357015dac5a184c95660c559f1216423f753f58	tooling	Retains the reviewed original PR 171 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
+subject	ci: update artifact download to v8.0.2	tooling	Reconciles PR 171 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
+subject	ci: update artifact download to v8.0.2 (#171)	tooling	Records the separately reviewed PR 171 merge without changing the source release contract or publisher authority.
