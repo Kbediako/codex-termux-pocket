@@ -472,9 +472,10 @@ impl AnalyticsEventsClient {
         tracking: &GuardianReviewTrackContext,
         result: GuardianReviewAnalyticsResult,
         completed_at_ms: u64,
+        elapsed: Duration,
     ) {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::GuardianReview(
-            Box::new(tracking.event_params(result, completed_at_ms)),
+            Box::new(tracking.event_params(result, completed_at_ms, elapsed)),
         )));
     }
 
@@ -580,6 +581,13 @@ impl AnalyticsEventsClient {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(
             Box::new(event),
         )));
+    }
+
+    pub fn track_realtime_session_updated(&self, thread_id: String, realtime_session_id: String) {
+        self.record_fact(AnalyticsFact::RealtimeSessionUpdated {
+            thread_id,
+            realtime_session_id,
+        });
     }
 
     pub fn track_guardian_v2_event(&self, event: GuardianV2Event) {
@@ -811,6 +819,24 @@ impl AnalyticsEventsClient {
 
     /// Records analytics-relevant notifications without cloning ignored variants.
     pub fn track_notification(&self, notification: &ServerNotification) {
+        match notification {
+            ServerNotification::ThreadRealtimeStarted(started) => {
+                self.record_fact(AnalyticsFact::RealtimeSessionStarted {
+                    thread_id: started.thread_id.clone(),
+                    realtime_session_id: started.realtime_session_id.clone(),
+                    started_at: crate::now_unix_seconds(),
+                });
+                return;
+            }
+            ServerNotification::ThreadRealtimeClosed(closed) => {
+                self.record_fact(AnalyticsFact::RealtimeSessionClosed {
+                    thread_id: closed.thread_id.clone(),
+                    closed_at: crate::now_unix_seconds(),
+                });
+                return;
+            }
+            _ => {}
+        }
         if let ServerNotification::ThreadRealtimeItemAdded(handoff) = notification {
             if handoff.item.get("type").and_then(serde_json::Value::as_str)
                 == Some("handoff_request")
@@ -826,8 +852,6 @@ impl AnalyticsEventsClient {
             ServerNotification::ThreadArchived(_)
                 | ServerNotification::ThreadClosed(_)
                 | ServerNotification::ThreadUnarchived(_)
-                | ServerNotification::ThreadRealtimeStarted(_)
-                | ServerNotification::ThreadRealtimeClosed(_)
                 | ServerNotification::TurnStarted(_)
                 | ServerNotification::TurnCompleted(_)
                 | ServerNotification::TurnDiffUpdated(_)
@@ -862,6 +886,7 @@ fn session_event_to_analytics_notification(
                 thread_id: thread_id.to_string(),
                 turn: Turn {
                     started_at: started.started_at,
+                    root_turn_id: started.root_turn_id.clone(),
                     ..analytics_turn(&started.turn_id, TurnStatus::InProgress)
                 },
             })
@@ -920,6 +945,7 @@ fn session_event_to_analytics_notification(
 fn analytics_turn(turn_id: &str, status: TurnStatus) -> Turn {
     Turn {
         id: turn_id.to_string(),
+        root_turn_id: None,
         items: Vec::new(),
         items_view: TurnItemsView::NotLoaded,
         status,
@@ -1029,6 +1055,13 @@ async fn send_track_events_request(
         #[cfg(debug_assertions)]
         AnalyticsEventsDestination::CaptureFile { .. } => return,
     };
+    let headers = match codex_model_provider::auth_provider_from_auth(auth).to_auth_headers() {
+        Ok(headers) => headers,
+        Err(error) => {
+            tracing::warn!("failed to authenticate events request: {error}");
+            return;
+        }
+    };
     let client = match codex_login::default_client::create_client_for_route_async(
         http_client_factory.clone(),
         url.clone(),
@@ -1046,7 +1079,7 @@ async fn send_track_events_request(
     let mut request = client
         .post(url)
         .timeout(ANALYTICS_EVENTS_TIMEOUT)
-        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
+        .headers(headers)
         .header("Content-Type", "application/json")
         .json(&payload);
     if let Some(product_sku) = product_sku {

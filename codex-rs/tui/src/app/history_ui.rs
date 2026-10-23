@@ -281,11 +281,7 @@ impl App {
         if let Err(err) = webbrowser::open(&url) {
             self.chat_widget
                 .add_error_message(format!("Failed to open browser for {url}: {err}"));
-            return;
         }
-
-        self.chat_widget
-            .add_info_message(format!("Opened {url} in your browser."), /*hint*/ None);
     }
 
     pub(super) fn open_desktop_thread(&mut self, thread_id: ThreadId) {
@@ -402,6 +398,7 @@ impl App {
         self.native_history = Default::default();
         self.cancel_pending_key_chord();
         self.transcript_view = Default::default();
+        *self.chat_widget.rendered_selection.borrow_mut() = Default::default();
         self.last_rendered_history_tail = None;
         self.last_thread_usage_status_cell = None;
         self.pending_thread_usage_history_refresh = false;

@@ -1,6 +1,5 @@
 use clap::Args;
 use clap::CommandFactory;
-use clap::FromArgMatches;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
@@ -56,26 +55,33 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
+mod config_override_args;
 mod daemon_install;
 mod daemon_telemetry;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_app;
 mod doctor;
 #[cfg(test)]
+#[path = "exec_args_tests.rs"]
+mod exec_args_tests;
+#[cfg(test)]
 #[path = "exec_server_args_tests.rs"]
 mod exec_server_args_tests;
 mod exec_server_auth;
 mod exec_server_command;
+mod exec_server_credential;
 mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod mcp_login;
+mod migrate_nfs_db;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
+mod sandbox_uninstall;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -189,7 +195,7 @@ enum Subcommand {
     Doctor(DoctorCommand),
 
     /// Run commands within a Codex-provided sandbox.
-    Sandbox(HostSandboxArgs),
+    Sandbox(SandboxCommand),
 
     /// Debugging tools.
     Debug(DebugCommand),
@@ -216,6 +222,9 @@ enum Subcommand {
 
     /// Inspect or migrate legacy local sessions to paginated thread history.
     MigrateRollouts(migrate_rollouts::MigrateRolloutsCommand),
+
+    /// [experimental] Migrate configured SQLite databases to DELETE mode in place.
+    MigrateNfsDb(migrate_nfs_db::MigrateNfsDbCommand),
 
     /// Unarchive a saved session by id or session name.
     Unarchive(SessionArchiveCommand),
@@ -463,6 +472,20 @@ impl clap::FromArgMatches for SessionTuiCli {
     }
 }
 
+#[derive(Debug, Parser)]
+struct SandboxCommand {
+    #[command(flatten)]
+    host: HostSandboxArgs,
+
+    #[command(subcommand)]
+    subcommand: Option<SandboxSubcommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum SandboxSubcommand {
+    Uninstall(sandbox_uninstall::SandboxUninstallCommand),
+}
+
 #[cfg(target_os = "macos")]
 type HostSandboxArgs = codex_cli::SeatbeltCommand;
 #[cfg(target_os = "linux")]
@@ -558,6 +581,12 @@ struct LogoutCommand {
 
 #[derive(Debug, Parser)]
 struct AppServerCommand {
+    #[command(flatten)]
+    startup_config: codex_app_server::StartupConfigArgs,
+
+    /// Load frozen cloud skills from a JSON snapshot instead of a live skill service.
+    #[arg(long, value_name = "PATH")]
+    cloud_skills_snapshot: Option<PathBuf>,
     /// Omit to run the app server; specify a subcommand for tooling.
     #[command(subcommand)]
     subcommand: Option<AppServerSubcommand>,
@@ -1031,15 +1060,14 @@ async fn cli_main(
     arg0_paths: Arg0DispatchPaths,
     remote_control_disabled: bool,
 ) -> anyhow::Result<()> {
-    let app = command_with_version();
-    let matches = app.get_matches();
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
         feature_toggles,
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    } = config_override_args::try_parse_from(std::env::args_os())
+        .unwrap_or_else(|error| error.exit());
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe
@@ -1227,6 +1255,8 @@ async fn cli_main(
         }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
+                startup_config,
+                cloud_skills_snapshot,
                 subcommand,
                 code_mode_host,
                 strict_config: app_server_strict_config,
@@ -1244,6 +1274,21 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 subcommand.as_ref(),
             )?;
+            if startup_config.print_startup_config {
+                anyhow::ensure!(
+                    subcommand.is_none(),
+                    "--print-startup-config cannot run a subcommand"
+                );
+                return codex_app_server::print_startup_config(
+                    arg0_paths,
+                    root_config_overrides,
+                    LoaderOverrides::default(),
+                    strict_config,
+                    startup_config,
+                )
+                .await
+                .map_err(Into::into);
+            }
             match subcommand {
                 None => {
                     let transport = if stdio {
@@ -1252,7 +1297,16 @@ async fn cli_main(
                         listen
                     };
                     let auth = auth.try_into_settings()?;
+                    if managed_daemon
+                        && matches!(
+                            &transport,
+                            codex_app_server::AppServerTransport::UnixSocket { .. }
+                        )
+                    {
+                        let _ = codex_app_server_daemon::maintain_stderr_log();
+                    }
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        cloud_skills_snapshot,
                         code_mode_host_transport: code_mode_host.into(),
                         managed_daemon,
                         remote_control_startup_mode: match (remote_control, remote_control_disabled)
@@ -1299,7 +1353,46 @@ async fn cli_main(
                         println!("{}", serde_json::to_string(&output)?);
                     }
                     AppServerDaemonSubcommand::Restart => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;
+                        let overrides = root_config_overrides
+                            .parse_overrides()
+                            .map_err(anyhow::Error::msg)?;
+                        let layer = codex_config::build_cli_overrides_layer(&overrides);
+                        let features = layer
+                            .get("features")
+                            .and_then(toml::Value::as_table)
+                            .into_iter()
+                            .flatten()
+                            .map(|(name, value)| (name.as_str(), value))
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let mut feature_overrides = std::collections::BTreeMap::new();
+                        // Match Features::apply_map's alias precedence.
+                        for (&name, &value) in &features {
+                            if name == "imagegenext" && features.contains_key("image_generation") {
+                                continue;
+                            }
+                            let value = if let Some(table) = value.as_table() {
+                                let Some(enabled) = table.get("enabled") else {
+                                    continue;
+                                };
+                                enabled
+                            } else {
+                                value
+                            };
+                            let feature =
+                                codex_features::feature_for_key(name).ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "daemon restart requires a boolean feature toggle: {name}"
+                                    )
+                                })?;
+                            let enabled = value.as_bool().ok_or_else(|| {
+                                anyhow::anyhow!("daemon restart requires a boolean enablement for features.{name}")
+                            })?;
+                            feature_overrides.insert(feature.key().to_string(), enabled);
+                        }
+                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart {
+                            feature_overrides,
+                        })
+                        .await?;
                     }
                     AppServerDaemonSubcommand::Update {
                         from_cli: true,
@@ -1355,7 +1448,7 @@ async fn cli_main(
                             .build()
                             .await
                             .map_err(anyhow::Error::from);
-                        let http_client_factory = updater_http_client_factory(config);
+                        let http_client_factory = updater_http_client_factory(config)?;
                         if matches!(
                             daemon_cli.subcommand,
                             AppServerDaemonSubcommand::Update { .. }
@@ -1420,7 +1513,8 @@ async fn cli_main(
                 }
             }
         }
-        Some(Subcommand::RemoteControl(remote_control_cli)) => {
+        Some(Subcommand::RemoteControl(mut remote_control_cli)) => {
+            remote_control_cli.no_daemon |= interactive.no_daemon;
             let subcommand_name = remote_control_cli.subcommand_name();
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -1518,6 +1612,19 @@ async fn cli_main(
                 "migrate-rollouts",
             )?;
             migrate_rollouts::run(command, root_config_overrides).await?;
+        }
+        Some(Subcommand::MigrateNfsDb(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "migrate-nfs-db",
+            )?;
+            migrate_nfs_db::run(
+                command,
+                root_config_overrides,
+                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?,
+            )
+            .await?;
         }
         Some(Subcommand::Unarchive(cmd)) => {
             let output = run_session_archive_cli_command(
@@ -1658,7 +1765,10 @@ async fn cli_main(
             codex_cloud_tasks::run_main(cloud_cli, arg0_paths.codex_linux_sandbox_exe.clone())
                 .await?;
         }
-        Some(Subcommand::Sandbox(mut sandbox_cli)) => {
+        Some(Subcommand::Sandbox(SandboxCommand {
+            host: mut sandbox_cli,
+            subcommand,
+        })) => {
             let config_profile = sandbox_cli
                 .config_profile
                 .as_ref()
@@ -1686,6 +1796,9 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 "sandbox",
             )?;
+            if let Some(SandboxSubcommand::Uninstall(command)) = subcommand {
+                return command.run();
+            }
             let loader_overrides = loader_overrides_for_profile(config_profile)?;
             #[cfg(target_os = "macos")]
             codex_cli::run_command_under_seatbelt(
@@ -1889,12 +2002,13 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Unarchive(_)
         | Subcommand::Fork(_)
         | Subcommand::Mcp(_)
+        | Subcommand::MigrateNfsDb(_)
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands, `codex mcp`, and `codex migrate-nfs-db`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex migrate-nfs-db`, `codex sandbox`, and `codex debug prompt-input`."
         ),
     }
 }
@@ -2014,7 +2128,6 @@ async fn run_debug_prompt_input_command(
         cwd: shared.cwd,
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,
         show_raw_agent_reasoning: shared.oss.then_some(true),
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
@@ -2047,6 +2160,13 @@ async fn run_debug_prompt_input_command(
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await?;
     let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    // Debug prompt construction bypasses app-server and needs its own extension registry.
+    if config
+        .features
+        .enabled(codex_features::Feature::MultiEnvCopyFile)
+    {
+        codex_multi_env_copy_file::install(&mut extensions);
+    }
     codex_git_attribution::install(
         &mut extensions,
         auth_manager,
@@ -2261,6 +2381,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
+        Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
@@ -2347,16 +2468,10 @@ async fn print_app_server_daemon_output(command: AppServerLifecycleCommand) -> a
 
 fn updater_http_client_factory(
     config: anyhow::Result<codex_core::config::Config>,
-) -> codex_http_client::HttpClientFactory {
-    match config {
-        Ok(config) => config.http_client_factory(),
-        Err(error) => {
-            eprintln!("warning: failed to load updater network configuration: {error}");
-            codex_http_client::HttpClientFactory::new(
-                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
-            )
-        }
-    }
+) -> anyhow::Result<codex_http_client::HttpClientFactory> {
+    let mut config = config?;
+    codex_app_server::in_process::EmbeddedNetworkPolicy::default().activate(&mut config);
+    Ok(config.http_client_factory())
 }
 
 async fn print_app_server_remote_control_output(
@@ -2439,11 +2554,12 @@ async fn run_interactive_tui(
         cloud_config::load_config(&interactive.config_overrides, LoaderOverrides::default())
             .await
             .map_err(std::io::Error::other)?;
-        codex_app_server_daemon::run(AppServerLifecycleCommand::Start)
+        let output = codex_app_server_daemon::run(AppServerLifecycleCommand::Start)
             .await
             .map_err(|err| std::io::Error::other(format!(
                 "{err:#}\nThe agents overview requires a shared server. Use codex --no-daemon to work without it."
             )))?;
+        interactive.managed_daemon = output.backend.is_some();
     }
 
     let remote_endpoint = match resolve_remote_endpoint(remote, remote_auth_token_env.clone()) {
@@ -2984,17 +3100,66 @@ mod tests {
             .expect("config should load");
 
         assert_eq!(
-            updater_http_client_factory(Ok(config)).outbound_proxy_policy(),
+            updater_http_client_factory(Ok(config))
+                .expect("updater configuration")
+                .outbound_proxy_policy(),
             codex_http_client::OutboundProxyPolicy::RespectSystemProxy
         );
     }
 
     #[test]
-    fn updater_http_client_factory_falls_back_when_config_load_fails() {
+    fn updater_http_client_factory_propagates_config_errors() {
         assert_eq!(
             updater_http_client_factory(Err(anyhow::anyhow!("invalid config")))
-                .outbound_proxy_policy(),
-            codex_http_client::OutboundProxyPolicy::ReqwestDefault
+                .expect_err("invalid configuration must prevent updates")
+                .to_string(),
+            "invalid config"
+        );
+    }
+
+    #[tokio::test]
+    async fn updater_http_client_factory_enforces_application_requirements() {
+        let home = tempfile::tempdir().expect("temporary Codex home");
+        let requirements = home.path().join("requirements.toml");
+        std::fs::write(
+            &requirements,
+            r#"
+[application.network]
+enabled = true
+[application.network.domains]
+"bedrock-mantle.us-gov-west-1.api.aws" = "allow"
+"chatgpt.com" = "deny"
+"releases.openai.com" = "deny"
+"#,
+        )
+        .expect("write managed requirements");
+        let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+        overrides.system_requirements_path = Some(requirements);
+        let config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .loader_overrides(overrides)
+            .build()
+            .await
+            .expect("load managed configuration");
+        let factory = updater_http_client_factory(Ok(config)).expect("updater configuration");
+        for host in ["chatgpt.com", "releases.openai.com", "unlisted.example"] {
+            assert_eq!(
+                factory
+                    .network_policy()
+                    .acquire(&format!("https://{host}/").parse().expect("URL"))
+                    .err(),
+                Some(codex_http_client::NetworkPolicyDenied::Destination)
+            );
+        }
+        assert!(
+            factory
+                .network_policy()
+                .acquire(
+                    &"https://bedrock-mantle.us-gov-west-1.api.aws/"
+                        .parse()
+                        .expect("URL")
+                )
+                .is_ok()
         );
     }
 
@@ -3753,6 +3918,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sandbox_uninstall_respects_command_separator() {
+        let cli = MultitoolCli::try_parse_from(["codex", "sandbox", "uninstall"]).expect("parse");
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Sandbox(SandboxCommand {
+                subcommand: Some(SandboxSubcommand::Uninstall(_)),
+                ..
+            }))
+        ));
+
+        for args in [
+            vec!["codex", "sandbox", "--", "uninstall", "--help"],
+            vec![
+                "codex",
+                "sandbox",
+                "--profile",
+                "uninstall",
+                "--",
+                "uninstall",
+                "--help",
+            ],
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).expect("parse forwarded command");
+            let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+                panic!("expected sandbox command");
+            };
+            assert!(command.subcommand.is_none());
+            assert_eq!(command.host.command, vec!["uninstall", "--help"]);
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[test]
     fn sandbox_parses_permission_profile() {
@@ -3766,7 +3963,7 @@ mod tests {
         ])
         .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3787,7 +3984,7 @@ mod tests {
         ])
         .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3810,7 +4007,7 @@ mod tests {
             MultitoolCli::try_parse_from(["codex", "sandbox", "-P", ":workspace", "--", "echo"])
                 .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 
@@ -3825,7 +4022,7 @@ mod tests {
             MultitoolCli::try_parse_from(["codex", "sandbox", "--profile", "work", "--", "echo"])
                 .expect("parse");
 
-        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+        let Some(Subcommand::Sandbox(SandboxCommand { host: command, .. })) = cli.subcommand else {
             panic!("expected sandbox command");
         };
 

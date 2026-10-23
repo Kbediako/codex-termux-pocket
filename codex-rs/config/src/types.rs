@@ -67,6 +67,26 @@ const fn default_enabled() -> bool {
     true
 }
 
+/// Last selected grouping in Agent Command Center.
+#[derive(Serialize, Deserialize, Debug, Default, Copy, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentsOverviewGrouping {
+    #[default]
+    Project,
+    Status,
+    Model,
+}
+
+impl AgentsOverviewGrouping {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Status => "status",
+            Self::Model => "model",
+        }
+    }
+}
+
 /// Preferred layout for the resume/fork session picker.
 #[derive(Serialize, Deserialize, Debug, Default, Copy, Clone, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -174,6 +194,8 @@ pub enum WindowsSandboxModeToml {
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
+    /// False blocks both explicit MXC configuration and automatic selection.
+    pub allow_mxc: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]
@@ -224,14 +246,15 @@ pub enum HistoryPersistence {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AnalyticsConfigToml {
-    /// When `false`, disables analytics across Codex product surfaces in this profile.
+    /// When `false`, disables OpenAI analytics across Codex product surfaces in this profile.
+    /// Custom OTLP metrics exporters remain enabled; set `otel.metrics_exporter = "none"` to disable them.
     pub enabled: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct FeedbackConfigToml {
-    /// When `false`, disables the feedback flow across Codex product surfaces.
+    /// When `false`, disables feedback uploads and background Guardian review retention. Explicit local exports remain available.
     pub enabled: Option<bool>,
 }
 
@@ -299,7 +322,7 @@ pub use codex_protocol::MemoryVersion;
 pub struct MemoriesToml {
     /// Selects the memory pipeline; v1 remains the default.
     pub version: Option<MemoryVersion>,
-    /// Generate both versions while the selected version supplies context.
+    /// Generate both versions while v1 is selected; v2 runs alone after cutover.
     pub dual_write: Option<bool>,
     /// When `true`, external context sources mark the thread `memory_mode` as `"polluted"`.
     #[serde(alias = "no_memories_if_mcp_or_web_search")]
@@ -619,7 +642,8 @@ pub struct OtelConfigToml {
     /// Optional trace exporter
     pub trace_exporter: Option<OtelExporterKind>,
 
-    /// Optional metrics exporter
+    /// Metrics exporter. Defaults to `statsig`, which follows `analytics.enabled`.
+    /// Custom OTLP exporters are independent of `analytics.enabled`; `none` disables metrics export.
     pub metrics_exporter: Option<OtelExporterKind>,
 
     /// Attributes to add to every exported trace span.
@@ -755,14 +779,14 @@ pub enum RightClickPaste {
     Off,
 }
 
-/// When transcript mouse selections are copied on release.
+/// When mouse selections are copied on release.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CopyOnSelect {
     /// Use the terminal-specific default.
     #[default]
     Auto,
-    /// Copy every nonempty transcript mouse selection on release.
+    /// Copy every nonempty transcript, footer, or composer mouse selection on release.
     Always,
     /// Require an explicit copy action.
     Never,
@@ -797,6 +821,32 @@ pub struct ModelAvailabilityNuxConfig {
 
 /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
+
+/// One reusable prompt or slash command submitted through the TUI composer.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields, rename = "Preset")]
+pub struct QuickDial {
+    /// Plain-text input, limited to 8,000 UTF-8 bytes.
+    pub input: String,
+    /// Optional short name for the picker and shortcut hints.
+    pub label: Option<String>,
+}
+
+impl QuickDial {
+    /// Keep stored inputs nonempty and below the context-item limit even with byte tokenization.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.input.trim().is_empty() {
+            return Err("Preset input cannot be empty.");
+        }
+        if self.input.trim_start().starts_with('!') {
+            return Err("Presets support prompts and slash commands, not shell commands.");
+        }
+        if self.input.len() > 8_000 {
+            return Err("Preset input cannot exceed 8,000 UTF-8 bytes.");
+        }
+        Ok(())
+    }
+}
 
 /// Collection of settings that are specific to the TUI.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
@@ -861,12 +911,24 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub fullscreen_transcript: bool,
 
-    /// Copy selected transcript text when the mouse button is released.
+    /// Mouse wheel speed multiplier for transcript scrolling, based on one row per event.
+    /// Defaults to `1.0`. Positive fractional values slow scrolling; values above `1.0` speed it up.
+    #[serde(default, deserialize_with = "crate::tui_mouse_scroll::deserialize")]
+    #[schemars(schema_with = "crate::tui_mouse_scroll::schema")]
+    pub mouse_scroll_speed: Option<f64>,
+
+    /// Copy selected transcript, footer, or composer text when the mouse button is released.
     /// Defaults to `auto`: enabled except in direct terminals known to forward their native
     /// copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows).
     /// Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying.
     #[serde(default)]
     pub copy_on_select: CopyOnSelect,
+
+    /// Deselect read-only transcript or footer text after Copy on select confirms delivery.
+    /// Editable composer selections remain visible. Defaults to `false` and has no effect when
+    /// Copy on select is off.
+    #[serde(default)]
+    pub copy_on_select_clear_selection: bool,
 
     /// Right-click text paste fallback. Defaults to `auto` (Windows/WSL/Linux).
     /// `on` also enables macOS; neither mode reads over SSH or in recognized VS Code terminals.
@@ -926,6 +988,10 @@ pub struct Tui {
     #[serde(default)]
     pub session_picker_view: Option<SessionPickerViewMode>,
 
+    /// Last selected grouping in Agent Command Center.
+    #[serde(default)]
+    pub agents_overview_grouping: AgentsOverviewGrouping,
+
     /// Working directory to use when resuming or forking a session.
     /// When unset, prompt if the current and session directories differ.
     #[serde(default)]
@@ -937,6 +1003,10 @@ pub struct Tui {
     /// Context bindings take precedence over `global` bindings.
     #[serde(default)]
     pub keymap: TuiKeymap,
+
+    /// Saved inputs keyed by a single digit (`0` through `9`).
+    #[serde(default, rename = "presets")]
+    pub quick_dials: BTreeMap<String, QuickDial>,
 
     /// Startup tooltip availability NUX state persisted by the TUI.
     #[serde(default)]
@@ -975,6 +1045,8 @@ pub struct ExternalConfigMigrationPrompts {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Notice {
+    /// Tracks whether the user has acknowledged the AWS GovCloud guidance.
+    pub hide_gov_cloud_guidance: Option<bool>,
     /// Tracks whether the user has acknowledged the full access warning prompt.
     pub hide_full_access_warning: Option<bool>,
     /// Tracks whether the user has acknowledged the Windows world-writable directories warning.
@@ -1000,11 +1072,69 @@ pub use crate::skills_config::BundledSkillsConfig;
 pub use crate::skills_config::SkillConfig;
 pub use crate::skills_config::SkillsConfig;
 
+/// Default activation settings for installed plugins.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PluginsDefaultConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// Plugin activation and capability settings loaded from configuration layers.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PluginsConfigToml {
+    /// Defaults for installed plugin activation. Omission preserves source enablement.
+    /// Explicit plugin enablement settings override this default, but cannot enable
+    /// an installation disabled by its source.
+    #[serde(default, rename = "_default", skip_serializing_if = "Option::is_none")]
+    pub default: Option<PluginsDefaultConfig>,
+
+    #[serde(default, flatten)]
+    pub plugins: HashMap<String, PluginConfig>,
+}
+
+impl PluginsConfigToml {
+    /// Whether configuration permits a source-enabled plugin to remain active.
+    /// Without `_default`, preserve legacy source and account enablement.
+    /// Otherwise, an explicit enablement setting overrides the configured default.
+    pub fn allows_plugin(&self, plugin_id: &str) -> bool {
+        let Some(default) = &self.default else {
+            return true;
+        };
+        self.plugins
+            .get(plugin_id)
+            .and_then(|plugin| plugin.enabled)
+            .unwrap_or(default.enabled)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PluginConfig {
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
+    /// Explicit activation override. Omission inherits the installed-plugin default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Stable, unique identifier of a ChatGPT-hosted remote plugin.
+    /// Availability to the requesting user is determined by Plugin Service at
+    /// provisioning time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_plugin_id: Option<String>,
+
+    /// Release identifier used to pin the remote plugin to a specific release.
+    /// Omission leaves release selection unchanged.
+    /// Core stores this metadata without selecting or fetching a release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<String>,
+
+    /// Provisioning metadata. Omission does not request provisioning.
+    /// Only applies with `remote_plugin_id` and Plugin Service availability to the
+    /// requesting user at provisioning time. Effective enablement, trusted
+    /// provisioning policy, and authentication and authorization restrictions still apply.
+    /// This value is not trusted authorization and does not trigger provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_provision: Option<bool>,
 
     /// Per-MCP-server policy overlays for MCP servers contributed by this plugin.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

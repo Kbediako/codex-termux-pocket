@@ -258,7 +258,8 @@ impl McpCli {
                 run_get(&config, args).await?;
             }
             McpSubcommand::Add(args) => {
-                run_add(&config_overrides, args).await?;
+                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                run_add(&config, args).await?;
             }
             McpSubcommand::Remove(args) => {
                 run_remove(&config_overrides, args).await?;
@@ -293,15 +294,7 @@ async fn validate_profile_v2_migration(
     Ok(())
 }
 
-async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Result<()> {
-    // Validate any provided overrides even though they are not currently applied.
-    let overrides = config_overrides
-        .parse_overrides()
-        .map_err(anyhow::Error::msg)?;
-    let config = Config::load_with_cli_overrides(overrides)
-        .await
-        .context("failed to load configuration")?;
-
+async fn run_add(config: &Config, add_args: AddArgs) -> Result<()> {
     let AddArgs {
         name,
         transport_args,
@@ -309,7 +302,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
 
     validate_server_name(&name)?;
 
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let codex_home = &config.codex_home;
 
     let (transport, oauth_client_id, oauth_client_secret, client_registration, oauth_resource) =
         match transport_args {
@@ -451,13 +444,13 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         tools: HashMap::new(),
     };
 
-    let mut servers = load_global_mcp_servers(&codex_home)
+    let mut servers = load_global_mcp_servers(codex_home)
         .await
         .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
     let credential_name = new_entry.oauth_credential_name(&name);
     servers.insert(name.clone(), new_entry);
 
-    ConfigEditsBuilder::new(&codex_home)
+    ConfigEditsBuilder::new(codex_home)
         .replace_mcp_servers(&servers)
         .apply()
         .await
@@ -700,7 +693,8 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?;
     let auth = auth_manager.auth().await;
     let mcp_servers = mcp_manager.configured_servers(config).await;
-    let effective_mcp_servers = mcp_manager.effective_servers(config, auth.as_ref()).await;
+    let runtime_config = mcp_manager.runtime_config(config).await;
+    let effective_mcp_servers = codex_mcp::effective_mcp_servers(&runtime_config, auth.as_ref());
 
     let mut entries: Vec<_> = mcp_servers.iter().collect();
     entries.sort_by_key(|(name, _)| *name);
@@ -717,6 +711,8 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         auth.as_ref(),
+        Some(&auth_manager),
+        &runtime_config.ema_state,
         &runtime_context,
     )
     .await;

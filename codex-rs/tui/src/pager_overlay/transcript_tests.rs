@@ -60,6 +60,29 @@ fn scrolling_prepend_and_resize_preserve_reading_content() {
     assert!(!overlay.is_scrolled_to_bottom());
 }
 
+#[test]
+fn repeated_prepend_keeps_fork_lineage_first() {
+    let lineage: Arc<dyn HistoryCell> = Arc::new(history_cell::ForkedThreadHistoryCell(
+        history_cell::PlainHistoryCell::new(vec!["fork lineage".into()]),
+    ));
+    let mut overlay = transcript_overlay(vec![
+        Arc::clone(&lineage),
+        Arc::new(TestCell {
+            lines: vec!["recent".into()],
+        }),
+    ]);
+
+    let older = overlay.prepend(vec![Arc::new(TestCell {
+        lines: vec!["older".into()],
+    })]);
+    let oldest = overlay.prepend(vec![Arc::new(TestCell {
+        lines: vec!["oldest".into()],
+    })]);
+
+    assert_eq!((older, oldest), (1, 1));
+    assert!(Arc::ptr_eq(&overlay.cells[0], &lineage));
+}
+
 #[tokio::test]
 async fn activity_hint_uses_the_configured_pager_jump_binding() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -277,7 +300,7 @@ async fn opening_find_retains_the_selected_mutable_revision() -> Result<()> {
         &mut tui,
         TuiEvent::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
     )?;
-    assert!(overlay.view.is_search_active());
+    assert!(overlay.view.is_search_editing());
     overlay.handle_event(
         &mut tui,
         TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -454,12 +477,7 @@ fn transcript_overlay_snapshots_paginated_history_states() {
         snapshots.push_str(&format!("--- {name} ---\n{}", buffer_to_text(&buf, area)));
     }
 
-    let snapshot_name = if cfg!(target_os = "macos") {
-        "transcript_overlay_paginated_history_states"
-    } else {
-        "transcript_overlay_paginated_history_states_non_macos"
-    };
-    assert_snapshot!(snapshot_name, snapshots);
+    assert_snapshot!("transcript_overlay_paginated_history_states", snapshots);
 }
 
 #[test]

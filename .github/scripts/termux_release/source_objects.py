@@ -91,9 +91,15 @@ def upload_batch(repo, source, entries, api, live_main):
     return expected
 
 
-def stage(repo, source, upstream, api, live_main):
+def stage(repo, source, upstream, api, live_main, *, object_batch=None):
     # Complete bounded local verification before making the first API write.
-    objects = collect(source, upstream)
+    receipt = {}
+    if object_batch is None:
+        objects = collect(source, upstream)
+    else:
+        from source_object_batch import collect as collect_batch
+
+        objects, receipt = collect_batch(source, upstream, object_batch)
     batches, pending, pending_size = [], [], 0
     for item in objects:
         data, sha = item["data"], item["sha"]
@@ -127,6 +133,7 @@ def stage(repo, source, upstream, api, live_main):
         batches.append(upload_batch(repo, source, pending, api, live_main))
     live_main(repo, source)
     return {
+        **receipt,
         "source_sha": source,
         "upstream_commit": upstream,
         "blob_count": len(objects),

@@ -1,7 +1,5 @@
 use codex_code_mode_protocol::NoopCodeModeSessionDelegate;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::CellId;
@@ -26,6 +24,7 @@ use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -60,6 +59,7 @@ fn resolve_yield_timeout_applies_grace_before_session_limits() {
 
 #[tokio::test(start_paused = true)]
 async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service: Arc<dyn CodeModeSession> = Arc::new(InProcessCodeModeSession::new());
     let execute_signal = CancellationToken::new();
@@ -77,9 +77,8 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
         .await
         .unwrap();
     let response = tokio::spawn(started.initial_response());
-    wait_until_tool_started(&delegate).await;
+    wait_until_tool_started(&delegate).await.unwrap();
     execute_signal.cancel();
-    wait_until_finished(&response).await;
     assert_eq!(
         response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
@@ -108,7 +107,6 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
     tokio::task::yield_now().await;
     assert!(!response.is_finished());
     wait_signal.cancel();
-    wait_until_finished(&response).await;
     assert_eq!(
         response.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
@@ -133,7 +131,6 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
                 .await
         }
     });
-    wait_until_finished(&response).await;
     assert_eq!(
         response.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
@@ -142,6 +139,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -149,6 +147,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
 
 #[tokio::test(start_paused = true)]
 async fn execute_waits_for_nested_tool_during_yield_grace() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::new();
     let request = ExecuteRequest {
@@ -162,10 +161,9 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
         .await
         .unwrap();
     let response = tokio::spawn(started.initial_response());
-    wait_until_tool_started(&delegate).await;
+    wait_until_tool_started(&delegate).await.unwrap();
     tokio::time::advance(Duration::from_millis(10_500)).await;
     delegate.release_tool();
-    wait_until_finished(&response).await;
     let response = response.await.unwrap().unwrap();
 
     assert_eq!(
@@ -176,6 +174,7 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -183,6 +182,7 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::with_limits(CodeModeSessionCellExecutionLimits {
         max_yield_time_ms: Some(/*value*/ 10_000),
@@ -202,12 +202,11 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
         .await
         .unwrap();
     let initial_response = tokio::spawn(started.initial_response());
-    wait_until_tool_started(&delegate).await;
+    wait_until_tool_started(&delegate).await.unwrap();
 
     tokio::time::advance(Duration::from_millis(9_999)).await;
     assert!(!initial_response.is_finished());
     tokio::time::advance(Duration::from_millis(/*millis*/ 1)).await;
-    wait_until_finished(&initial_response).await;
     assert_eq!(
         initial_response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
@@ -229,7 +228,6 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
     let wait_response = tokio::spawn(wait_response);
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(/*secs*/ 10)).await;
-    wait_until_finished(&wait_response).await;
     assert_eq!(
         wait_response.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
@@ -250,7 +248,6 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
         )
         .await;
     let completion = tokio::spawn(completion);
-    wait_until_finished(&completion).await;
     assert_eq!(
         completion.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
@@ -259,6 +256,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -266,6 +264,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_waits_for_nested_tool_during_yield_grace() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::new();
     let initial_response = service
@@ -300,7 +299,6 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(10_500)).await;
     delegate.release_tool();
-    wait_until_finished(&response).await;
     let response = response.await.unwrap();
 
     assert_eq!(
@@ -311,6 +309,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -318,6 +317,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
+    let _time_guard = hold_virtual_time();
     let zero_delegate = Arc::new(ReleasableToolDelegate::default());
     let zero_session = InProcessCodeModeSession::with_limits(CodeModeSessionCellExecutionLimits {
         max_yield_time_ms: Some(/*value*/ 0),
@@ -349,9 +349,8 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
         .unwrap();
     let zero_response = tokio::spawn(zero_started.initial_response());
     let limited_response = tokio::spawn(limited_started.initial_response());
-    wait_until_tool_started(&zero_delegate).await;
-    wait_until_tool_started(&limited_delegate).await;
-    wait_until_finished(&zero_response).await;
+    wait_until_tool_started(&zero_delegate).await.unwrap();
+    wait_until_tool_started(&limited_delegate).await.unwrap();
     assert!(!limited_response.is_finished());
     assert_eq!(
         zero_response.await.unwrap().unwrap(),
@@ -372,7 +371,6 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
         )
         .await;
     let zero_wait = tokio::spawn(zero_wait);
-    wait_until_finished(&zero_wait).await;
     assert_eq!(
         zero_wait.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
@@ -383,7 +381,6 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
     );
 
     tokio::time::advance(Duration::from_millis(/*millis*/ 10)).await;
-    wait_until_finished(&limited_response).await;
     assert_eq!(
         limited_response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
@@ -397,30 +394,89 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
     limited_session.shutdown().await.unwrap();
 }
 
-async fn wait_until_finished<T>(task: &tokio::task::JoinHandle<T>) {
-    for _ in 0..10_000 {
-        if task.is_finished() {
-            return;
+#[tokio::test(start_paused = true)]
+async fn tool_start_acknowledgement_reports_error_before_invocation() {
+    let _time_guard = hold_virtual_time();
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let started = service
+        .execute(
+            execute_request("throw 'startup failed';"),
+            delegate.clone(),
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+
+    let (startup, response) = tokio::join!(
+        wait_until_tool_started(&delegate),
+        started.initial_response(),
+    );
+    assert_eq!(startup, Err("cell closed before nested tool started"));
+    assert_eq!(
+        response.unwrap(),
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
+            error_text: Some("startup failed".to_string()),
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("code-mode response did not finish while virtual time was held in the grace period");
+    );
 }
 
-async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) {
-    for _ in 0..10_000 {
-        if delegate.tool_started.load(Ordering::Acquire) {
-            return;
-        }
-        tokio::task::yield_now().await;
+#[tokio::test(start_paused = true)]
+async fn tool_start_acknowledgement_reports_termination_before_invocation() {
+    let _time_guard = hold_virtual_time();
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let started = service
+        .execute(
+            execute_request("await new Promise(() => {});"),
+            delegate.clone(),
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+
+    let (startup, terminated) = tokio::join!(
+        wait_until_tool_started(&delegate),
+        service.terminate(cell_id("1")),
+    );
+    assert_eq!(startup, Err("cell closed before nested tool started"));
+    let response = RuntimeResponse::Terminated {
+        code_mode_host_duration: None,
+        cell_id: cell_id("1"),
+        content_items: Vec::new(),
+    };
+    assert_eq!(terminated.unwrap(), WaitOutcome::LiveCell(response.clone()));
+    assert_eq!(started.initial_response().await.unwrap(), response);
+}
+
+fn hold_virtual_time() -> oneshot::Sender<()> {
+    // A live blocking task prevents Tokio's paused clock from auto-advancing while
+    // we await the V8 thread. Tests advance time explicitly; dropping the guard
+    // releases the task even if the test panics or is cancelled.
+    let (guard, released) = oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = released.blocking_recv();
+    });
+    guard
+}
+
+async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) -> Result<(), &'static str> {
+    tokio::select! {
+        biased;
+        _ = delegate.tool_started.notified() => Ok(()),
+        _ = delegate.cell_closed.cancelled() => Err("cell closed before nested tool started"),
     }
-    panic!("nested code-mode tool did not start");
 }
 
 #[derive(Default)]
 struct ReleasableToolDelegate {
     tool_release: Notify,
-    tool_started: AtomicBool,
+    tool_started: Notify,
+    cell_closed: CancellationToken,
 }
 
 impl ReleasableToolDelegate {
@@ -435,7 +491,7 @@ impl CodeModeSessionDelegate for ReleasableToolDelegate {
         _invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
     ) -> ToolInvocationFuture<'a> {
-        self.tool_started.store(true, Ordering::Release);
+        self.tool_started.notify_one();
         Box::pin(async move {
             tokio::select! {
                 _ = self.tool_release.notified() => Ok(JsonValue::Null),
@@ -454,7 +510,9 @@ impl CodeModeSessionDelegate for ReleasableToolDelegate {
         Box::pin(async { Ok(()) })
     }
 
-    fn cell_closed(&self, _cell_id: &CellId) {}
+    fn cell_closed(&self, _cell_id: &CellId) {
+        self.cell_closed.cancel();
+    }
 }
 
 fn execute_request(source: &str) -> ExecuteRequest {
@@ -519,6 +577,210 @@ async fn synchronous_exit_returns_successfully() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn exit_stops_the_whole_cell_and_preserves_only_prior_writes() {
+    for (label, source) in [
+        ("exit inside infinite loop", r#"for (;;) { exit(); }"#),
+        ("infinite loop after exit", r#"exit(); for (;;) {}"#),
+        (
+            "invalid helper after exit",
+            r#"try { exit(); image(null); } catch { for (;;) {} }"#,
+        ),
+        (
+            "catch and finally",
+            r#"try { exit(); } catch { text("caught"); } finally { store("phase", "finally"); text("finally"); }"#,
+        ),
+        (
+            "queued microtask",
+            r#"Promise.resolve().then(() => { store("phase", "microtask"); text("microtask"); }); exit();"#,
+        ),
+        (
+            "unawaited promise",
+            r#"Promise.resolve().then(() => exit()).catch(() => text("caught")); await new Promise(() => {});"#,
+        ),
+        (
+            "async module",
+            r#"await Promise.resolve(); try { exit(); } finally { text("finally"); }"#,
+        ),
+        (
+            "parallel promises",
+            r#"await Promise.all([Promise.resolve().then(() => exit()), Promise.resolve().then(() => { store("phase", "sibling"); text("sibling"); })]);"#,
+        ),
+        (
+            "timer callback",
+            r#"setTimeout(() => { try { exit(); } catch { text("caught"); } finally { text("finally"); } }, 0); await new Promise(() => {});"#,
+        ),
+        (
+            "timer microtask",
+            r#"setTimeout(() => { Promise.resolve().then(() => exit()); }, 0); await new Promise(() => {});"#,
+        ),
+        (
+            "after awaited timer",
+            r#"await new Promise((resolve) => setTimeout(resolve, 0)); try { exit(); } catch { text("caught"); }"#,
+        ),
+        (
+            "text toJSON",
+            r#"try { text({ toJSON() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "store toJSON",
+            r#"try { store("phase", { toJSON() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "store key coercion",
+            r#"try { store({ toString() { exit(); } }, "late"); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "image getter",
+            r#"try { image({ get image_url() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "exception stack getter",
+            r#"store("phase", "before formatting");
+throw {
+    get stack() { store("phase", "before"); exit(); for (;;) {} },
+    toString() { for (;;) {} }
+};"#,
+        ),
+    ] {
+        let service = InProcessCodeModeSession::new();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute(
+                &service,
+                ExecuteRequest {
+                    source: format!(
+                        r#"store("phase", "before"); text("before"); {source} store("phase", "after"); text("after");"#
+                    ),
+                    yield_time_ms: Some(30_000),
+                    ..execute_request("")
+                },
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("exit did not stop {label}"));
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("1"),
+                content_items: vec![FunctionCallOutputContentItem::InputText {
+                    text: "before".to_string(),
+                }],
+                result_buffered_for: Duration::ZERO,
+                error_text: None,
+            },
+            "{label}"
+        );
+
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(r#"text(load("phase"));"#)
+            },
+        )
+        .await;
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("2"),
+                content_items: vec![FunctionCallOutputContentItem::InputText {
+                    text: "before".to_string(),
+                }],
+                result_buffered_for: Duration::ZERO,
+                error_text: None,
+            },
+            "{label}: next cell"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exit_after_yield_and_tool_response_finishes_successfully() {
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let yield_signal = CancellationToken::new();
+    let started = service
+        .execute(
+            ExecuteRequest {
+                enabled_tools: vec![echo_tool()],
+                source: r#"
+text("before yield");
+await tools.echo({});
+store("phase", "after tool");
+text("after tool");
+try { exit(); } catch { text("caught"); } finally { text("finally"); }
+text("after exit");
+"#
+                .to_string(),
+                yield_time_ms: Some(30_000),
+                ..execute_request("")
+            },
+            delegate.clone(),
+            Some(yield_signal.clone()),
+        )
+        .await
+        .unwrap();
+    let response = tokio::spawn(started.initial_response());
+    wait_until_tool_started(&delegate).await.unwrap();
+    yield_signal.cancel();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "before yield".to_string(),
+            }],
+        }
+    );
+    delegate.release_tool();
+    let actual = service
+        .wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 30_000,
+            },
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        actual,
+        WaitOutcome::LiveCell(RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "after tool".to_string(),
+            }],
+            result_buffered_for: actual.result_buffered_for().unwrap(),
+            error_text: None,
+        })
+    );
+    assert_eq!(
+        execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(r#"text(load("phase"));"#)
+            },
+        )
+        .await,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("2"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "after tool".to_string(),
+            }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -564,6 +826,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -575,6 +838,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "visible".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -586,6 +850,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "undefined".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -628,9 +893,109 @@ text(load("key"));
                     text: "null".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
+}
+
+#[tokio::test]
+async fn json_conversion_rejects_serde_markers_without_poisoning_sessions() {
+    let first = InProcessCodeModeSession::new();
+    let second = InProcessCodeModeSession::new();
+    let source = r#"
+store("healthy", 42);
+function rejects(value, message) {
+    let error;
+    try { store("healthy", value); } catch (e) { error = String(e); }
+    if (!message.test(error ?? "")) throw new Error(`expected ${message}; got ${error ?? "no error"}`);
+}
+const keys = ["$serde_json::private::RawValue", "$serde_json::private::Number"];
+for (const key of keys) {
+    for (const value of [
+        {[key]: "123"},
+        {first: 0, [key]: "null"},
+        [{[key]: "123"}],
+        JSON.parse('{"\\u0024' + key.slice(1) + '":"123"}'),
+    ]) rejects(value, /reserved JSON object key/);
+
+    // Marker text in strings and longer keys must remain valid.
+    const literal = ['{"' + key + '":"123"}', {['prefix"' + key]: key}];
+    store("literal", literal);
+    if (JSON.stringify(load("literal")) !== JSON.stringify(literal)) throw "changed literal";
+}
+for (const segments of [2, 5]) {
+    let encoded = "0";
+    for (let i = 0; i < segments; i++) {
+        encoded = "[".repeat(80) + encoded + "]".repeat(80);
+        if (i < segments - 1) encoded = JSON.stringify({[keys[0]]: encoded});
+    }
+    // Exercise Serde's depth reset without first requiring a deep V8 object.
+    rejects({[keys[0]]: encoded}, /reserved JSON object key/);
+}
+let value = 0;
+for (let depth = 1; depth <= 160; depth++) {
+    value = [value];
+    if (depth === 127) {
+        try {
+            store("boundary", value);
+            if (JSON.stringify(load("boundary")) !== JSON.stringify(value)) throw "changed boundary";
+        } catch (e) {
+            // V8 can reach its stack limit before Serde's depth limit on Windows.
+            if (!String(e).includes("Maximum call stack size exceeded")) throw e;
+        }
+    }
+    if (depth === 128 || depth === 160) rejects(value, /recursion limit exceeded|Maximum call stack size exceeded/);
+}
+const normal = {toJSON() { return [undefined, NaN, Infinity, 1.25, 1e100]; }};
+store("normal", normal);
+if (JSON.stringify(load("normal")) !== JSON.stringify(normal)) throw "changed normal JSON";
+text("ok");
+store("healthy", {[keys[0]]: "null"});
+"#;
+
+    for (session, source, expected_text, expected_error) in [
+        (
+            &second,
+            r#"store("healthy", 42); text(load("healthy"));"#,
+            "42",
+            None,
+        ),
+        (
+            &first,
+            source,
+            "ok",
+            Some("failed to serialize JavaScript value: reserved JSON object key"),
+        ),
+        (&first, r#"text(load("healthy"));"#, "42", None),
+        (&second, r#"text(load("healthy"));"#, "42", None),
+    ] {
+        let response = execute(
+            session,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(source)
+            },
+        )
+        .await;
+        let RuntimeResponse::Result {
+            content_items,
+            error_text,
+            ..
+        } = response
+        else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert_eq!(
+            (content_items, error_text),
+            (
+                vec![FunctionCallOutputContentItem::InputText {
+                    text: expected_text.to_string()
+                }],
+                expected_error.map(str::to_string)
+            )
+        );
+    }
 }
 
 #[tokio::test]
@@ -705,6 +1070,7 @@ async fn execute_to_pending_returns_completed_for_synchronous_results() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -983,6 +1349,7 @@ text("done");
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "done".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         ))
@@ -1074,6 +1441,7 @@ async fn global_scope_contains_only_allowed_items() {
         "WeakSet",
         "__codexContentItems",
         "add_content",
+        "as_settled",
         "audio",
         "decodeURI",
         "decodeURIComponent",
@@ -1093,6 +1461,7 @@ async fn global_scope_contains_only_allowed_items() {
         "parseInt",
         "setTimeout",
         "store",
+        "stream_settled",
         "text",
         "tools",
         "undefined",
@@ -1129,6 +1498,7 @@ async fn v8_console_is_not_exposed_on_global_this() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "false".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1170,6 +1540,7 @@ text(value);
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1210,6 +1581,7 @@ text(formatter.format(new Date("2025-01-02T03:04:05Z")));
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1258,6 +1630,7 @@ text(JSON.stringify(returnsUndefined));
                     text: "[true,true,true,true]".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1285,51 +1658,61 @@ async fn text_helper_serializes_objects() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: r#"{"json":true}"#.to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
 }
 
 #[tokio::test]
-async fn text_helper_surfaces_stringify_errors() {
-    let service = InProcessCodeModeSession::new();
+async fn output_helpers_surface_serialization_errors() {
+    for (source, expected_error) in [
+        (
+            "const circular = {}; circular.self = circular; text(circular);",
+            "Converting circular structure to JSON",
+        ),
+        (
+            "image({get image_url() { throw new Error('image getter failed'); }});",
+            "image getter failed",
+        ),
+        (
+            "image({type: 'image', get data() { throw new Error('MCP getter failed'); }});",
+            "MCP getter failed",
+        ),
+    ] {
+        let service = InProcessCodeModeSession::new();
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(source)
+            },
+        )
+        .await;
 
-    let response = execute(
-        &service,
-        ExecuteRequest {
-            source: r#"
-const circular = {};
-circular.self = circular;
-text(circular);
-"#
-            .to_string(),
-            yield_time_ms: None,
-            ..execute_request("")
-        },
-    )
-    .await;
-
-    let RuntimeResponse::Result {
-        error_text: Some(error_text),
-        ..
-    } = &response
-    else {
-        panic!("circular stringify unexpectedly succeeded: {response:?}");
-    };
-    assert!(
-        error_text.contains("Converting circular structure to JSON"),
-        "unexpected circular stringify error: {error_text}"
-    );
-    let error_text = error_text.clone();
-    assert_eq!(
-        response,
-        RuntimeResponse::Result {
-            code_mode_host_duration: None,
-            cell_id: cell_id("1"),
-            content_items: Vec::new(),
+        let RuntimeResponse::Result {
             error_text: Some(error_text),
-        }
-    );
+            ..
+        } = &response
+        else {
+            panic!("serialization unexpectedly succeeded: {response:?}");
+        };
+        assert!(
+            error_text.contains(expected_error),
+            "unexpected serialization error: {error_text}"
+        );
+        let error_text = error_text.clone();
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("1"),
+                content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
+                error_text: Some(error_text),
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -1369,6 +1752,7 @@ audio({
                     audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1401,6 +1785,7 @@ async fn audio_helper_rejects_non_data_urls() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid audio output. Pass a base64 data URI instead"
                         .to_string(),
@@ -1438,6 +1823,7 @@ image({
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::Original),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
@@ -1477,6 +1863,7 @@ generatedImage({
                     text: "generated image save hint".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1514,6 +1901,7 @@ image(
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Original),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1550,6 +1938,7 @@ image(
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::High),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
@@ -1584,6 +1973,7 @@ image({
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Low),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1617,6 +2007,7 @@ async fn image_helpers_reject_remote_urls() {
                         code_mode_host_duration: None,
                         cell_id: cell_id("1"),
                         content_items: Vec::new(),
+                        result_buffered_for: Duration::ZERO,
                         error_text: Some(
                             "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead".to_string(),
                         ),
@@ -1652,6 +2043,7 @@ async fn image_helpers_reject_invalid_image_outputs() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid image output. Pass a base64 data URI instead"
                         .to_string(),
@@ -1687,6 +2079,7 @@ image({
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("image detail must be one of: auto, low, high, original".to_string()),
         }
     );
@@ -1722,6 +2115,7 @@ image({
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "image expects a non-empty image URL string, an object with image_url and optional detail, or a raw MCP image block".to_string(),
                 ),
@@ -1750,6 +2144,7 @@ async fn wait_reports_missing_cell_separately_from_runtime_results() {
             code_mode_host_duration: None,
             cell_id: cell_id("missing"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("exec cell missing not found".to_string()),
         })
     );

@@ -11,7 +11,7 @@ use std::sync::Weak;
 use super::*;
 
 const MAX_CACHED_ENTRIES: usize = 64;
-const MAX_CACHED_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CACHED_LAYOUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The selected activity presentation and any live content that follows it.
 pub(crate) struct ActivityTranscriptLines {
@@ -36,7 +36,8 @@ pub(super) fn activity_layout(
         return layout;
     }
     let label = match (expanded, lines.disclosure) {
-        (true, _) => "− Show less".to_owned(),
+        (true, Some(ActivityDisclosure::OutputLines(_))) => "− Show less".to_owned(),
+        (true, Some(ActivityDisclosure::Generic) | None) => "− Hide details".to_owned(),
         (false, Some(ActivityDisclosure::OutputLines(count))) => {
             let noun = if count == 1 { "line" } else { "lines" };
             let mut label = format!("+ {count} {noun}");
@@ -70,6 +71,7 @@ struct RenderState {
     foreground: Option<(u8, u8, u8)>,
     background: Option<(u8, u8, u8)>,
     color_level: crate::terminal_palette::StdoutColorLevel,
+    cell_size: Option<(u32, u32)>,
 }
 
 struct CachedLayout {
@@ -87,6 +89,8 @@ pub(super) struct CellPresentation {
     turn_tip_space: bool,
     expanded: bool,
     disclosure: bool,
+    detailed: bool,
+    image_protocol: Option<crate::pets::ImageProtocol>,
 }
 
 impl TranscriptView {
@@ -100,6 +104,20 @@ impl TranscriptView {
         if index > cells.len() {
             return None;
         }
+        let key = self.entry_key(cells, index);
+        if let Some(layout) = self.search.match_layout(key) {
+            return Some(layout);
+        }
+        self.base_layout(cells, index)
+    }
+
+    /// Resolve manual disclosure and retained revisions, without Find's temporary expansion.
+    /// Call with the snapshot's cells, if present.
+    pub(super) fn base_layout(
+        &mut self,
+        cells: &[Arc<dyn HistoryCell>],
+        index: usize,
+    ) -> Option<Arc<TextLayout>> {
         let key = self.entry_key(cells, index);
         if let Some(layout) = self
             .snapshot()
@@ -118,6 +136,15 @@ impl TranscriptView {
         &mut self,
         cells: &[Arc<dyn HistoryCell>],
         index: usize,
+    ) -> Option<Arc<TextLayout>> {
+        self.entry_layout(cells, index, self.detailed)
+    }
+
+    pub(super) fn entry_layout(
+        &mut self,
+        cells: &[Arc<dyn HistoryCell>],
+        index: usize,
+        full_content: bool,
     ) -> Option<Arc<TextLayout>> {
         let Some(cell) = cells.get(index) else {
             if index != cells.len() {
@@ -140,12 +167,13 @@ impl TranscriptView {
         {
             return Some(Arc::new(TextLayout::new(Vec::new(), width)));
         }
-        let detailed = self.detailed;
         let mode = self.mode;
         let ids = cell.activity_ids();
-        let disclosure = !detailed && mode == HistoryRenderMode::Rich && !ids.is_empty();
-        let expanded = disclosure && self.disclosure.is_expanded(&ids);
-        if expanded {
+        let disclosure = !self.detailed && mode == HistoryRenderMode::Rich && !ids.is_empty();
+        let manually_expanded = self.disclosure.is_expanded(&ids);
+        let reveal_image = ids.is_empty() || manually_expanded || self.detailed;
+        let expanded = disclosure && (full_content || manually_expanded);
+        if manually_expanded {
             self.disclosure.expanded.extend(ids);
         }
         let separated = index > 0 && !cell.is_stream_continuation();
@@ -154,13 +182,17 @@ impl TranscriptView {
             turn_tip_space: self.turn_tip_key == Some(EntryKey::cell(cell)),
             expanded,
             disclosure,
+            detailed: full_content,
+            image_protocol: self
+                .image_protocol
+                .filter(|_| mode == HistoryRenderMode::Rich && reveal_image),
         };
         let shortcut = self
             .disclosure
             .keymap
             .primary_hint(KeymapContext::Global, "open_transcript");
         Some(self.cache.get(cell, width, presentation, || {
-            if disclosure {
+            let mut layout = if disclosure {
                 activity_layout(
                     ActivityTranscriptLines {
                         activity: if expanded {
@@ -180,12 +212,20 @@ impl TranscriptView {
                     crate::history_cell::fullscreen_session_lines(
                         cell.as_ref(),
                         width,
-                        detailed,
+                        full_content,
                         mode,
                     ),
                     width,
                 )
+            };
+            if let Some(protocol) = presentation.image_protocol
+                && let Some(path) = cell.image_path()
+            {
+                layout.image =
+                    crate::transcript_image::TranscriptImage::load(path.as_path(), width, protocol)
+                        .map(Arc::new);
             }
+            layout
         }))
     }
 }
@@ -198,6 +238,7 @@ impl LayoutCache {
             foreground: crate::terminal_palette::default_fg(),
             background: crate::terminal_palette::default_bg(),
             color_level: crate::terminal_palette::stdout_color_level(),
+            cell_size: crate::transcript_image::terminal_cell_size(),
         };
         if self.render_state.as_ref() != Some(&state) {
             self.entries.clear();
@@ -258,16 +299,20 @@ impl LayoutCache {
     }
 
     fn evict(&mut self) {
-        let mut bytes = self
-            .entries
-            .iter()
-            .map(|entry| entry.layout.text().len())
-            .sum::<usize>();
+        let retained_bytes = |entry: &CachedLayout| {
+            entry.layout.text().len()
+                + entry
+                    .layout
+                    .image
+                    .as_ref()
+                    .map_or(0, |image| image.pixels.len())
+        };
+        let mut bytes = self.entries.iter().map(retained_bytes).sum::<usize>();
         // Retain a single oversized entry rather than repeatedly laying it out while visible.
         while self.entries.len() > 1
-            && (self.entries.len() > MAX_CACHED_ENTRIES || bytes > MAX_CACHED_TEXT_BYTES)
+            && (self.entries.len() > MAX_CACHED_ENTRIES || bytes > MAX_CACHED_LAYOUT_BYTES)
         {
-            bytes -= self.entries.remove(/*index*/ 0).layout.text().len();
+            bytes -= retained_bytes(&self.entries.remove(/*index*/ 0));
         }
     }
 }

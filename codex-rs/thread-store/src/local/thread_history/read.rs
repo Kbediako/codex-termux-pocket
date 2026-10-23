@@ -52,6 +52,7 @@ pub(super) struct RolloutHistoryPosition {
 pub(super) struct StoredTurnRow {
     pub position: RolloutHistoryPosition,
     pub turn_id: String,
+    pub root_turn_id: Option<String>,
     pub status: StoredTurnStatus,
     pub error: Option<StoredTurnError>,
     pub started_at: Option<i64>,
@@ -110,7 +111,9 @@ pub(in crate::local) async fn list_turns(
     )
     .await?;
     validate_page_size(params.page_size)?;
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let pool = store.thread_history_db().await?;
     let page = page_turn_rows(
         pool,
@@ -139,6 +142,7 @@ pub(in crate::local) async fn list_turns(
         };
         turns.push(StoredTurn {
             turn_id: turn.turn_id,
+            root_turn_id: turn.root_turn_id,
             items,
             items_view: params.items_view,
             status: turn.status,
@@ -158,7 +162,7 @@ pub(in crate::local) async fn list_turns(
 
 pub(in crate::local) async fn list_items(
     store: &LocalThreadStore,
-    params: ListItemsParams,
+    mut params: ListItemsParams,
 ) -> ThreadStoreResult<ItemPage> {
     validate_thread_for_paginated_reads(
         store,
@@ -167,8 +171,25 @@ pub(in crate::local) async fn list_items(
         "list_items",
     )
     .await?;
+    if let Some(ids) = &params.item_ids {
+        if params.turn_id.is_none()
+            || params.position.is_some()
+            || params.after_updated_at_ordinal.is_some()
+            || params.sort_key != crate::ItemSortKey::CreatedAtOrdinal
+            || !(1..=100).contains(&ids.len())
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: "itemIds requires turnId, 1 to 100 IDs, and no cursor or update replay"
+                    .to_string(),
+            });
+        }
+        params.page_size = ids.len();
+        params.sort_direction = crate::SortDirection::Asc;
+    }
     validate_page_size(params.page_size)?;
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let pool = store.thread_history_db().await?;
     let page = page_item_rows(pool, &lineage, &params).await?;
 
@@ -308,6 +329,7 @@ pub(super) fn stored_turn_row(row: sqlx::sqlite::SqliteRow) -> ThreadStoreResult
             rollout_ordinal: row.try_get("rollout_ordinal")?,
         },
         turn_id: row.try_get("turn_id")?,
+        root_turn_id: row.try_get("root_turn_id")?,
         status,
         error,
         started_at: row.try_get("started_at")?,

@@ -2,12 +2,17 @@
 //! Required action evidence is never truncated. Optional evidence leaves first;
 //! hosts may shorten historical instructions after compaction cannot make room.
 //! Every reduction reserves an omission notice and preserves source order.
+//! JSON recovery shortens only the body; line mode shortens the whole rendered entry.
+//! Native agent messages are reconciled with current history before budgeting.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TruncationPolicy;
 
 use crate::ComposedContext;
@@ -15,8 +20,9 @@ use crate::RequestBudget;
 use crate::SectionError;
 use crate::TruncationObservation;
 use crate::budget::content_framing_tokens;
-use crate::budget::content_tokens;
+use crate::budget::section_content_tokens;
 use crate::budget::section_tokens;
+use crate::composition::SectionContent;
 use crate::composition::SectionDelivery;
 use crate::composition::SectionOutput;
 
@@ -90,6 +96,70 @@ pub enum HistoryTruncation {
 }
 
 impl ComposedContext {
+    /// Omits native agent messages already present in the effective reviewer history
+    /// or earlier in this input. Hosts must repeat this check after compaction;
+    /// missing evidence may be delivered again. Identity excludes host annotations.
+    /// Conflicting payloads under one ID reject the input without changing it.
+    pub fn retain_new_agent_messages(
+        &mut self,
+        reviewer_history: &[ResponseItemEnvelope],
+    ) -> Result<(), SectionError> {
+        if !self.sections.iter().any(|section| {
+            matches!(
+                &section.delivery,
+                SectionDelivery::Message(message)
+                    if matches!(message.content.item, ResponseItem::AgentMessage { .. })
+            )
+        }) {
+            return Ok(());
+        }
+        let mut seen = HashMap::new();
+        let mut duplicates = HashSet::new();
+        let pending =
+            self.sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| match &section.delivery {
+                    SectionDelivery::Message(message) => Some((Some(index), &message.content.item)),
+                    SectionDelivery::UserContent(_) => None,
+                });
+        for (index, item) in reviewer_history
+            .iter()
+            .map(|item| (None, &item.item))
+            .chain(pending)
+        {
+            let ResponseItem::AgentMessage {
+                id: Some(id),
+                author,
+                recipient,
+                content,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if id.is_empty() {
+                continue;
+            }
+            let payload = (author, recipient, content);
+            if let Some(previous) = seen.insert(id, payload) {
+                if previous != payload {
+                    return Err(SectionError::ConflictingAgentMessage);
+                }
+                if let Some(index) = index {
+                    duplicates.insert(index);
+                }
+            }
+        }
+        let mut index = 0;
+        self.sections.retain(|_| {
+            let retain = !duplicates.contains(&index);
+            index += 1;
+            retain
+        });
+        Ok(())
+    }
+
     /// Applies host image admission before aggregate selection, preserving section
     /// identity and each retained item's selection policy.
     pub fn retain_images(
@@ -98,7 +168,9 @@ impl ComposedContext {
     ) {
         for section in &mut self.sections {
             retain_content(section, &mut self.truncations, |_, item| match item {
-                ContentItem::InputImage { image, detail } => admit(image, detail),
+                SectionContent::Other(ContentItem::InputImage { image, detail }) => {
+                    admit(image, detail)
+                }
                 _ => true,
             });
         }
@@ -124,7 +196,7 @@ impl ComposedContext {
         }
         let notice = SectionOutput {
             id: "budget_omission",
-            delivery: SectionDelivery::UserContent(vec![Budgeted::required(
+            delivery: SectionDelivery::user_content(vec![Budgeted::required(
                 ContentItem::InputText {
                     text: omission_notice,
                 },
@@ -151,7 +223,7 @@ impl ComposedContext {
                         continue;
                     };
                     required_items -= 1;
-                    let tokens = content_tokens(&item.content);
+                    let tokens = section_content_tokens(&item.content);
                     required_tokens = required_tokens.saturating_sub(tokens);
                     candidates.push((priority, section_index, index, tokens));
                 }
@@ -179,40 +251,49 @@ impl ComposedContext {
                     if item.retention != Retention::Historical {
                         continue;
                     }
-                    let original_tokens = content_tokens(&item.content);
-                    let ContentItem::InputText { text } = &mut item.content else {
+                    let original_tokens = section_content_tokens(&item.content);
+                    let original_bytes = match &item.content {
+                        SectionContent::Transcript(record) => record.rendered().text_bytes,
+                        SectionContent::Other(ContentItem::InputText { text }) => text.len(),
+                        _ => continue,
+                    };
+                    let Some(original_body) = item.content.replace_text(String::new()) else {
                         continue;
                     };
                     let target = original_tokens.saturating_sub(required_tokens - remaining);
-                    let mut upper = TruncationPolicy::Bytes(text.len()).token_budget();
+                    let mut upper = TruncationPolicy::Bytes(original_body.len()).token_budget();
                     let mut lower = 32.min(upper);
-                    let mut shortened = crate::truncate_text(text, lower);
+                    let mut selected = lower;
                     while lower < upper {
                         let mid = lower + (upper - lower).div_ceil(2);
-                        let candidate = crate::truncate_text(text, mid);
-                        if content_tokens(&ContentItem::InputText {
-                            text: candidate.clone(),
-                        }) <= target
-                        {
+                        let _ = item
+                            .content
+                            .replace_text(crate::truncate_text(&original_body, mid));
+                        if section_content_tokens(&item.content) <= target {
                             lower = mid;
-                            shortened = candidate;
+                            selected = mid;
                         } else {
                             upper = mid - 1;
                         }
                     }
+                    let _ = item
+                        .content
+                        .replace_text(crate::truncate_text(&original_body, selected));
                     let saved =
-                        original_tokens.saturating_sub(content_tokens(&ContentItem::InputText {
-                            text: shortened.clone(),
-                        }));
+                        original_tokens.saturating_sub(section_content_tokens(&item.content));
                     if saved == 0 {
+                        let _ = item.content.replace_text(original_body);
                         continue;
                     }
                     self.truncations.push(TruncationObservation {
                         component: section.id,
-                        original_bytes: text.len(),
-                        retained_bytes: shortened.len(),
+                        original_bytes,
+                        retained_bytes: match &item.content {
+                            SectionContent::Transcript(record) => record.rendered().text_bytes,
+                            SectionContent::Other(ContentItem::InputText { text }) => text.len(),
+                            _ => 0,
+                        },
                     });
-                    *text = shortened;
                     history_truncated = true;
                     required_tokens = required_tokens.saturating_sub(saved);
                     needed = needed.saturating_sub(saved);
@@ -271,7 +352,7 @@ impl ComposedContext {
             {
                 self.truncations.push(TruncationObservation {
                     component: section.id,
-                    original_bytes: serde_json::to_vec(&message.content)
+                    original_bytes: serde_json::to_vec(&message.content.item)
                         .map_or(usize::MAX, |bytes| bytes.len()),
                     retained_bytes: 0,
                 });
@@ -294,7 +375,7 @@ impl ComposedContext {
 fn retain_content(
     section: &mut SectionOutput,
     truncations: &mut Vec<TruncationObservation>,
-    mut retain: impl FnMut(usize, &mut ContentItem) -> bool,
+    mut retain: impl FnMut(usize, &mut SectionContent) -> bool,
 ) {
     let SectionDelivery::UserContent(content) = &mut section.delivery else {
         return;
@@ -305,16 +386,19 @@ fn retain_content(
         index += 1;
         if !keep {
             let original_bytes = match &item.content {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => text.len(),
-                ContentItem::InputImage {
+                SectionContent::Transcript(record) => record.rendered().text_bytes,
+                SectionContent::Other(
+                    ContentItem::InputText { text } | ContentItem::OutputText { text, .. },
+                ) => text.len(),
+                SectionContent::Other(ContentItem::InputImage {
                     image: ImageReference::Inline { image_url },
                     ..
-                } => image_url.len(),
-                ContentItem::InputImage {
+                }) => image_url.len(),
+                SectionContent::Other(ContentItem::InputImage {
                     image: ImageReference::File { .. },
                     ..
-                } => 0,
-                ContentItem::InputAudio { audio_url } => audio_url.len(),
+                }) => 0,
+                SectionContent::Other(ContentItem::InputAudio { audio_url }) => audio_url.len(),
             };
             truncations.push(TruncationObservation {
                 component: section.id,

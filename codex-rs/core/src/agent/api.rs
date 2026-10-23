@@ -53,6 +53,11 @@ pub trait AgentControl: Send + Sync {
     ) -> BoxFuture<'a, Result<ThreadId>>;
 
     /// Start a child and accept its initial input, returning its effective settings.
+    /// Retain provisional-child ownership until this future returns its acceptance receipt.
+    /// Once returned, caller cancellation does not retract the accepted child. Subsequent
+    /// tool-result or transport publication belongs to the caller, outside this boundary.
+    /// V2 snapshots resolve effort against captured startup metadata without changing the
+    /// child's configured effort (for example, Ultra still enables proactive behavior).
     fn spawn(
         &self,
         request: SpawnRequest,
@@ -62,6 +67,14 @@ pub trait AgentControl: Send + Sync {
     /// and wake mode: queue-only messages do not start work and follow-ups cannot target
     /// the root. Legacy user input can address loaded threads outside the agent registry.
     fn send(&self, request: SendRequest) -> BoxFuture<'_, Result<DeliveryReceipt>>;
+
+    /// Take queued, non-turn-starting mail in order, without loading the recipient.
+    /// This in-memory operation performs no I/O; returning transfers ownership to the caller.
+    fn take_mailbox(&self, agent: ThreadId) -> Vec<crate::PendingAgentMessage>;
+
+    /// Observe whether unread mail is available. Subscribe before the first read so
+    /// arrivals cannot be missed; notifications do not consume mail or start a turn.
+    fn watch_mailbox(&self, agent: ThreadId) -> tokio::sync::watch::Receiver<bool>;
 
     /// Load a recorded V2 child through its live immediate parent, without sending input.
     /// Implementations validate ownership and restore the child under the parent's current

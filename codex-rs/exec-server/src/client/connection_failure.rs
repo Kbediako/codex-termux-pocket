@@ -37,12 +37,15 @@ impl ExecServerError {
             | Self::WebSocketConnectTimeout { .. }
             | Self::WebSocketConfiguration(_)
             | Self::InitializeTimedOut { .. }
+            | Self::RpcTimedOut { .. }
             | Self::Closed
             | Self::Disconnected(_)
             | Self::ProvisioningFailed(_)
             | Self::Json(_)
             | Self::HttpRequest(_)
+            | Self::RequestNotSent(_)
             | Self::Protocol(_)
+            | Self::AuthenticationRequired(_)
             | Self::ProvisioningModeConflict { .. }
             | Self::Server { .. }
             | Self::EnvironmentRegistryHttp { .. }

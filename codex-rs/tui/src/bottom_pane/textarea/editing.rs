@@ -7,7 +7,7 @@ use super::*;
 
 /// The selection to replace, or an empty range at the insertion cursor.
 /// Vim Replace without a selection computes its overwrite span as it inserts each grapheme.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct EditTarget {
     range: Range<usize>,
 }
@@ -39,6 +39,8 @@ impl TextArea {
     }
 
     pub(crate) fn insert_str_at_target(&mut self, target: EditTarget, text: &str) {
+        let filtered = self.filter_line_breaks(text);
+        let text = filtered.as_ref();
         // Empty text must not delete a selection or create a Vim replacement step.
         if text.is_empty() {
             if !self.is_vim_replace_mode() {
@@ -64,6 +66,8 @@ impl TextArea {
     }
 
     pub(crate) fn insert_element_at_target(&mut self, target: EditTarget, text: &str) -> u64 {
+        let filtered = self.filter_line_breaks(text);
+        let text = filtered.as_ref();
         let start = target.start();
         if target.replaces_text() {
             self.vim_commands = VimCommandState::default();

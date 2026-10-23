@@ -33,6 +33,7 @@ use codex_protocol::models::ImageReference as CoreImageReference;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
 use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemAccessMode as CoreFileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath as CoreFileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry as CoreFileSystemSandboxEntry;
@@ -2670,6 +2671,7 @@ fn mcp_server_elicitation_response_serializes_nullable_content() {
 fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "not-ready".to_string(),
@@ -2695,6 +2697,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
                 "httpOrigin": null,
                 "serverInfo": null,
                 "serverCapabilities": null,
+                "toolListMeta": null,
                 "tools": {},
                 "toolsError": null,
                 "resources": [],
@@ -2721,6 +2724,7 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
     assert_eq!(
         status,
         McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "older-server".to_string(),
@@ -2795,6 +2799,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
 fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
             name: "initialized".to_string(),
@@ -2826,6 +2831,7 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
                 "pluginId": "lookup@test",
                 "httpOrigin": null,
                 "serverCapabilities": null,
+                "toolListMeta": null,
                 "serverInfo": {
                     "name": "lookup-server",
                     "title": null,
@@ -3330,12 +3336,9 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         source: CoreExecCommandSource::Agent,
         interaction_input: None,
         status: CoreCommandExecutionStatus::Completed,
-        stdout: Some("done\n".to_string()),
-        stderr: Some(String::new()),
         aggregated_output: Some("done\n".to_string()),
         exit_code: Some(0),
         duration: Some(Duration::from_millis(5)),
-        formatted_output: Some("done\n".to_string()),
     });
 
     assert_eq!(
@@ -3449,8 +3452,10 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     );
 
     let sub_agent_activity_item = TurnItem::SubAgentActivity(SubAgentActivityItem {
+        model: Some("gpt-5".into()),
+        reasoning_effort: Some(ReasoningEffort::High),
         id: "activity-1".to_string(),
-        kind: CoreSubAgentActivityKind::Completed,
+        kind: CoreSubAgentActivityKind::Started,
         agent_thread_id: receiver_thread_id,
         agent_path: codex_protocol::AgentPath::root()
             .join("worker")
@@ -3460,11 +3465,33 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     assert_eq!(
         ThreadItem::from(sub_agent_activity_item),
         ThreadItem::SubAgentActivity {
+            model: Some("gpt-5".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
             id: "activity-1".to_string(),
-            kind: SubAgentActivityKind::Completed,
+            kind: SubAgentActivityKind::Started,
             agent_thread_id: receiver_thread_id.to_string(),
             agent_path: "/root/worker".to_string(),
         }
+    );
+
+    let old_activity: SubAgentActivityItem = serde_json::from_value(json!({
+        "id": "old-activity",
+        "kind": "started",
+        "agent_thread_id": receiver_thread_id,
+        "agent_path": "/root/worker",
+    }))
+    .unwrap();
+    let old_wire_activity: ThreadItem = serde_json::from_value(json!({
+        "type": "subAgentActivity",
+        "id": "old-activity",
+        "kind": "started",
+        "agentThreadId": receiver_thread_id,
+        "agentPath": "/root/worker",
+    }))
+    .unwrap();
+    assert_eq!(
+        ThreadItem::from(TurnItem::SubAgentActivity(old_activity)),
+        old_wire_activity
     );
 
     let search_item = TurnItem::WebSearch(CoreWebSearchItem {
@@ -4781,6 +4808,67 @@ fn core_error_info_converts_to_camel_case() {
     }
 }
 
+/// The catchall must keep the existing `other` string stable in both directions.
+#[test]
+fn codex_error_info_other_round_trips_as_string() {
+    assert_eq!(
+        serde_json::to_value(CodexErrorInfo::Other).unwrap(),
+        json!("other")
+    );
+    assert_eq!(
+        serde_json::from_value::<CodexErrorInfo>(json!("other")).unwrap(),
+        CodexErrorInfo::Other
+    );
+}
+
+/// Future unit variants must not prevent older clients from handling errors.
+#[test]
+fn codex_error_info_deserializes_unknown_string_as_other() {
+    assert_eq!(
+        serde_json::from_value::<CodexErrorInfo>(json!("futureError")).unwrap(),
+        CodexErrorInfo::Other
+    );
+}
+
+/// Future structured variants must fall back without retaining their unknown payload.
+#[test]
+fn codex_error_info_deserializes_unknown_object_as_other() {
+    assert_eq!(
+        serde_json::from_value::<CodexErrorInfo>(json!({
+            "futureError": {
+                "detail": "unknown",
+                "retryAfterSeconds": 30,
+            }
+        }))
+        .unwrap(),
+        CodexErrorInfo::Other
+    );
+}
+
+/// The catchall must not replace known structured variants with `Other`.
+#[test]
+fn codex_error_info_deserializes_known_object_without_falling_back() {
+    assert_eq!(
+        serde_json::from_value::<CodexErrorInfo>(json!({
+            "httpConnectionFailed": {
+                "httpStatusCode": 503,
+            }
+        }))
+        .unwrap(),
+        CodexErrorInfo::HttpConnectionFailed {
+            http_status_code: Some(503),
+        }
+    );
+}
+
+/// Only the two supported error wire shapes may reach the catchall.
+#[test]
+fn codex_error_info_rejects_unsupported_wire_shapes() {
+    for value in [json!(null), json!(true), json!(42), json!([])] {
+        assert!(serde_json::from_value::<CodexErrorInfo>(value).is_err());
+    }
+}
+
 #[test]
 fn codex_error_info_serializes_active_turn_not_steerable_turn_kind_in_camel_case() {
     let value = CodexErrorInfo::ActiveTurnNotSteerable {
@@ -5002,8 +5090,11 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         client_user_message_id: None,
         input: vec![],
         turn_trigger: None,
+        parent_turn_id: None,
+        root_turn_id: None,
         tool_output: None,
         responsesapi_client_metadata: None,
+        responsesapi_client_metadata_patch: None,
         additional_context: None,
         environments: None,
         cwd: None,
@@ -5361,4 +5452,33 @@ fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
             auto_resolution_ms: Some(60_000),
         }
     );
+}
+
+/// Native path spelling survives serialization so the receiving host can validate it.
+#[test]
+fn feedback_paths_preserve_native_wire_spelling_before_host_validation() {
+    for path in [
+        "/tmp/feedback.zip",
+        r"C:\Users\test\feedback.zip",
+        r"\\server\share\feedback.zip",
+        "relative.zip",
+    ] {
+        let request: FeedbackSaveParams = serde_json::from_value(json!({
+            "classification": "bug", "savePath": path
+        }))
+        .expect("wire paths remain uninterpreted");
+        assert_eq!(request.save_path.as_str(), path);
+        assert_eq!(
+            serde_json::to_value(&request).expect("serialize request")["savePath"],
+            path
+        );
+        let response: FeedbackSaveResponse = serde_json::from_value(json!({
+            "threadId": "synthetic", "savedPath": path, "promptHash": null
+        }))
+        .expect("wire response");
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize response")["savedPath"],
+            path
+        );
+    }
 }

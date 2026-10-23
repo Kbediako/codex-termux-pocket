@@ -261,9 +261,11 @@ pub(super) async fn build_test_processor(
         analytics_events_client.clone(),
     ));
     let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        cloud_skill_provider: None,
         outgoing,
         analytics_events_client,
         arg0_paths: Arg0DispatchPaths::default(),
+        startup_cwd: Some(config.cwd.to_path_buf()),
         config,
         config_manager,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
@@ -684,8 +686,11 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                         text_elements: Vec::new(),
                     }],
                     turn_trigger: None,
+                    parent_turn_id: None,
+                    root_turn_id: None,
                     tool_output: None,
                     responsesapi_client_metadata: None,
+                    responsesapi_client_metadata_patch: None,
                     additional_context: None,
                     cwd: None,
                     runtime_workspace_roots: None,

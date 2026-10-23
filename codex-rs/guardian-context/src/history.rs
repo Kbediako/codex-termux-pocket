@@ -13,7 +13,9 @@ use std::io;
 use std::io::Write;
 use std::sync::Arc;
 
+use codex_context_fragments::COMPACTION_SUMMARY_KIND;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::executed_tool_call_metadata_bytes;
 
@@ -68,9 +70,18 @@ impl TranscriptHistory {
                     | ResponseItem::ContextCompaction { .. }
                     | ResponseItem::CompactionTrigger { .. }
             )
-            || matches!(item, ResponseItem::Message { internal_chat_message_metadata_passthrough: Some(metadata), .. }
-                if metadata.content_item_kinds.as_ref().is_some_and(|kinds|
-                    kinds.iter().any(|kind| kind.0 == "compaction.summary")))
+            || matches!(
+                item,
+                ResponseItem::Message {
+                    internal_chat_message_metadata_passthrough: Some(
+                        InternalChatMessageMetadataPassthrough {
+                            content_item_kinds: Some(kinds),
+                            ..
+                        }
+                    ),
+                    ..
+                } if kinds.iter().any(|kind| kind.as_str() == COMPACTION_SUMMARY_KIND)
+            )
         {
             return;
         }
@@ -95,6 +106,7 @@ impl TranscriptHistory {
                 content,
                 phase,
                 internal_chat_message_metadata_passthrough,
+                ..
             } = item
                 && role == "user"
                 && content
@@ -126,6 +138,8 @@ impl TranscriptHistory {
                 if !text.is_empty() {
                     self.record(&ResponseItemEnvelope {
                         item: ResponseItem::Message {
+                            status: None,
+                            encrypted_content: None,
                             id: id.clone(),
                             role: role.clone(),
                             content: text,
@@ -228,7 +242,12 @@ impl TranscriptHistory {
 
 impl SectionHistory for TranscriptHistory {
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.items.iter().map(|(item, _)| &item.item))
+        Box::new(
+            self.items
+                .iter()
+                .filter(|(item, _)| !crate::is_inherited_manual_approval(item))
+                .map(|(item, _)| &item.item),
+        )
     }
 }
 
