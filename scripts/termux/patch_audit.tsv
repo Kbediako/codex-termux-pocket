@@ -547,3 +547,6 @@ subject	ci: prepare skills fixture table insertion	tooling	Retains the bounded t
 subject	ci: synchronize alpha validation history with main	tooling	Records current main as a parent of the already reviewed validation tree without changing its bytes or publishing a release.
 subject	feat(termux): update to Codex 0.164.0-alpha.12	security-critical	Integrates the original official alpha.12 commit, reviewed Termux compatibility conflict resolutions and paired generated dependency locks; preserves permanent release gates and requires new exact-source runtime validation.
 subject	feat(termux): update to Codex 0.164.0-alpha.12 (#172)	security-critical	Records the reviewed upstream integration PR merge while retaining original upstream ancestry and requiring fresh final-source runtime gates.
+sha	d0a7d2127510a5868c9736d6e4ab189fd043a45d	tooling	Retains the reviewed original PR 169 pinned action update; package tool versions, runtime and release permission boundaries remain unchanged.
+subject	ci: update artifact upload to v7.0.2	tooling	Reconciles PR 169 with the reviewed upstream alpha and prior accepted CI updates, preserving pinned tool inputs and permanent workflow ownership.
+subject	ci: update artifact upload to v7.0.2 (#169)	tooling	Records the separately reviewed PR 169 merge without changing the source release contract or publisher authority.
