@@ -559,3 +559,6 @@ subject	ci: update pinned installer action to v2.87.28 (#174)	tooling	Records th
 sha	cb467738ffa8b742fe7bfd61cf587dcf1c868beb	runtime-critical	Retains the original PR 165 proposal; reconciled adoption requires paired generated locks and fresh source validation.
 subject	build(deps): update tracing-appender to 0.2.5	runtime-critical	Reconciles PR 165 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
 subject	build(deps): update tracing-appender to 0.2.5 (#165)	runtime-critical	Records the separately reviewed PR 165 dependency merge and its paired generated locks.
+sha	d84e60c0ec4155cbd637fa033d31b0d8904d621d	runtime-critical	Retains the original PR 166 proposal; reconciled adoption requires paired generated locks and fresh source validation.
+subject	build(deps): update regex to 1.13.1	runtime-critical	Reconciles PR 166 through supported Cargo/Bazel lock generation while preserving accepted dependency versions and Termux source; exact-source release gates remain mandatory.
+subject	build(deps): update regex to 1.13.1 (#166)	runtime-critical	Records the separately reviewed PR 166 dependency merge and its paired generated locks.
