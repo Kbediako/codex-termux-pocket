@@ -23,6 +23,7 @@ use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_OPEN_TAG;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::user_input::UserInput;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -77,6 +78,8 @@ fn parses_user_message_with_text_and_two_images() {
     let img2 = "https://example.com/two.jpg".to_string();
 
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -128,6 +131,8 @@ fn parses_user_message_with_text_and_two_images() {
 #[test]
 fn parses_user_message_with_file_image() {
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -174,6 +179,8 @@ fn skips_local_image_label_text() {
     let user_text = "Please review this image.".to_string();
 
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -222,6 +229,8 @@ fn skips_local_audio_label_text() {
     let user_text = "Please transcribe this audio.".to_string();
 
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -262,6 +271,8 @@ fn skips_local_audio_label_text() {
 #[test]
 fn parses_assistant_message_input_text_for_backward_compatibility() {
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::InputText {
@@ -303,6 +314,8 @@ fn skips_unnamed_image_label_text() {
     let user_text = "Please review this image.".to_string();
 
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -348,6 +361,8 @@ fn skips_unnamed_image_label_text() {
 fn skips_user_instructions_and_env() {
     let items = vec![
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -356,6 +371,8 @@ fn skips_user_instructions_and_env() {
             phase: None,
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -364,6 +381,8 @@ fn skips_user_instructions_and_env() {
             phase: None,
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -372,6 +391,8 @@ fn skips_user_instructions_and_env() {
             phase: None,
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -381,6 +402,8 @@ fn skips_user_instructions_and_env() {
             phase: None,
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -389,6 +412,8 @@ fn skips_user_instructions_and_env() {
             phase: None,
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![
@@ -429,6 +454,7 @@ fn parses_hook_prompt_message_as_distinct_turn_item() {
                 HookPromptFragment {
                     text: "Retry with exactly the phrase meow meow meow.".to_string(),
                     hook_run_id: "hook-run-1".to_string(),
+                    metadata: Default::default(),
                 }
             );
         }
@@ -439,6 +465,8 @@ fn parses_hook_prompt_message_as_distinct_turn_item() {
 #[test]
 fn parses_hook_prompt_and_hides_other_contextual_fragments() {
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "user".to_string(),
         content: vec![
@@ -464,6 +492,7 @@ fn parses_hook_prompt_and_hides_other_contextual_fragments() {
                 vec![HookPromptFragment {
                     text: "Retry with care & joy.".to_string(),
                     hook_run_id: "hook-run-1".to_string(),
+                    metadata: Default::default(),
                 }]
             );
         }
@@ -474,6 +503,8 @@ fn parses_hook_prompt_and_hides_other_contextual_fragments() {
 #[test]
 fn internal_model_context_does_not_parse_as_visible_turn_item() {
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -481,7 +512,8 @@ fn internal_model_context_does_not_parse_as_visible_turn_item() {
                 InternalContextSource::from_static("extension"),
                 "Internal steering.",
             )
-            .render(),
+            .render()
+            .expect_text(),
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,
@@ -493,9 +525,13 @@ fn internal_model_context_does_not_parse_as_visible_turn_item() {
 #[test]
 fn parses_agent_message() {
     let item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: "Hello from Codex".to_string(),
         }],
         phase: None,
@@ -584,6 +620,7 @@ fn parses_reasoning_including_raw_content() {
 #[test]
 fn parses_web_search_call() {
     let item = ResponseItem::WebSearchCall {
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("ws", "1")),
         status: Some("completed".to_string()),
         action: Some(WebSearchAction::Search {
@@ -615,6 +652,7 @@ fn parses_web_search_call() {
 #[test]
 fn parses_web_search_open_page_call() {
     let item = ResponseItem::WebSearchCall {
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("ws", "open")),
         status: Some("completed".to_string()),
         action: Some(WebSearchAction::OpenPage {
@@ -644,6 +682,7 @@ fn parses_web_search_open_page_call() {
 #[test]
 fn parses_web_search_find_in_page_call() {
     let item = ResponseItem::WebSearchCall {
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("ws", "find")),
         status: Some("completed".to_string()),
         action: Some(WebSearchAction::FindInPage {
@@ -675,6 +714,7 @@ fn parses_web_search_find_in_page_call() {
 #[test]
 fn parses_partial_web_search_call_without_action_as_other() {
     let item = ResponseItem::WebSearchCall {
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("ws", "partial")),
         status: Some("in_progress".to_string()),
         action: None,

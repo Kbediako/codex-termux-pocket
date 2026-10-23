@@ -86,15 +86,10 @@ wire_api = "responses"
         ] {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
                 let executable = bin.join(name);
-                std::fs::write(
+                codex_utils_cargo_bin::write_executable(
                     &executable,
                     "#!/bin/sh\nprintf 'helper ran\\n' >> \"$CODEX_TEST_HELPER_MARKER\"\nexit 0\n",
-                )?;
-                std::fs::set_permissions(
-                    executable,
-                    std::fs::Permissions::from_mode(/*mode*/ 0o755),
                 )?;
             }
             #[cfg(windows)]
@@ -228,7 +223,7 @@ fn doctor_reports_failed_database_paths() -> Result<()> {
     let sqlite_home = toml::Value::String(sqlite_home.display().to_string());
     std::fs::write(
         &config_file,
-        format!("sqlite_home = {sqlite_home}\n{config}"),
+        format!("sqlite_home = {sqlite_home}\nlog_dir = {sqlite_home}\n{config}"),
     )?;
 
     for (snapshot_name, failed_paths) in [
@@ -322,7 +317,7 @@ fn doctor_redacts_failed_database_paths_in_json() -> Result<()> {
     let sqlite_home = toml::Value::String(sqlite_home.display().to_string());
     std::fs::write(
         &config_file,
-        format!("sqlite_home = {sqlite_home}\n{config}"),
+        format!("sqlite_home = {sqlite_home}\nlog_dir = {sqlite_home}\n{config}"),
     )?;
     std::fs::write(sqlite.logs_db_path(), "not a SQLite database")?;
 
@@ -415,6 +410,24 @@ fn doctor_reports_only_safe_config_error_metadata() -> Result<()> {
             insta::assert_snapshot!(snapshot_name, serde_json::to_string_pretty(&check)?);
         }
         std::fs::remove_file(config_file)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_configured_tui_mode() -> Result<()> {
+    let fixture = Fixture::new()?;
+    for (setting, expected) in [("true", "fullscreen"), ("false", "scrollback")] {
+        let output = fixture
+            .command()?
+            .args(["-c", &format!("tui.fullscreen_transcript={setting}")])
+            .args(["doctor", "--json"])
+            .output()?;
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            report["checks"]["config.load"]["details"]["configured TUI mode"],
+            expected
+        );
     }
     Ok(())
 }

@@ -141,6 +141,9 @@ pub(crate) enum StatusLineItem {
     /// Whether Fast mode is currently active.
     FastMode,
 
+    /// Whether Daybreak is enabled for this thread.
+    Daybreak,
+
     /// Whether raw scrollback mode is currently active.
     RawOutput,
 
@@ -204,6 +207,7 @@ impl StatusLineItem {
             }
             StatusLineItem::SessionId => "Current thread identifier (omitted until thread starts)",
             StatusLineItem::FastMode => "Whether Fast mode is currently active",
+            StatusLineItem::Daybreak => "Whether Daybreak is enabled for this thread",
             StatusLineItem::RawOutput => "Whether raw scrollback mode is active",
             StatusLineItem::ThreadName => "Current thread name (omitted when unnamed)",
             StatusLineItem::ThreadTitle => {
@@ -245,6 +249,7 @@ impl StatusLineItem {
             StatusLineItem::EstimatedThreadCost => StatusSurfacePreviewItem::EstimatedThreadCost,
             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
             StatusLineItem::FastMode => StatusSurfacePreviewItem::FastMode,
+            StatusLineItem::Daybreak => StatusSurfacePreviewItem::Daybreak,
             StatusLineItem::RawOutput => StatusSurfacePreviewItem::RawOutput,
             StatusLineItem::ThreadName => StatusSurfacePreviewItem::ThreadName,
             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
@@ -398,6 +403,10 @@ impl StatusLineSetupView {
 impl BottomPaneView for StatusLineSetupView {
     fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List)
+    }
+
+    fn accepts_input_when_disconnected(&self) -> bool {
+        true
     }
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {

@@ -2,6 +2,7 @@
 
 use codex_utils_path as path_utils;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -15,6 +16,14 @@ use time::format_description::FormatItem;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use uuid::Uuid;
+
+#[path = "list_files.rs"]
+mod files;
+use files::collect_dirs_desc;
+use files::collect_files_by_updated_at;
+use files::collect_flat_files_by_updated_at;
+use files::collect_flat_rollout_files;
+use files::collect_rollout_day_files;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
@@ -286,30 +295,6 @@ impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
         {
             self.items.push(item);
         }
-        ControlFlow::Continue(())
-    }
-}
-
-/// Collects lightweight file candidates (path + id + mtime).
-/// Sorting after mtime happens after all files are collected.
-struct FilesByUpdatedAtVisitor<'a> {
-    candidates: &'a mut Vec<ThreadCandidate>,
-}
-
-impl<'a> RolloutFileVisitor for FilesByUpdatedAtVisitor<'a> {
-    async fn visit(
-        &mut self,
-        _ts: OffsetDateTime,
-        id: Uuid,
-        path: PathBuf,
-        _scanned: usize,
-    ) -> ControlFlow<()> {
-        let updated_at = file_modified_time(&path).await.unwrap_or(None);
-        self.candidates.push(ThreadCandidate {
-            path,
-            id,
-            updated_at,
-        });
         ControlFlow::Continue(())
     }
 }
@@ -901,102 +886,6 @@ pub async fn read_thread_item_from_rollout(path: PathBuf) -> Option<ThreadItem> 
     .await
 }
 
-/// Collects immediate subdirectories of `parent`, parses their (string) names with `parse`,
-/// and returns them sorted descending by the parsed key.
-async fn collect_dirs_desc<T, F>(parent: &Path, parse: F) -> io::Result<Vec<(T, PathBuf)>>
-where
-    T: Ord + Copy,
-    F: Fn(&str) -> Option<T>,
-{
-    let mut dir = tokio::fs::read_dir(parent).await?;
-    let mut vec: Vec<(T, PathBuf)> = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_dir())
-            .unwrap_or(false)
-            && let Some(s) = entry.file_name().to_str()
-            && let Some(v) = parse(s)
-        {
-            vec.push((v, entry.path()));
-        }
-    }
-    vec.sort_by_key(|(v, _)| Reverse(*v));
-    Ok(vec)
-}
-
-/// Collects files in a directory and parses them with `parse`.
-async fn collect_files<T, F>(parent: &Path, parse: F) -> io::Result<Vec<T>>
-where
-    F: Fn(&str, &Path) -> Option<T>,
-{
-    let mut dir = tokio::fs::read_dir(parent).await?;
-    let mut collected: Vec<T> = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-            && let Some(s) = entry.file_name().to_str()
-            && let Some(v) = parse(s, &entry.path())
-        {
-            collected.push(v);
-        }
-    }
-    Ok(collected)
-}
-
-async fn collect_flat_rollout_files(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<(OffsetDateTime, Uuid, PathBuf)>> {
-    let mut dir = tokio::fs::read_dir(root).await?;
-    let mut collected = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if *scanned_files >= MAX_SCAN_FILES {
-            break;
-        }
-        if !entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
-            continue;
-        };
-        let Some((ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-        else {
-            continue;
-        };
-        *scanned_files += 1;
-        if *scanned_files > MAX_SCAN_FILES {
-            break;
-        }
-        collected.push((ts, id, rollout_file.into_path()));
-    }
-    collected.sort_by_key(|(ts, sid, _path)| (Reverse(*ts), Reverse(*sid)));
-    Ok(collected)
-}
-
-async fn collect_rollout_day_files(
-    day_path: &Path,
-) -> io::Result<Vec<(OffsetDateTime, Uuid, PathBuf)>> {
-    let mut day_files = collect_files(day_path, |_name_str, path| {
-        let rollout_file = compression::RolloutFile::from_path(path.to_path_buf())?;
-        parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-            .map(|(ts, id)| (ts, id, rollout_file.into_path()))
-    })
-    .await?;
-    // Stable ordering within the same second: (timestamp desc, uuid desc)
-    day_files.sort_by_key(|(ts, sid, _path)| (Reverse(*ts), Reverse(*sid)));
-    Ok(day_files)
-}
-
 pub(crate) fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(OffsetDateTime, Uuid)> {
     let file_name = RolloutFileName::parse(name)?;
     let thread_id = Uuid::parse_str(&file_name.thread_id().to_string()).ok()?;
@@ -1007,61 +896,6 @@ struct ThreadCandidate {
     path: PathBuf,
     id: Uuid,
     updated_at: Option<OffsetDateTime>,
-}
-
-async fn collect_files_by_updated_at(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<ThreadCandidate>> {
-    let mut candidates = Vec::new();
-    let mut visitor = FilesByUpdatedAtVisitor {
-        candidates: &mut candidates,
-    };
-    walk_rollout_files(root, scanned_files, &mut visitor).await?;
-
-    Ok(candidates)
-}
-
-async fn collect_flat_files_by_updated_at(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<ThreadCandidate>> {
-    let mut candidates = Vec::new();
-    let mut dir = tokio::fs::read_dir(root).await?;
-    while let Some(entry) = dir.next_entry().await? {
-        if *scanned_files >= MAX_SCAN_FILES {
-            break;
-        }
-        if !entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
-            continue;
-        };
-        let Some((_ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-        else {
-            continue;
-        };
-        *scanned_files += 1;
-        if *scanned_files > MAX_SCAN_FILES {
-            break;
-        }
-        let updated_at = file_modified_time(rollout_file.path())
-            .await
-            .unwrap_or(None);
-        candidates.push(ThreadCandidate {
-            path: rollout_file.into_path(),
-            id,
-            updated_at,
-        });
-    }
-
-    Ok(candidates)
 }
 
 async fn walk_rollout_files(
@@ -1370,7 +1204,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
             continue;
         };
         match rollout_line.item {
-            RolloutItem::SessionMeta(session_meta_line) => return Ok(session_meta_line),
+            RolloutItem::SessionMeta(session_meta_line) => return Ok(*session_meta_line),
             RolloutItem::ResponseItem(_) | RolloutItem::InterAgentCommunication(_) => {
                 return Err(io::Error::other(MetadataReadError {
                     reason: "response_before_metadata",
@@ -1584,31 +1418,33 @@ async fn find_thread_path_by_id_from_filenames(
         return Ok(None);
     };
     let mut newest = None;
-    visit_rollout_filenames::<()>(root, |file_name, path| {
-        if file_name.thread_id() != target {
-            return ControlFlow::Continue(());
-        }
-        let rollout_id = Uuid::parse_str(&file_name.rollout_id().to_string()).ok();
-        let Some(rollout_id) = rollout_id else {
-            return ControlFlow::Continue(());
-        };
-        // Rollout filenames only encode timestamps to second precision, so use the UUIDv7
-        // rollout ID as a deterministic tie-breaker when multiple files are created in the same
-        // second.
-        let candidate = (file_name.timestamp(), rollout_id, path);
-        if newest.as_ref().is_none_or(|(timestamp, id, _)| {
-            candidate.0 > *timestamp || (candidate.0 == *timestamp && candidate.1 > *id)
-        }) {
-            newest = Some(candidate);
-        }
-        ControlFlow::Continue(())
-    })
+    visit_rollout_filenames::<()>(
+        root,
+        |file_name| file_name.thread_id() == target,
+        |file_name, path| {
+            let rollout_id = Uuid::parse_str(&file_name.rollout_id().to_string()).ok();
+            let Some(rollout_id) = rollout_id else {
+                return ControlFlow::Continue(());
+            };
+            // Rollout filenames only encode timestamps to second precision, so use the UUIDv7
+            // rollout ID as a deterministic tie-breaker when multiple files are created in the same
+            // second.
+            let candidate = (file_name.timestamp(), rollout_id, path);
+            if newest.as_ref().is_none_or(|(timestamp, id, _)| {
+                candidate.0 > *timestamp || (candidate.0 == *timestamp && candidate.1 > *id)
+            }) {
+                newest = Some(candidate);
+            }
+            ControlFlow::Continue(())
+        },
+    )
     .await?;
     Ok(newest.map(|(_timestamp, _id, path)| path))
 }
 
 async fn visit_rollout_filenames<T>(
     root: &Path,
+    matches: impl Fn(&RolloutFileName) -> bool,
     mut visitor: impl FnMut(RolloutFileName, PathBuf) -> ControlFlow<T>,
 ) -> io::Result<Option<T>> {
     let mut stack = vec![root.to_path_buf()];
@@ -1628,10 +1464,19 @@ async fn visit_rollout_filenames<T>(
             if !file_type.is_file() {
                 continue;
             }
-            let Some(rollout_file) = compression::RolloutFile::from_path(path) else {
+            // Check filename matches before RolloutFile::from_path(), which calls
+            // Path::exists() to check for a compressed rollout's plain sibling.
+            let Some(file_name) = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .and_then(RolloutFileName::parse)
+            else {
                 continue;
             };
-            let Some(file_name) = RolloutFileName::parse(rollout_file.plain_file_name()) else {
+            if !matches(&file_name) {
+                continue;
+            }
+            let Some(rollout_file) = compression::RolloutFile::from_path(path) else {
                 continue;
             };
             if let ControlFlow::Break(found) = visitor(file_name, rollout_file.into_path()) {
@@ -1646,13 +1491,11 @@ async fn find_rollout_path_by_rollout_id_from_filenames(
     root: &Path,
     rollout_id: RolloutId,
 ) -> io::Result<Option<PathBuf>> {
-    visit_rollout_filenames(root, |file_name, path| {
-        if file_name.rollout_id() == rollout_id {
-            ControlFlow::Break(path)
-        } else {
-            ControlFlow::Continue(())
-        }
-    })
+    visit_rollout_filenames(
+        root,
+        |file_name| file_name.rollout_id() == rollout_id,
+        |_file_name, path| ControlFlow::Break(path),
+    )
     .await
 }
 
@@ -1702,6 +1545,66 @@ pub async fn find_rollout_path_by_rollout_id(
         }
     }
     Ok(None)
+}
+
+/// Prefetch a bounded set of active rollout paths for a history page.
+///
+/// The sibling directory supplies candidate IDs. They are resolved in the same traversal order as
+/// [`find_rollout_path_by_rollout_id`] to preserve duplicate-ID selection; missing or stale paths
+/// still require the normal lookup.
+pub async fn prefetch_sibling_rollout_paths(
+    codex_home: &Path,
+    child_path: &Path,
+    first_ancestor_id: RolloutId,
+) -> io::Result<HashMap<RolloutId, PathBuf>> {
+    let Some(child_name) = child_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(RolloutFileName::parse)
+    else {
+        return Ok(HashMap::new());
+    };
+    // A thread's original rollout ends the chain of same-thread ancestors.
+    if child_name.thread_id() == child_name.rollout_id()
+        || first_ancestor_id == child_name.thread_id()
+    {
+        return Ok(HashMap::new());
+    }
+    let active_root = codex_home.join(SESSIONS_SUBDIR);
+    let canonical_root = tokio::fs::canonicalize(&active_root).await?;
+    let canonical_child = tokio::fs::canonicalize(child_path).await?;
+    let Some(directory) = canonical_child
+        .parent()
+        .filter(|directory| directory.starts_with(&canonical_root))
+    else {
+        return Ok(HashMap::new());
+    };
+    let ids = files::collect_sibling_rollout_ids(
+        directory,
+        child_name.thread_id(),
+        child_name.rollout_id(),
+        first_ancestor_id,
+    )
+    .await?;
+    if ids.len() < 2 || !ids.contains(&first_ancestor_id) {
+        return Ok(HashMap::new());
+    }
+
+    let mut paths = HashMap::new();
+    visit_rollout_filenames(
+        &active_root,
+        |file_name| ids.contains(&file_name.rollout_id()),
+        |file_name, path| {
+            paths.entry(file_name.rollout_id()).or_insert(path);
+            if paths.len() == ids.len() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .await?;
+    Ok(paths)
 }
 
 /// Extract the `YYYY/MM/DD` directory components from a rollout filename.

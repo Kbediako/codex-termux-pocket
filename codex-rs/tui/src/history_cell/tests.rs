@@ -356,28 +356,26 @@ fn source_backed_cells_render_raw_source_without_prefix_or_style() {
 
 #[test]
 fn proposed_plan_cell_renders_markdown_table() {
-    let plan = new_proposed_plan(
-        "## Plan\n\n| Step | Owner |\n| --- | --- |\n| Verify | Codex |\n".to_string(),
-        &test_cwd(),
-    );
+    crate::terminal_palette::with_test_default_colors(
+        crate::terminal_probe::DefaultColors {
+            fg: (30, 30, 30),
+            bg: (255, 255, 255),
+        },
+        || {
+            let plan = new_proposed_plan(
+                "## Plan\n\n| Step | Owner |\n| --- | --- |\n| Verify | Codex |\n".to_string(),
+                &test_cwd(),
+            );
 
-    let rendered = render_lines(&plan.display_lines(/*width*/ 80));
+            let lines = plan.display_lines(/*width*/ 80);
+            insta::assert_debug_snapshot!(lines);
 
-    assert!(
-        rendered.iter().any(|line| line.contains('━')),
-        "expected separated table in proposed plan output: {rendered:?}"
-    );
-    assert!(
-        !rendered
-            .iter()
-            .any(|line| line.trim() == "| Step | Owner |"),
-        "did not expect raw table header in rich proposed plan output: {rendered:?}"
-    );
-
-    let raw = render_lines(&plan.raw_lines());
-    assert!(
-        raw.iter().any(|line| line == "| Step | Owner |"),
-        "expected raw mode to preserve table markdown source: {raw:?}"
+            let raw = render_lines(&plan.raw_lines());
+            assert!(
+                raw.iter().any(|line| line == "| Step | Owner |"),
+                "expected raw mode to preserve table markdown source: {raw:?}"
+            );
+        },
     );
 }
 
@@ -405,7 +403,7 @@ fn proposed_plan_cell_preserves_wrapped_table_web_links() {
 
 #[test]
 fn composite_cell_preserves_child_web_links() {
-    let destination = "https://chatgpt.com/codex/settings/usage";
+    let destination = "https://chatgpt.com/settings/usage";
     let cell = CompositeHistoryCell::new(vec![
         Box::new(PlainHistoryCell::new(vec![Line::from("/status")])),
         Box::new(WebHyperlinkHistoryCell::new(vec![Line::from(destination)])),
@@ -603,6 +601,7 @@ fn image_generation_call_renders_saved_path() {
 
 fn session_configured_event(model: &str) -> ThreadSessionState {
     ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -620,7 +619,6 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
@@ -915,9 +913,17 @@ fn cyber_policy_error_event_astra_snapshot() {
 }
 
 #[test]
-fn cyber_policy_error_event_limited_snapshot() {
-    let cell = new_cyber_policy_error_event(crate::daybreak::Notice::Limited);
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+fn cyber_policy_error_event_available_snapshot() {
+    let rendered = [
+        crate::daybreak::Notice::Disabled,
+        crate::daybreak::Notice::Enabled,
+    ]
+    .into_iter()
+    .map(|notice| {
+        render_lines(&new_cyber_policy_error_event(notice).display_lines(/*width*/ 80)).join("\n")
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n");
     insta::assert_snapshot!(rendered);
 }
 
@@ -1128,6 +1134,7 @@ async fn mcp_tools_output_lists_tools_for_hyphenated_server_names() {
 fn mcp_tools_output_from_statuses_renders_status_only_servers() {
     let statuses = vec![McpServerStatus {
         server_capabilities: None,
+        tool_list_meta: None,
         tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
@@ -1163,6 +1170,7 @@ fn mcp_tools_output_from_statuses_renders_status_only_servers() {
 fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
     let statuses = vec![McpServerStatus {
         server_capabilities: None,
+        tool_list_meta: None,
         tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
@@ -1390,17 +1398,6 @@ fn pnpm_update_available_history_cell_snapshot() {
 }
 
 #[test]
-fn vite_plus_update_available_history_cell_snapshot() {
-    let cell = UpdateAvailableHistoryCell::new(
-        "9.9.9".to_string(),
-        Some(UpdateAction::VitePlusGlobalLatest),
-    );
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
-
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
 fn web_search_history_cell_without_detail_snapshot() {
     let cell = new_web_search_call("call-1".to_string(), String::new(), WebSearchAction::Other);
     let rendered = render_lines(&cell.display_lines(/*width*/ 64)).join("\n");
@@ -1521,7 +1518,7 @@ fn code_mode_tool_call_uses_title_and_preserves_full_transcript() {
       └ 012345678901234567890123456789012345
         678901234567890123456789012345678901
         234567890123456789012345678901234567
-        +1 line (ctrl+t to view transcript)
+        +1 line (⌃t to view transcript)
 
     transcript:
     • Called node_repl.js({"title":"Inspect Spotify workspace","code":"await tools.exec_command({ cmd: 'git status' })"})
@@ -2966,6 +2963,18 @@ fn deprecation_notice_renders_summary_with_details() {
             "Use flag `bar` instead.".to_string(),
         ]
     );
+}
+
+#[test]
+fn legacy_zsh_migration_notice_snapshot() {
+    let mut features = codex_features::Features::default();
+    features.record_legacy_usage_force("shell_zsh_fork", codex_features::Feature::ShellZshFork);
+    let usage = features
+        .legacy_feature_usages()
+        .next()
+        .expect("migration notice");
+    let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
+    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n"));
 }
 
 #[test]

@@ -1,3 +1,44 @@
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_thread_store::ThreadStoreError;
+use pretty_assertions::assert_eq;
+
+#[test]
+fn storage_failure_classification_does_not_change_mutation_error_policy() {
+    for error in [
+        ThreadStoreError::Internal {
+            message: "retryable conflict; outcome unknown".to_owned(),
+        },
+        ThreadStoreError::Retryable {
+            message: "store temporarily unavailable".to_owned(),
+        },
+        ThreadStoreError::OutcomeUnknown {
+            message: "connection lost after write".to_owned(),
+        },
+    ] {
+        let mapped = super::thread_store_mutation_error("archive", error.clone());
+        let expected = JSONRPCErrorError {
+            code: -32603,
+            message: format!("failed to archive session: {error}"),
+            data: None,
+        };
+        assert_eq!(mapped, expected);
+    }
+
+    assert_eq!(
+        super::thread_store_mutation_error(
+            "archive",
+            ThreadStoreError::Conflict {
+                message: "writer already active".to_owned(),
+            },
+        ),
+        JSONRPCErrorError {
+            code: -32600,
+            message: "writer already active".to_owned(),
+            data: None,
+        },
+    );
+}
+
 mod thread_list_cwd_filter_tests {
     use super::super::normalize_thread_list_cwd_filters;
     use codex_app_server_protocol::ThreadListCwdFilter;
@@ -291,6 +332,7 @@ mod thread_processor_behavior_tests {
         ))];
         let active_turn = Turn {
             id: "live-turn".to_string(),
+            root_turn_id: None,
             items: vec![ThreadItem::UserMessage {
                 id: "live-user-message".to_string(),
                 client_id: None,
@@ -612,6 +654,7 @@ mod thread_processor_behavior_tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: false,
+            capabilities: None,
             include_internal_metadata: false,
         };
         let config_manager = ConfigManager::new(
@@ -682,6 +725,7 @@ mod thread_processor_behavior_tests {
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
+            turn_extension_init: Default::default(),
             disabled_plugin_ids: Vec::new(),
             model: "gpt-5".to_string(),
             model_provider_id: "openai".to_string(),
@@ -715,7 +759,11 @@ mod thread_processor_behavior_tests {
         };
 
         assert_eq!(
-            collect_resume_override_mismatches(&request, &config_snapshot),
+            collect_resume_override_mismatches(
+                &request,
+                &config_snapshot,
+                /* selected_service_tier */ Some("flex"),
+            ),
             vec!["service_tier requested=Some(\"priority\") active=Some(\"flex\")".to_string()]
         );
     }
@@ -945,10 +993,10 @@ mod thread_processor_behavior_tests {
         let line = RolloutLine {
             timestamp: timestamp.clone(),
             ordinal: None,
-            item: RolloutItem::SessionMeta(SessionMetaLine {
+            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: session_meta.clone(),
                 git: None,
-            }),
+            })),
         };
 
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
@@ -1013,10 +1061,10 @@ mod thread_processor_behavior_tests {
         let line = RolloutLine {
             timestamp,
             ordinal: None,
-            item: RolloutItem::SessionMeta(SessionMetaLine {
+            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: session_meta,
                 git: None,
-            }),
+            })),
         };
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
 
@@ -1056,10 +1104,10 @@ mod thread_processor_behavior_tests {
         let line = RolloutLine {
             timestamp,
             ordinal: None,
-            item: RolloutItem::SessionMeta(SessionMetaLine {
+            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: session_meta,
                 git: None,
-            }),
+            })),
         };
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
 
@@ -1197,6 +1245,7 @@ mod thread_processor_behavior_tests {
             state.track_current_turn_event(
                 "turn-1",
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+                    turn_attribution: None,
                     turn_id: "turn-1".to_string(),
                     root_turn_id: None,
                     trace_id: None,

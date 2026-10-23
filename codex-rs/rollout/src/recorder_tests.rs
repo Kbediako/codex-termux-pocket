@@ -48,7 +48,7 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
 }
 
 fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
-    RolloutItem::SessionMeta(SessionMetaLine {
+    RolloutItem::SessionMeta(Box::new(SessionMetaLine {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
@@ -61,7 +61,7 @@ fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
             ..SessionMeta::default()
         },
         git: None,
-    })
+    }))
 }
 
 fn agent_message_item(message: &str) -> RolloutItem {
@@ -174,6 +174,31 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn open_log_file_materializes_rollout_when_acl_denies_timestamp_changes() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let rollout_path = home.path().join("rollout.jsonl");
+    let compressed_path = rollout_path.with_extension("jsonl.zst");
+    fs::write(
+        &compressed_path,
+        zstd::stream::encode_all(&b"original\n"[..], 0)?,
+    )?;
+    let acl = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone deny writeattr"])
+        .arg(&compressed_path)
+        .output()?;
+    assert!(acl.status.success(), "{acl:?}");
+
+    let mut file = open_log_file(&rollout_path)?;
+    file.write_all(b"appended\n")?;
+    drop(file);
+
+    assert!(!compressed_path.exists());
+    assert_eq!(fs::read(&rollout_path)?, b"original\nappended\n");
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -223,7 +248,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             ordinal: None,
-            item: RolloutItem::SessionMeta(session_meta_line),
+            item: RolloutItem::SessionMeta(Box::new(session_meta_line)),
         },
         RolloutLine {
             timestamp: "2026-01-27T12:34:57Z".to_string(),
@@ -458,12 +483,6 @@ async fn load_rollout_items_preserves_security_risk_scores() -> std::io::Result<
         sampled_at: None,
     };
     let security_risk_item = RolloutItem::SecurityRiskScore(security_risk.clone());
-    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
-        assert!(crate::is_persisted_rollout_item(
-            &security_risk_item,
-            history_mode
-        ));
-    }
 
     let mut file = File::create(&rollout_path)?;
     for (ordinal, item) in [
@@ -620,6 +639,58 @@ fn strip_legacy_ghost_snapshot_keeps_checkpoint_metadata_aligned() {
 }
 
 #[tokio::test]
+async fn recorder_preserves_additional_tools_in_both_history_modes() -> std::io::Result<()> {
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let thread_id = ThreadId::new();
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                thread_id,
+                /*forked_from_id*/ None,
+                /*parent_thread_id*/ None,
+                SessionSource::Exec,
+                /*thread_source*/ None,
+                "test_originator".to_string(),
+                BaseInstructions::default(),
+                Vec::new(),
+            )
+            .with_history_mode(history_mode),
+        )
+        .await?;
+        let item = RolloutItem::ResponseItem(
+            ResponseItem::AdditionalTools {
+                id: None,
+                role: "developer".to_string(),
+                tools: Arc::from([serde_json::json!({
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "Available tools.",
+                    "tools": [{"type": "function", "name": "lookup",
+                        "description": "Look up a value.",
+                        "parameters": {"type": "object", "properties": {}}}]
+                })]),
+            }
+            .into(),
+        );
+        let persisted = crate::persisted_rollout_items(std::slice::from_ref(&item), history_mode);
+        recorder.record_canonical_items(&persisted).await?;
+        recorder.flush().await?;
+        let (items, loaded_thread_id, parse_errors) =
+            RolloutRecorder::load_rollout_items(recorder.rollout_path()).await?;
+        assert_eq!(loaded_thread_id, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        assert_eq!(
+            serde_json::to_value(&items[1..])?,
+            serde_json::to_value([item])?
+        );
+        recorder.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
@@ -751,10 +822,20 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
     )
     .await?;
     let rollout_path = recorder.rollout_path().to_path_buf();
+    let initial_meta = recorder
+        .unpersisted_session_meta()
+        .await?
+        .expect("new rollout retains its creation metadata");
+    assert!(!rollout_path.exists());
     recorder.persist().await?;
+    assert!(recorder.unpersisted_session_meta().await?.is_none());
     recorder.shutdown().await?;
 
     let meta = crate::read_session_meta_line(&rollout_path).await?.meta;
+    assert_eq!(
+        serde_json::to_value(&initial_meta)?,
+        serde_json::to_value(&meta)?
+    );
     assert_eq!(
         meta.forked_from_ordinal_exclusive,
         Some(history_base.end_ordinal_exclusive)
@@ -762,6 +843,7 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
 
     let resumed =
         RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    assert!(resumed.unpersisted_session_meta().await?.is_none());
     resumed
         .record_canonical_items(&[agent_message_item("first child record")])
         .await?;
@@ -1347,6 +1429,8 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .await
         .expect("state db upsert should succeed");
 
+    let older_path = write_session_file(home.path(), "2025-01-01T13-00-00", Uuid::from_u128(9014))?;
+
     let default_provider = config.model_provider_id.clone();
     let page = RolloutRecorder::list_threads(
         Some(runtime.clone()),
@@ -1374,6 +1458,25 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .await
         .expect("state db lookup should succeed");
     assert_eq!(stored_metadata, Some(metadata));
+    let cursor = page.next_cursor.expect("another thread remains");
+    assert_eq!(cursor.thread_id(), None);
+    runtime.close().await;
+    let fallback = RolloutRecorder::list_threads(
+        Some(runtime),
+        &config,
+        /*page_size*/ 1,
+        Some(&cursor),
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+        &[],
+        /*model_providers*/ None,
+        /*cwd_filters*/ None,
+        default_provider.as_str(),
+        /*search_term*/ None,
+    )
+    .await?;
+    assert_eq!(fallback.items.len(), 1);
+    assert_eq!(fallback.items[0].path, older_path);
     Ok(())
 }
 
@@ -1473,6 +1576,23 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
     )
     .await?;
     assert_eq!(repaired_state_db_only_page.items.len(), 1);
+    runtime.close().await;
+    let error = RolloutRecorder::list_threads_from_state_db(
+        Some(runtime),
+        &config,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+        &[],
+        /*model_providers*/ None,
+        /*cwd_filters*/ Some(cwd_filters.as_slice()),
+        config.model_provider_id.as_str(),
+        /*search_term*/ None,
+    )
+    .await
+    .expect_err("a failed database query must not look like an exhausted listing");
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
     Ok(())
 }
 
@@ -1849,26 +1969,20 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             disabled_plugin_ids: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             permission_profile: None,
             active_permission_profile: None,
-            network: None,
             file_system_sandbox_policy: None,
             model: "test-model".to_string(),
             comp_hash: None,
-            personality: None,
             collaboration_mode: None,
             multi_agent_version: None,
-            multi_agent_mode: None,
             realtime_active: None,
             cyber_access_program: None,
             effort: None,
-            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+            summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
         }),
     };
     writeln!(file, "{}", serde_json::to_string(&turn_context)?)?;

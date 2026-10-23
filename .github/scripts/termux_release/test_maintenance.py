@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import maintenance as subject
 import source_preparation as preparation
+from source_object_batch_tests import SourceObjectBatchTests
 
 
 class MaintenanceTests(unittest.TestCase):

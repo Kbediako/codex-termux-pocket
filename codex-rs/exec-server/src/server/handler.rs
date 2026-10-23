@@ -13,10 +13,13 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::DiscoverV2CapabilitiesRequest;
+use crate::DiscoverV2CapabilitiesResponse;
 use crate::ExecServerRuntimeOptions;
 use crate::client::http_client::PendingRouteAwareHttpBodyStream;
 use crate::client::http_client::RouteAwareHttpClient;
 use crate::client::http_client::RouteAwareHttpRequestRunner;
+use crate::discover_v2::capability_manager::CapabilityManager;
 use crate::environment_config::ReadEnvironmentConfigError;
 use crate::environment_config::read_environment_config;
 use crate::protocol::CapabilityRootsDiscoverParams;
@@ -50,6 +53,8 @@ use crate::protocol::FsRemoveParams;
 use crate::protocol::FsRemoveResponse;
 use crate::protocol::FsWalkParams;
 use crate::protocol::FsWalkResponse;
+use crate::protocol::FsWriteBlockParams;
+use crate::protocol::FsWriteBlockResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
 use crate::protocol::HTTP_REQUEST_METHOD;
@@ -77,6 +82,7 @@ use crate::telemetry::ExecutorRegistration;
 pub(crate) struct ExecServerHandler {
     pub(super) executor_registration: Option<Arc<ExecutorRegistration>>,
     session_registry: Arc<SessionRegistry>,
+    capability_manager: Arc<CapabilityManager>,
     notifications: RpcNotificationSender,
     session: StdMutex<Option<SessionHandle>>,
     active_body_stream_ids: Mutex<HashSet<String>>,
@@ -92,6 +98,7 @@ pub(crate) struct ExecServerHandler {
 impl ExecServerHandler {
     pub(crate) fn new(
         session_registry: Arc<SessionRegistry>,
+        capability_manager: Arc<CapabilityManager>,
         notifications: RpcNotificationSender,
         runtime_paths: ExecServerRuntimeOptions,
         http_client_factory: HttpClientFactory,
@@ -99,6 +106,7 @@ impl ExecServerHandler {
         Self {
             executor_registration: None,
             session_registry,
+            capability_manager,
             notifications,
             session: StdMutex::new(None),
             active_body_stream_ids: Mutex::new(HashSet::new()),
@@ -207,12 +215,16 @@ impl ExecServerHandler {
         params: EnvironmentConfigReadParams,
     ) -> Result<EnvironmentConfigReadResponse, JSONRPCErrorError> {
         self.require_initialized_for("environment config")?;
-        read_environment_config(crate::LOCAL_FS.as_ref(), params)
-            .await
-            .map_err(|error| match error {
-                ReadEnvironmentConfigError::InvalidParams(message) => invalid_params(message),
-                ReadEnvironmentConfigError::Internal(message) => internal_error(message),
-            })
+        read_environment_config(
+            crate::LOCAL_FS.as_ref(),
+            params,
+            self.runtime_paths.prefer_mxc,
+        )
+        .await
+        .map_err(|error| match error {
+            ReadEnvironmentConfigError::InvalidParams(message) => invalid_params(message),
+            ReadEnvironmentConfigError::Internal(message) => internal_error(message),
+        })
     }
 
     pub(crate) fn environment_status(&self) -> Result<EnvironmentStatus, JSONRPCErrorError> {
@@ -324,6 +336,17 @@ impl ExecServerHandler {
         self.file_system.discover_capability_roots(params).await
     }
 
+    pub(crate) async fn discover_capabilities_v2(
+        &self,
+        params: DiscoverV2CapabilitiesRequest,
+    ) -> Result<Arc<DiscoverV2CapabilitiesResponse>, JSONRPCErrorError> {
+        self.require_initialized_for("capability discovery")?;
+        self.capability_manager
+            .get_or_refresh_discovery(params)
+            .await
+            .map_err(|error| internal_error(error.to_string()))
+    }
+
     pub(crate) async fn fs_open(
         &self,
         params: FsOpenParams,
@@ -338,6 +361,14 @@ impl ExecServerHandler {
     ) -> Result<FsReadBlockResponse, JSONRPCErrorError> {
         self.require_initialized_for("filesystem")?;
         self.file_system.read_block(params).await
+    }
+
+    pub(crate) async fn fs_write_block(
+        &self,
+        params: FsWriteBlockParams,
+    ) -> Result<FsWriteBlockResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.write_block(params).await
     }
 
     pub(crate) async fn fs_close(

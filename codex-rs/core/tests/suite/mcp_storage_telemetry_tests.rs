@@ -12,6 +12,7 @@ use codex_otel::MetricsConfig;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -110,7 +111,7 @@ async fn recovery_without_a_snapshot_keeps_each_threads_originator() -> Result<(
         let thread = fixture
             .thread_manager
             .start_thread(StartThreadOptions {
-                initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(
+                initial_history: InitialHistory::Forked(vec![RolloutItem::SessionMeta(Box::new(
                     SessionMetaLine {
                         meta: SessionMeta {
                             originator: originator.into(),
@@ -118,8 +119,16 @@ async fn recovery_without_a_snapshot_keeps_each_threads_originator() -> Result<(
                         },
                         git: None,
                     },
-                )]),
-                environments: Some(fixture.codex.environment_selections().await),
+                ))]),
+                environments: Some(
+                    fixture
+                        .codex
+                        .environment_selections()
+                        .await
+                        .into_iter()
+                        .map(TurnEnvironmentSelection::into_request)
+                        .collect(),
+                ),
                 ..StartThreadOptions::new(config.clone())
             })
             .await?

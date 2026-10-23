@@ -1,6 +1,22 @@
 {
   "format_version": 1,
-  "request_id": "issue158-final-post-cleanup-20261003",
-  "operation": "dispatch-checks",
-  "phase": "post"
+  "request_id": "issue168-prepare-skills-table-insert-20261019",
+  "operation": "prepare-source",
+  "base_main": "91257ba6f149d9ba10da7112e1fbc3a6a57b0805",
+  "prepared_commit": "0690eb6ca75464064c6beacbd6f24ef7b6e40bca",
+  "expected_input_tree": "8089417f0aac31ec017b253e54542d3cc068f43f",
+  "edits": [
+    {
+      "path": "codex-rs/ext/skills/src/host_roots_tests.rs",
+      "before": "aade9a1e6ea73c80c871f333fda2cd04fdf6d02f",
+      "after": "cd6362c34020c17e203b3fc395d944e343c32662",
+      "replacements": [
+        {
+          "old": "    config[\"project_root_markers\"] = toml::Value::Array(vec![toml::Value::String(marker)]);",
+          "new": "    config.as_table_mut().expect(\"config table\").insert(\n        \"project_root_markers\".to_string(),\n        toml::Value::Array(vec![toml::Value::String(marker)]),\n    );"
+        }
+      ]
+    }
+  ],
+  "package_updates": []
 }

@@ -1,5 +1,6 @@
 //! Restores compacted retained evidence and checks complete synchronous requests.
 //! Restored records are budgeted and persisted before sampling, including continuations.
+//! Admitted sampling inputs are observed once per step, independent of transport retries.
 
 use codex_api::ResponsesApiRequest;
 use codex_context_fragments::set_annotated_content;
@@ -8,7 +9,6 @@ use codex_guardian_context::REQUEST_TOKENS_BOUNDARIES;
 use codex_guardian_context::REQUEST_TOKENS_METRIC;
 use codex_guardian_context::RequestBudget;
 use codex_guardian_context::effective_input_token_limit;
-use codex_otel::SessionTelemetry;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
@@ -33,18 +33,8 @@ pub(crate) enum ExhaustedReviewBudget {
     Compacting,
 }
 
-pub(crate) fn observe(telemetry: &SessionTelemetry, request: &ResponsesApiRequest) -> usize {
-    let total = estimate_request_tokens(request);
-    // The assembled input already includes inherited history and the current
-    // review. Do not report a guessed old/new split after context injection.
-    telemetry.histogram_with_boundaries(
-        REQUEST_TOKENS_METRIC,
-        i64::try_from(total).unwrap_or(i64::MAX),
-        REQUEST_TOKENS_BOUNDARIES,
-        &[("target", "sync"), ("component", "total")],
-    );
-    total
-}
+/// Guardian-owned marker scoped to one sampling step, including all transport retries.
+struct ObservedRequest;
 
 pub(super) fn estimate_request_tokens(request: &ResponsesApiRequest) -> usize {
     let input = request
@@ -52,13 +42,11 @@ pub(super) fn estimate_request_tokens(request: &ResponsesApiRequest) -> usize {
         .iter()
         .map(estimate_item_token_count)
         .fold(0i64, i64::saturating_add);
-    let instructions = TruncationPolicy::Bytes(request.instructions.len()).token_budget();
     let metadata = serde_json::to_vec(&(&request.tools, &request.text))
         .map(|bytes| TruncationPolicy::Bytes(bytes.len()).token_budget())
         .unwrap_or(usize::MAX);
     usize::try_from(input)
         .unwrap_or(usize::MAX)
-        .saturating_add(instructions)
         .saturating_add(metadata)
 }
 
@@ -98,7 +86,10 @@ pub(crate) async fn prepare_prompt(
                     max_input_tokens: maximum,
                     existing_context_tokens: estimate_request_tokens(&baseline),
                 },
-                GuardianBudgetOmission.render(),
+                GuardianBudgetOmission
+                    .render()
+                    .into_text()
+                    .unwrap_or_default(),
                 HistoryTruncation::Preserve,
             )
             .map_err(|error| {
@@ -156,7 +147,8 @@ pub(crate) async fn prepare_prompt(
         metadata,
         /*include_internal*/ true,
     )?;
-    if estimate_request_tokens(&request) > maximum {
+    let total = estimate_request_tokens(&request);
+    if total > maximum {
         session
             .services
             .thread_extension_data
@@ -181,5 +173,27 @@ pub(crate) async fn prepare_prompt(
         .services
         .thread_extension_data
         .remove::<ExhaustedReviewBudget>();
+    if step
+        .extension_data
+        .insert_if(ObservedRequest, |existing| existing.is_none())
+    {
+        step.session_telemetry.histogram_with_boundaries(
+            REQUEST_TOKENS_METRIC,
+            i64::try_from(total).unwrap_or(i64::MAX),
+            REQUEST_TOKENS_BOUNDARIES,
+            &[
+                ("target", "sync"),
+                ("component", "total"),
+                (
+                    "token_bucket",
+                    codex_guardian_context::request_token_bucket(total),
+                ),
+            ],
+        );
+    }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "request_budget_tests.rs"]
+mod tests;

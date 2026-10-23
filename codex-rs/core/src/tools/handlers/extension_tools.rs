@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -18,12 +17,10 @@ use codex_tools::TurnItemEmissionFuture;
 use codex_tools::TurnItemEmitter;
 use codex_utils_string::to_ascii_json_string;
 
-use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::lifecycle::extension_tool_call_source;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
@@ -66,7 +63,22 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
     where
         ToolInvocation: 'a,
     {
-        Box::pin(async move { self.0.handle(to_extension_call(&invocation).await).await })
+        Box::pin(async move {
+            let environment_accessors = invocation.step_context.environments();
+            let environments = environment_accessors
+                .iter()
+                .map(|(environment, fs)| {
+                    ToolEnvironment::new(
+                        environment.selection.environment_id.clone(),
+                        environment.cwd().clone(),
+                        fs,
+                    )
+                })
+                .collect();
+            self.0
+                .handle(to_extension_call(&invocation, environments).await)
+                .await
+        })
     }
 }
 
@@ -164,7 +176,10 @@ impl TurnItemEmitter for CoreTurnItemEmitter {
     }
 }
 
-async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_> {
+async fn to_extension_call<'a>(
+    invocation: &ToolInvocation,
+    environments: Vec<ToolEnvironment<'a>>,
+) -> ExtensionToolCall<'a> {
     let history = invocation
         .session
         .clone_history()
@@ -180,30 +195,10 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
     let codex_turn_metadata = invocation
         .turn
         .turn_metadata_state
-        .current_meta_value_for_mcp_request(ExecutionMetadata::from_settings(
+        .current_meta_value_for_extension_request(ExecutionMetadata::from_settings(
             &invocation.step_context.settings,
         ))
         .and_then(|metadata| to_ascii_json_string(&metadata).ok());
-    let mut environments = Vec::new();
-    for environment in invocation.step_context.environments.turn_environments() {
-        let additional_permissions = apply_granted_turn_permissions(
-            invocation.session.as_ref(),
-            environment,
-            environment.cwd(),
-            SandboxPermissions::UseDefault,
-            /*additional_permissions*/ None,
-        )
-        .await
-        .additional_permissions;
-        let file_system_sandbox_context = environment.sandbox_context(additional_permissions);
-        environments.push(ToolEnvironment {
-            _lifetime: PhantomData,
-            environment_id: environment.selection.environment_id.clone(),
-            cwd: environment.cwd().clone(),
-            file_system: environment.environment.get_filesystem(),
-            file_system_sandbox_context,
-        });
-    }
     ExtensionToolCall {
         turn_id: invocation.turn.sub_id.clone(),
         call_id: invocation.call_id.clone(),
@@ -217,6 +212,8 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
             session: Arc::downgrade(&invocation.session),
             turn: Arc::downgrade(&invocation.turn),
         }),
+        attachment_store: Arc::clone(&invocation.session.services.image_store),
+        ephemeral: invocation.turn.config.ephemeral,
         environments,
         payload: invocation.payload.clone(),
     }
@@ -227,6 +224,7 @@ mod tests {
     use std::sync::Arc;
 
     use codex_extension_items::ExtensionItem;
+    use codex_extension_items::image_generation::GeneratedImageRef;
     use codex_extension_items::image_generation::ImageGenerationItem;
     use codex_extension_items::web_search::WebSearchItem;
     use codex_protocol::items::TurnItem;
@@ -356,7 +354,7 @@ mod tests {
             *self.captured_sandbox_cwds.lock().await = call
                 .environments
                 .iter()
-                .map(|environment| environment.file_system_sandbox_context.cwd.clone())
+                .map(|environment| environment.cwd.clone())
                 .collect();
             let call = codex_tools::ToolCall {
                 environments: Vec::new(),
@@ -440,6 +438,8 @@ mod tests {
             .map(|environment| environment.cwd().clone())
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -570,10 +570,13 @@ mod tests {
             id: "call-image".to_string(),
             status: "in_progress".to_string(),
             revised_prompt: None,
-            result: String::new(),
+            image: GeneratedImageRef::Inline {
+                result: String::new(),
+            },
             transparent_background: None,
             failure: None,
             saved_path: None,
+            input_images: Vec::new(),
             imagegen_request_id: None,
             generation_id: None,
         });
@@ -581,10 +584,13 @@ mod tests {
             id: "call-image".to_string(),
             status: "completed".to_string(),
             revised_prompt: Some("A tiny blue square".to_string()),
-            result: "cG5n".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "cG5n".to_string(),
+            },
             transparent_background: Some(true),
             failure: None,
             saved_path: Some(expected_path.clone()),
+            input_images: Vec::new(),
             imagegen_request_id: None,
             generation_id: None,
         });
@@ -606,10 +612,13 @@ mod tests {
                     call_id: "call-image".to_string(),
                     status: "completed".to_string(),
                     revised_prompt: Some("A tiny blue square".to_string()),
-                    result: "cG5n".to_string(),
+                    image: GeneratedImageRef::Inline {
+                        result: "cG5n".to_string(),
+                    },
                     transparent_background: Some(true),
                     failure: None,
                     saved_path: Some(expected_path.clone()),
+                    input_images: Vec::new(),
                 })],
             },
         )

@@ -9,6 +9,7 @@ use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
 use super::*;
+use crate::app_server_session::is_server_shutting_down_error;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
 use crate::chatwidget::ThreadInputStateRestoreMode;
@@ -174,7 +175,7 @@ impl App {
         let mut initial_selected_idx = selected;
         let items: Vec<SelectionItem> = self
             .agent_navigation
-            .ordered_threads()
+            .visible_threads()
             .into_iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
@@ -372,11 +373,7 @@ impl App {
             .thread_event_channels
             .get(&thread_id)
             .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::ExternalWriter);
-        if self
-            .thread_event_channels
-            .get(&thread_id)
-            .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::Live)
-        {
+        if !self.should_attach_live_thread_for_selection(thread_id) {
             return Ok(true);
         }
 
@@ -483,8 +480,8 @@ impl App {
         Ok(live_attached)
     }
 
-    /// Replaces the chat widget, carrying the editor yank and re-seeding collab metadata from the
-    /// navigation cache.
+    /// Replaces the chat widget, carrying composer preferences and the editor yank, and
+    /// re-seeding collab metadata from the navigation cache.
     ///
     /// Thread switches reconstruct the `ChatWidget`, which loses the `collab_agent_metadata` map.
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
@@ -492,10 +489,10 @@ impl App {
     pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
         chat_widget.fork_in_progress = self.chat_widget.fork_in_progress;
         self.pending_right_click_paste = None;
+        self.config_notification_test_pending = None;
         if !self.chat_widget.realtime_conversation_is_running() {
             self.retain_realtime_replay_state_before_replace();
         }
-        chat_widget.cyber_policy_notice = self.chat_widget.cyber_policy_notice.clone();
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
@@ -505,6 +502,7 @@ impl App {
         if chat_widget.last_terminal_title.is_none() {
             chat_widget.last_terminal_title = previous_terminal_title;
         }
+        chat_widget.config_panel_tui = self.chat_widget.config_panel_tui.clone();
         chat_widget.remote_connection = self.chat_widget.remote_connection.clone();
         chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
         chat_widget.set_local_worktree_operations(self.chat_widget.local_worktree_operations);
@@ -520,6 +518,10 @@ impl App {
             AppServerTarget::LocalDaemon { .. }
         ));
         chat_widget.inherit_backend_banner_state(&mut self.chat_widget);
+        chat_widget.inherit_security_setup(&mut self.chat_widget);
+        chat_widget
+            .mention_usage_mut()
+            .inherit(self.chat_widget.mention_usage_mut());
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,
@@ -611,11 +613,6 @@ impl App {
                     return Ok(());
                 }
             }
-        } else if !self.thread_event_channels.contains_key(&thread_id) && is_replay_only {
-            self.add_agents_overview_error(format!(
-                "Agent thread {thread_id} is no longer available."
-            ));
-            return Ok(());
         }
         let previous_thread_id = self.active_thread_id;
         // Notifications already routed to the active channel must reach the old
@@ -779,13 +776,13 @@ impl App {
     }
 
     pub(super) fn should_attach_live_thread_for_selection(&self, thread_id: ThreadId) -> bool {
-        self.thread_event_channels
+        self.agent_navigation
             .get(&thread_id)
-            .is_none_or(|channel| channel.attachment() != ThreadEventAttachment::Live)
-            && self
-                .agent_navigation
+            .is_some_and(|entry| entry.is_closed)
+            || self
+                .thread_event_channels
                 .get(&thread_id)
-                .is_none_or(|entry| !entry.is_closed || self.thread_unavailable(thread_id))
+                .is_none_or(|channel| channel.attachment() != ThreadEventAttachment::Live)
     }
 
     pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
@@ -796,18 +793,35 @@ impl App {
 
     pub(super) async fn reset_thread_event_state(&mut self) {
         let voice_owner = self.voice_owner_thread_id();
+        let mut previous_pending = std::mem::take(&mut self.pending_app_server_requests);
+        // Move retained tasks' approvals to background routing before clearing request bookkeeping.
+        for (thread_id, requests) in &mut self.agents_overview.dispatched_requests {
+            if let Some(channel) = self.thread_event_channels.get(thread_id) {
+                for request in channel.store.lock().await.pending_replay_requests() {
+                    if !requests
+                        .iter()
+                        .any(|pending| pending.request.id() == request.id())
+                        && let Some(request) = previous_pending.buffered_request(request)
+                    {
+                        requests.push(request);
+                    }
+                }
+            }
+        }
         if voice_owner.is_some() {
             for (thread_id, channel) in &self.thread_event_channels {
-                if Some(*thread_id) != voice_owner {
+                if Some(*thread_id) != voice_owner && !self.side_threads.contains_key(thread_id) {
                     for request in channel.store.lock().await.pending_replay_requests() {
-                        self.pending_app_server_requests
-                            .resolve_notification(&thread_id.to_string(), request.id());
+                        previous_pending.resolve_notification(&thread_id.to_string(), request.id());
                     }
                 }
             }
         }
         self.thread_event_listener_tasks.retain(|id, task| {
-            if Some(*id) == voice_owner {
+            if Some(*id) == voice_owner
+                || self.side_threads.contains_key(id)
+                || self.agents_overview.dispatched_requests.contains_key(id)
+            {
                 true
             } else {
                 task.abort();
@@ -815,14 +829,13 @@ impl App {
             }
         });
         self.thread_event_channels
-            .retain(|id, _| Some(*id) == voice_owner);
+            .retain(|id, _| Some(*id) == voice_owner || self.side_threads.contains_key(id));
         self.pending_realtime_speech_replay.clear();
         self.pending_realtime_transcript_replay.clear();
         self.realtime_replay_order.clear();
         self.pending_server_profiles.clear();
         self.agents_overview.activity.clear();
         self.agent_navigation.clear();
-        self.side_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
@@ -830,7 +843,20 @@ impl App {
         self.primary_session_configured = None;
         self.pending_primary_events.clear();
         if voice_owner.is_none() {
-            self.pending_app_server_requests.clear();
+            let side_thread_ids: Vec<_> = self.side_threads.keys().copied().collect();
+            for thread_id in side_thread_ids {
+                if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                    for request in channel.store.lock().await.pending_replay_requests() {
+                        if let Some(request) = previous_pending.buffered_request(request) {
+                            let _ = self
+                                .pending_app_server_requests
+                                .note_buffered_request(&request);
+                        }
+                    }
+                }
+            }
+        } else {
+            self.pending_app_server_requests = previous_pending;
         }
         self.pending_startup_thread_start = false;
         self.pending_server_version_notice = None;
@@ -857,6 +883,18 @@ impl App {
             return Ok(());
         }
 
+        // A refusal proves no thread was created.
+        if let Err(error) = &result
+            && matches!(
+                error.downcast_ref::<TypedRequestError>(),
+                Some(TypedRequestError::Server { method, source })
+                    if method == "thread/start" && is_server_shutting_down_error(source)
+            )
+            && self.begin_reconnect_for_rejected_startup()
+        {
+            return Ok(());
+        }
+
         self.pending_startup_thread_start = false;
         self.chat_widget
             .set_queue_submissions_until_session_configured(/*queue*/ false);
@@ -880,31 +918,22 @@ impl App {
                     ThreadBufferedEvent::HistoryEntryResponse(_)
                     | ThreadBufferedEvent::FeedbackSubmission(_) => true,
                 });
-                self.pending_app_server_requests.clear();
-                let mut unsupported_requests = Vec::new();
+                let previous_pending = std::mem::take(&mut self.pending_app_server_requests);
                 for event in &self.pending_primary_events {
-                    if let ThreadBufferedEvent::Request(request) = event
-                        && let Some(unsupported) = self
-                            .pending_app_server_requests
-                            .note_server_request(request)
-                    {
-                        unsupported_requests.push(unsupported);
-                    }
-                }
-                for unsupported in unsupported_requests {
-                    self.pending_primary_events.retain(|event| {
-                        !matches!(event, ThreadBufferedEvent::Request(request)
-                            if request.id() == &unsupported.request_id)
-                    });
-                    if let Err(error) = self
-                        .reject_app_server_request(
-                            app_server,
-                            unsupported.request_id,
-                            unsupported.message,
-                        )
-                        .await
-                    {
-                        tracing::warn!("{error}");
+                    if let ThreadBufferedEvent::Request(request) = event {
+                        let retained = previous_pending.buffered_request((**request).clone());
+                        #[cfg(test)]
+                        let retained = retained.or_else(|| {
+                            Some(super::app_server_requests::BufferedServerRequest::new(
+                                (**request).clone(),
+                                &app_server.request_handle(),
+                            ))
+                        });
+                        if let Some(request) = retained {
+                            let _ = self
+                                .pending_app_server_requests
+                                .note_buffered_request(&request);
+                        }
                     }
                 }
                 if started.blocks_direct_input {
@@ -974,10 +1003,32 @@ impl App {
             }
             return;
         }
+        // Dismissing the initial agents overview can expose /new before any folder consent.
+        // Resolve trust before loading defaults and applying explicit permission choices.
+        if self.current_displayed_thread_id().is_none() {
+            let mut config = self.chat_widget.config_ref().clone();
+            let cwd = config.cwd.to_path_buf();
+            if let Err(control) = self
+                .confirm_directory_trust(
+                    tui,
+                    app_server,
+                    &mut config,
+                    &cwd,
+                    crate::onboarding::DirectoryTrustOptions::default(),
+                    /*startup_draft*/ None,
+                )
+                .await
+            {
+                if matches!(control, AppRunControl::Exit(_)) {
+                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+                }
+                return;
+            }
+        }
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
         // until the new session is configured and any replayed turns have been rendered.
-        let mut config = match self.load_new_session_config(app_server).await {
+        let (mut config, local_settings) = match self.load_new_session_config(app_server).await {
             Ok(config) => config,
             Err(err) => {
                 if let Some(message) = initial_user_message {
@@ -1023,9 +1074,10 @@ impl App {
                     Some(started.session.thread_id),
                 )
                 .await;
-                self.local_settings = self.local_settings.reloaded(&config);
+                self.local_settings = local_settings;
                 self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
                 self.config = config;
+                self.remember_launch_permissions();
 
                 let name_error = if let Some(name) = new_thread_name {
                     match app_server
@@ -1286,6 +1338,10 @@ impl App {
         app_server: &mut AppServerSession,
         target_session: SessionTarget,
     ) -> Result<AppRunControl> {
+        if let Err(error) = target_session.ensure_backend(app_server.backend_id()) {
+            self.add_session_picker_error(error.to_string());
+            return Ok(AppRunControl::Continue);
+        }
         if self.ignore_same_thread_resume(&target_session) {
             self.agents_overview
                 .hidden_threads

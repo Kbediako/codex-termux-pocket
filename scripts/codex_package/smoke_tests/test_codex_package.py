@@ -12,7 +12,6 @@ ROOT_OF_EXTRACTED_PACKAGE
     ├── bwrap                             # Linux only
     ├── codex-command-runner.exe          # Windows only
     ├── codex-windows-sandbox-setup.exe   # Windows only
-    └── zsh/bin/zsh                       # supported Unix targets only
 
 Debug symbols for all shipped binaries arrive in a separate companion archive.
 Each package contains one entrypoint, not both codex and codex-app-server.
@@ -22,6 +21,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -40,7 +40,6 @@ from fixtures import SmokePackage
     ("arguments", "expected"),
     [
         pytest.param(("--help",), "Usage:", id="help"),
-        pytest.param(("--version",), None, id="version"),
         pytest.param(("features", "list"), "code_mode", id="features"),
         pytest.param(("completion", "bash"), "codex", id="completion"),
     ],
@@ -48,11 +47,23 @@ from fixtures import SmokePackage
 def test_cli_public_commands(
     package: SmokePackage,
     arguments: tuple[str, ...],
-    expected: str | None,
+    expected: str,
 ) -> None:
-    """Packaged CLI remains usable for discovery, version, features, and completions."""
+    """Packaged CLI remains usable for discovery, features, and completions."""
     output = package.run(*arguments).stdout
-    assert expected in output if expected is not None else output.strip()
+    assert expected in output
+
+
+def test_cli_version_matches_release_sources(package: SmokePackage) -> None:
+    """Verify the compiled banner against the sources used to package the release."""
+    root = next(
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "codex-rs/Cargo.toml").is_file()
+    )
+    manifest = tomllib.loads((root / "codex-rs/Cargo.toml").read_text())
+    version = manifest["workspace"]["package"]["version"]
+    assert package.run("--version").stdout == f"codex-cli {version}\n"
 
 
 @pytest.mark.parametrize("entrypoint", ["codex", "codex-app-server"])
@@ -150,7 +161,7 @@ def _code_mode_host_symbol_address(
     *arguments: str,
 ) -> str:
     symbol_output = subprocess.run(
-        ["nm", *arguments, str(symbols)],
+        ["nm", "-C", *arguments, str(symbols)],
         cwd=package.directory,
         env=package.environment,
         capture_output=True,
@@ -158,12 +169,14 @@ def _code_mode_host_symbol_address(
         check=True,
         timeout=45,
     ).stdout
+    # Rust v0 symbols can name this crate only as the instantiating crate of
+    # a dependency's generic function. Match the demangled entrypoint instead.
     return next(
         parts[0]
         for line in symbol_output.splitlines()
-        if len(parts := line.split()) == 3
+        if len(parts := line.split(maxsplit=2)) == 3
         and parts[1].lower() == "t"
-        and "codex_code_mode_host" in parts[2]
+        and parts[2] == "codex_code_mode_host::main"
     )
 
 
@@ -174,7 +187,7 @@ def test_linux_debug_symbols_resolve_packaged_code(
 ) -> None:
     """Linux host symbols resolve a packaged function and its source location."""
     address = _code_mode_host_symbol_address(
-        package, code_mode_host_debug_symbols, "--defined-only", "--extern-only"
+        package, code_mode_host_debug_symbols, "--defined-only"
     )
     resolved = subprocess.run(
         [
@@ -222,11 +235,13 @@ def test_windows_debug_symbols_resolve_packaged_code(
     code_mode_host_debug_symbols: Path,
 ) -> None:
     """Windows host symbols match the packaged executable's debug signature."""
-    # Rust embeds an underscored PDB name, but release archives normalize it.
-    symbols = code_mode_host_debug_symbols.rename(
-        code_mode_host_debug_symbols.with_name("codex_code_mode_host.pdb")
-    )
-    host = symbols.with_suffix(".exe")
+    # Cargo embeds an underscored PDB name; Bazel uses the binary's name.
+    # Offer the archived PDB under both names so dumpbin still verifies that
+    # its signature matches the packaged executable, regardless of builder.
+    cargo_symbols = code_mode_host_debug_symbols.with_name("codex_code_mode_host.pdb")
+    shutil.copy2(code_mode_host_debug_symbols, cargo_symbols)
+    symbols = (code_mode_host_debug_symbols, cargo_symbols)
+    host = code_mode_host_debug_symbols.with_suffix(".exe")
     shutil.copy2(package.cli.with_name("codex-code-mode-host.exe"), host)
     result = subprocess.run(
         ["dumpbin", "/PDBPATH", str(host)],
@@ -237,4 +252,6 @@ def test_windows_debug_symbols_resolve_packaged_code(
         check=True,
         timeout=45,
     )
-    assert str(symbols).casefold() in result.stdout.casefold(), result.stdout
+    assert any(str(path).casefold() in result.stdout.casefold() for path in symbols), (
+        result.stdout
+    )

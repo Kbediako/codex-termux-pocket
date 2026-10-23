@@ -28,6 +28,7 @@ use crate::facts::CompactionStrategy;
 use crate::facts::CompactionTrigger;
 use crate::facts::CustomAnalyticsFact;
 use crate::facts::SubAgentThreadStartedInput;
+use crate::facts::ThreadInitializationMode;
 use crate::reducer::AnalyticsReducer;
 use crate::tests::support::ingest_complete_child_turn;
 use crate::tests::support::ingest_completed_command_execution_item;
@@ -55,6 +56,7 @@ use codex_app_server_protocol::RequestPermissionProfile;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerResponse;
+use codex_app_server_protocol::ThreadClosedNotification;
 use codex_login::default_client::DEFAULT_ORIGINATOR;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -857,6 +859,7 @@ async fn guardian_events_keep_thread_source_and_originator_with_explicit_turn_co
                     ephemeral: false,
                     thread_source: Some(ThreadSource::GuardianReview),
                     subagent_source: SubAgentSource::Other("guardian".to_string()),
+                    initialization_mode: ThreadInitializationMode::New,
                     created_at: 130,
                 },
             )),
@@ -1048,4 +1051,46 @@ fn permission_metadata_preserves_absent_and_empty_requests() {
             expected,
         );
     }
+}
+
+#[tokio::test]
+async fn closing_thread_discards_review_without_turn_lifecycle_facts() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+    ingest_review_prerequisites(&mut reducer, &mut events).await;
+    reducer
+        .ingest(
+            AnalyticsFact::ServerRequest {
+                connection_id: 1,
+                request: Box::new(sample_command_approval_request(
+                    /*request_id*/ 1, /*approval_id*/ None,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(ServerNotification::ThreadClosed(
+                ThreadClosedNotification {
+                    thread_id: "thread-1".to_string(),
+                },
+            ))),
+            &mut events,
+        )
+        .await;
+    events.clear();
+    reducer
+        .ingest(
+            AnalyticsFact::ServerResponse {
+                completed_at_ms: 2_000,
+                response: Box::new(sample_command_approval_response(
+                    /*request_id*/ 1,
+                    CommandExecutionApprovalDecision::Accept,
+                )),
+            },
+            &mut events,
+        )
+        .await;
+    assert!(events.is_empty());
 }
