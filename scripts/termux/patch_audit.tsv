@@ -1,4 +1,6 @@
 # match_kind<TAB>match_value<TAB>classification<TAB>reason
+subject	release: request validated Termux daemon startup repair	tooling	Bind all five successful exact-source gates and the independently verified runtime to the sole permanent publisher; no runtime or promoted manifest changes.
+subject	termux: promote termux-v0.164.0-alpha.12-9900586656	tooling	Classify the sole permanent publisher promotion after complete assets, source identity, anonymous byte verification and publisher attestations pass.
 subject	fix(termux): use the app-private daemon socket directory	runtime-critical	Share the fixed Termux socket root between listeners and sandbox masking, preserving ownership and mode validation; verify the live native socket and daemon lifecycle.
 subject	fix(deps): update ctutils for RUSTSEC-2026-0385	runtime-critical	Patch the constant-time utility advisory with matching Cargo and generated Bazel locks; no security waiver.
 subject	fix(termux): package the alpha for background server startup	runtime-critical	Use package semver and the required ripgrep entrypoint, with production and real-Termux daemon lifecycle regression checks.
