@@ -282,6 +282,32 @@ case "\${app_server_status}" in
     ;;
 esac
 
+# Test the same local-package preparation used by default interactive startup.
+# Isolate its managed package and PID records from every other native probe.
+daemon_home="\${HOME}/daemon-smoke"
+mkdir -p "\${daemon_home}"
+# PRoot can retain the launching process while tracing the detached server.
+CODEX_HOME="\${daemon_home}" codex app-server daemon start >"\${HOME}/daemon-start.json" &
+daemon_start_pid=\$!
+for _ in \$(seq 1 60); do
+  [[ -s "\${HOME}/daemon-start.json" ]] && break
+  sleep 1
+done
+test -s "\${HOME}/daemon-start.json"
+CODEX_HOME="\${daemon_home}" codex app-server daemon version >"\${HOME}/daemon-version.json"
+CODEX_HOME="\${daemon_home}" codex app-server daemon stop >"\${HOME}/daemon-stop.json"
+wait "\${daemon_start_pid}"
+node - "\${HOME}/daemon-version.json" "\${EXPECTED_PACKAGE_VERSION}" <<'EOF_DAEMON'
+const fs = require("fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (value.status !== "running" || value.appServerVersion !== process.argv[3]) {
+  throw new Error("background server did not start with the expected package: " + JSON.stringify(value));
+}
+EOF_DAEMON
+source "\${PREFIX}/bin/termux-mobile-lib.sh"
+runtime="\$(termux_runtime_root "\${PREFIX}")/current"
+"\${runtime}/codex-path/rg" --version
+
 mkdir -p "\${HOME}/sandbox-workspace"
 rm -f \
   "\${HOME}/sandbox-workspace/read-only-denied" \
@@ -395,6 +421,9 @@ for file in \
   device-auth.log \
   github-network.txt \
   codex-app-server.log \
+  daemon-start.json \
+  daemon-version.json \
+  daemon-stop.json \
   sandbox-read-only.log \
   sandbox-workspace-write.log \
   installed-releases.log \

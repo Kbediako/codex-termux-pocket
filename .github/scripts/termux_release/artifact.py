@@ -136,12 +136,15 @@ def safe_member_name(name: str) -> PurePosixPath:
     return path
 
 
-def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -> None:
+def verify_archive(
+    path: Path, *, runtime_size_bytes: int, package_version: str
+) -> None:
     required = {
         "codex-termux-runtime/bin/codex",
         "codex-termux-runtime/bin/codex-code-mode-host",
         "codex-termux-runtime/bin/codex-responses-api-proxy",
         "codex-termux-runtime/codex-resources/bwrap",
+        "codex-termux-runtime/codex-path/rg",
         "codex-termux-runtime/codex-package.json",
         "codex-termux-runtime/runtime-files.sha256",
     }
@@ -208,7 +211,7 @@ def verify_archive(path: Path, *, runtime_size_bytes: int, codex_version: str) -
             fail(f"invalid codex-package.json: {exc}")
         expected_package = {
             "layoutVersion": 1,
-            "version": codex_version,
+            "version": package_version,
             "target": TARGET,
             "variant": "primary",
             "entrypoint": "bin/codex",
@@ -280,7 +283,7 @@ def validate_local_bundle(
     if checksum_entries[METADATA] != file_sha256(root / METADATA):
         fail("metadata digest disagrees with SHA256SUMS")
     verify_archive(
-        root / ARCHIVE, runtime_size_bytes=runtime_size, codex_version=codex_version
+        root / ARCHIVE, runtime_size_bytes=runtime_size, package_version=package_version
     )
     validate_sbom(
         root / SBOM,

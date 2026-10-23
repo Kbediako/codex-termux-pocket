@@ -5,6 +5,7 @@ set -euo pipefail
 : "${SOURCE_SHA:?SOURCE_SHA is required}"
 : "${EXPECTED_PACKAGE_VERSION:?EXPECTED_PACKAGE_VERSION is required}"
 : "${TARGET:=x86_64-unknown-linux-musl}"
+export TARGET
 
 CODEX_DIR="${SOURCE_DIR}/codex-rs"
 FIXTURE_ROOT="${GITHUB_WORKSPACE}/dist/android-emulator"
@@ -138,11 +139,10 @@ import os
 from pathlib import Path
 
 root = Path(os.environ["GITHUB_WORKSPACE"]) / "dist/android-emulator/runtime/codex-termux-runtime"
-version = os.popen(f"{root / 'bin/codex'} --version").read().strip()
 package = {
     "layoutVersion": 1,
-    "version": version,
-    "target": "aarch64-unknown-linux-musl",
+    "version": os.environ["EXPECTED_PACKAGE_VERSION"],
+    "target": os.environ["TARGET"],
     "variant": "android-emulator-surrogate",
     "entrypoint": "bin/codex",
     "resourcesDir": "codex-resources",
@@ -151,6 +151,10 @@ package = {
     json.dumps(package, indent=2) + "\n",
     encoding="utf-8",
 )
+(root / "codex-path").mkdir()
+rg = root / "codex-path/rg"
+rg.write_text('#!/data/data/com.termux/files/usr/bin/sh\nexec /data/data/com.termux/files/usr/bin/rg "$@"\n')
+rg.chmod(0o755)
 lines: list[str] = []
 for path in sorted(item for item in root.rglob("*") if item.is_file()):
     relative = path.relative_to(root).as_posix()

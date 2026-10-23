@@ -72,6 +72,7 @@ jobs:
       - name: Self-test the executable release contract
         run: |
           python3 .github/scripts/termux_release_control.py self-test
+          python3 -m unittest discover -s .github/scripts/termux_release -p test_artifact.py
           python3 -m unittest discover -s .github/scripts/termux_release -p test_maintenance.py
           python3 -m unittest discover -s .github/scripts -p test_termux_workflow_registry.py
 

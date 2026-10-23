@@ -119,6 +119,15 @@ independent verification semantically identical without sharing write authority.
 - `termux-governance.yml` repeats the public audit, checks force-push observation
   and protection visibility, and also runs daily.
 
+Both production packaging and the real Termux gate start, probe and stop the
+managed background server from the installed package in an isolated Codex home.
+The package descriptor uses the Cargo workspace semantic version; the CLI display
+banner remains a separate source identity. Packages include `codex-path/rg`, which
+executes the ripgrep installed by the Termux bootstrap. The Android surrogate's
+descriptor names its actual x64 build target so it exercises the same platform
+validation. Release acceptance rejects a display banner or source hash in the
+descriptor and rejects a missing required ripgrep entrypoint.
+
 `.github/scripts/validate-termux-workflow-topology.py` enforces this exact
 inventory, rejects issue-triggered or temporary maintenance jobs and scripts,
 requires all five exact-source gate fields, and ensures no workflow other than

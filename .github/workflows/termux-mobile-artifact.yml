@@ -343,6 +343,7 @@ jobs:
           python3 - <<'PY'
           import os
           import subprocess
+          import tomllib
           from pathlib import Path
 
           artifact_root = Path(os.environ["GITHUB_WORKSPACE"]) / "dist" / "termux-mobile"
@@ -359,9 +360,11 @@ jobs:
               [str(runtime_root / "bin" / "codex"), "--version"],
               text=True,
           ).strip()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]) / "codex-rs/Cargo.toml"
+          package_version = tomllib.loads(workspace.read_text())["workspace"]["package"]["version"]
           package = {
               "layoutVersion": 1,
-              "version": version,
+              "version": package_version,
               "target": "aarch64-unknown-linux-musl",
               "variant": "primary",
               "entrypoint": "bin/codex",
@@ -371,6 +374,11 @@ jobs:
           (runtime_root / "codex-package.json").write_text(
               json.dumps(package, indent=2) + "\n", encoding="utf-8"
           )
+          # Daemon packages require this path; ripgrep is installed by the Termux bootstrap.
+          (runtime_root / "codex-path").mkdir()
+          rg = runtime_root / "codex-path/rg"
+          rg.write_text('#!/data/data/com.termux/files/usr/bin/sh\nexec /data/data/com.termux/files/usr/bin/rg "$@"\n')
+          rg.chmod(0o755)
           import hashlib
           manifest_lines = []
           for path in sorted(item for item in runtime_root.rglob("*") if item.is_file()):
@@ -455,6 +463,7 @@ jobs:
             bin/codex \
             bin/codex-code-mode-host \
             bin/codex-responses-api-proxy \
+            codex-path/rg \
             codex-resources/bwrap; do
             test -x "$runtime/$file" || { echo "Missing executable: $file"; exit 1; }
           done
@@ -474,6 +483,17 @@ jobs:
           "$runtime/bin/codex-code-mode-host" --help >/dev/null
           "$runtime/bin/codex-responses-api-proxy" --help >/dev/null
           "$runtime/codex-resources/bwrap" --version >/dev/null
+          # Exercise the package consumer, including its strict semver parser and required files.
+          export CODEX_HOME="${RUNNER_TEMP}/termux-artifact-daemon-home"
+          mkdir -p "$CODEX_HOME"
+          trap '"$runtime/bin/codex" app-server daemon stop || true' EXIT
+          "$runtime/bin/codex" app-server daemon start
+          "$runtime/bin/codex" app-server daemon version >"${RUNNER_TEMP}/termux-daemon-version.json"
+          python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value["status"] == "running" and value["appServerVersion"] == sys.argv[2], value' \
+            "${RUNNER_TEMP}/termux-daemon-version.json" \
+            "$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/codex-rs/Cargo.toml")"
+          "$runtime/bin/codex" app-server daemon stop
+          trap - EXIT
           bash "${GITHUB_WORKSPACE}/scripts/termux/smoke-test-artifact" \
             --bundle-dir "$artifact_root" \
             --expected-sha "$(git rev-parse HEAD)" \
