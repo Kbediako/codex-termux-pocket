@@ -182,6 +182,7 @@ impl SessionConfiguration {
 
     pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
+            environment_hooks: Default::default(),
             allow_login_shell: self.allow_login_shell,
             workspace_roots: Vec::new(),
             permission_profile: self.permission_profile_state.snapshot(),
@@ -380,7 +381,10 @@ impl SessionConfiguration {
     ) -> ConstraintResult<()> {
         self.step_settings
             .validate(&self.step_settings_constraints(environments))?;
-        super::environment::validate_environment_configs(environments)
+        super::environment::validate_environment_configs(
+            environments,
+            &self.original_config_do_not_use.features,
+        )
     }
 
     pub(super) fn step_settings_constraints(
@@ -554,7 +558,10 @@ impl SessionConfiguration {
             .map_or(current_environments, |environments| {
                 environments.environments.as_slice()
             });
-        super::environment::validate_environment_configs(next_environments)?;
+        super::environment::validate_environment_configs(
+            next_environments,
+            &next_configuration.original_config_do_not_use.features,
+        )?;
         // Apply step settings last: the proposed permissions and environment
         // selections must be complete before deriving their validation constraints.
         next_configuration.step_settings = Arc::new(self.step_settings.apply(
@@ -805,6 +812,7 @@ impl Session {
     pub(crate) async fn new(
         startup: Option<Arc<super::startup::SessionStartup>>,
         mut session_configuration: SessionConfiguration,
+        attached_thread: bool,
         prompt_cache_key: PromptCacheKey,
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
@@ -1080,6 +1088,7 @@ impl Session {
                     InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
                         let auth = persistence_auth.await;
                         let params = CreateThreadParams {
+                            attached_thread,
                             creator_user_id: auth.as_ref().and_then(CodexAuth::get_chatgpt_user_id),
                             creator_account_id: auth.as_ref().and_then(CodexAuth::get_account_id),
                             session_id,

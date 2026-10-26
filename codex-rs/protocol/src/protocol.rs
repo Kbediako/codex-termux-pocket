@@ -1980,6 +1980,7 @@ pub enum CodexErrorInfo {
     RateLimitExceeded,
     FlexUnavailable,
     ServerOverloaded,
+    ModelNotFound,
     CyberPolicy,
     BioPolicy,
     MisalignmentPolicyViolation,
@@ -2025,6 +2026,7 @@ impl CodexErrorInfo {
             | Self::RateLimitExceeded
             | Self::FlexUnavailable
             | Self::ServerOverloaded
+            | Self::ModelNotFound
             | Self::CyberPolicy
             | Self::BioPolicy
             | Self::MisalignmentPolicyViolation
@@ -3285,6 +3287,9 @@ pub struct SessionMeta {
     pub id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
+    /// Marks a persisted fork as attached to `forked_from_id`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attached_thread: bool,
     /// Exclusive ordinal inherited from the logical fork parent, independent of `history_base`.
     /// Revert may replace the physical history base while retaining this fork boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3359,6 +3364,7 @@ impl Default for SessionMeta {
             session_id: id.into(),
             id,
             forked_from_id: None,
+            attached_thread: false,
             forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
             timestamp: String::new(),

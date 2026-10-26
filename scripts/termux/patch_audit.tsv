@@ -1,4 +1,6 @@
 # match_kind<TAB>match_value<TAB>classification<TAB>reason
+sha	de8e7df8a026d30ca5e7b98fd0be8fef9249a4b0	runtime-critical	Retain the original official alpha.12 version commit in fork history when integrating alpha.1; the new official tag descends from its mainline parent rather than that release commit.
+subject	feat(termux): sync official Codex 0.165.0-alpha.1	runtime-critical	Retain the original official alpha.1 history and maintained Termux runtime, package/daemon fixes and permanent release controls; validate paired locks and all five gates on the selected source.
 subject	release: request validated Termux daemon startup repair	tooling	Bind all five successful exact-source gates and the independently verified runtime to the sole permanent publisher; no runtime or promoted manifest changes.
 subject	termux: promote termux-v0.164.0-alpha.12-9900586656	tooling	Classify the sole permanent publisher promotion after complete assets, source identity, anonymous byte verification and publisher attestations pass.
 subject	fix(termux): use the app-private daemon socket directory	runtime-critical	Share the fixed Termux socket root between listeners and sandbox masking, preserving ownership and mode validation; verify the live native socket and daemon lifecycle.
