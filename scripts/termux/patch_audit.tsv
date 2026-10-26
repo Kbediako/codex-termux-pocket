@@ -1,4 +1,5 @@
 # match_kind<TAB>match_value<TAB>classification<TAB>reason
+subject	chore(security): record approved crypto-bigint advisory exception	security-critical	Owner approved RUSTSEC-2026-0387 timing-leak risk acceptance on 2026-10-26 in issue #175; retain dependency paths and the removal condition in synchronized policies without changing other advisory checks.
 sha	de8e7df8a026d30ca5e7b98fd0be8fef9249a4b0	runtime-critical	Retain the original official alpha.12 version commit in fork history when integrating alpha.1; the new official tag descends from its mainline parent rather than that release commit.
 subject	feat(termux): sync official Codex 0.165.0-alpha.1	runtime-critical	Retain the original official alpha.1 history and maintained Termux runtime, package/daemon fixes and permanent release controls; validate paired locks and all five gates on the selected source.
 subject	release: request validated Termux daemon startup repair	tooling	Bind all five successful exact-source gates and the independently verified runtime to the sole permanent publisher; no runtime or promoted manifest changes.
