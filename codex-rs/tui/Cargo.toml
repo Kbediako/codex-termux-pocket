@@ -146,7 +146,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Keep the same executor features as the credential store, which also uses zbus.
-zbus = "4.4.0"
+zbus = "5.19.0"
 
 [target.'cfg(windows)'.dependencies]
 which = { workspace = true }
