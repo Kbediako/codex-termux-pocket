@@ -15,6 +15,11 @@ pub(crate) enum KeyEventAction {
 }
 
 impl ChatWidget {
+    pub(crate) fn current_patch_approval(&self) -> Option<(ThreadId, &str)> {
+        let patch = self.bottom_pane.current_patch_approval()?;
+        Some((patch.thread_id, &patch.id))
+    }
+
     pub(crate) fn clear_composer_selection(&mut self) {
         self.bottom_pane.clear_composer_selection();
     }
@@ -65,16 +70,17 @@ impl ChatWidget {
         self.bottom_pane.prepare_composer_mouse(event)
     }
 
-    pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
-        self.bottom_pane.set_agents_navigation_enabled(enabled);
-    }
-
     pub(crate) fn agents_navigation_key_available(&self) -> bool {
         self.bottom_pane.agents_navigation_key_available()
     }
 
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
-        self.bottom_pane.keymap_contexts()
+        let contexts = self.bottom_pane.keymap_contexts();
+        if self.visible_new_backend_control().is_some() {
+            contexts.with_backend_cycling()
+        } else {
+            contexts
+        }
     }
 
     pub(crate) fn take_key_chord_reset(&mut self) -> bool {
@@ -89,6 +95,35 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> KeyEventAction {
         self.handle_key_event_with_activation_key(key_event, /*activation_key*/ None)
+    }
+
+    pub(crate) fn set_new_backend_control(&mut self, label: Option<String>) {
+        if self.new_backend_label != label {
+            self.new_backend_label = label;
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn can_choose_new_backend(&self) -> bool {
+        !self.blocks_direct_input
+            && !self.is_user_turn_pending_or_running()
+            && self.last_turn_id().is_none()
+            && !self.input_queue.has_queued_follow_up_messages()
+            && self.input_queue.startup_submission.is_none()
+            && self.initial_user_message.is_none()
+    }
+
+    pub(super) fn visible_new_backend_control(&self) -> Option<&str> {
+        let label = self.new_backend_label.as_deref()?;
+        (self.can_choose_new_backend()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.fork_in_progress
+            && !self.shortcut_overlay_visible()
+            && !self.quick_dial_menu
+            && self.safety_recourse.is_none()
+            && !self.has_provider_error()
+            && matches!(self.external_editor_state, ExternalEditorState::Closed))
+        .then_some(label)
     }
 
     pub(crate) fn handle_key_event_with_activation_key(
@@ -113,7 +148,7 @@ impl ChatWidget {
                     modifiers,
                     kind: KeyEventKind::Press,
                     ..
-                } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c')
+                } if modifiers == KeyModifiers::CONTROL && c.eq_ignore_ascii_case(&'c')
             )
             && (self.bottom_pane.warnings_active()
                 || (!key_hint::ctrl(KeyCode::Char('r')).is_press(key_event)
@@ -130,6 +165,15 @@ impl ChatWidget {
             if self.bottom_pane.no_modal_or_popup_active() {
                 self.on_modal_or_popup_closed();
             }
+            return KeyEventAction::None;
+        }
+
+        let keymap = self.bottom_pane.keymap();
+        if keymap.app.change_host.is_pressed(key_event)
+            && self.visible_new_backend_control().is_some()
+        {
+            self.app_event_tx
+                .send(AppEvent::CycleNewConversationBackend);
             return KeyEventAction::None;
         }
 
@@ -542,7 +586,9 @@ impl ChatWidget {
 
     pub(crate) fn handle_paste(&mut self, text: String) {
         self.cancel_quick_dial_menu();
-        if self.external_writer_view && !self.bottom_pane.has_active_view() {
+        if (self.external_writer_view || self.has_provider_error())
+            && !self.bottom_pane.has_active_view()
+        {
             return;
         }
         if !self.startup_submission_has_protected_input() {

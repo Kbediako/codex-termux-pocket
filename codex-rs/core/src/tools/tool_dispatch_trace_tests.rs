@@ -90,14 +90,15 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
         request: codex_code_mode::WaitRequest,
         _preempt: Option<CancellationToken>,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
-        self.terminate(request.cell_id)
+        self.terminate(request.cell_id.into())
     }
 
     fn terminate<'a>(
         &'a self,
-        cell_id: codex_code_mode::CellId,
+        request: codex_code_mode::TerminateRequest,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
         Box::pin(async move {
+            let cell_id = request.cell_id;
             Ok(codex_code_mode::WaitOutcome::MissingCell(
                 codex_code_mode::RuntimeResponse::Result {
                     code_mode_host_duration: None,
@@ -366,6 +367,7 @@ fn test_invocation_with_payload(
         tool_name,
         source,
         payload,
+        native_call: None,
         environments: Default::default(),
     }
 }

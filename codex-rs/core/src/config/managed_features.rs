@@ -124,6 +124,7 @@ impl ManagedFeatures {
         let mut values = self.get().clone();
         for feature in [
             Feature::EnableMcpApps,
+            Feature::McpConnectionSharing,
             Feature::SecretAuthStorage,
             Feature::McpOAuthRefreshCoordination,
         ] {
@@ -243,7 +244,10 @@ fn parse_feature_requirements(
         if key == Feature::Personality.key() {
             continue;
         }
-        if key == Feature::Worktrees.key() || key == Feature::RealtimeConversation.key() {
+        if matches!(
+            key.as_str(),
+            "daemon_auto_start" | "worktrees" | "realtime_conversation"
+        ) {
             push_feature_requirement_warning(
                 &mut startup_warnings,
                 format!(

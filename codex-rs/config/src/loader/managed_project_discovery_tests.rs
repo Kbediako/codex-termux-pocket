@@ -145,6 +145,99 @@ fn assert_discovery(
 }
 
 #[tokio::test]
+async fn managed_network_requirements_control_broker_project_discovery() -> anyhow::Result<()> {
+    let mut fixture = Fixture::new()?;
+    std::fs::write(
+        fixture.home.join("config.toml"),
+        format!(
+            "{}\n[features.network_proxy]\nenabled = true\ncredential_broker = true\n",
+            fixture.trust("trusted")
+        ),
+    )?;
+    std::fs::write(
+        fixture.cwd.join(".codex/config.toml"),
+        "[features]\nshell_snapshot = false\n",
+    )?;
+    let requirements_path = fixture._temp.path().join("requirements.toml");
+    fixture.overrides.system_requirements_path = Some(requirements_path.clone());
+
+    for table in [
+        "network_proxy",
+        "experimental_network",
+        "permissions.network",
+    ] {
+        for enabled in [false, true] {
+            std::fs::write(
+                &requirements_path,
+                format!("[{table}]\nenabled = {enabled}\n"),
+            )?;
+            let (canonical, local) = fixture.load().await?;
+            let mut local_effective = TomlValue::Table(toml::map::Map::new());
+            for layer in local.config.layers {
+                merge_toml_values(&mut local_effective, &layer.toml);
+            }
+            let shell_snapshot = |value: &TomlValue| {
+                value
+                    .get("features")
+                    .and_then(|features| features.get("shell_snapshot"))
+                    .cloned()
+            };
+            let expected = (!enabled).then_some(TomlValue::Boolean(false));
+            assert_eq!(
+                (
+                    shell_snapshot(&canonical.effective_config()),
+                    shell_snapshot(&local_effective)
+                ),
+                (expected.clone(), expected),
+                "{table}, enabled = {enabled}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_discovery_rejects_invalid_network_requirements() -> anyhow::Result<()> {
+    let mut fixture = Fixture::new()?;
+    let path = fixture._temp.path().join("requirements.toml");
+    fixture.overrides.system_requirements_path = Some(path.clone());
+    for table in ["network_proxy", "experimental_network"] {
+        for (nested, message) in [
+            ("http_port = 8090", "exactly one surface"),
+            ("enabled = false", "exactly one surface"),
+            ("", "rename the managed profile"),
+            (
+                "extends = ':workspace'\nenabled = true",
+                "rename the managed profile",
+            ),
+        ] {
+            std::fs::write(&path, format!("[{table}]\n[permissions.network]\n{nested}"))?;
+            let local = load_local_config_layers_with_overrides(
+                &TestFileSystem,
+                &fixture.home,
+                &fixture.cwd,
+                &fixture.overrides,
+            )
+            .await
+            .expect_err("executor-local discovery must reject mixed network requirements");
+            let canonical = load_config_layers_state(
+                &TestFileSystem,
+                &fixture.home,
+                Some(fixture.cwd.clone()),
+                &[],
+                fixture.overrides.clone(),
+                &NoopThreadConfigLoader,
+            )
+            .await
+            .expect_err("startup must reject mixed network requirements");
+            assert_eq!(local.to_string(), canonical.to_string());
+            assert!(local.to_string().contains(message), "{local}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn managed_project_discovery_uses_file_markers_without_changing_precedence()
 -> anyhow::Result<()> {
     let fixture = Fixture::new()?;
@@ -268,6 +361,8 @@ async fn project_cannot_define_or_rebind_credentials_via_permission_profiles() -
     let fixture = Fixture::new()?;
     let trusted = r#"
 [permissions.bridge]
+[permissions.network]
+extends = "bridge"
 [permissions.vault.network.mitm]
 version = 2
 [[permissions.vault.network.mitm.actions.token.inject_request_headers]]
@@ -285,8 +380,10 @@ action = ["token"]
         format!("{}{trusted}", fixture.trust("trusted")),
     )?;
     let managed = r#"
+[permissions.network]
+enabled = true
 [permissions.documents]
-extends = "bridge"
+extends = "network"
 [permissions.documents.network.mitm]
 version = 2
 [permissions.documents.network.mitm.hooks.public]
@@ -314,6 +411,11 @@ action = ["token"]"#,
             r#"[permissions.bridge]
 extends = "vault""#,
             "inheritance of MITM profile bridge",
+        ),
+        (
+            r#"[permissions.network]
+extends = "vault""#,
+            "inheritance of MITM profile network",
         ),
     ] {
         std::fs::write(&project_config, project)?;

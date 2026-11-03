@@ -7,6 +7,7 @@
 //! Wheel input accumulates fractional rows and discards the remainder when direction reverses.
 
 use crate::key_hint::KeyBindingListExt;
+use codex_protocol::ThreadId;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -29,9 +30,9 @@ pub(crate) enum ViewAction {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MouseMode {
+enum MouseMode<'a> {
     Interactive,
-    Selection,
+    Selection(Option<(ThreadId, &'a str)>),
 }
 
 /// Transcript jumps shared with input routing so legacy terminals preserve their Alt modifier.
@@ -202,6 +203,21 @@ impl TranscriptView {
             return Some(action);
         }
         if self.select_mode.is_some() {
+            if self.is_search_editing() {
+                let (code, modifiers) =
+                    crate::key_hint::normalize_key_parts(key.code, key.modifiers);
+                let accepting = code == KeyCode::Enter && modifiers == KeyModifiers::NONE;
+                let cancelling = code == KeyCode::Esc
+                    || (code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL);
+                if self.handle_search_key(key, cells) {
+                    if accepting && self.search.is_reading() {
+                        self.accept_search_into_select_mode(cells);
+                    } else if cancelling {
+                        self.restore_select_search_origin();
+                    }
+                    return Some(ViewAction::Changed);
+                }
+            }
             return self
                 .handle_select_mode_key(key, cells)
                 .or(Some(ViewAction::Changed));
@@ -236,25 +252,48 @@ impl TranscriptView {
         cells: &[Arc<dyn HistoryCell>],
     ) -> Option<ViewAction> {
         if self.select_mode.is_some() {
-            return self.handle_selection_mouse(event, cells);
+            return self.handle_selection_mouse(event, cells, /*patch_approval*/ None);
         }
         self.handle_mouse_with_mode(event, cells, MouseMode::Interactive)
     }
 
-    /// Handles selection and scrolling without activating transcript content.
+    /// Modals allow transcript disclosure, while select mode keeps clicks for text selection.
     pub(crate) fn handle_selection_mouse(
         &mut self,
         event: MouseEvent,
         cells: &[Arc<dyn HistoryCell>],
+        patch_approval: Option<(ThreadId, &str)>,
     ) -> Option<ViewAction> {
-        self.handle_mouse_with_mode(event, cells, MouseMode::Selection)
+        let endpoint_changed = matches!(
+            event.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        );
+        let before = self
+            .selection
+            .as_ref()
+            .map(|selection| (selection.start, selection.end, selection.unit()));
+        let action =
+            self.handle_mouse_with_mode(event, cells, MouseMode::Selection(patch_approval));
+        let after = self
+            .selection
+            .as_ref()
+            .map(|selection| (selection.start, selection.end, selection.unit()));
+        if endpoint_changed && before != after {
+            if self.has_selection_range() {
+                self.disclosure.resume_after_approval = None;
+            }
+            self.adopt_select_mouse_range();
+        }
+        action
     }
 
     fn handle_mouse_with_mode(
         &mut self,
         event: MouseEvent,
         cells: &[Arc<dyn HistoryCell>],
-        mode: MouseMode,
+        mode: MouseMode<'_>,
     ) -> Option<ViewAction> {
         if mode == MouseMode::Interactive
             && let Some(action) = self.handle_follow_control_mouse(event)
@@ -465,12 +504,17 @@ impl TranscriptView {
         &mut self,
         event: MouseEvent,
         cells: &[Arc<dyn HistoryCell>],
-        mode: MouseMode,
+        mode: MouseMode<'_>,
     ) -> Option<ViewAction> {
-        if mode == MouseMode::Interactive
+        let was_following = self.is_following();
+        if !self.is_select_mode()
             && event.modifiers.is_empty()
             && self.toggle_disclosure_at(cells, event.column, event.row)
         {
+            // Keep the patch anchored for inspection, then follow again when the prompt closes.
+            if was_following && let MouseMode::Selection(Some((thread_id, id))) = mode {
+                self.disclosure.resume_after_approval = Some((thread_id, id.to_owned()));
+            }
             return Some(ViewAction::Changed);
         }
         self.disclosure.focused = None;

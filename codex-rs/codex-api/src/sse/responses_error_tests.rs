@@ -16,6 +16,99 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;
 
+#[test]
+fn audio_validation_codes_map_to_non_retryable_audio_input_errors_on_all_transports() {
+    for code in [
+        "audio_too_large",
+        "audio_too_short",
+        "invalid_audio",
+        "invalid_audio_data",
+        "invalid_audio_format",
+        "missing_audio_sample_rate",
+    ] {
+        let detail = json!({"code": code, "message": "Invalid recording."});
+        let http_error = map_api_error(crate::error::ApiError::Transport(
+            crate::TransportError::Http {
+                status: StatusCode::BAD_REQUEST,
+                url: None,
+                headers: None,
+                body: Some(json!({"error": detail}).to_string()),
+                retry_after: None,
+            },
+        ));
+        let mut errors = vec![http_error];
+        for failure in [
+            json!({"type": "error", "error": detail}),
+            json!({"type": "response.failed", "response": {"error": detail}}),
+        ] {
+            let event = serde_json::from_value(failure).unwrap();
+            errors.push(map_api_error(
+                process_responses_event(event).unwrap_err().into_api_error(),
+            ));
+        }
+        for error in errors {
+            assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
+            assert!(matches!(
+                error.details(),
+                codex_protocol::error::CodexErrorDetails::InvalidAudioInput { .. }
+            ));
+            assert_eq!(error.to_string(), "Invalid recording.");
+        }
+    }
+}
+
+/// Only the explicit policy capacity code changes overload attribution.
+#[tokio::test(start_paused = true)]
+async fn policy_capacity_classification_preserves_overload_retry_behavior() {
+    for (code, error_type, expected) in [
+        (
+            "policy_capacity_unavailable",
+            None,
+            CodexErrorInfo::PolicyCapacityUnavailable,
+        ),
+        (
+            "server_is_overloaded",
+            Some("policy_error"),
+            CodexErrorInfo::ServerOverloaded,
+        ),
+        (
+            "server_is_overloaded",
+            None,
+            CodexErrorInfo::ServerOverloaded,
+        ),
+    ] {
+        for retry_after in [Some("3"), None] {
+            let event = serde_json::from_value(json!({
+                "type": "response.failed",
+                "response": {"error": {
+                    "type": error_type,
+                    "code": code,
+                    "headers": {"Retry-After": retry_after},
+                }},
+            }))
+            .unwrap();
+            let error = map_api_error(process_responses_event(event).unwrap_err().into_api_error());
+            assert_eq!(
+                (
+                    error.to_codex_protocol_error(),
+                    error.retry_delay(/*retry_count*/ 1),
+                    error.to_string()
+                ),
+                (
+                    expected.clone(),
+                    retry_after.map(|_| Duration::from_secs(3)),
+                    if expected == CodexErrorInfo::PolicyCapacityUnavailable {
+                        "Policy-restricted capacity is unavailable. Please try again later."
+                    } else {
+                        "Selected model is at capacity. Please try a different model."
+                    }
+                    .to_string()
+                )
+            );
+        }
+    }
+}
+
 /// Flex failures remain terminal even with retry headers and a later completed event.
 #[tokio::test(start_paused = true)]
 async fn flex_failure_with_retry_header_ends_stream_immediately() {

@@ -34,7 +34,7 @@ const FIRST_DISPATCH_FUNCTION_KEY: u8 = codex_config::types::MAX_FUNCTION_KEY + 
 const LAST_DISPATCH_FUNCTION_KEY: u8 = u8::MAX;
 const MAX_LEADER_CHORD_BINDINGS: usize = 1024;
 
-pub(super) mod quick_dial_defaults;
+pub(super) mod leader_defaults;
 const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
     ("cancel", ctrl(KeyCode::Char('c'))),
     ("resume_picker.toggle_transcript", ctrl(KeyCode::Char('t'))),
@@ -52,6 +52,8 @@ const WARNINGS_FOCUS: u32 = 1 << 16;
 const VOICE_TOGGLE: u32 = 1 << 17;
 const RAW_KEY_CAPTURE: u32 = 1 << 18;
 const VOICE_TOGGLE_BLOCKED: u32 = 1 << 19;
+const TRANSCRIPT_ACTIONS: u32 = 1 << 20;
+const BACKEND_CYCLING: u32 = 1 << 21;
 
 const TRANSCRIPT_BROWSING: u32 = 1 << 14;
 
@@ -66,6 +68,11 @@ impl KeymapContextSet {
         Self(context_bit(KeymapContext::List) | context_bit(KeymapContext::Global) | ACTIVITY_FOCUS)
     }
 
+    /// Offer backend cycling only while the new conversation control is visible.
+    pub(crate) const fn with_backend_cycling(self) -> Self {
+        Self(self.0 | BACKEND_CYCLING)
+    }
+
     /// Add only the detail-close action to an owned composer path.
     pub(crate) const fn with_transcript_close(self) -> Self {
         Self(self.0 | context_bit(KeymapContext::Pager) | TRANSCRIPT_CLOSE)
@@ -78,6 +85,15 @@ impl KeymapContextSet {
             context_bit(KeymapContext::Pager)
                 | context_bit(KeymapContext::Global)
                 | TRANSCRIPT_BROWSING,
+        )
+    }
+
+    /// Transcript overlays admit pager bindings plus the explicit selection and Find actions.
+    pub(crate) const fn transcript() -> Self {
+        Self(
+            context_bit(KeymapContext::Pager)
+                | context_bit(KeymapContext::Global)
+                | TRANSCRIPT_ACTIONS,
         )
     }
 
@@ -142,6 +158,9 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if action.context == KeymapContext::Global && action.action == "change_host" {
+            return self.0 & BACKEND_CYCLING != 0;
+        }
         if action.context == KeymapContext::Chat && action.action == "open_presets" {
             return self.contains(KeymapContext::Chat)
                 && self.contains(KeymapContext::Global)
@@ -154,13 +173,19 @@ impl KeymapContextSet {
         self.contains(action.context)
             && (self.0 & ACTIVITY_FOCUS == 0
                 || action.context != KeymapContext::Global
-                || matches!(action.action, "focus_activity" | "find_transcript"))
+                || matches!(
+                    action.action,
+                    "focus_activity" | "find_transcript" | "select_transcript"
+                ))
             && (self.0 & TRANSCRIPT_CLOSE == 0
                 || action.context != KeymapContext::Pager
                 || action.action == "close_transcript")
             && (self.0 & TRANSCRIPT_BROWSING == 0
                 || action.context != KeymapContext::Global
-                || action.action == "open_transcript")
+                || matches!(action.action, "open_transcript" | "select_transcript"))
+            && (self.0 & TRANSCRIPT_ACTIONS == 0
+                || action.context != KeymapContext::Global
+                || matches!(action.action, "find_transcript" | "select_transcript"))
             && (!self.is_warnings()
                 || action.context != KeymapContext::List
                 || action.action != "accept")
@@ -214,9 +239,17 @@ impl RuntimeChordBinding {
         self.spec.starts_with("leader ")
     }
 
-    /// Leader consumers also remain active beside pager actions on native transcript surfaces.
+    /// Transcript selection remains active beside pager actions on native transcript surfaces.
     fn overlaps(&self, action: KeymapActionId) -> bool {
         self.action.overlaps(action)
+            || (matches!(
+                (self.action.context, self.action.action),
+                (KeymapContext::Global, "select_transcript")
+            ) || matches!(
+                (action.context, action.action),
+                (KeymapContext::Global, "select_transcript")
+            )) && KeymapContextSet::transcript().contains_action(self.action)
+                && KeymapContextSet::transcript().contains_action(action)
             || self.is_leader()
                 && [
                     KeymapContextSet::browsing(),
@@ -380,6 +413,8 @@ Reduce `tui.keymap.global.leader` alternatives or `leader ...` bindings."
                     !(contexts.0 & TRANSCRIPT_CLOSE != 0
                         && binding.action.context == KeymapContext::Pager
                         && binding.action.action == "close_transcript"),
+                    !(contexts.0 & TRANSCRIPT_ACTIONS != 0
+                        && binding.action.context == KeymapContext::Pager),
                     contexts.is_warnings() && binding.action.context != KeymapContext::List,
                     contexts.is_warnings() && binding.action.context == KeymapContext::Global,
                 )
@@ -493,6 +528,7 @@ impl KeyChordMatcher {
         {
             let label = match binding.action.action {
                 "open_presets" if pending.started_at.is_none() => "presets",
+                "change_host" => "cycle",
                 "focus_activity" => "activity",
                 "find_transcript" => "find",
                 "open_warnings" => "warnings",
@@ -644,7 +680,7 @@ fn dispatch_binding(action: KeymapActionId) -> Option<KeyBinding> {
     ))
 }
 
-fn dispatch_event(action: KeymapActionId) -> Option<KeyEvent> {
+pub(crate) fn dispatch_event(action: KeymapActionId) -> Option<KeyEvent> {
     let (code, modifiers) = dispatch_binding(action)?.parts();
     Some(KeyEvent::new(code, modifiers))
 }
@@ -666,7 +702,7 @@ pub(crate) fn is_dispatch_token_event(event: KeyEvent) -> bool {
     )
 }
 
-fn chord_stroke_matches(binding: KeyBinding, key_event: KeyEvent) -> bool {
+pub(crate) fn chord_stroke_matches(binding: KeyBinding, key_event: KeyEvent) -> bool {
     let ctrl_slash = crate::key_hint::ctrl(KeyCode::Char('/'));
     let ctrl_seven = crate::key_hint::ctrl(KeyCode::Char('7'));
 
@@ -745,6 +781,19 @@ Unbind or remap the existing shortcut before using it as a chord prefix.",
             if previous.action != binding.action
                 && (previous.overlaps(binding.action) || binding.overlaps(previous.action))
                 && previous.chord == binding.chord
+                && !matches!(
+                    (
+                        (previous.action.context, previous.action.action),
+                        (binding.action.context, binding.action.action),
+                    ),
+                    (
+                        (KeymapContext::Global, "find_transcript"),
+                        (KeymapContext::Pager, "find")
+                    ) | (
+                        (KeymapContext::Pager, "find"),
+                        (KeymapContext::Global, "find_transcript")
+                    )
+                )
             {
                 return Err(format!(
                     "Ambiguous `{}` = `{}`: the same chord is already assigned to `{}`. \

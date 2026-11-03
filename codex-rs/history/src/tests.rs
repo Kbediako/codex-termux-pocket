@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
@@ -584,6 +585,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
 #[test]
 fn compacted_resume_metadata_presence_round_trips_empty_values() -> Result<()> {
     let resume_metadata = CompactionResumeMetadata {
+        dynamic_tools: None,
         multi_agent_version: None,
         last_started_turn_id: None,
         turn_attribution: None,
@@ -695,6 +697,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: Some(CompactionResumeMetadata {
+            dynamic_tools: None,
             multi_agent_version: Some(MultiAgentVersion::V2),
             last_started_turn_id: Some("turn-1".to_string()),
             turn_attribution: None,
@@ -713,6 +716,79 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         panic!("expected legacy compacted item");
     };
     assert_eq!(legacy.replacement_history, vec![response_item]);
+    Ok(())
+}
+
+#[test]
+fn uploaded_audio_round_trips_in_canonical_message_content() -> Result<()> {
+    let mut message = response_message("user");
+    let ResponseItem::Message { content, .. } = &mut message else {
+        unreachable!()
+    };
+    content.push(ContentItem::InputAudio {
+        audio: AudioReference::Inline {
+            audio_url: "data:audio/wav;base64,aGVsbG8=".to_string(),
+        },
+    });
+    content.push(ContentItem::InputAudio {
+        audio: AudioReference::File {
+            file_id: "file_audio".to_string(),
+        },
+    });
+    content.push(ContentItem::InputText {
+        text: "after audio".to_string(),
+    });
+    let envelope = ResponseItemEnvelope::new(message);
+    let response = RolloutItem::ResponseItem(envelope.clone());
+    let compacted = RolloutItem::Compacted(Box::new(CompactedItem {
+        message: String::new(),
+        replacement_history: Some(vec![envelope.clone()]),
+        guardian_history: Some(GuardianHistoryCheckpoint(vec![envelope])),
+        retained_context: None,
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+        resume_metadata: None,
+    }));
+    for (item, paths) in [
+        (response, vec!["/payload/content"]),
+        (
+            compacted,
+            vec![
+                "/payload/replacement_history/0/content",
+                "/payload/guardian_history/0/content",
+            ],
+        ),
+    ] {
+        let mut serialized = serde_json::to_value(&item)?;
+        for path in paths {
+            assert_eq!(
+                serialized.pointer(path),
+                Some(&json!([
+                    {"type": "input_text", "text": "hello"},
+                    {"type": "input_audio", "audio_url": "data:audio/wav;base64,aGVsbG8="},
+                    {"type": "input_audio", "file_id": "file_audio"},
+                    {"type": "input_text", "text": "after audio"},
+                ]))
+            );
+            // Rollouts from the prototype can contain this extra field. Reading
+            // them must preserve the same file reference in every history shape.
+            serialized.pointer_mut(path).unwrap()[2]["duration_ms"] = json!(1_000);
+        }
+        match (serde_json::from_value::<RolloutItem>(serialized)?, item) {
+            (RolloutItem::ResponseItem(restored), RolloutItem::ResponseItem(original)) => {
+                assert_eq!(restored, original)
+            }
+            (RolloutItem::Compacted(restored), RolloutItem::Compacted(original)) => {
+                assert_eq!(restored, original)
+            }
+            _ => panic!("unexpected rollout variant"),
+        }
+    }
     Ok(())
 }
 
@@ -848,7 +924,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 12);
+    assert_eq!(variants.len(), 13);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");
@@ -1049,5 +1125,83 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
             .get_multi_agent_version(),
         Some(MultiAgentVersion::V2)
     );
+    Ok(())
+}
+
+#[test]
+fn dynamic_tools_updates_survive_replay_and_explicit_clear() -> Result<()> {
+    let tool = codex_protocol::dynamic_tools::DynamicToolSpec::Function(
+        codex_protocol::dynamic_tools::DynamicToolFunctionSpec {
+            name: "check_release".into(),
+            description: "Check the release.".into(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            defer_loading: false,
+        },
+    );
+    let thread_id = ThreadId::new();
+    let mut items = vec![RolloutItem::SessionMeta(Box::new(SessionMetaLine {
+        meta: SessionMeta {
+            id: thread_id,
+            dynamic_tools: Some(vec![tool.clone()]),
+            ..SessionMeta::default()
+        },
+        git: None,
+    }))];
+    let mut replacement = tool.clone();
+    if let codex_protocol::dynamic_tools::DynamicToolSpec::Function(tool) = &mut replacement {
+        tool.name = "check_deployment".into();
+    }
+    let checkpoint = |thread_id: ThreadId, tools: Vec<DynamicToolSpec>| -> Result<RolloutItem> {
+        Ok(RolloutItem::Compacted(Box::new(serde_json::from_value(
+            json!({
+                "message": "summary",
+                "replacement_history": [],
+                "window_number": 1,
+                "resume_metadata": {
+                    "dynamic_tools": {"thread_id": thread_id, "tools": tools}
+                }
+            }),
+        )?)))
+    };
+    items.push(checkpoint(ThreadId::new(), vec![replacement.clone()])?);
+    assert_eq!(
+        latest_dynamic_tools(&items),
+        Some(std::slice::from_ref(&tool))
+    );
+    for expected in [vec![replacement], Vec::new()] {
+        for item in [
+            checkpoint(thread_id, expected.clone())?,
+            RolloutItem::DynamicToolsUpdated {
+                thread_id,
+                tools: expected.clone(),
+            },
+        ] {
+            items.push(checkpoint(thread_id, vec![tool.clone()])?);
+            items.push(item);
+            // Metadata-only writes and inherited records cannot resurrect a replaced catalog.
+            items.push(items[0].clone());
+            items.push(RolloutItem::DynamicToolsUpdated {
+                thread_id: ThreadId::new(),
+                tools: vec![tool.clone()],
+            });
+            items.push(checkpoint(ThreadId::new(), vec![tool.clone()])?);
+            let serialized = serde_json::to_vec(&items)?;
+            let replayed: Vec<RolloutItem> = serde_json::from_slice(&serialized)?;
+            assert_eq!(
+                InitialHistory::Forked(replayed.clone()).get_dynamic_tools(),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                InitialHistory::Resumed(ResumedHistory {
+                    history_revision: None,
+                    conversation_id: thread_id,
+                    history: Arc::new(replayed),
+                    rollout_path: None,
+                })
+                .get_dynamic_tools(),
+                Some(expected.clone())
+            );
+        }
+    }
     Ok(())
 }

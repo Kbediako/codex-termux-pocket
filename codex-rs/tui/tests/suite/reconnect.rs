@@ -41,6 +41,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
     let server_cwd = workspace_path.clone();
     let id = "00000000-0000-0000-0000-000000000001";
+    let server_home = codex_home.path().to_path_buf();
     let server = tokio::spawn(async move {
         let mut methods = Vec::new();
         let mut restore_rx = Some(restore_rx);
@@ -52,8 +53,8 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             "status": {"type": "active", "activeFlags": []}, "cwd": server_cwd,
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
-        // The first connection checks daemon compatibility before TUI startup.
-        for connection in -1..7 {
+        // Startup probes the running daemon and checks compatibility before opening the session.
+        for connection in -2..7 {
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -95,7 +96,8 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                         .send(Message::Text(
                             json!({"id": request.id, "error": {
                                 "code": -32600,
-                                "message": format!("thread {id} is closing; retry after the thread is closed")
+                                "message": "Server is draining; retry after reconnecting",
+                                "data": {"reason": "serverShuttingDown"}
                             }})
                             .to_string()
                             .into(),
@@ -104,7 +106,9 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 }
                 let result = match request.method.as_str() {
-                    "initialize" => json!({"userAgent": "reconnect-pty"}),
+                    "initialize" => {
+                        json!({"userAgent": "reconnect-pty/0.0.0", "codexHome": server_home, "platformFamily": std::env::consts::FAMILY, "platformOs": std::env::consts::OS})
+                    }
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
                         json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
@@ -140,8 +144,8 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                             );
                         }
                         json!({"thread": thread, "model": "gpt-5.6-terra", "modelProvider": "openai",
-                            "cwd": server_cwd, "approvalPolicy": if starting { "never" } else { "on-request" }, "approvalsReviewer": "user",
-                            "sandbox": {"type": if starting { "dangerFullAccess" } else { "readOnly" }}, "reasoningEffort": null})
+                            "cwd": server_cwd, "approvalPolicy": if starting { "on-request" } else { "never" }, "approvalsReviewer": "user",
+                            "sandbox": {"type": if starting { "readOnly" } else { "workspaceWrite" }}, "reasoningEffort": null})
                     }
                     "turn/start" => {
                         let params = request.params.as_ref().unwrap();
@@ -152,7 +156,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                                 params["sandboxPolicy"],
                                 params["permissions"]
                             ]),
-                            json!(["never", {"type": "dangerFullAccess"}, null])
+                            json!(["on-request", {"type": "readOnly", "networkAccess": false}, null])
                         );
                         json!({"turn": {"id": "fresh", "items": [], "status": "inProgress", "error": null}})
                     }
@@ -202,8 +206,17 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
         }
         Ok::<_, anyhow::Error>(methods)
     });
-    let mut terminal =
-        PtyCodex::start(&workspace_path, codex_home, &["--yolo", "--no-alt-screen"])?;
+    let mut terminal = PtyCodex::start(
+        &workspace_path,
+        codex_home,
+        &[
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "on-request",
+            "--no-alt-screen",
+        ],
+    )?;
     terminal.wait_for_startup()?;
     let mut disconnect_tx = Some(disconnect_tx);
     let mut restore_tx = Some(restore_tx);

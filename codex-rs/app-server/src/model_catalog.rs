@@ -3,12 +3,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_config::ConfigLayerStack;
 use codex_core::config::Config;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::openai_models::ModelPreset;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio::sync::Mutex;
 
 use crate::config_manager::ConfigManager;
@@ -48,9 +50,26 @@ impl ModelCatalog {
         }
     }
 
+    /// Loads the same startup context used to reload the catalog after account setup.
+    pub(crate) async fn load_startup_config_layers(&self) -> std::io::Result<ConfigLayerStack> {
+        let cwd = self
+            .startup_cwd
+            .as_deref()
+            .map(AbsolutePathBuf::from_absolute_path)
+            .transpose()?;
+        self.config_manager.load_config_layers(cwd).await
+    }
+
     /// Marks catalog configuration stale after an account transition.
     pub(crate) async fn invalidate(&self) {
         self.state.lock().await.needs_reload = true;
+    }
+
+    pub(crate) async fn invalidate_if_current_provider(&self, provider_id: &str) {
+        let mut state = self.state.lock().await;
+        if state.config.model_provider_id == provider_id {
+            state.needs_reload = true;
+        }
     }
 
     pub(crate) async fn set_api_key_model_discovery_enabled(&self, enabled: bool) {

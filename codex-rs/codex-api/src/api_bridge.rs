@@ -24,6 +24,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::Retryable { retry_after, .. }
         | ApiError::RateLimitExceeded { retry_after, .. }
         | ApiError::ServerOverloaded { retry_after }
+        | ApiError::PolicyCapacityUnavailable { retry_after }
         | ApiError::Transport(TransportError::Http { retry_after, .. }) => *retry_after,
         ApiError::Transport(_)
         | ApiError::Api { .. }
@@ -36,6 +37,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
         | ApiError::CyberPolicy { .. }
@@ -64,6 +66,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             CodexErr::new(CodexErrorDetails::ResponseIncomplete(incomplete))
         }
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
+        ApiError::PolicyCapacityUnavailable { .. } => {
+            CodexErr::new(CodexErrorDetails::PolicyCapacityUnavailable)
+        }
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -79,6 +84,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             })
         }
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::InvalidAudioInput { message } => {
+            CodexErr::new(CodexErrorDetails::InvalidAudioInput { message })
+        }
         ApiError::ModelNotFound { message, status } => {
             CodexErr::new(CodexErrorDetails::ModelNotFound { message, status })
         }
@@ -115,6 +123,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                     && let Some(error) = provider_error
                 {
                     match error.get("code").and_then(Value::as_str) {
+                        Some("policy_capacity_unavailable") => {
+                            return CodexErr::new(CodexErrorDetails::PolicyCapacityUnavailable);
+                        }
                         Some("server_is_overloaded") => return CodexErr::ServerOverloaded,
                         Some("slow_down") => {
                             return CodexErr::new(CodexErrorDetails::RateLimitExceeded(

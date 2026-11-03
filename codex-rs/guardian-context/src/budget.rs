@@ -1,9 +1,13 @@
 //! Payload-free accounting for composed sections and complete Guardian requests.
+//! Elastic section policies are validated without changing fixed request preparation.
 //! Text and image bytes stay separate. Hosts provide existing-context estimates;
 //! the shared wire estimate reserves image tokens without counting base64 as text.
 
+use codex_protocol::openai_models::CatalogModel;
+use codex_protocol::openai_models::ModelOrigin;
 use std::io::Write;
 
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -85,14 +89,11 @@ pub const DEFAULT_MAX_INPUT_TOKENS: usize = 128_000;
 
 /// Applies the same configured-window cap and effective percentage as sync review.
 /// Async callers supply no parent-model override.
-pub fn effective_input_token_limit(
-    model: &codex_protocol::openai_models::ModelInfo,
-    configured_window: Option<i64>,
-) -> usize {
+pub fn effective_input_token_limit(model: &CatalogModel, configured_window: Option<i64>) -> usize {
     let supported = model
         .resolved_context_window()
         .unwrap_or(DEFAULT_MAX_INPUT_TOKENS as i64);
-    let supported = if model.used_fallback_model_metadata {
+    let supported = if model.origin == ModelOrigin::Synthetic {
         supported.min(DEFAULT_MAX_INPUT_TOKENS as i64)
     } else {
         supported
@@ -111,6 +112,233 @@ pub struct RequestBudget {
     pub max_input_tokens: usize,
     pub existing_context_tokens: usize,
 }
+
+/// Section policies named for the source section that owns the evidence.
+/// The transcript has separate message and tool groups despite sharing one section.
+/// Entry caps apply to section text; minimum allocations include Required usage.
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ElasticSection {
+    TranscriptMessages,
+    TranscriptTools,
+    #[serde(alias = "root_messages")]
+    RootConversationMessages,
+    #[serde(alias = "retained_instructions")]
+    RetainedUserInstructions,
+    #[serde(alias = "user_answers")]
+    TrustedUserAnswers,
+    #[serde(alias = "sender_messages")]
+    SenderUserMessages,
+    #[serde(
+        alias = "tool_descriptions",
+        alias = "planned_action_tool_descriptions"
+    )]
+    PlannedAction,
+    PreviousReviews,
+    TrustedTools,
+    TrustedSkills,
+    #[serde(alias = "images")]
+    TranscriptImages,
+    #[serde(alias = "repl_evidence")]
+    NodeReplEvidence,
+    PermissionContext,
+}
+
+impl ElasticSection {
+    const ALL: &[Self] = &[
+        Self::TranscriptMessages,
+        Self::TranscriptTools,
+        Self::RootConversationMessages,
+        Self::RetainedUserInstructions,
+        Self::TrustedUserAnswers,
+        Self::SenderUserMessages,
+        Self::PlannedAction,
+        Self::PreviousReviews,
+        Self::TrustedTools,
+        Self::TrustedSkills,
+        Self::TranscriptImages,
+        Self::NodeReplEvidence,
+        Self::PermissionContext,
+    ];
+}
+
+/// Per-group elastic limits, validated when decoded; not an activation switch.
+/// Entry caps apply to required and optional supporting text; exact actions stay whole.
+/// Omitted groups use the synchronous entry caps,
+/// reserving one capped entry as their minimum.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElasticBudgetConfig {
+    #[serde(default)]
+    pub sections: std::collections::BTreeMap<ElasticSection, ElasticSectionLimits>,
+}
+
+impl ElasticBudgetConfig {
+    /// Includes fallback policies for sections omitted from the configured map.
+    pub fn total_minimum_tokens(&self) -> u128 {
+        ElasticSection::ALL
+            .iter()
+            .copied()
+            .map(|section| self.section_limits(section).min_total_section_tokens() as u128)
+            .sum()
+    }
+
+    /// Required reservations use exactly the nominal Guardian input budget.
+    pub fn validate(&self) -> Result<(), crate::SectionError> {
+        let total = self.total_minimum_tokens();
+        if total != DEFAULT_MAX_INPUT_TOKENS as u128 {
+            return Err(crate::SectionError::SectionMinimumTotalMismatch { total });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn section_limits(&self, section: ElasticSection) -> ElasticSectionLimits {
+        self.sections.get(&section).copied().unwrap_or_else(|| {
+            let entries = crate::ContextProfile::synchronous().transcript.entry_limits;
+            let tokens = if section == ElasticSection::TranscriptMessages {
+                entries.message_tokens
+            } else if section == ElasticSection::TranscriptTools {
+                entries.tool_tokens
+            } else {
+                crate::preparation::MAX_INSTRUCTION_TOKENS
+            };
+            ElasticSectionLimits {
+                min_total_section_tokens: tokens,
+                max_section_entry_tokens: tokens,
+                max_total_section_tokens: None,
+            }
+        })
+    }
+}
+
+/// Section reservation, allocation ceiling and per-entry text allowance.
+/// The minimum funds Required supporting records; Optional candidates can grow the
+/// section up to its maximum.
+/// Preparation must cap text entries once, including framing and omission markers,
+/// before measuring demand. Entries that fit keep their original representation.
+/// Entry caps cannot exceed the existing text-part delivery allowance.
+/// Exact actions use protected global space. Opaque native payloads and images stay
+/// whole and use section/global space rather than the text entry cap.
+/// Required supporting records use only the minimum. Effective section minimums
+/// must sum to DEFAULT_MAX_INPUT_TOKENS. Unused Required reservations fund Optional
+/// evidence up to each section maximum; Optional items have no separate minimum.
+/// Actual request admission still accounts for history, framing and exact actions.
+/// These settings do not change storage bounds or activate elastic allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ElasticSectionLimits {
+    min_total_section_tokens: usize,
+    max_section_entry_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_total_section_tokens: Option<usize>,
+}
+
+impl ElasticSectionLimits {
+    /// Reject empty quotas, oversized entries and minimums that cannot hold one capped entry.
+    pub fn new(
+        min_total_section_tokens: usize,
+        max_section_entry_tokens: usize,
+    ) -> Result<Self, ElasticSectionLimitsError> {
+        if min_total_section_tokens == 0 || max_section_entry_tokens == 0 {
+            return Err(ElasticSectionLimitsError::ZeroTokens);
+        }
+        if max_section_entry_tokens > min_total_section_tokens {
+            return Err(ElasticSectionLimitsError::EntryExceedsMinimum);
+        }
+        if max_section_entry_tokens > crate::composition::MAX_TEXT_PART_ESTIMATED_TOKENS {
+            return Err(ElasticSectionLimitsError::EntryExceedsDeliveryLimit);
+        }
+        Ok(Self {
+            min_total_section_tokens,
+            max_section_entry_tokens,
+            max_total_section_tokens: None,
+        })
+    }
+
+    /// Sets the section's allocation ceiling.
+    /// Absence leaves the global request budget as the upper bound.
+    pub fn with_max_total_section_tokens(
+        mut self,
+        maximum: usize,
+    ) -> Result<Self, ElasticSectionLimitsError> {
+        if maximum < self.min_total_section_tokens {
+            return Err(ElasticSectionLimitsError::MaximumBelowMinimum);
+        }
+        self.max_total_section_tokens = Some(maximum);
+        Ok(self)
+    }
+
+    pub fn max_total_section_tokens(self) -> Option<usize> {
+        self.max_total_section_tokens
+    }
+
+    pub fn min_total_section_tokens(self) -> usize {
+        self.min_total_section_tokens
+    }
+
+    pub fn max_section_entry_tokens(self) -> usize {
+        self.max_section_entry_tokens
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ElasticSectionLimits {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            min_total_section_tokens: usize,
+            max_section_entry_tokens: usize,
+            max_total_section_tokens: Option<usize>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        let limits = Self::new(
+            fields.min_total_section_tokens,
+            fields.max_section_entry_tokens,
+        )
+        .map_err(serde::de::Error::custom)?;
+        fields
+            .max_total_section_tokens
+            .map_or(Ok(limits), |maximum| {
+                limits.with_max_total_section_tokens(maximum)
+            })
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Invalid elastic limits cannot enter preparation through construction or decoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ElasticSectionLimitsError {
+    ZeroTokens,
+    EntryExceedsMinimum,
+    EntryExceedsDeliveryLimit,
+    MaximumBelowMinimum,
+}
+
+impl std::fmt::Display for ElasticSectionLimitsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroTokens => {
+                formatter.write_str("elastic section token limits must be greater than zero")
+            }
+            Self::EntryExceedsMinimum => formatter
+                .write_str("min_total_section_tokens must be at least max_section_entry_tokens"),
+            Self::MaximumBelowMinimum => formatter
+                .write_str("max_total_section_tokens must be at least min_total_section_tokens"),
+            Self::EntryExceedsDeliveryLimit => write!(
+                formatter,
+                "max_section_entry_tokens must not exceed {}",
+                crate::composition::MAX_TEXT_PART_ESTIMATED_TOKENS
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ElasticSectionLimitsError {}
 
 /// Size of section evidence, excluding enclosing message serialization overhead.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -139,11 +367,16 @@ impl SectionCost {
             } => {
                 self.image_count = self.image_count.saturating_add(1);
             }
-            ContentItem::InputAudio { audio_url } => {
-                // Guardian currently has no audio contributor. Count a future opaque
-                // payload conservatively until its consumer supplies modality costs.
+            ContentItem::InputAudio {
+                audio: AudioReference::Inline { audio_url },
+            } => {
+                // Guardian has no audio contributor. Keep the existing inline
+                // transport cost, but do not treat a file handle as evidence.
                 self.text_bytes = self.text_bytes.saturating_add(audio_url.len());
             }
+            ContentItem::InputAudio {
+                audio: AudioReference::File { .. },
+            } => {}
         }
         self
     }
@@ -192,7 +425,11 @@ impl ComposedContext {
                         .iter()
                         .fold(SectionCost::default(), SectionCost::add_content),
                     item => SectionCost {
-                        text_bytes: ByteCount::item(item),
+                        text_bytes: ByteCount::item(item).saturating_add(
+                            crate::native_tool_call::evidence_output(item)
+                                .as_ref()
+                                .map_or(0, ByteCount::item),
+                        ),
                         ..SectionCost::default()
                     },
                 },
@@ -289,7 +526,9 @@ pub(super) fn section_tokens(section: &SectionOutput) -> usize {
             .iter()
             .map(|item| section_content_tokens(&item.content))
             .fold(content_framing_tokens(content.len()), usize::saturating_add),
-        SectionDelivery::Message(message) => estimate_input_tokens(&message.content.item),
+        SectionDelivery::Message(message) => {
+            crate::native_tool_call::estimate_tokens(&message.content.item)
+        }
     }
 }
 
@@ -320,10 +559,10 @@ fn adjusted_tokens(mut bytes: usize, content: &[ContentItem]) -> usize {
 }
 
 #[derive(Default)]
-struct ByteCount(usize);
+pub(crate) struct ByteCount(usize);
 
 impl ByteCount {
-    fn item(item: &ResponseItem) -> usize {
+    pub(crate) fn item(item: &ResponseItem) -> usize {
         Self::measure(|counter| serde_json::to_writer(counter, item))
     }
 
@@ -349,4 +588,4 @@ impl Write for ByteCount {
 
 #[cfg(test)]
 #[path = "budget_tests.rs"]
-mod tests;
+pub(crate) mod tests;

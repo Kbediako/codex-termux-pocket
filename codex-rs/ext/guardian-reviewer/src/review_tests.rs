@@ -64,10 +64,10 @@ impl ReviewHost for GatedHost {
                 script_path: None,
                 approval_request_source: GuardianApprovalRequestSource::MainTurn,
                 reviewed_action: GuardianReviewedAction::RequestPermissions {},
-                action: GuardianAssessmentAction::RequestPermissions {
+                action: Some(GuardianAssessmentAction::RequestPermissions {
                     reason: None,
                     permissions: Default::default(),
-                },
+                }),
                 review_reason: reason,
                 timeout: Some(crate::REVIEW_TIMEOUT),
                 model_context: ModelInvocationContext {
@@ -160,6 +160,7 @@ async fn async_approval_revalidates_without_waiting_for_tracked_cleanup(state: A
     let analytics = AnalyticsEventsClient::disabled();
     let action = json!({});
     let request = ReviewRequest {
+        serving_assessment: None,
         host: host.clone(),
         approval_id: "approval",
         tool_call_id: Some("call"),

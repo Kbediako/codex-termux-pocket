@@ -13,6 +13,7 @@ use codex_core::AgentTurnOutcome;
 use codex_core::DeliveryReceipt;
 use codex_core::ForkSnapshot;
 use codex_core::GuardianRootSnapshot;
+use codex_core::InheritedSessionId;
 use codex_core::LiveAgent;
 use codex_core::PendingAgentMessage;
 use codex_core::RolloutBudgetReminder;
@@ -21,6 +22,12 @@ use codex_core::SpawnRequest;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
+use codex_extension_api::ExtensionFuture;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ThreadLifecycleContributor;
+use codex_extension_api::ThreadStartInput;
+use codex_extension_api::ThreadStopInput;
 use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
@@ -51,7 +58,33 @@ use serde_json::json;
 use test_case::test_case;
 use wiremock::MockServer;
 
-struct TestAgentControl {
+pub(super) struct HostRuntime;
+
+impl codex_core::AgentTurnAdmission for HostRuntime {
+    fn admit_turn(
+        &self,
+        _: codex_core::AgentTurnAdmissionRequest,
+    ) -> BoxFuture<'_, CodexResult<AgentExecutionGuard>> {
+        Box::pin(async { Ok(AgentExecutionGuard::new(())) })
+    }
+}
+
+pub(super) fn install_host_runtime(data: &codex_extension_api::ExtensionData) {
+    data.insert(codex_core::AgentRuntimeOwnership::Host);
+    data.get_or_init(|| Arc::new(HostRuntime) as Arc<dyn codex_core::AgentTurnAdmission>);
+}
+
+impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config> for HostRuntime {
+    fn on_thread_start<'a>(
+        &'a self,
+        input: codex_extension_api::ThreadStartInput<'a, codex_core::config::Config>,
+    ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+        install_host_runtime(input.thread_store);
+        Box::pin(async {})
+    }
+}
+
+pub(super) struct TestAgentControl {
     thread_id: ThreadId,
     service_tier: Mutex<Option<String>>,
     mail: Mutex<Vec<PendingAgentMessage>>,
@@ -60,7 +93,7 @@ struct TestAgentControl {
 }
 
 impl TestAgentControl {
-    fn new(thread_id: ThreadId) -> Self {
+    pub(super) fn new(thread_id: ThreadId) -> Self {
         Self {
             thread_id,
             service_tier: Mutex::default(),
@@ -495,6 +528,70 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_hosted_child_persists_inherited_session_id() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let root = test_codex().build_with_auto_env(&server).await?;
+    let root_session_id = root.session_configured.session_id;
+    let manager = &root.thread_manager;
+    let options = || StartThreadOptions {
+        session_source: Some(SessionSource::Custom("host".to_string())),
+        environments: Some(vec![root.executor_environment().request()]),
+        ..StartThreadOptions::new(root.config.clone())
+    };
+    let mut child_options = options();
+    child_options
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    let child = manager.start_thread(child_options).await?;
+    assert_ne!(SessionId::from(child.thread_id), root_session_id);
+    assert_eq!(
+        (
+            child.session_configured.session_id,
+            child.session_configured.parent_thread_id
+        ),
+        (root_session_id, None)
+    );
+    child.thread.ensure_rollout_materialized().await;
+    child.thread.flush_rollout().await?;
+    let history = child
+        .thread
+        .load_history(/*include_archived*/ false)
+        .await?;
+    let Some(RolloutItem::SessionMeta(meta)) = history.items.first() else {
+        anyhow::bail!("expected child metadata as the first rollout item");
+    };
+    assert_eq!(
+        (meta.meta.id, meta.meta.session_id),
+        (child.thread_id, root_session_id)
+    );
+    child.thread.shutdown_and_wait().await?;
+    let resumed = manager
+        .start_thread(StartThreadOptions {
+            initial_history: InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
+                conversation_id: child.thread_id,
+                history: Arc::new(history.items),
+                rollout_path: child.thread.rollout_path(),
+            }),
+            ..options()
+        })
+        .await?;
+    assert!(!Arc::ptr_eq(&resumed.thread, &child.thread));
+    assert_eq!(
+        (
+            resumed.thread_id,
+            resumed.session_configured.session_id,
+            resumed.session_configured.parent_thread_id
+        ),
+        (child.thread_id, root_session_id, None)
+    );
+    resumed.thread.shutdown_and_wait().await?;
+    root.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collaboration_tools_dispatch_to_the_host_controller() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
@@ -697,5 +794,47 @@ async fn agent_mail_wakes_completed_root_when_enabled(
         json!([{"type": "input_text", "text": "Late agent update"}])
     );
     assert!(controller.mail.lock().expect("mail lock").is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_start_requires_turn_admission() -> anyhow::Result<()> {
+    struct HostWithoutAdmission(Mutex<Vec<&'static str>>);
+
+    impl ThreadLifecycleContributor<Config> for HostWithoutAdmission {
+        fn on_thread_start<'a>(
+            &'a self,
+            input: ThreadStartInput<'a, Config>,
+        ) -> ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push("start");
+                input
+                    .thread_store
+                    .insert(codex_core::AgentRuntimeOwnership::Host);
+            })
+        }
+
+        fn on_thread_stop<'a>(&'a self, _input: ThreadStopInput<'a>) -> ExtensionFuture<'a, ()> {
+            Box::pin(async move { self.0.lock().unwrap().push("stop") })
+        }
+    }
+
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let host = Arc::new(HostWithoutAdmission(Mutex::default()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(host.clone());
+    let error = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await
+        .err()
+        .expect("missing admission")
+        .downcast::<CodexErr>()?;
+    assert!(
+        matches!(error.details(), CodexErrorDetails::InvalidRequest(message) if message.contains("AgentTurnAdmission")),
+        "{error:?}"
+    );
+    assert_eq!(*host.0.lock().unwrap(), ["start", "stop"]);
     Ok(())
 }

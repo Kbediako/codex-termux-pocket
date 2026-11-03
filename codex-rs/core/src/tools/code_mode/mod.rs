@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use codex_code_mode::CellId;
 use codex_code_mode::CodeModeNestedToolCall;
+use codex_code_mode::CodeModeOutputTruncation;
 use codex_code_mode::CodeModeSession;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::CodeModeToolKind;
@@ -46,8 +47,7 @@ use codex_protocol::openai_models::ToolMode;
 use codex_tools::ToolName;
 use codex_utils_audio::estimate_audio_token_count;
 use codex_utils_output_truncation::TruncationPolicy;
-use codex_utils_output_truncation::formatted_truncate_text_content_items_with_policy;
-use codex_utils_output_truncation::truncate_function_output_items_with_policy;
+use codex_utils_output_truncation::formatted_truncate_function_output_items_with_policy;
 
 use delegate::CodeModeCellDelegate;
 use delegate::CodeModeDispatchBroker;
@@ -127,6 +127,13 @@ impl CodeModeService {
         Arc::clone(&self.session_provider)
     }
 
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        self.session
+            .get()
+            .map(|session| session.output_truncation())
+            .unwrap_or_default()
+    }
+
     pub(crate) async fn execute(
         &self,
         mut request: codex_code_mode::ExecuteRequest,
@@ -156,9 +163,9 @@ impl CodeModeService {
 
     pub(crate) async fn terminate(
         &self,
-        cell_id: CellId,
+        request: codex_code_mode::TerminateRequest,
     ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session().await?.terminate(cell_id).await
+        self.session().await?.terminate(request).await
     }
 
     pub(crate) async fn interrupt_active_cells(&self) {
@@ -170,7 +177,7 @@ impl CodeModeService {
                 .active_cell_ids()
                 .into_iter()
                 .map(|cell_id| async move {
-                    if let Err(error) = session.terminate(cell_id.clone()).await {
+                    if let Err(error) = session.terminate(cell_id.clone().into()).await {
                         tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell");
                     }
                 }),
@@ -264,6 +271,7 @@ fn handle_runtime_response(
     model_info: &codex_protocol::openai_models::ModelInfo,
     response: RuntimeResponse,
     max_output_tokens: Option<usize>,
+    output_truncation: CodeModeOutputTruncation,
     wall_time: Duration,
     experimental_show_cell_overhead: bool,
 ) -> CodeModeToolOutput {
@@ -285,12 +293,14 @@ fn handle_runtime_response(
     let mut content_items = into_function_call_output_content_items(content_items);
     sanitize_image_detail_items(supports_original, &mut content_items);
     let success = error_text.is_none();
-    if let Some(error_text) = error_text {
-        content_items.push(FunctionCallOutputContentItem::InputText {
-            text: format!("Script error:\n{error_text}"),
-        });
+    if output_truncation == CodeModeOutputTruncation::Client {
+        if let Some(error_text) = error_text {
+            content_items.push(FunctionCallOutputContentItem::InputText {
+                text: format!("Script error:\n{error_text}"),
+            });
+        }
+        content_items = truncate_code_mode_result(content_items, max_output_tokens);
     }
-    content_items = truncate_code_mode_result(content_items, max_output_tokens);
     CodeModeToolOutput::new(
         FunctionToolOutput::from_content(content_items, Some(success)),
         script_status,
@@ -321,16 +331,7 @@ fn truncate_code_mode_result(
 ) -> Vec<FunctionCallOutputContentItem> {
     let max_output_tokens = resolve_max_tokens(max_output_tokens);
     let policy = TruncationPolicy::Tokens(max_output_tokens);
-    if items
-        .iter()
-        .all(|item| matches!(item, FunctionCallOutputContentItem::InputText { .. }))
-    {
-        let (truncated_items, _) =
-            formatted_truncate_text_content_items_with_policy(&items, policy);
-        return truncated_items;
-    }
-
-    truncate_function_output_items_with_policy(&items, policy, estimate_audio_token_count)
+    formatted_truncate_function_output_items_with_policy(items, policy, estimate_audio_token_count)
 }
 
 // Submit synchronously so the recorder sees the call before the cell's dispatch gate closes.
@@ -345,6 +346,7 @@ fn submit_nested_tool(
     impl std::future::Future<Output = Result<JsonValue, FunctionCallError>> + Send + 'static,
     FunctionCallError,
 > {
+    let dispatch_started = std::time::Instant::now();
     let CodeModeNestedToolCall {
         cell_id,
         runtime_tool_call_id,
@@ -361,6 +363,9 @@ fn submit_nested_tool(
         target: "codex_otel.trace_safe",
         tracing::Level::INFO,
         event.name = "codex.code_mode.nested_tool_dispatched",
+        tool_name = tool_name.name.as_str(),
+        tool_namespace = call_trace::namespace(&tool_name),
+        tool_source = "code_mode",
         conversation.id = %thread_id,
         turn_id = turn_id.as_str(),
         cell.id = telemetry::trace_id(cell_id.as_str()),
@@ -381,6 +386,7 @@ fn submit_nested_tool(
                 &tool_name,
                 &call_id,
                 call_trace::Source::CodeMode,
+                dispatch_started.elapsed(),
             );
             return Err(FunctionCallError::RespondToModel(error));
         }
@@ -391,6 +397,7 @@ fn submit_nested_tool(
         call_id,
         payload,
         encrypted_function_args: None,
+        native_call: None,
     };
     session
         .services

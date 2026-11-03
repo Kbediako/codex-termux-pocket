@@ -53,6 +53,7 @@ fn experimental_features_display_metadata() {
     for feature in [
         Feature::AnalyticsPlanHistory,
         Feature::LoginShellPackagePath,
+        Feature::RespectSystemProxy,
     ] {
         let stage = feature.stage();
         let (app_tx, _app_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -103,6 +104,7 @@ fn experimental_features_discovery_preserves_server_order_and_accepts_new_keys()
         .send(Ok(vec![
             server_feature("network_proxy"),
             server_feature("future_feature"),
+            server_feature("daemon_auto_start"),
             server_feature("worktrees"),
             server_feature("realtime_conversation"),
             stable,

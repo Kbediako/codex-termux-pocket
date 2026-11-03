@@ -178,7 +178,7 @@ fn is_iterm2_terminal(info: &TerminalInfo) -> bool {
 fn supports_kitty_graphics(info: &TerminalInfo) -> bool {
     matches!(
         info.name,
-        TerminalName::Ghostty | TerminalName::Kitty | TerminalName::WezTerm
+        TerminalName::Ghostty | TerminalName::Kitty | TerminalName::Rex | TerminalName::WezTerm
     ) || terminal_field_contains(info.term.as_deref(), "kitty")
         || terminal_field_contains(info.term.as_deref(), "ghostty")
         || terminal_field_contains(info.term.as_deref(), "wezterm")
@@ -517,6 +517,12 @@ mod tests {
                 /*term*/ None,
             ),
             terminal_info_for_test(
+                TerminalName::Rex,
+                /*multiplexer*/ None,
+                Some("rex"),
+                /*term*/ None,
+            ),
+            terminal_info_for_test(
                 TerminalName::WezTerm,
                 /*multiplexer*/ None,
                 Some("WezTerm"),
@@ -637,6 +643,7 @@ mod tests {
         term: Option<&str>,
     ) -> TerminalInfo {
         TerminalInfo {
+            backend: None,
             name,
             term_program: term_program.map(str::to_string),
             version: version.map(str::to_string),

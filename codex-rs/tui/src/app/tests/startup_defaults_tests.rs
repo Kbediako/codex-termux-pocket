@@ -29,6 +29,14 @@ pub(super) async fn run_startup_for_test(
         initial_backends,
         config.clone(),
         config.cwd.to_path_buf(),
+        backend_selection::BackendPreferenceContext::new(
+            &config,
+            crate::backend_preference_local_cwd(
+                config.cwd.as_path(),
+                &app_server_target,
+                &EnvironmentManager::default_for_tests(),
+            ),
+        ),
         Vec::new(),
         ConfigOverrides::default(),
         LoaderOverrides::default(),
@@ -295,6 +303,7 @@ async fn fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence
 model = "client-model"
 model_reasoning_effort = "low"
 model_provider = "client-provider"
+approval_policy = "never"
 approvals_reviewer = "auto_review"
 [model_providers.client-provider]
 name = "Client provider"
@@ -305,10 +314,14 @@ requires_openai_auth = false
         )?;
         std::fs::write(
             server_home.path().join("config.toml"),
-            if choice == "managed" {
-                ""
-            } else {
-                "model = \"server-model\"\nmodel_reasoning_effort = \"high\"\napprovals_reviewer = \"user\"\n"
+            match choice {
+                "managed" => "",
+                "kv_reviewer" => {
+                    "model = \"server-model\"\napproval_policy = { granular = { sandbox_approval = false, rules = false, request_permissions = true, mcp_elicitations = false } }\n"
+                }
+                _ => {
+                    "model = \"server-model\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"on-request\"\napprovals_reviewer = \"user\"\n"
+                }
             },
         )?;
         if managed {
@@ -325,6 +338,7 @@ requires_openai_auth = false
             "kv_model" => cli_kv_overrides.extend([
                 ("model".into(), "earlier-model".into()),
                 ("model".into(), "kv-model".into()),
+                ("approval_policy".into(), "never".into()),
             ]),
             "migration" => harness_overrides.model = Some("old-model".into()),
             "cli_provider" => harness_overrides.model_provider = Some("openai".into()),
@@ -334,13 +348,21 @@ requires_openai_auth = false
                 TomlValue::String("low".to_string()),
             )),
             "typed_reviewer" => {
+                harness_overrides.approval_policy = Some(AskForApproval::OnRequest.to_core());
                 harness_overrides.approvals_reviewer = Some(ApprovalsReviewer::User);
+                cli_kv_overrides.push(("approval_policy".into(), "never".into()));
                 cli_kv_overrides.push(("approvals_reviewer".into(), "auto_review".into()));
             }
-            "kv_reviewer" => cli_kv_overrides.extend([
-                ("approvals_reviewer".into(), "user".into()),
-                ("approvals_reviewer".into(), "auto_review".into()),
-            ]),
+            "kv_reviewer" => {
+                cli_kv_overrides.extend([
+                    ("approvals_reviewer".into(), "user".into()),
+                    ("approvals_reviewer".into(), "auto_review".into()),
+                ]);
+                cli_kv_overrides.extend(
+                    ["sandbox_approval", "rules", "mcp_elicitations"]
+                        .map(|key| (format!("approval_policy.granular.{key}"), true.into())),
+                );
+            }
             "profile_model" | "profile_effort" => {
                 let path = client_home.path().join("work.config.toml");
                 std::fs::write(
@@ -445,6 +467,28 @@ requires_openai_auth = false
             serde_json::json!(expected_reviewer),
             "{choice}"
         );
+        let expected_policy = match choice {
+            "typed_reviewer" => Some(AskForApproval::OnRequest),
+            "kv_model" | "profile_model" | "profile_effort" => Some(AskForApproval::Never),
+            _ => None,
+        };
+        assert_eq!(
+            starts[0]["approvalPolicy"],
+            serde_json::json!(expected_policy),
+            "{choice}"
+        );
+        if choice == "kv_reviewer" {
+            assert_eq!(
+                started.session.approval_policy,
+                AskForApproval::Granular {
+                    sandbox_approval: true,
+                    rules: true,
+                    skill_approval: false,
+                    request_permissions: true,
+                    mcp_elicitations: true,
+                }
+            );
+        }
         if choice == "embedded_saved" {
             assert_eq!(
                 started.session.approvals_reviewer,
@@ -477,20 +521,25 @@ requires_openai_auth = false
             assert_eq!(started.session.approvals_reviewer, ApprovalsReviewer::User);
             let (mut app, _events, mut ops) = make_test_app_with_channels().await;
             app.app_server_target = target;
+            app.config.permissions.approval_policy =
+                codex_config::Constrained::allow_only(AskForApproval::Never.to_core());
             app.set_approvals_reviewer_in_app_and_widget(ApprovalsReviewer::AutoReview);
             app.pending_startup_thread_start = true;
             let thread_id = started.session.thread_id;
             app.handle_startup_thread_started(&mut server, Ok(started))
                 .await?;
+            assert_eq!(
+                app.config.permissions.approval_policy.value(),
+                AskForApproval::OnRequest.to_core()
+            );
             app.chat_widget.insert_str("first turn");
             app.chat_widget
                 .handle_key_event(KeyEvent::from(KeyCode::Enter));
             app.submit_thread_op(&mut server, thread_id, next_user_turn_op(&mut ops))
                 .await?;
-            assert_eq!(
-                recorded_params(&requests, "turn/start")[0]["approvalsReviewer"],
-                "user"
-            );
+            let turn = &recorded_params(&requests, "turn/start")[0];
+            assert_eq!(turn["approvalsReviewer"], "user");
+            assert_eq!(turn["approvalPolicy"], "on-request");
         }
         server.shutdown().await?;
         proxy.await??;
@@ -639,6 +688,66 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
 }
 
 #[tokio::test]
+async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<()> {
+    let home = tempdir()?;
+    let destination = tempdir()?;
+    std::fs::create_dir(destination.path().join(".git"))?;
+    let config_path = home.path().join("config.toml");
+    let project = serde_json::to_string(&destination.path().display().to_string())?;
+    let write_tier = |tier: &str| {
+        std::fs::write(
+            &config_path,
+            format!("service_tier = \"{tier}\"\n[projects.{project}]\ntrust_level = \"trusted\"\n"),
+        )
+    };
+    write_tier("priority")?;
+    let config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(destination.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let (mut server, requests, proxy) = start_recording_app_server_with_history(
+        &config,
+        HistoryCapabilities::Current,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides {
+            user_config_path: Some(config_path.clone().abs()),
+            ..LoaderOverrides::default()
+        },
+    )
+    .await?;
+    let bootstrap = server.bootstrap(&config).await?;
+    let reads_before = recorded_params(&requests, "config/read").len();
+    let trust = crate::config_update::read_remote_project_trust(
+        server.request_handle(),
+        config.cwd.as_path(),
+        crate::config_update::ProjectTrustHost::Local,
+    )
+    .await?;
+    assert_eq!(trust, None);
+    // A different process can edit this file even when the app server is embedded.
+    write_tier("flex")?;
+    run_until_thread_start(server, config, bootstrap, &requests).await?;
+    let starts = recorded_params(&requests, "thread/start");
+    assert_eq!(
+        (
+            starts.len(),
+            &starts[0]["serviceTier"],
+            recorded_params(&requests, "config/read").len() - reads_before,
+        ),
+        (1, &serde_json::json!("flex"), 2),
+    );
+    proxy.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn fresh_startup_falls_back_only_for_unsupported_config_read() -> Result<()> {
     for capabilities in [
         HistoryCapabilities::ConfigReadUnsupported(-32601),
@@ -683,6 +792,7 @@ async fn fresh_startup_falls_back_only_for_unsupported_config_read() -> Result<(
 async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     let client_home = tempdir()?;
     let server_home = tempdir()?;
+    let projectless_cwd = tempdir()?;
     std::fs::write(
         client_home.path().join("config.toml"),
         "model = \"client-model\"\nmodel_reasoning_effort = \"low\"\n",
@@ -694,6 +804,10 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     let config = ConfigBuilder::default()
         .codex_home(client_home.path().to_path_buf())
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(projectless_cwd.path().to_path_buf()),
+            ..Default::default()
+        })
         .build()
         .await?;
     let mut server_config = config.clone();
@@ -707,7 +821,7 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
         crate::app_server_session::ThreadParamsMode::Embedded,
         LoaderOverrides {
             user_config_path: Some(server_home.path().join("config.toml").abs()),
-            ..LoaderOverrides::default()
+            ..LoaderOverrides::without_managed_config_for_tests()
         },
     )
     .await?;
@@ -727,6 +841,7 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     }
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
+    assert!(starts[0]["approvalPolicy"]["granular"].is_object());
     assert_eq!(
         (
             &starts[0]["model"],

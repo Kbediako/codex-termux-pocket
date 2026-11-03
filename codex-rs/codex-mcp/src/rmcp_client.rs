@@ -9,12 +9,16 @@
 //! Higher-level aggregation and resource/tool APIs live in
 //! [`crate::connection_manager`].
 
+#[path = "rmcp_client/managed_client.rs"]
+mod managed_client;
 #[path = "rmcp_client/status.rs"]
 mod status;
 
 #[cfg(test)]
 #[path = "rmcp_client/provenance_tests.rs"]
 mod provenance_tests;
+
+pub(crate) use managed_client::ManagedClient;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -33,6 +37,11 @@ use crate::codex_apps::normalize_codex_apps_callable_name;
 use crate::codex_apps::normalize_codex_apps_callable_namespace;
 use crate::codex_apps::normalize_codex_apps_tool_title;
 use crate::codex_apps::prepare_openai_file_params_for_model;
+use crate::connection_pool::ConnectionKey;
+use crate::connection_pool::ConnectionSharing;
+use crate::connection_pool::ConnectionSlot;
+use crate::connection_pool::LEASE_CAPABILITY;
+use crate::connection_pool::SharingNegotiation;
 use crate::elicitation::ElicitationRequestManager;
 use crate::executor_environment_http_client::ExecutorEnvironmentHttpClient;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -94,7 +103,6 @@ use rmcp::model::Tool as RmcpTool;
 use tokio::sync::watch;
 use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use tracing::instrument;
 use tracing::warn;
@@ -125,47 +133,9 @@ const UNTRUSTED_CONNECTOR_META_KEYS: &[&str] = &[
     "connectorDescription",
 ];
 
-#[derive(Clone)]
-pub(crate) struct ManagedClient {
-    pub(crate) _auth_change_notifications: Option<Arc<AbortOnDropHandle<()>>>,
-    pub(crate) client: Arc<RmcpClient>,
-    pub(crate) server_info: McpServerInfo,
-    pub(crate) tool_catalog: Arc<ClientToolCatalog>,
-    pub(crate) tool_timeout: Option<Duration>,
-    pub(crate) server_instructions: Option<String>,
-    pub(crate) server_supports_sandbox_state_meta_capability: bool,
-    pub(crate) client_supports_network_policy_meta_capability: bool,
-    pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
-}
-
-impl ManagedClient {
-    pub(crate) async fn listed_catalog(&self) -> (Vec<ToolInfo>, Option<Arc<serde_json::Value>>) {
-        let total_start = Instant::now();
-        self.tool_catalog
-            .read(|catalog| {
-                // Discovery may use the shared cache until this client is refreshed.
-                // Executable bindings always capture this client's own catalog.
-                if catalog.revision == 0
-                    && let Some(cache_context) = &self.codex_apps_tools_cache_context
-                {
-                    let tools = cache_context.current_catalog_snapshot();
-                    emit_duration(
-                        MCP_TOOLS_LIST_DURATION_METRIC,
-                        total_start.elapsed(),
-                        &[("cache", if tools.is_some() { "hit" } else { "miss" })],
-                    );
-                    if let Some(tools) = tools {
-                        return (tools.tools().to_vec(), tools.shared_tool_list_meta());
-                    }
-                }
-                (catalog.tools.to_vec(), catalog.meta)
-            })
-            .await
-    }
-}
-
 pub(crate) type ManagedClientFuture =
     Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>;
+type StartupShutdown = Shared<BoxFuture<'static, Result<(), String>>>;
 
 #[derive(Default)]
 struct CodexAppsStartupReconnectState {
@@ -327,7 +297,11 @@ struct ManagedClientStartup {
 }
 
 impl ManagedClientStartup {
-    fn start(&self) -> ManagedClientFuture {
+    fn start(
+        &self,
+        sharing_declined: Option<CancellationToken>,
+        publish_apps: Option<watch::Sender<Option<std::sync::Weak<RmcpClient>>>>,
+    ) -> ManagedClientFuture {
         // A new attempt must not expose capabilities from an earlier connection.
         *self
             .server_capabilities
@@ -368,6 +342,7 @@ impl ManagedClientStartup {
                 .as_ref()
                 .map(McpToolCatalogCacheContext::begin_fetch);
             let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
+            let mut discovery_client = None;
             let outcome = match async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {
                     return Err(error.into());
@@ -399,10 +374,15 @@ impl ManagedClientStartup {
                         )));
                     }
                 };
+                if client.protocol_mode() == McpProtocolMode::DiscoverLocalStdio {
+                    discovery_client = Some(Arc::clone(&client));
+                }
                 start_server_task(
                     server_name.clone(),
                     client,
                     StartServerTaskParams {
+                        sharing_declined,
+                        publish_apps,
                         is_codex_apps_mcp_server,
                         startup_timeout: Some(startup_timeout),
                         tx_event,
@@ -422,8 +402,32 @@ impl ManagedClientStartup {
             .or_cancel(&cancel_token_for_fut)
             .await
             {
-                Ok(result) => result,
-                Err(CancelErr::Cancelled) => Err(StartupOutcomeError::Cancelled),
+                Ok(mut result) => {
+                    if let Err(StartupOutcomeError::Failed { shutdown, .. }) = &mut result
+                        && let Some(client) = discovery_client
+                    {
+                        // Report the startup error now. A retry waits for the helper to exit.
+                        *shutdown = Some(
+                            tokio::spawn(async move { client.shutdown_before_retry().await })
+                                .map(|joined| match joined {
+                                    Ok(result) => result.map_err(|error| error.to_string()),
+                                    Err(error) => Err(error.to_string()),
+                                })
+                                .boxed()
+                                .shared(),
+                        );
+                    }
+                    result
+                }
+                Err(CancelErr::Cancelled) => {
+                    // A cancelled legacy replacement may still be inside the native spawn.
+                    if let Some(client) = discovery_client
+                        && let Err(error) = client.shutdown_before_retry().await
+                    {
+                        warn!("failed to stop cancelled MCP discovery: {error}");
+                    }
+                    Err(StartupOutcomeError::Cancelled)
+                }
             };
             // Log once per startup attempt, including discovery without startup notifications.
             if let Err(StartupOutcomeError::Failed { error, .. }) = &outcome {
@@ -462,6 +466,7 @@ pub(crate) struct AsyncManagedClient {
     pub(crate) tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
     pub(crate) startup_complete: Arc<AtomicBool>,
     pub(crate) startup_reconnect: Option<Arc<CodexAppsStartupReconnect>>,
+    pub(crate) connection_slot: Option<Arc<ConnectionSlot>>,
     pub(crate) cancel_token: CancellationToken,
 }
 
@@ -491,6 +496,8 @@ impl AsyncManagedClient {
         auth_changes: Option<watch::Receiver<AuthChangeState>>,
         protocol_mode: McpProtocolMode,
         catalog_item_limit: usize,
+        connection_pool: Option<(crate::McpConnectionPool, ConnectionKey)>,
+        publish_apps: Option<watch::Sender<Option<std::sync::Weak<RmcpClient>>>>,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -540,16 +547,64 @@ impl AsyncManagedClient {
             startup_complete: Arc::clone(&startup_complete),
             server_capabilities: Arc::clone(&server_capabilities),
         });
-        let client = startup.start();
+        // A discovery attempt may publish a legacy catalog. It cannot read that catalog
+        // before negotiation or publish a modern joiner's tool list into it.
+        let tool_catalog_cache_context = tool_catalog_cache_context
+            .filter(|_| protocol_mode != McpProtocolMode::DiscoverLocalStdio);
+        let (client, connection_slot) = if let Some((pool, key)) = connection_pool {
+            let slot = Arc::new(ConnectionSlot::default());
+            let connection_slot = Arc::clone(&slot);
+            let startup = Arc::clone(&startup);
+            let cancel_token = cancel_token.clone();
+            let startup_complete = Arc::clone(&startup_complete);
+            let server_capabilities = Arc::clone(&server_capabilities);
+            let tool_catalog_cache_context = tool_catalog_cache_context.clone();
+            let client = async move {
+                let outcome = pool
+                    .connect(
+                        slot,
+                        key,
+                        server_capabilities,
+                        tool_catalog_cache_context,
+                        cancel_token,
+                        |cancellation, sharing_declined| {
+                            let mut shared_startup = (*startup).clone();
+                            shared_startup.cancel_token = cancellation;
+                            shared_startup.start(sharing_declined, /*publish_apps*/ None)
+                        },
+                    )
+                    .await
+                    .map(|mut client| {
+                        if matches!(client.connection_sharing, ConnectionSharing::Shared(_)) {
+                            client.shared_elicitation =
+                                Some(Arc::new(startup.elicitation_requests.make_sender(
+                                    startup.server_name.clone(),
+                                    startup.tx_event.clone(),
+                                    &startup.client_mcp_extensions,
+                                )));
+                        }
+                        client
+                    });
+                startup_complete.store(true, Ordering::Release);
+                outcome
+            }
+            .boxed()
+            .shared();
+            (client, Some(connection_slot))
+        } else {
+            (startup.start(/*sharing_declined*/ None, publish_apps), None)
+        };
         let startup_reconnect = is_codex_apps_mcp_server.then(|| {
             let startup = Arc::clone(&startup);
             Arc::new(
-                CodexAppsStartupReconnect::new(Arc::new(move || startup.start()))
-                    .with_startup_status_context(
-                        startup_submit_id,
-                        reconnect_server_name,
-                        reconnect_tx_event,
-                    ),
+                CodexAppsStartupReconnect::new(Arc::new(move || {
+                    startup.start(/*sharing_declined*/ None, /*publish_apps*/ None)
+                }))
+                .with_startup_status_context(
+                    startup_submit_id,
+                    reconnect_server_name,
+                    reconnect_tx_event,
+                ),
             )
         });
         Self {
@@ -562,6 +617,7 @@ impl AsyncManagedClient {
             tool_catalog_cache_context,
             startup_complete,
             startup_reconnect,
+            connection_slot,
             cancel_token,
         }
     }
@@ -595,6 +651,33 @@ impl AsyncManagedClient {
         self.ready_client().map(|client| client.client)
     }
 
+    /// Waits for this server's failed predecessor when the replacement actually starts.
+    pub(crate) fn wait_for_failed_predecessor(&mut self, previous: &Self) {
+        let Some(Err(
+            error @ StartupOutcomeError::Failed {
+                shutdown: Some(shutdown),
+                ..
+            },
+        )) = previous.client.peek()
+        else {
+            return;
+        };
+        let shutdown = shutdown.clone();
+        let error = error.clone();
+        let client = self.client.clone();
+        let startup_complete = Arc::clone(&self.startup_complete);
+        self.client = async move {
+            if let Err(stop_error) = shutdown.await {
+                warn!("cannot restart MCP server after failed cleanup: {stop_error}");
+                startup_complete.store(true, Ordering::Release);
+                return Err(error);
+            }
+            client.await
+        }
+        .boxed()
+        .shared();
+    }
+
     pub(crate) async fn reconnect_failed_startup(&self) {
         let Some(startup_reconnect) = self.startup_reconnect.as_ref() else {
             return;
@@ -610,11 +693,28 @@ impl AsyncManagedClient {
     pub(crate) async fn shutdown(&self) {
         self.cancel_token.cancel();
         match self.client().await {
-            Ok(client) => client.client.shutdown().await,
+            Ok(client) => match &client.connection_sharing {
+                ConnectionSharing::Owned(lease) | ConnectionSharing::Shared(lease) => {
+                    if let Some(slot) = lease.release() {
+                        return slot.wait_for_shutdown().await;
+                    }
+                    if matches!(&client.connection_sharing, ConnectionSharing::Owned(_)) {
+                        // Waiters from startup may still hold leases even though sharing was declined.
+                        client.client.shutdown().await;
+                    }
+                }
+                ConnectionSharing::Private | ConnectionSharing::Negotiated => {
+                    client.client.shutdown().await;
+                }
+            },
             Err(StartupOutcomeError::Cancelled) => {}
             Err(error) => {
                 warn!("failed to initialize MCP client during shutdown: {error:#}");
+                error.wait_for_shutdown().await;
             }
+        }
+        if let Some(slot) = &self.connection_slot {
+            slot.wait_for_shutdown().await;
         }
     }
 
@@ -684,10 +784,22 @@ pub(crate) enum StartupOutcomeError {
         error: String,
         is_authentication_required: bool,
         is_ema_authentication_required: bool,
+        shutdown: Option<StartupShutdown>,
     },
 }
 
 impl StartupOutcomeError {
+    pub(crate) async fn wait_for_shutdown(&self) {
+        if let Self::Failed {
+            shutdown: Some(shutdown),
+            ..
+        } = self
+            && let Err(error) = shutdown.clone().await
+        {
+            warn!("failed to stop MCP server after startup failed: {error}");
+        }
+    }
+
     pub(crate) fn is_authentication_required(&self) -> bool {
         match self {
             Self::Cancelled => false,
@@ -709,6 +821,7 @@ impl From<anyhow::Error> for StartupOutcomeError {
             is_ema_authentication_required: is_authentication_required
                 && (error.downcast_ref::<EmaTokenSourceError>().is_some()
                     || error.downcast_ref::<EmaAuthFailure>().is_some()),
+            shutdown: None,
         }
     }
 }
@@ -1008,12 +1121,14 @@ async fn start_server_task(
     params: StartServerTaskParams,
 ) -> Result<ManagedClient, StartupOutcomeError> {
     let StartServerTaskParams {
+        sharing_declined,
+        publish_apps,
         is_codex_apps_mcp_server,
         startup_timeout,
         tx_event,
         elicitation_requests,
         codex_apps_tools_cache_context,
-        tool_catalog_cache_context,
+        mut tool_catalog_cache_context,
         tool_catalog_fetch_ticket,
         client_elicitation_capability,
         client_mcp_extensions,
@@ -1025,8 +1140,21 @@ async fn start_server_task(
         elicitation_requests.make_sender(server_name.clone(), tx_event, &client_mcp_extensions);
     let client_supports_network_policy_meta =
         client_mcp_extensions.contains(MCP_NETWORK_POLICY_META_CAPABILITY);
+    let (sharing_negotiation, send_elicitation) = if let Some(sharing_declined) = sharing_declined {
+        let (negotiation, sender) = SharingNegotiation::new(send_elicitation, sharing_declined);
+        (Some(negotiation), sender)
+    } else {
+        (None, send_elicitation)
+    };
     let mut params =
         mcp_initialize_request_params(client_elicitation_capability, client_mcp_extensions);
+    if sharing_negotiation.is_some() {
+        params
+            .capabilities
+            .extensions
+            .get_or_insert_default()
+            .insert(LEASE_CAPABILITY.to_owned(), Default::default());
+    }
     if auth_changes.is_some() {
         params
             .capabilities
@@ -1050,6 +1178,16 @@ async fn start_server_task(
         &initialize_result,
     );
     let initialize_result = initialize_result.map_err(StartupOutcomeError::from)?;
+    if client.protocol_mode() == McpProtocolMode::DiscoverLocalStdio
+        && !initialize_result.protocol_version.has_initialize()
+        && let Some(context) = tool_catalog_cache_context.take()
+        && let Some(ticket) = &tool_catalog_fetch_ticket
+    {
+        context.invalidate_if_newest(ticket);
+    }
+    let connection_sharing = sharing_negotiation
+        .map(|negotiation| negotiation.finish(&initialize_result.protocol_version))
+        .unwrap_or_default();
     *server_capabilities
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1107,6 +1245,9 @@ async fn start_server_task(
     let fetch_ticket = codex_apps_tools_cache_context
         .as_ref()
         .map(|context| context.begin_fetch(ConnectorRuntimeFetchSource::Startup));
+    if let Some(tx) = &publish_apps {
+        tx.send_replace(Some(Arc::downgrade(&client)));
+    }
     let (tools, meta) = list_tools_for_client_uncached(
         &server_name,
         is_codex_apps_mcp_server,
@@ -1154,6 +1295,8 @@ async fn start_server_task(
         );
     }
     let managed = ManagedClient {
+        connection_sharing,
+        shared_elicitation: None,
         _auth_change_notifications: auth_change_notifications,
         client: Arc::clone(&client),
         server_info,
@@ -1186,7 +1329,7 @@ fn record_protocol_discovery_metrics(
 
     let mode = match mode {
         McpProtocolMode::Legacy => "legacy",
-        McpProtocolMode::V20260728 => "auto",
+        McpProtocolMode::V20260728 | McpProtocolMode::DiscoverLocalStdio => "auto",
     };
     let outcome = match result {
         Ok(result) if result.protocol_version == ProtocolVersion::V_2026_07_28 => "modern",
@@ -1219,7 +1362,8 @@ pub(crate) fn mcp_initialize_request_params(
     }
     let extensions = client_mcp_extensions
         .iter()
-        .filter(|(id, _)| *id != MCP_NETWORK_POLICY_META_CAPABILITY)
+        // Only Core can open and release leases on a pooled connection.
+        .filter(|(id, _)| !matches!(*id, MCP_NETWORK_POLICY_META_CAPABILITY | LEASE_CAPABILITY))
         .filter_map(|(id, settings)| {
             settings
                 .as_object()
@@ -1258,6 +1402,8 @@ fn mcp_server_info_from_implementation(
 }
 
 struct StartServerTaskParams {
+    publish_apps: Option<watch::Sender<Option<std::sync::Weak<RmcpClient>>>>,
+    sharing_declined: Option<CancellationToken>,
     server_capabilities: Arc<StdMutex<Option<serde_json::Value>>>,
     is_codex_apps_mcp_server: bool,
     startup_timeout: Option<Duration>, // TODO: cancel_token should handle this.
@@ -1536,6 +1682,7 @@ mod tests {
                 ),
                 (OPENAI_FORM_EXTENSION_ID.to_string(), serde_json::json!({})),
                 (MCP_APP_UI_EXTENSION_ID.to_string(), app_ui.clone()),
+                (LEASE_CAPABILITY.to_string(), serde_json::json!({})),
             ]),
         );
         assert_eq!(

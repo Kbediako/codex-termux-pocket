@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import get_type_hints
 
 import pytest
+from pydantic import ValidationError
 
 from openai_codex._runtime_requirements import CheckoutCapabilities
 from openai_codex.client import CodexClient, _params_dict
@@ -20,9 +21,14 @@ from openai_codex.generated.v2_all import (
     AuthRecoveryNotification,
     CommandGuardianApprovalReviewAction,
     GetAccountResponse,
+    ModelProviderConfigWriteParams,
+    ModelProviderConfigWriteResponse,
+    ModelProviderListResponse,
     PlanType,
     ReasoningEffort,
     ReasoningEffortOption,
+    ReviewDelivery,
+    ReviewStartParams,
     ThreadForkParams,
     ThreadListParams,
     ThreadQueueChangedNotification,
@@ -37,6 +43,96 @@ from openai_codex.models import InitializeResponse, JsonObject, Notification, Un
 from openai_codex.types import ThreadSource
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_model_provider_responses_preserve_wire_fields_for_each_auth_mode() -> None:
+    wire = {
+        "data": [
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "canEdit": False,
+                "baseUrl": None,
+                "settings": {"type": "openai"},
+            },
+            {
+                "id": "amazon-bedrock",
+                "name": "Amazon Bedrock Mantle",
+                "canEdit": True,
+                "baseUrl": None,
+                "settings": {"type": "bedrock", "profile": "work", "region": "us-east-1"},
+            },
+            {
+                "id": "gcp",
+                "name": "Google Cloud Vertex AI",
+                "canEdit": True,
+                "baseUrl": None,
+                "settings": {
+                    "type": "gcp",
+                    "projectId": "test-project",
+                    "location": "global",
+                    "credentialFile": "/host/adc.json",
+                },
+            },
+            *[
+                {
+                    "id": auth["mode"],
+                    "name": "Gateway",
+                    "canEdit": True,
+                    "baseUrl": "https://gateway.example.test",
+                    "settings": {"type": "customGateway", "auth": auth},
+                }
+                for auth in [
+                    {"mode": "none"},
+                    {"mode": "environmentVariable", "envKey": "GATEWAY_KEY"},
+                    {"mode": "externallyConfigured", "envKey": "EXTERNAL_KEY"},
+                ]
+            ],
+        ],
+        "defaultProviderId": "gcp",
+        "canChangeDefault": True,
+    }
+    response = ModelProviderListResponse.model_validate(wire)
+    assert response.model_dump(mode="json", by_alias=True) == wire
+    for provider in wire["data"]:
+        saved = ModelProviderConfigWriteResponse.model_validate({"provider": provider})
+        assert saved.model_dump(mode="json", by_alias=True) == {"provider": provider}
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"type": "customGateway", "name": "Gateway", "baseUrl": "https://example.test"},
+        {"type": "customGateway", "providerId": "team", "envKey": None},
+        {"type": "bedrock", "providerId": "amazon-bedrock", "region": None},
+        {"type": "bedrock", "providerId": "amazon-bedrock-runtime", "profile": "work"},
+        {"type": "gcp", "providerId": "gcp", "credentialFile": None, "location": "global"},
+    ],
+)
+def test_provider_patch_preserves_explicit_null_and_omitted_fields(settings: dict) -> None:
+    wire = {"settings": settings}
+    params = ModelProviderConfigWriteParams.model_validate(wire)
+    assert params.model_dump(mode="json", by_alias=True, exclude_unset=True) == wire
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"type": "bedrock", "providerId": "gcp", "region": "us-east-1"},
+        {"type": "gcp", "providerId": "gcp", "region": "us-east-1"},
+    ],
+)
+def test_provider_patch_rejects_mismatched_id_or_fields(settings: dict) -> None:
+    with pytest.raises(ValidationError):
+        ModelProviderConfigWriteParams.model_validate({"settings": settings})
+
+
+def test_inline_review_delivery_round_trips_as_an_enum() -> None:
+    wire = {"threadId": "thread-1", "target": {"type": "uncommittedChanges"}, "delivery": "inline"}
+    params = ReviewStartParams.model_validate(wire)
+
+    assert params.delivery is ReviewDelivery.inline
+    assert params.model_dump(mode="json", by_alias=True) == wire
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ pub use codex_protocol::config_types::AltScreenMode;
 pub use codex_protocol::config_types::ApprovalsReviewer;
 pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 pub use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ToolExposureSurface;
 pub use codex_protocol::config_types::WebSearchMode;
@@ -29,6 +30,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 
+use codex_utils_redacted_string::RedactedString;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -353,6 +355,8 @@ pub struct MemoriesToml {
     pub extract_model: Option<String>,
     /// Model used for memory consolidation.
     pub consolidation_model: Option<String>,
+    /// Service tier for memory consolidation. Defaults to Standard (`"default"`).
+    pub consolidation_service_tier: Option<String>,
 }
 
 /// Effective memories settings after defaults are applied.
@@ -372,6 +376,7 @@ pub struct MemoriesConfig {
     pub min_rate_limit_remaining_percent: i64,
     pub extract_model: Option<String>,
     pub consolidation_model: Option<String>,
+    pub consolidation_service_tier: String,
 }
 
 impl Default for MemoriesConfig {
@@ -391,6 +396,7 @@ impl Default for MemoriesConfig {
             min_rate_limit_remaining_percent: DEFAULT_MEMORIES_MIN_RATE_LIMIT_REMAINING_PERCENT,
             extract_model: None,
             consolidation_model: None,
+            consolidation_service_tier: SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string(),
         }
     }
 }
@@ -439,6 +445,13 @@ impl From<MemoriesToml> for MemoriesConfig {
                 .clamp(0, 100),
             extract_model: toml.extract_model,
             consolidation_model: toml.consolidation_model,
+            consolidation_service_tier: toml
+                .consolidation_service_tier
+                .map(|tier| {
+                    ServiceTier::from_request_value(&tier)
+                        .map_or(tier, |tier| tier.request_value().to_string())
+                })
+                .unwrap_or(defaults.consolidation_service_tier),
         }
     }
 }
@@ -497,7 +510,7 @@ pub struct AppToolsConfig {
 }
 
 /// Approval settings for a connected account within an app.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppLinkConfig {
     /// Reviewer for approval prompts from this account, overriding the app default.
@@ -510,7 +523,7 @@ pub struct AppLinkConfig {
 }
 
 /// Account settings for a single app.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppLinksConfig {
     /// Per-account approval settings keyed by link ID.
@@ -519,7 +532,7 @@ pub struct AppLinksConfig {
 }
 
 /// Config values for a single app/connector.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppConfig {
     /// When `false`, Codex does not surface this app.
@@ -604,7 +617,8 @@ pub enum OtelExporterKind {
     OtlpHttp {
         endpoint: String,
         #[serde(default)]
-        headers: HashMap<String, String>,
+        #[schemars(with = "HashMap<String, String>")]
+        headers: HashMap<String, RedactedString>,
         protocol: OtelHttpProtocol,
         #[serde(default)]
         tls: Option<OtelTlsConfig>,
@@ -612,7 +626,8 @@ pub enum OtelExporterKind {
     OtlpGrpc {
         endpoint: String,
         #[serde(default)]
-        headers: HashMap<String, String>,
+        #[schemars(with = "HashMap<String, String>")]
+        headers: HashMap<String, RedactedString>,
         #[serde(default)]
         tls: Option<OtelTlsConfig>,
     },
@@ -623,8 +638,10 @@ pub enum OtelExporterKind {
 #[schemars(deny_unknown_fields)]
 pub struct OtelConfigToml {
     /// Byte limit for tool-result log output; independent of model-visible output.
-    #[serde(default)]
-    pub tool_result: codex_protocol::config_types::ToolResultLogConfig,
+    pub tool_result: Option<codex_protocol::config_types::ToolResultLogConfig>,
+    /// Log successful SSE events whose kind ends in `.delta`. Defaults to true.
+    /// Disabling this preserves errors, completion events, and metrics.
+    pub log_sse_deltas: Option<bool>,
     /// Log user prompt in traces
     pub log_user_prompt: Option<bool>,
     /// Opt in to logging final main-agent and spawned-subagent responses to an OTLP log exporter.
@@ -648,7 +665,7 @@ pub struct OtelConfigToml {
     pub metrics_exporter: Option<OtelExporterKind>,
 
     /// Attributes to add to every exported trace span.
-    pub span_attributes: Option<BTreeMap<String, String>>,
+    pub span_attributes: Option<HashMap<String, String>>,
 
     /// Semicolon-separated `key:value` fields to upsert into W3C tracestate members.
     pub tracestate: Option<BTreeMap<String, BTreeMap<String, String>>>,
@@ -658,6 +675,7 @@ pub struct OtelConfigToml {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtelConfig {
     pub tool_result: codex_protocol::config_types::ToolResultLogConfig,
+    pub log_sse_deltas: bool,
     pub log_user_prompt: bool,
     pub log_agent_responses: bool,
     pub log_guardian_assessments: bool,
@@ -665,7 +683,7 @@ pub struct OtelConfig {
     pub exporter: OtelExporterKind,
     pub trace_exporter: OtelExporterKind,
     pub metrics_exporter: OtelExporterKind,
-    pub span_attributes: BTreeMap<String, String>,
+    pub span_attributes: HashMap<String, String>,
     pub tracestate: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -673,6 +691,7 @@ impl Default for OtelConfig {
     fn default() -> Self {
         OtelConfig {
             tool_result: Default::default(),
+            log_sse_deltas: true,
             log_user_prompt: false,
             log_agent_responses: false,
             log_guardian_assessments: false,
@@ -680,7 +699,7 @@ impl Default for OtelConfig {
             exporter: OtelExporterKind::None,
             trace_exporter: OtelExporterKind::None,
             metrics_exporter: OtelExporterKind::Statsig,
-            span_attributes: BTreeMap::new(),
+            span_attributes: HashMap::new(),
             tracestate: BTreeMap::new(),
         }
     }
@@ -853,6 +872,11 @@ impl QuickDial {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Tui {
+    /// Preferred hosts for new conversations, indexed by project and local user identity.
+    /// Read from the user configuration only; values are never endpoints or credentials.
+    #[serde(default)]
+    pub default_hosts: BTreeMap<String, BTreeMap<String, String>>,
+
     #[serde(default, flatten)]
     pub notification_settings: TuiNotificationSettings,
 
@@ -1140,6 +1164,11 @@ pub struct PluginConfig {
     /// Per-MCP-server policy overlays for MCP servers contributed by this plugin.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mcp_servers: HashMap<String, PluginMcpServerConfig>,
+
+    /// Connector-wide app settings keyed by connector ID. Ignored when this
+    /// plugin is disabled by configuration. Explicit top-level app fields win.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub apps: HashMap<String, AppConfig>,
 }
 
 /// Policy settings for a plugin-provided MCP server.

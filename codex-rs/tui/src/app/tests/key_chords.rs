@@ -1,4 +1,5 @@
 use super::App;
+use super::AppEvent;
 use super::AppServerSession;
 use super::Result;
 use super::RuntimeKeymap;
@@ -65,6 +66,61 @@ async fn press(
 
 fn ctrl(ch: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+}
+
+#[tokio::test]
+async fn empty_thread_backend_chord_preserves_draft_until_first_submission() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    let session = test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf());
+    app.chat_widget.handle_thread_session(session);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget
+        .apply_external_edit("first draft".to_string());
+    app.chat_widget
+        .set_new_backend_control(Some("Cloud".to_string()));
+    let screen = render_bottom_popup(&app.chat_widget, 80);
+    insta::assert_snapshot!(screen.lines().find(|line| line.trim_start().starts_with("Cloud")).unwrap().trim(), @"Cloud  ⌃x b to cycle");
+
+    // Cursor movement remains available while the backend selector is visible.
+    let key = app.route_key_chord_event(&mut tui, ctrl('b')).unwrap();
+    app.chat_widget.handle_key_event(key);
+    app.chat_widget.handle_paste("!".to_string());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    assert_eq!(app.route_key_chord_event(&mut tui, ctrl('x')), None);
+    let key = app
+        .route_key_chord_event(&mut tui, KeyCode::Char('b').into())
+        .expect("backend chord dispatch");
+    app.chat_widget.handle_key_event(key);
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    // A single-key remap takes precedence over cursor movement in the same draft.
+    let config = toml::from_str("[global]\nchange_host = 'ctrl-b'")?;
+    app.keymap = RuntimeKeymap::from_config(&config).unwrap();
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert!(
+        !render_bottom_popup(&app.chat_widget, 80)
+            .lines()
+            .any(|line| line.trim_start().starts_with("Cloud"))
+    );
+
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -868,7 +924,10 @@ async fn preset_menu_keys_take_precedence_over_transcript_find() -> Result<()> {
 async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
     app.keymap = RuntimeKeymap::from_config(&serde_json::from_value(serde_json::json!({
-        "global": {"copy": ["ctrl-x ctrl-u"]},
+        "global": {
+            "copy": ["ctrl-x ctrl-u"],
+            "find_transcript": ["ctrl-space f"]
+        },
         "pager": {
             "scroll_up": ["ctrl-space x", "ctrl-home x", "ctrl-end x"],
             "close_transcript": ["ctrl-x ctrl-u"]
@@ -883,6 +942,19 @@ async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Re
             let key = KeyEvent::new(code, KeyModifiers::CONTROL);
             assert_eq!(app.route_key_chord_event(&mut tui, key), Some(key));
             assert!(!app.key_chord_matcher.is_pending());
+        }
+        if let Some(crate::pager_overlay::Overlay::Transcript(overlay)) = &mut app.overlay {
+            overlay.begin_select_mode();
+            let fixed = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+            assert_eq!(app.route_key_chord_event(&mut tui, fixed), Some(fixed));
+            assert!(!app.key_chord_matcher.is_pending());
+            press(
+                &mut app,
+                &mut tui,
+                &mut app_server,
+                KeyCode::Char('q').into(),
+            )
+            .await?;
         }
         press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
         press(&mut app, &mut tui, &mut app_server, ctrl('u')).await?;
@@ -938,6 +1010,40 @@ async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Re
         assert!(!app.transcript_view.is_detailed());
         assert!(!app.key_chord_matcher.is_pending());
     }
+    app.keymap = RuntimeKeymap::from_config(&toml::from_str(
+        "[global]\nfind_transcript = 'f6 f'\n[pager]\nscroll_down = 'f6'",
+    )?)
+    .expect("valid pager motion and global chord");
+    app.transcript_cells = vec![std::sync::Arc::new(
+        crate::history_cell::PlainHistoryCell::new(vec!["first".into(), "second".into()]),
+    )];
+    tui.set_owned_screen(/*owned*/ true)?;
+    app.render_owned_transcript(
+        &mut tui,
+        ratatui::layout::Size::new(/*width*/ 80, /*height*/ 12),
+    )?;
+    assert!(app.transcript_view.begin_select_mode(&app.transcript_cells));
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('g').into(),
+    )
+    .await?;
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('v').into(),
+    )
+    .await?;
+    let before = app.transcript_view.selected_text(&app.transcript_cells);
+    press(&mut app, &mut tui, &mut app_server, KeyCode::F(6).into()).await?;
+    assert_ne!(
+        app.transcript_view.selected_text(&app.transcript_cells),
+        before
+    );
+    assert!(!app.key_chord_matcher.is_pending());
     tui.set_owned_screen(/*owned*/ false)?;
     app_server.shutdown().await?;
     Ok(())
@@ -946,6 +1052,13 @@ async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Re
 #[tokio::test]
 async fn selection_after_live_commit_uses_the_refreshed_frame() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
+    let config: TuiKeymap = toml::from_str(
+        "[global]\ntoggle_side_conversation = []\nfind_transcript = 'ctrl-7 j'\n[pager]\nscroll_down = 'ctrl-7 j'",
+    )?;
+    let runtime =
+        RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+    app.chat_widget.apply_keymap_update(config, &runtime);
+    app.keymap = runtime;
     let area = ratatui::layout::Rect::new(
         /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 12,
     );
@@ -960,18 +1073,33 @@ async fn selection_after_live_commit_uses_the_refreshed_frame() -> Result<()> {
     overlay.insert_cell(std::sync::Arc::new(
         crate::history_cell::PlainHistoryCell::new(vec!["committed output".into()]),
     ));
+    overlay.begin_select_mode();
     app.overlay = Some(crate::pager_overlay::Overlay::Transcript(overlay));
     // The active cell has completed, but no Draw has reached the overlay yet.
-    app.handle_tui_event(
+    assert!(matches!(
+        &app.overlay,
+        Some(crate::pager_overlay::Overlay::Transcript(overlay)) if overlay.is_select_mode()
+    ));
+    press(&mut app, &mut tui, &mut app_server, ctrl('/')).await?;
+    assert!(app.key_chord_matcher.is_pending());
+    let repeat = KeyEvent::new_with_kind(
+        KeyCode::Char('/'),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Repeat,
+    );
+    press(&mut app, &mut tui, &mut app_server, repeat).await?;
+    assert!(app.key_chord_matcher.is_pending());
+    press(
+        &mut app,
         &mut tui,
         &mut app_server,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+        KeyCode::Char('j').into(),
     )
     .await?;
     let Some(crate::pager_overlay::Overlay::Transcript(overlay)) = &mut app.overlay else {
         panic!("overlay closed")
     };
-    assert!(overlay.has_active_interaction());
+    assert!(overlay.has_active_interaction() && !overlay.is_search_editing());
     let mut buffer = ratatui::buffer::Buffer::empty(area);
     overlay.render(area, &mut buffer);
     let text = buffer

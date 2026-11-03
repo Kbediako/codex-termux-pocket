@@ -7,6 +7,7 @@ use codex_protocol::models::local_image_label_text;
 use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::bottom_pane::KillBufferSnapshot;
 use crate::bottom_pane::MentionUsage;
+use crate::bottom_pane::ShellPrefixHandling;
 
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
@@ -22,6 +23,15 @@ impl ChatWidget {
 
     pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
         self.bottom_pane.restore_kill_buffer_snapshot(snapshot);
+    }
+
+    pub(crate) fn composer_draft_snapshot(&mut self) -> ComposerDraftSnapshot {
+        self.bottom_pane.flush_pending_composer_input();
+        let mut draft = self.bottom_pane.composer_draft_snapshot();
+        // This snapshot comes from an active host, where disabled shell commands
+        // also mean a leading bang was entered literally.
+        draft.shell_mode = Some(draft.shell_mode.unwrap_or(false));
+        draft
     }
 
     /// Restore the exact draft entered before the fully initialized composer became available.
@@ -79,20 +89,23 @@ impl ChatWidget {
                     .saturating_sub(original_end)
             });
             pending_pastes.extend(startup_pending_pastes);
-            self.restore_composer_state(Self::composer_state_from_user_message(
-                merge_user_messages(vec![existing_message, startup_message]),
-                pending_pastes,
-            ));
+            self.restore_composer_state_with_shell_mode(
+                Self::composer_state_from_user_message(
+                    merge_user_messages(vec![existing_message, startup_message]),
+                    pending_pastes,
+                ),
+                existing_draft.shell_mode,
+            );
             startup_offset
                 .saturating_add(draft.cursor)
                 .saturating_add(cursor_adjustment)
         } else if existing_has_content || !startup_has_content {
             existing_cursor
         } else {
-            self.restore_composer_state(Self::composer_state_from_user_message(
-                startup_message,
-                draft.pending_pastes,
-            ));
+            self.restore_composer_state_with_shell_mode(
+                Self::composer_state_from_user_message(startup_message, draft.pending_pastes),
+                draft.shell_mode,
+            );
             draft.cursor
         };
         self.bottom_pane.set_composer_cursor(cursor);
@@ -564,6 +577,14 @@ impl ChatWidget {
     }
 
     pub(super) fn restore_composer_state(&mut self, composer: ThreadComposerState) {
+        self.restore_composer_state_with_shell_mode(composer, None);
+    }
+
+    fn restore_composer_state_with_shell_mode(
+        &mut self,
+        composer: ThreadComposerState,
+        shell_mode: Option<bool>,
+    ) {
         let ThreadComposerState {
             text,
             local_images,
@@ -579,6 +600,11 @@ impl ChatWidget {
             text_elements,
             local_image_paths,
             mention_bindings,
+            if shell_mode == Some(false) {
+                ShellPrefixHandling::Literal
+            } else {
+                ShellPrefixHandling::Interpret
+            },
         );
         self.bottom_pane.set_composer_pending_pastes(pending_pastes);
     }
@@ -606,7 +632,7 @@ impl ChatWidget {
 
     pub(crate) fn capture_thread_input_state(&mut self) -> Option<ThreadInputState> {
         self.cancel_image_submission();
-        let draft = self.bottom_pane.composer_draft_snapshot();
+        let draft = self.bottom_pane.composer_recovery_snapshot();
         let composer = ThreadComposerState {
             text: draft.text,
             text_elements: draft.text_elements,
@@ -616,6 +642,7 @@ impl ChatWidget {
             pending_pastes: draft.pending_pastes,
         };
         Some(ThreadInputState {
+            provider_error: self.provider_error.clone(),
             questions: self
                 .bottom_pane
                 .questions
@@ -657,6 +684,9 @@ impl ChatWidget {
         input_state: Option<ThreadInputState>,
         restore_mode: ThreadInputStateRestoreMode,
     ) {
+        let provider_error = input_state
+            .as_ref()
+            .and_then(|state| state.provider_error.clone());
         let preserve_in_flight_turn = restore_mode.preserve_in_flight_turn;
         let restored_task_running =
             preserve_in_flight_turn && input_state.as_ref().is_some_and(|state| state.task_running);
@@ -749,6 +779,9 @@ impl ChatWidget {
         if restored_task_running && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(/*running*/ true);
             self.refresh_status_surfaces();
+        }
+        if let Some(error) = provider_error {
+            self.show_provider_error(error, /*rejected_message_id*/ None);
         }
         self.refresh_pending_input_preview();
         self.request_redraw();

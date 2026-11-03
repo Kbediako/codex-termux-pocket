@@ -2,6 +2,7 @@
 
 use super::focus_palette::PtyCodex;
 use super::focus_palette::write_test_config;
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use app_test_support::create_fake_rollout;
@@ -9,7 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn history_lookup_uses_server_provider_with_local_and_embedded_servers() -> Result<()> {
+async fn resume_lists_all_providers_and_fork_keeps_provider_filter() -> Result<()> {
     let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
     let cwd = codex_utils_cargo_bin::repo_root()?;
     for action in ["resume", "fork"] {
@@ -91,17 +92,33 @@ async fn history_lookup_uses_server_provider_with_local_and_embedded_servers() -
                     "model_provider=\"openai\"",
                 ]);
             }
+            let case = format!("{action}: embedded={embedded}, last={last}, explicit={explicit}");
             let mut terminal = PtyCodex::start_cli(&cwd, home, &args)?;
-            let (expected, excluded) = if embedded || explicit {
-                ("Client provider history", "Server provider history")
+            if action == "resume" {
+                terminal
+                    .wait_for_screen("Server provider history")
+                    .with_context(|| format!("{case}; screen:\n{}", terminal.screen_contents()))?;
+                if !last {
+                    terminal
+                        .wait_for_screen("Client provider history")
+                        .with_context(|| {
+                            format!("{case}; screen:\n{}", terminal.screen_contents())
+                        })?;
+                }
             } else {
-                ("Server provider history", "Client provider history")
-            };
-            terminal.wait_for_screen(expected)?;
-            ensure!(
-                !terminal.screen_contains(excluded),
-                "{action}: unexpected provider history"
-            );
+                let (expected, excluded) = if embedded || explicit {
+                    ("Client provider history", "Server provider history")
+                } else {
+                    ("Server provider history", "Client provider history")
+                };
+                terminal
+                    .wait_for_screen(expected)
+                    .with_context(|| format!("{case}; screen:\n{}", terminal.screen_contents()))?;
+                ensure!(
+                    !terminal.screen_contains(excluded),
+                    "{case}: unexpected provider history"
+                );
+            }
             drop(terminal);
             daemon.kill().await?;
             daemon.wait().await?;

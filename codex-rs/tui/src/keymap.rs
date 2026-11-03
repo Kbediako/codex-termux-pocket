@@ -50,6 +50,10 @@ mod voice_tests;
 #[path = "keymap/global_find_tests.rs"]
 mod global_find_tests;
 
+#[cfg(test)]
+#[path = "keymap/select_transcript_tests.rs"]
+mod select_transcript_tests;
+
 pub(crate) use bindings::KeymapActionId;
 pub(crate) use bindings::KeymapContext;
 pub(crate) use bindings::bindings_for_action;
@@ -62,6 +66,8 @@ pub(crate) use chords::KeyChordMatch;
 pub(crate) use chords::KeyChordMatcher;
 pub(crate) use chords::KeymapContextSet;
 pub(crate) use chords::RuntimeChordKeymap;
+pub(crate) use chords::chord_stroke_matches;
+pub(crate) use chords::dispatch_event;
 pub(crate) use chords::is_dispatch_token;
 pub(crate) use chords::is_dispatch_token_event;
 
@@ -96,12 +102,16 @@ pub(crate) struct RuntimeKeymap {
 
 #[derive(Clone, Debug)]
 pub(crate) struct AppKeymap {
-    /// Open the daemon-wide agent-session overview.
+    /// Change where a new conversation runs.
+    pub(crate) change_host: Vec<KeyBinding>,
+    /// Open the agent command center.
     pub(crate) open_agents: Vec<KeyBinding>,
     /// Open transcript overlay.
     pub(crate) open_transcript: Vec<KeyBinding>,
     /// Find text in the full transcript.
     pub(crate) find_transcript: Vec<KeyBinding>,
+    /// Enter keyboard selection mode for the transcript.
+    pub(crate) select_transcript: Vec<KeyBinding>,
     /// Focus activity groups in the owned transcript to inspect their details.
     pub(crate) focus_activity: Vec<KeyBinding>,
     /// Open retained warnings without replacing the composer.
@@ -444,7 +454,7 @@ impl ListKeymap {
     }
 }
 
-/// Task-management shortcuts specific to the shared agents dashboard.
+/// Task-management shortcuts specific to the agents dashboard.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentsKeymap {
     pub(crate) resume: Vec<KeyBinding>,
@@ -644,7 +654,7 @@ impl RuntimeKeymap {
 
         DEFAULTS
             .get_or_init(|| {
-                Self::from_config(&TuiKeymap::default()).unwrap_or_else(|error| {
+                Self::resolve(&TuiKeymap::default()).unwrap_or_else(|error| {
                     panic!("built-in keymap defaults must be valid: {error}")
                 })
             })
@@ -662,6 +672,13 @@ impl RuntimeKeymap {
     /// Calling code should not merge bindings across unrelated contexts before
     /// dispatch, or conflict guarantees from this resolver no longer hold.
     pub(crate) fn from_config(keymap: &TuiKeymap) -> Result<Self, String> {
+        if keymap == &TuiKeymap::default() {
+            return Ok(Self::defaults());
+        }
+        Self::resolve(keymap)
+    }
+
+    fn resolve(keymap: &TuiKeymap) -> Result<Self, String> {
         let defaults = Self::built_in_defaults();
         let chords = Arc::new(RuntimeChordKeymap::from_config(keymap)?);
         let side_toggle_default_is_shadowed = keymap.global.toggle_side_conversation.is_none()
@@ -708,6 +725,11 @@ impl RuntimeKeymap {
             .collect();
 
         let app = AppKeymap {
+            change_host: resolve_bindings(
+                keymap.global.change_host.as_ref(),
+                &defaults.app.change_host,
+                "tui.keymap.global.change_host",
+            )?,
             open_agents: resolve_bindings(
                 keymap.global.open_agents.as_ref(),
                 &defaults.app.open_agents,
@@ -722,6 +744,11 @@ impl RuntimeKeymap {
                 keymap.global.find_transcript.as_ref(),
                 &defaults.app.find_transcript,
                 "tui.keymap.global.find_transcript",
+            )?,
+            select_transcript: resolve_bindings(
+                keymap.global.select_transcript.as_ref(),
+                &defaults.app.select_transcript,
+                "tui.keymap.global.select_transcript",
             )?,
             focus_activity: resolve_bindings(
                 keymap.global.focus_activity.as_ref(),
@@ -1457,6 +1484,10 @@ impl RuntimeKeymap {
                 app.find_transcript.as_slice(),
             ),
             (
+                keymap.global.select_transcript.as_ref(),
+                app.select_transcript.as_slice(),
+            ),
+            (
                 keymap.global.focus_activity.as_ref(),
                 app.focus_activity.as_slice(),
             ),
@@ -1647,7 +1678,7 @@ impl RuntimeKeymap {
             }
         }
         resolved.configure_search(keymap)?;
-        chords::quick_dial_defaults::register(keymap, &mut resolved);
+        chords::leader_defaults::register(keymap, &mut resolved);
         resolved.validate_conflicts()?;
         chords::validate_chord_conflicts(&resolved)?;
         chords::install_dispatch_bindings(&mut resolved)?;
@@ -1673,9 +1704,11 @@ impl RuntimeKeymap {
     fn built_in_defaults() -> Self {
         Self {
             app: AppKeymap {
+                change_host: Vec::new(),
                 open_agents: default_bindings![],
                 open_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 find_transcript: default_bindings![plain(KeyCode::F(3))],
+                select_transcript: default_bindings![],
                 focus_activity: default_bindings![plain(KeyCode::F(4))],
                 open_warnings: default_bindings![plain(KeyCode::F(2))],
                 open_external_editor: default_bindings![ctrl(KeyCode::Char('g'))],
@@ -1998,15 +2031,16 @@ impl RuntimeKeymap {
     ///    backtracking, intentionally stay outside this configurable keymap.
     fn validate_conflicts(&self) -> Result<(), String> {
         for (action, bindings) in [
-            ("open_presets", &self.chat.open_presets),
-            ("toggle_voice", &self.chat.toggle_voice),
+            ("global.change_host", &self.app.change_host),
+            ("chat.open_presets", &self.chat.open_presets),
+            ("chat.toggle_voice", &self.chat.toggle_voice),
             (
-                "previous_permission_mode",
+                "chat.previous_permission_mode",
                 &self.chat.previous_permission_mode,
             ),
-            ("next_permission_mode", &self.chat.next_permission_mode),
-            ("prompt_stack_back", &self.chat.prompt_stack_back),
-            ("skip_question", &self.chat.skip_question),
+            ("chat.next_permission_mode", &self.chat.next_permission_mode),
+            ("chat.prompt_stack_back", &self.chat.prompt_stack_back),
+            ("chat.skip_question", &self.chat.skip_question),
         ] {
             if bindings.iter().any(|binding| {
                 let (code, modifiers) = binding.parts();
@@ -2014,12 +2048,13 @@ impl RuntimeKeymap {
                     || matches!(code, KeyCode::Char(_)) && crate::key_hint::is_altgr(modifiers)
             }) {
                 return Err(format!(
-                    "tui.keymap.chat.{action}: printable keys are reserved for text input"
+                    "tui.keymap.{action}: printable keys are reserved for text input"
                 ));
             }
         }
         #[cfg(unix)]
         for (action, bindings) in [
+            ("global.change_host", &self.app.change_host),
             ("global.open_agents", &self.app.open_agents),
             ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
@@ -2049,9 +2084,11 @@ impl RuntimeKeymap {
         }
 
         let main_bindings = [
+            ("change_host", self.app.change_host.as_slice()),
             ("open_agents", self.app.open_agents.as_slice()),
             ("open_transcript", self.app.open_transcript.as_slice()),
             ("find_transcript", self.app.find_transcript.as_slice()),
+            ("select_transcript", self.app.select_transcript.as_slice()),
             ("focus_activity", self.app.focus_activity.as_slice()),
             ("open_warnings", self.app.open_warnings.as_slice()),
             (
@@ -2159,6 +2196,7 @@ impl RuntimeKeymap {
                 ("open_agents", self.app.open_agents.as_slice()),
                 ("open_transcript", self.app.open_transcript.as_slice()),
                 ("find_transcript", self.app.find_transcript.as_slice()),
+                ("select_transcript", self.app.select_transcript.as_slice()),
                 ("focus_activity", self.app.focus_activity.as_slice()),
                 ("open_warnings", self.app.open_warnings.as_slice()),
                 (
@@ -2218,6 +2256,7 @@ impl RuntimeKeymap {
                 ("open_agents", self.app.open_agents.as_slice()),
                 ("open_transcript", self.app.open_transcript.as_slice()),
                 ("find_transcript", self.app.find_transcript.as_slice()),
+                ("select_transcript", self.app.select_transcript.as_slice()),
                 ("focus_activity", self.app.focus_activity.as_slice()),
                 ("open_warnings", self.app.open_warnings.as_slice()),
                 (
@@ -2336,6 +2375,30 @@ impl RuntimeKeymap {
 
         validate_unique("pager", context_bindings(KeymapContext::Pager))?;
 
+        validate_unique(
+            "transcript",
+            [
+                (
+                    "global.select_transcript",
+                    self.app.select_transcript.as_slice(),
+                ),
+                ("pager.scroll_up", self.pager.scroll_up.as_slice()),
+                ("pager.scroll_down", self.pager.scroll_down.as_slice()),
+                ("pager.page_up", self.pager.page_up.as_slice()),
+                ("pager.page_down", self.pager.page_down.as_slice()),
+                ("pager.half_page_up", self.pager.half_page_up.as_slice()),
+                ("pager.half_page_down", self.pager.half_page_down.as_slice()),
+                ("pager.jump_top", self.pager.jump_top.as_slice()),
+                ("pager.jump_bottom", self.pager.jump_bottom.as_slice()),
+                ("pager.close", self.pager.close.as_slice()),
+                (
+                    "pager.close_transcript",
+                    self.pager.close_transcript.as_slice(),
+                ),
+                ("pager.find", self.pager.find.as_slice()),
+            ],
+        )?;
+
         validate_no_reserved(
             "pager",
             context_bindings(KeymapContext::Pager),
@@ -2351,6 +2414,10 @@ impl RuntimeKeymap {
                 (
                     "global.find_transcript",
                     self.app.find_transcript.as_slice(),
+                ),
+                (
+                    "global.select_transcript",
+                    self.app.select_transcript.as_slice(),
                 ),
             ]),
         )?;
@@ -4140,9 +4207,14 @@ mod tests {
         assert_eq!(
             (
                 runtime.composer.history_search_previous,
-                runtime.chat.open_presets
+                runtime.chat.open_presets,
+                runtime.app.select_transcript
             ),
-            (vec![key_hint::ctrl(KeyCode::Char('r'))], Vec::new())
+            (
+                vec![key_hint::ctrl(KeyCode::Char('r'))],
+                Vec::new(),
+                Vec::new()
+            )
         );
         let defaults = RuntimeKeymap::defaults();
         for leader in ["page-up", "page-down"] {
@@ -4153,11 +4225,13 @@ mod tests {
                 (
                     runtime.pager.page_up,
                     runtime.pager.page_down,
-                    runtime.chat.open_presets
+                    runtime.chat.open_presets,
+                    runtime.app.select_transcript
                 ),
                 (
                     defaults.pager.page_up.clone(),
                     defaults.pager.page_down.clone(),
+                    Vec::new(),
                     Vec::new()
                 )
             );

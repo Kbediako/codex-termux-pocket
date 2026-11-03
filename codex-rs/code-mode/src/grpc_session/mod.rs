@@ -5,18 +5,22 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
+use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
+use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionProvider;
 use codex_code_mode_protocol::CodeModeSessionProviderFuture;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::StartedCell;
+use codex_code_mode_protocol::TerminateRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use codex_code_mode_protocol::grpc;
@@ -44,6 +48,7 @@ mod conversion;
 mod deadline;
 mod generation;
 mod operations;
+mod process_metrics;
 mod reconnect;
 mod state;
 mod transport;
@@ -63,9 +68,16 @@ fn inject_span_traceparent<T>(request: &mut tonic::Request<T>, span: &tracing::S
 }
 
 /// Creates code-mode sessions over an HTTP/2 gRPC connection.
+///
+/// Metrics requests do not open sessions, retry RPCs, or explicitly reset the
+/// connection. URL providers may initialize their client or establish a network
+/// connection; caller-supplied channels and transports retain their reconnect
+/// policy. Preventing child creation requires a process-owned transport.
 #[derive(Clone)]
 pub struct GrpcCodeModeSessionProvider {
     transport: Arc<SharedTransport>,
+    // Reloaded threads share this counter rather than reusing a cell namespace.
+    next_generation: Arc<AtomicU64>,
 }
 
 impl GrpcCodeModeSessionProvider {
@@ -90,18 +102,41 @@ impl GrpcCodeModeSessionProvider {
         Self::from_transport(SharedTransport::with_channel(channel))
     }
 
+    /// Uses a caller-owned transport, which can prevent observation RPCs from
+    /// starting or replacing process-owned connections.
+    pub fn with_transport<T>(transport: T) -> Self
+    where
+        T: tower::Service<
+                tonic::codegen::http::Request<tonic::body::Body>,
+                Response = tonic::codegen::http::Response<tonic::body::Body>,
+                Error = tonic::Status,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        T::Future: Send + 'static,
+    {
+        Self::from_transport(SharedTransport::with_transport(
+            tower::util::BoxCloneSyncService::new(transport),
+        ))
+    }
+
     fn from_transport(transport: SharedTransport) -> Self {
         Self {
             transport: Arc::new(transport),
+            next_generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
     #[tracing::instrument(name = "code_mode.grpc.open_binding", level = "info", skip_all)]
     async fn open_binding(
         &self,
-        limits: CodeModeSessionCellExecutionLimits,
+        options: &CodeModeSessionOptions,
+        pinned_mode: Option<CodeModeOutputTruncation>,
     ) -> Result<Arc<GrpcCodeModeSession>, String> {
         let mut client = deadline::startup("transport connection", self.transport.client()).await?;
+        let requested_mode = pinned_mode.unwrap_or(options.output_truncation);
+        let limits = &options.cell_execution_limits;
         let limits = grpc::SessionCellExecutionLimits {
             max_yield_time_ms: limits.max_yield_time_ms,
             max_heap_size_bytes: limits
@@ -119,6 +154,12 @@ impl GrpcCodeModeSessionProvider {
             loop {
                 let mut request = tonic::Request::new(grpc::OpenSessionRequest {
                     cell_execution_limits,
+                    output_truncation: match requested_mode {
+                        CodeModeOutputTruncation::Client => None,
+                        CodeModeOutputTruncation::Server => {
+                            Some(grpc::OutputTruncation::Server.into())
+                        }
+                    },
                 });
                 inject_span_traceparent(&mut request, &open_session_span);
                 let result = async {
@@ -166,9 +207,33 @@ impl GrpcCodeModeSessionProvider {
             return Err("gRPC code-mode session lease omitted its opening event".to_string());
         };
         validate_identifier(&opened.session_id, "session ID")?;
+        let host_mode =
+            grpc::OutputTruncation::try_from(opened.output_truncation.unwrap_or_default())
+                .map_err(|_| "gRPC code-mode host returned an unknown output truncation mode")?;
+        let output_truncation = match host_mode {
+            grpc::OutputTruncation::Unspecified | grpc::OutputTruncation::Client => {
+                CodeModeOutputTruncation::Client
+            }
+            grpc::OutputTruncation::Server => CodeModeOutputTruncation::Server,
+        };
+        if output_truncation == CodeModeOutputTruncation::Server
+            && requested_mode == CodeModeOutputTruncation::Client
+        {
+            return Err(format!(
+                "gRPC code-mode host selected {output_truncation:?} output truncation, requested {requested_mode:?}"
+            ));
+        }
+        if pinned_mode.is_some_and(|previous| previous != output_truncation) {
+            // Dropping the opening lease releases this incompatible session before subscribing.
+            return Err(
+                "gRPC code-mode host changed the session output truncation mode on reconnect"
+                    .to_string(),
+            );
+        }
 
         let inner = Arc::new(SessionInner {
             id: opened.session_id,
+            output_truncation,
             client,
             route,
             runtime: tokio::runtime::Handle::current(),
@@ -214,6 +279,13 @@ impl GrpcCodeModeSessionProvider {
 }
 
 impl CodeModeSessionProvider for GrpcCodeModeSessionProvider {
+    fn sample_process_metrics(
+        &self,
+    ) -> CodeModeSessionResultFuture<'_, codex_code_mode_protocol::CodeModeProcessMetricsSample>
+    {
+        Box::pin(process_metrics::sample(self))
+    }
+
     fn create_session(&self) -> CodeModeSessionProviderFuture<'_> {
         self.create_session_with_limits(CodeModeSessionCellExecutionLimits::default())
     }
@@ -222,8 +294,18 @@ impl CodeModeSessionProvider for GrpcCodeModeSessionProvider {
         &'a self,
         limits: CodeModeSessionCellExecutionLimits,
     ) -> CodeModeSessionProviderFuture<'a> {
+        self.create_session_with_options(CodeModeSessionOptions {
+            cell_execution_limits: limits,
+            ..CodeModeSessionOptions::default()
+        })
+    }
+
+    fn create_session_with_options<'a>(
+        &'a self,
+        options: CodeModeSessionOptions,
+    ) -> CodeModeSessionProviderFuture<'a> {
         Box::pin(async move {
-            let session = Arc::new(reconnect::ReconnectableSession::new(self.clone(), limits));
+            let session = Arc::new(reconnect::ReconnectableSession::new(self.clone(), options));
             session.initialize().await?;
             Ok(session as _)
         })
@@ -252,6 +334,10 @@ impl Drop for OpeningSession {
 }
 
 impl CodeModeSession for GrpcCodeModeSession {
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        self.inner.output_truncation
+    }
+
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
@@ -269,8 +355,11 @@ impl CodeModeSession for GrpcCodeModeSession {
         Box::pin(self.inner.wait(request, preempt))
     }
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
-        Box::pin(self.inner.terminate(cell_id))
+    fn terminate<'a>(
+        &'a self,
+        request: TerminateRequest,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+        Box::pin(self.inner.terminate(request))
     }
 
     fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()> {
@@ -286,6 +375,7 @@ impl Drop for GrpcCodeModeSession {
 
 pub(super) struct SessionInner {
     pub(super) id: String,
+    output_truncation: CodeModeOutputTruncation,
     pub(super) client: GrpcClient,
     // Affinity belongs to the session: parents and children may share a transport
     // while being admitted to different hosts. The token is opaque to Codex.

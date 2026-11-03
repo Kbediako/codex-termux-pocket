@@ -37,7 +37,7 @@ use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadReadParams;
@@ -84,6 +84,7 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_rollout::RolloutRecorder;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::read_session_meta_line;
@@ -115,6 +116,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
     let list_id = mcp
         .send_thread_list_request(ThreadListParams {
+            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -237,6 +239,20 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
+    assert_eq!(
+        (
+            read_session_meta_line(&original_path)
+                .await?
+                .meta
+                .account_scoped,
+            read_session_meta_line(thread_path.as_path())
+                .await?
+                .meta
+                .account_scoped,
+        ),
+        (false, true),
+        "forking legacy history creates a newly account-scoped thread"
+    );
     assert!(thread.cwd.as_path().is_absolute());
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
@@ -250,8 +266,8 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let turn = &thread.turns[0];
     assert_eq!(turn.status, TurnStatus::Interrupted);
     assert_eq!(turn.items.len(), 1, "expected user message item");
-    match &turn.items[0] {
-        ThreadItem::UserMessage { content, .. } => {
+    match &turn.items[0].payload {
+        ThreadItemPayload::UserMessage { content, .. } => {
             assert_eq!(
                 content,
                 &vec![UserInput::Text {
@@ -442,7 +458,7 @@ async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
-    let (source_thread_id, source_turn_id) = {
+    let (source_thread_id, source_turn_id, rollout_path) = {
         let mut mcp = TestAppServer::builder()
             .with_codex_home(codex_home.path())
             .build_initialized()
@@ -530,8 +546,19 @@ async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
             );
         }
 
-        (thread.id, turn.id)
+        (
+            thread.id,
+            turn.id,
+            thread.path.expect("source rollout path"),
+        )
     };
+
+    // The first turn records its workspace permissions after the source switched to read-only.
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    let frozen_context = items.into_iter().find(|item| {
+        matches!(item, RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some(&source_turn_id))
+    }).expect("first turn context");
+    append_rollout_item_to_path(&rollout_path, &frozen_context).await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1848,18 +1875,13 @@ async fn thread_fork_warns_for_paginated_full_history_hydration() -> Result<()> 
     Ok(())
 }
 
+#[test_case::test_case(MultiAgentVersion::V1, false; "ordinary v1")]
+#[test_case::test_case(MultiAgentVersion::V2, false; "ordinary v2")]
+#[test_case::test_case(MultiAgentVersion::V1, true; "attached")]
 #[tokio::test]
-async fn thread_fork_freezes_active_paginated_turn_as_interrupted() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V1).await
-}
-
-#[tokio::test]
-async fn thread_fork_persists_developer_interruption_marker_for_multi_agent_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V2).await
-}
-
-async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
+async fn thread_fork_freezes_active_paginated_turn_as_interrupted(
     multi_agent_version: MultiAgentVersion,
+    attach_to_source: bool,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -1983,6 +2005,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             params: ThreadForkParams {
                 thread_id: source_thread_id.clone(),
                 thread_source,
+                attach_to_source,
                 ..Default::default()
             },
         })
@@ -2096,14 +2119,33 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             },
         })
         .await?;
+    if attach_to_source {
+        assert!(turns.is_empty());
+        for (method, field) in [
+            ("thread/revert", "beforeTurnId"),
+            ("thread/fork", "lastTurnId"),
+        ] {
+            let id = mcp
+                .send_raw_request(
+                    method,
+                    Some(json!({"threadId": forked_thread_id, (field): "active-turn"})),
+                )
+                .await?;
+            let error = mcp
+                .read_stream_until_error_message(RequestId::Integer(id))
+                .await?;
+            assert!(error.error.message.contains("turn not found: active-turn"));
+        }
+        return Ok(());
+    }
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].id, "active-turn");
     assert_eq!(turns[0].root_turn_id.as_deref(), Some("causal-root"));
     assert_eq!(turns[0].status, TurnStatus::Interrupted);
     assert_eq!(turns[0].items.len(), 1);
     assert!(matches!(
-        &turns[0].items[0],
-        ThreadItem::UserMessage { id, .. } if id == "before-fork"
+        &turns[0].items[0].payload,
+        ThreadItemPayload::UserMessage { id, .. } if id == "before-fork"
     ));
 
     let search: ThreadSearchOccurrencesResponse = mcp
@@ -2486,8 +2528,8 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
         let turn = &thread.turns[0];
         assert_eq!(turn.status, TurnStatus::Completed);
         assert_eq!(turn.items.len(), 1, "expected user message item");
-        match &turn.items[0] {
-            ThreadItem::UserMessage { content, .. } => {
+        match &turn.items[0].payload {
+            ThreadItemPayload::UserMessage { content, .. } => {
                 assert_eq!(
                     content,
                     &vec![UserInput::Text {
@@ -2945,7 +2987,7 @@ async fn fork_option_disables_mcp_servers(
     let server = responses::start_mock_server().await;
     let mock = responses::mount_sse_sequence(
         &server,
-        ["parent", "child", "refreshed-child", "continued-parent"]
+        ["parent", "prediction", "continued-parent"]
             .into_iter()
             .map(|id| responses::sse(vec![responses::ev_completed(id)]))
             .collect(),
@@ -2987,7 +3029,7 @@ async fn fork_option_disables_mcp_servers(
     let mut model = construct_model_info_offline("gpt-5.4", &config);
     model.use_responses_lite = responses_lite;
     model.supports_search_tool = false;
-    model.tool_mode = Some(codex_protocol::openai_models::ToolMode::Direct);
+    model.tool_mode = Some(codex_protocol::openai_models::ToolMode::CodeMode);
     let catalog = codex_home.path().join("catalog.json");
     std::fs::write(
         &catalog,
@@ -3036,38 +3078,36 @@ async fn fork_option_disables_mcp_servers(
             },
         })
         .await?;
-    let removes_mcp = disable_mcp && incremental_tools && responses_lite;
-    for (index, thread_id) in [&child.thread.id, &child.thread.id, &parent.thread.id]
-        .into_iter()
-        .enumerate()
-    {
-        if index == 1 {
-            let initializations = mcp_server
-                .received_requests()
-                .await
-                .expect("MCP request recording must be enabled")
-                .iter()
-                .filter(|request| request.method.as_str() == "POST")
-                .filter(|request| {
-                    serde_json::from_slice::<Value>(&request.body)
-                        .expect("MCP request must be valid JSON")["method"]
-                        == "initialize"
-                })
-                .count();
-            if removes_mcp {
-                assert_eq!(initializations, 1, "disabled fork must not connect MCPs");
-            }
-            let _: McpServerRefreshResponse = app
-                .request(|request_id| ClientRequest::McpServerRefresh {
-                    request_id,
-                    params: None,
-                })
-                .await?;
-        }
+    let disables_mcp = disable_mcp && incremental_tools && responses_lite;
+    if disables_mcp {
+        let initializations = mcp_server
+            .received_requests()
+            .await
+            .expect("MCP request recording must be enabled")
+            .iter()
+            .filter(|request| request.method.as_str() == "POST")
+            .filter(|request| {
+                serde_json::from_slice::<Value>(&request.body)
+                    .expect("MCP request must be valid JSON")["method"]
+                    == "initialize"
+            })
+            .count();
+        assert_eq!(initializations, 1, "disabled fork must not connect MCPs");
+    }
+    let _: McpServerRefreshResponse = app
+        .request(|request_id| ClientRequest::McpServerRefresh {
+            request_id,
+            params: None,
+        })
+        .await?;
+    for (thread_id, text) in [
+        (&child.thread.id, "Predict the next message."),
+        (&parent.thread.id, "Continue"),
+    ] {
         app.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: thread_id.clone(),
             input: vec![UserInput::Text {
-                text: "Continue".into(),
+                text: text.into(),
                 text_elements: vec![],
             }],
             ..Default::default()
@@ -3081,21 +3121,36 @@ async fn fork_option_disables_mcp_servers(
             .to_string()
             .contains("prediction_mcp_lookup")
     );
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.body_json()["input"]
-                .as_array()
-                .expect("input")
+    let declarations = requests[0].inputs_of_type("additional_tools");
+    if disables_mcp {
+        assert!(
+            declarations
                 .iter()
-                .any(|item| {
-                    let text = item.to_string();
-                    text.contains("namespaces are no longer available")
-                        && text.contains("mcp__fixture")
-                }))
-            .collect::<Vec<_>>(),
-        vec![false, removes_mcp, removes_mcp, false],
-    );
+                .any(|item| responses::namespace_child_tool(item, "functions", "exec").is_some())
+        );
+    }
+    let notice_counts: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            request
+                .message_input_texts("developer")
+                .iter()
+                .filter(|text| text.contains("MCP tools are unavailable for this request."))
+                .count()
+        })
+        .collect();
+    assert_eq!(notice_counts, [0, usize::from(disables_mcp), 0]);
+    for request in &requests[1..] {
+        if disables_mcp {
+            assert_eq!(request.inputs_of_type("additional_tools"), declarations);
+        }
+        assert!(
+            !request
+                .input()
+                .iter()
+                .any(|item| item.to_string().contains("no longer available"))
+        );
+    }
     Ok(())
 }
 

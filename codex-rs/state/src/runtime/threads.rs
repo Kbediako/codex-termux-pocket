@@ -134,6 +134,22 @@ WHERE id = ? AND preview = ''
         Ok(result.rows_affected() > 0)
     }
 
+    /// List saved threads attached directly to the given parent, including archived threads.
+    pub async fn list_attached_thread_ids(
+        &self,
+        parent: ThreadId,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM threads WHERE attached_thread_parent_id = ?",
+        )
+        .bind(parent.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        ids.into_iter()
+            .map(|id| ThreadId::try_from(id).map_err(Into::into))
+            .collect()
+    }
+
     /// Persist or replace the directional parent-child edge for a spawned thread.
     pub async fn upsert_thread_spawn_edge(
         &self,
@@ -543,9 +559,9 @@ ON CONFLICT(child_thread_id) DO NOTHING
             if let Some(overflow_item) = items.pop() {
                 parent_thread_ids.remove(&overflow_item.id);
             }
-            items.last().and_then(|item| {
-                anchor_from_item(item, filters.sort_key, relation_filter.is_some())
-            })
+            items
+                .last()
+                .and_then(|item| anchor_from_item(item, filters.sort_key))
         } else {
             None
         };
@@ -916,11 +932,41 @@ WHERE id = ?
         Ok(result.rows_affected() > 0)
     }
 
+    /// Apply observed metadata, memory preference, and recency in one commit.
+    pub async fn upsert_thread_with_observed_metadata(
+        &self,
+        metadata: &crate::ThreadMetadata,
+        memory_mode: Option<&str>,
+        recency_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        self.upsert_thread_metadata(metadata, memory_mode, memory_mode, recency_at)
+            .await
+    }
+
     async fn upsert_thread_with_creation_memory_mode(
         &self,
         metadata: &crate::ThreadMetadata,
         creation_memory_mode: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.upsert_thread_metadata(
+            metadata,
+            creation_memory_mode,
+            /*memory_mode*/ None,
+            /*recency_at*/ None,
+        )
+        .await
+    }
+
+    async fn upsert_thread_metadata(
+        &self,
+        metadata: &crate::ThreadMetadata,
+        creation_memory_mode: Option<&str>,
+        memory_mode: Option<&str>,
+        recency_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        let recency_at = recency_at
+            .map(|at| self.allocate_thread_recency_at(at))
+            .transpose()?;
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
@@ -978,10 +1024,12 @@ ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
     updated_at = excluded.updated_at,
-    recency_at = threads.recency_at,
+    recency_at = CASE WHEN ? IS NULL THEN threads.recency_at
+        ELSE MAX(?, MAX(?, threads.recency_at_ms + 1) / 1000) END,
     created_at_ms = excluded.created_at_ms,
     updated_at_ms = excluded.updated_at_ms,
-    recency_at_ms = threads.recency_at_ms,
+    recency_at_ms = CASE WHEN ? IS NULL THEN threads.recency_at_ms
+        ELSE MAX(?, threads.recency_at_ms + 1) END,
     source = excluded.source,
     originator = COALESCE(threads.originator, excluded.originator),
     creator_user_id = COALESCE(threads.creator_user_id, excluded.creator_user_id),
@@ -1010,7 +1058,8 @@ ON CONFLICT(id) DO UPDATE SET
     archived_at = excluded.archived_at,
     git_sha = COALESCE(threads.git_sha, excluded.git_sha),
     git_branch = COALESCE(threads.git_branch, excluded.git_branch),
-    git_origin_url = COALESCE(threads.git_origin_url, excluded.git_origin_url)
+    git_origin_url = COALESCE(threads.git_origin_url, excluded.git_origin_url),
+    memory_mode = COALESCE(?, threads.memory_mode)
             "#,
         )
         .bind(metadata.id.to_string())
@@ -1064,6 +1113,12 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.project_id.as_deref())
         .bind(metadata.daybreak_enabled)
         .bind(metadata.attached_thread_parent_id.map(|id| id.to_string()))
+        .bind(recency_at.map(datetime_to_epoch_seconds))
+        .bind(recency_at.map(datetime_to_epoch_seconds))
+        .bind(recency_at.map(datetime_to_epoch_millis))
+        .bind(recency_at.map(datetime_to_epoch_millis))
+        .bind(recency_at.map(datetime_to_epoch_millis))
+        .bind(memory_mode)
         .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
@@ -1287,15 +1342,10 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         }
         None => builder.push(" FROM threads"),
     };
-    let include_thread_id_tiebreaker = relation_filter.is_some()
-        || matches!(
-            filters.sort_key,
-            SortKey::CreatedAt | SortKey::RecencyAt | SortKey::SectionPosition
-        );
     push_thread_filters_with_preview(
         builder,
         filters,
-        include_thread_id_tiebreaker,
+        /*include_thread_id_tiebreaker*/ true,
         /*include_empty_preview*/ relation_filter.is_some(),
     );
     if !matches!(
@@ -1334,7 +1384,7 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         filters.sort_key,
         filters.sort_direction,
         order_by_index,
-        include_thread_id_tiebreaker,
+        /*include_thread_id_tiebreaker*/ true,
         limit,
     );
 }
@@ -1404,6 +1454,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         | RolloutItem::WorldState(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::RetainedContext(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::EventMsg(_) => None,
@@ -2311,7 +2362,7 @@ mod tests {
             Some(Anchor {
                 ts: DateTime::<Utc>::from_timestamp_millis(1_700_000_200_000)
                     .expect("valid timestamp"),
-                id: None,
+                id: Some(newer_id),
             })
         );
 
@@ -2405,7 +2456,7 @@ mod tests {
             Some(Anchor {
                 ts: DateTime::<Utc>::from_timestamp_millis(1_700_000_300_000)
                     .expect("valid timestamp"),
-                id: None,
+                id: Some(second_id),
             })
         );
 
@@ -2590,8 +2641,9 @@ mod tests {
                         "cursor query lost its timestamp index range: {plan_details:?}"
                     );
                 }
-                // The visible creation-time index covers timestamps, so only ties need sorting.
-                let expect_tie_sort = sort_key == SortKey::CreatedAt && cwd_filters.is_none();
+                // The visible creation/update indexes cover timestamps, so only ties need sorting.
+                let expect_tie_sort = matches!(sort_key, SortKey::CreatedAt | SortKey::UpdatedAt)
+                    && cwd_filters.is_none();
                 if expect_tie_sort {
                     assert!(
                         plan_details.iter().any(|detail| {
@@ -2907,6 +2959,7 @@ mod tests {
         );
         let items = vec![RolloutItem::SessionMeta(Box::new(SessionMetaLine {
             meta: SessionMeta {
+                account_scoped: false,
                 attached_thread: false,
                 creator_user_id: None,
                 creator_account_id: None,
@@ -2982,6 +3035,7 @@ mod tests {
         );
         let items = vec![RolloutItem::SessionMeta(Box::new(SessionMetaLine {
             meta: SessionMeta {
+                account_scoped: false,
                 attached_thread: false,
                 creator_user_id: None,
                 creator_account_id: None,
@@ -3739,6 +3793,7 @@ mod tests {
                         total_tokens: 321,
                         codex_rollout_budget_units: None,
                     },
+                    last_usage_includes_reasoning: None,
                     last_token_usage: codex_protocol::protocol::TokenUsage::default(),
                     model_context_window: None,
                 }),

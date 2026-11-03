@@ -16,6 +16,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerNotificationEnvelope;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerRequestPayload;
+use codex_app_server_protocol::ServerRequestResolvedNotification;
 use codex_app_server_protocol::ServerResponse;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
@@ -66,6 +67,7 @@ pub(crate) struct RequestContext {
     request_id: ConnectionRequestId,
     pub(crate) cancellation: tokio_util::sync::CancellationToken,
     cancellation_scope: RequestCancellationScope,
+    is_process_request: bool,
     span: Span,
     parent_trace: Option<W3cTraceContext>,
     _diagnostics_guard: Arc<GaugeGuard>,
@@ -88,6 +90,10 @@ impl RequestContext {
         Self {
             request_id,
             cancellation: tokio_util::sync::CancellationToken::new(),
+            is_process_request: matches!(
+                method,
+                "process/spawn" | "process/writeStdin" | "process/resizePty" | "process/kill"
+            ),
             cancellation_scope: match method {
                 "userVerification/status"
                 | "userVerification/enroll"
@@ -131,8 +137,10 @@ pub(crate) enum OutgoingEnvelope {
 pub(crate) struct OutgoingMessageSender {
     verification_auth: OnceLock<Arc<codex_login::AuthManager>>,
     verification_connections: Mutex<HashSet<ConnectionId>>,
+    human_approval_connections: Mutex<HashSet<ConnectionId>>,
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
+    process_reply_sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
     /// Incoming requests that are still waiting on a final response or error.
     /// We keep them here because this is where responses, errors, and
@@ -149,6 +157,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
 }
 
 struct PendingCallbackEntry {
+    human_approval_recipients: HashSet<ConnectionId>,
     verification_owner: Option<ConnectionId>,
     verification_auth_revision: Option<u64>,
     verification_identity: Option<user_verification_auth::Identity>,
@@ -220,6 +229,17 @@ impl ThreadScopedOutgoingMessageSender {
         self.outgoing.send_server_notification(notification).await;
     }
 
+    pub(crate) async fn resolve_server_request(&self, request_id: RequestId) {
+        self.outgoing.cancel_request(&request_id).await;
+        self.send_server_notification(ServerNotification::ServerRequestResolved(
+            ServerRequestResolvedNotification {
+                thread_id: self.thread_id.to_string(),
+                request_id,
+            },
+        ))
+        .await;
+    }
+
     pub(crate) async fn abort_pending_server_requests(&self) {
         self.outgoing
             .cancel_requests_for_thread(
@@ -253,12 +273,22 @@ impl OutgoingMessageSender {
         Self {
             verification_auth: OnceLock::new(),
             verification_connections: Mutex::new(HashSet::new()),
+            human_approval_connections: Mutex::new(HashSet::new()),
             next_server_request_id: AtomicI64::new(0),
+            process_reply_sender: sender.clone(),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),
             request_contexts: Mutex::new(HashMap::new()),
             analytics_events_client,
         }
+    }
+
+    pub(crate) fn with_process_reply_sender(
+        mut self,
+        sender: mpsc::Sender<OutgoingEnvelope>,
+    ) -> Self {
+        self.process_reply_sender = sender;
+        self
     }
 
     pub(crate) async fn register_request_context(&self, request_context: RequestContext) {
@@ -289,7 +319,18 @@ impl OutgoingMessageSender {
         }
     }
 
+    pub(crate) async fn enable_human_approval_connection(&self, connection_id: ConnectionId) {
+        self.human_approval_connections
+            .lock()
+            .await
+            .insert(connection_id);
+    }
+
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
+        self.human_approval_connections
+            .lock()
+            .await
+            .remove(&connection_id);
         self.disconnect_user_verification_connection(connection_id)
             .await;
         let mut request_contexts = self.request_contexts.lock().await;
@@ -372,6 +413,22 @@ impl OutgoingMessageSender {
                     || verification_identity != self.verification_identity())
         };
         let (tx_approve, rx_approve) = oneshot::channel();
+        let human_connections;
+        let connection_ids = if requires_human_approval(&request) {
+            let eligible = self.human_approval_connections.lock().await;
+            human_connections = connection_ids
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .filter(|id| eligible.contains(id))
+                .collect::<Vec<_>>();
+            if human_connections.is_empty() {
+                return (outgoing_message_id, rx_approve);
+            }
+            Some(human_connections.as_slice())
+        } else {
+            connection_ids
+        };
         // One app owns this ceremony. Reconnect and other subscribers cannot answer it.
         let verification_owner = if user_verification {
             let eligible = self.verification_connections.lock().await;
@@ -394,6 +451,11 @@ impl OutgoingMessageSender {
             request_id_to_callback.insert(
                 id,
                 PendingCallbackEntry {
+                    human_approval_recipients: if requires_human_approval(&request) {
+                        connection_ids.unwrap_or_default().iter().copied().collect()
+                    } else {
+                        HashSet::new()
+                    },
                     verification_owner,
                     verification_auth_revision,
                     verification_identity: verification_identity.clone(),
@@ -466,7 +528,24 @@ impl OutgoingMessageSender {
         thread_id: ThreadId,
     ) {
         let requests = self.pending_requests_for_thread(thread_id).await;
+        let human_approval = self
+            .human_approval_connections
+            .lock()
+            .await
+            .contains(&connection_id);
         for request in requests {
+            if requires_human_approval(&request) {
+                if !human_approval {
+                    continue;
+                }
+                // Register the replay recipient before sending so its response
+                // cannot race ahead of callback authorization.
+                let mut callbacks = self.request_id_to_callback.lock().await;
+                let Some(entry) = callbacks.get_mut(request.id()) else {
+                    continue;
+                };
+                entry.human_approval_recipients.insert(connection_id);
+            }
             if let Err(err) = self
                 .sender
                 .send(OutgoingEnvelope::ToConnection {
@@ -580,8 +659,18 @@ impl OutgoingMessageSender {
         connection_id: ConnectionId,
         id: &RequestId,
     ) -> Option<(RequestId, PendingCallbackEntry)> {
+        let human_approval = self
+            .human_approval_connections
+            .lock()
+            .await
+            .contains(&connection_id);
         let mut callbacks = self.request_id_to_callback.lock().await;
         let entry = callbacks.get(id)?;
+        if requires_human_approval(&entry.request)
+            && (!human_approval || !entry.human_approval_recipients.contains(&connection_id))
+        {
+            return None;
+        }
         if let Some(owner) = entry.verification_owner {
             if owner != connection_id {
                 return None;
@@ -889,10 +978,23 @@ impl OutgoingMessageSender {
         message: OutgoingMessage,
         message_kind: &'static str,
     ) {
-        let send_fut = self.sender.send(OutgoingEnvelope::ToConnection {
+        // Process requests serialize by handle. A blocked resize reply would also block the next kill.
+        let sender = if request_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.is_process_request)
+        {
+            &self.process_reply_sender
+        } else {
+            &self.sender
+        };
+        // The spawn reply must reach the embedder before the collectors can publish output.
+        let (written_tx, written_rx) = (!sender.same_channel(&self.sender))
+            .then(oneshot::channel)
+            .unzip();
+        let send_fut = sender.send(OutgoingEnvelope::ToConnection {
             connection_id,
             message,
-            write_complete_tx: None,
+            write_complete_tx: written_tx,
         });
         let send_result = if let Some(request_context) = request_context {
             send_fut.instrument(request_context.span()).await
@@ -902,6 +1004,8 @@ impl OutgoingMessageSender {
 
         if let Err(err) = send_result {
             warn!("failed to send {message_kind} to client: {err:?}");
+        } else if let Some(written_rx) = written_rx {
+            let _ = written_rx.await;
         }
     }
 }
@@ -920,6 +1024,11 @@ fn timestamped_server_notification(notification: ServerNotification) -> Outgoing
         notification,
         emitted_at_ms: Some(now_unix_timestamp_ms().try_into().unwrap_or_default()),
     })
+}
+
+fn requires_human_approval(request: &ServerRequest) -> bool {
+    matches!(request, ServerRequest::CommandExecutionRequestApproval { params, .. }
+        if params.kind == codex_app_server_protocol::CommandExecutionApprovalKind::HumanCommand)
 }
 
 #[cfg(test)]

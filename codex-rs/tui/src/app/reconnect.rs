@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app_server_session::ResumeModelSettings;
+use crate::app_server_session::is_server_shutting_down_error;
 use crate::dynamic_tools_mcp::ThreadToolTransport;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -23,7 +24,7 @@ pub(super) struct ReconnectState {
 }
 
 pub(super) struct Reconnected {
-    session: AppServerSession,
+    pub(super) session: AppServerSession,
     bootstrap: AppServerBootstrap,
     thread: Option<AppServerStartedThread>,
 }
@@ -62,16 +63,21 @@ pub(super) async fn reconnect(
             tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 120)
         }
     };
+    // Track only the stage. Transport errors can contain endpoint credentials.
+    let mut stage = "connecting to the server";
     for delay in [0, 1, 2, 4].into_iter().chain(std::iter::repeat(/*elt*/ 8)) {
         let attempt = async {
             tokio::time::sleep(Duration::from_secs(delay)).await;
+            stage = "connecting to the server";
             let client = crate::app_server_connection::connect(&target).await?;
             let mut session = AppServerSession::new(backend_id, client, mode)
                 .with_local_codex_home(&config.codex_home)
                 .with_remote_cwd_override(remote_cwd.clone())
                 .with_thread_tool_transport(task_tools.clone());
+            stage = "loading session settings";
             let bootstrap = session.bootstrap(&config).await?;
             let thread = if let Some(thread_id) = thread_id {
+                stage = "resuming the conversation";
                 match session
                     .resume_thread(
                         &local_settings,
@@ -90,14 +96,14 @@ pub(super) async fn reconnect(
                     {
                         return Err(error);
                     }
-                    // Unloading threads use the same code as unavailable conversations, but
-                    // ordinary resume can reattach once the unload finishes.
+                    // Draining servers and unloading threads both reject resume temporarily.
                     Err(error)
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
                             Some(TypedRequestError::Server { method, source })
                                 if method == "thread/resume" && source.code == -32600
-                                    && source.message.starts_with(&format!("thread {thread_id} is closing;"))
+                                    && (is_server_shutting_down_error(source)
+                                        || source.message.starts_with(&format!("thread {thread_id} is closing;")))
                         ) =>
                     {
                         return Err(error);
@@ -127,9 +133,9 @@ pub(super) async fn reconnect(
             Ok(Err(_)) => {}
             Err(_) => break,
         }
-        // Transport errors can contain endpoint credentials. Do not render or log them.
     }
-    color_eyre::eyre::bail!("Server connection could not be restored");
+    tracing::warn!(stage, "automatic reconnect timed out");
+    color_eyre::eyre::bail!("Automatic reconnect timed out while {stage}.")
 }
 
 impl App {
@@ -299,6 +305,32 @@ impl App {
         true
     }
 
+    pub(super) fn bind_backend_workspace(
+        &mut self,
+        app_server: &AppServerSession,
+        search_dir: PathBuf,
+    ) {
+        self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
+        self.chat_widget.set_local_worktree_operations(
+            !crate::uses_remote_workspace_or_environment(
+                &self.app_server_target,
+                self.environment_manager.as_ref(),
+            ),
+        );
+        self.chat_widget.windows_sandbox_local_server =
+            !self.app_server_target.uses_remote_workspace()
+                && app_server.app_server_platform_os() == Some("windows");
+        self.chat_widget.remote_connection =
+            crate::status::remote_connection::remote_connection_status_value(
+                &self.app_server_target,
+                app_server.server_version(),
+            );
+        self.workspace_command_runner = Some(Arc::new(AppServerWorkspaceCommandRunner::new(
+            app_server.request_handle(),
+        )));
+        self.file_search = FileSearchManager::new(search_dir, self.app_event_tx.clone());
+    }
+
     pub(super) async fn finish_reconnect(
         &mut self,
         tui: &mut tui::Tui,
@@ -364,16 +396,6 @@ impl App {
                 self.chat_widget.windows_sandbox_elevated_setup_complete = false;
             }
         }
-        self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
-        self.chat_widget.set_local_worktree_operations(
-            !crate::uses_remote_workspace_or_environment(
-                &self.app_server_target,
-                self.environment_manager.as_ref(),
-            ),
-        );
-        self.chat_widget.windows_sandbox_local_server =
-            !self.app_server_target.uses_remote_workspace()
-                && app_server.app_server_platform_os() == Some("windows");
         self.chat_widget.windows_sandbox_host = WindowsSandboxHost::Unknown;
         self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         let managed_daemon = self
@@ -381,19 +403,10 @@ impl App {
             .remote_connection
             .as_ref()
             .is_some_and(|connection| connection.is_managed_daemon);
-        self.chat_widget.remote_connection =
-            crate::status::remote_connection::remote_connection_status_value(
-                &self.app_server_target,
-                app_server.server_version(),
-            );
+        self.bind_backend_workspace(app_server, self.config.cwd.to_path_buf());
         if let Some(connection) = &mut self.chat_widget.remote_connection {
             connection.is_managed_daemon = connection.is_local_daemon && managed_daemon;
         }
-        self.workspace_command_runner = Some(Arc::new(AppServerWorkspaceCommandRunner::new(
-            app_server.request_handle(),
-        )));
-        self.file_search =
-            FileSearchManager::new(self.config.cwd.to_path_buf(), self.app_event_tx.clone());
         self.model_catalog = Arc::new(
             ModelCatalog::new(bootstrap.available_models)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
@@ -438,6 +451,7 @@ impl App {
         // so their late requests cannot leak into recovery. Background threads attach on selection.
         for channel in self.thread_event_channels.values_mut() {
             let mut replacement = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
+            replacement.backend_id = channel.backend_id;
             if channel.attachment() == ThreadEventAttachment::ExternalWriter {
                 replacement.mark_external_writer();
             } else {
@@ -514,7 +528,6 @@ impl App {
                 return Err(err);
             }
             self.config = self.chat_widget.config_ref().clone();
-            self.refresh_pending_thread_approvals().await;
             if self.thread_unavailable(id) && !self.chat_widget.is_external_writer_view() {
                 self.agent_navigation.mark_stopped(id);
                 self.chat_widget.pause_unavailable_thread();
@@ -535,6 +548,7 @@ impl App {
             self.replace_chat_widget(ChatWidget::new_with_app_event(init));
             self.chat_widget.restore_reconnected_input(input, &[]);
         }
+        self.refresh_pending_thread_approvals().await;
         // Discover tasks whose notifications were missed, without clearing retained rows.
         // A hidden overview performs this discovery when it is next opened.
         self.agents_overview.initialized = false;

@@ -827,22 +827,27 @@ async fn session_info_preserves_styled_tooltip_links() {
 }
 
 #[tokio::test]
-async fn session_info_first_event_suppresses_tooltips_and_nux() {
+async fn session_info_first_event_respects_tooltip_preference() {
     let config = test_config().await;
-    let cell = new_session_info(
-        &config,
-        &crate::local_settings::LocalSettings::from(&config),
-        "gpt-5",
-        "gpt-5",
-        &session_configured_event("gpt-5"),
-        /*is_first_event*/ true,
-        Some("Model just became available".to_string()),
-        Some(PlanType::Free),
-    );
+    let mut local_settings = crate::local_settings::LocalSettings::from(&config);
+    for show_tooltips in [true, false] {
+        local_settings.tui.show_tooltips = show_tooltips;
+        let cell = new_session_info(
+            &config,
+            &local_settings,
+            "requested-model",
+            "gpt-5",
+            &session_configured_event("gpt-5"),
+            /*is_first_event*/ true,
+            Some("Model just became available".to_string()),
+            Some(PlanType::Free),
+        );
 
-    let rendered = render_transcript(&cell).join("\n");
-    assert!(!rendered.contains("Model just became available"));
-    assert!(rendered.contains("To get started"));
+        let rendered = render_transcript(&cell).join("\n");
+        assert_eq!(rendered.contains("To get started"), show_tooltips);
+        assert!(!rendered.contains("Model just became available"));
+        assert!(!rendered.contains("model changed:"));
+    }
 }
 
 #[tokio::test]
@@ -932,6 +937,8 @@ fn safety_access_block_event_snapshot() {
     let cell = new_safety_access_block_event();
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
     insta::assert_snapshot!(rendered);
+    let body = cell.display_lines(u16::MAX)[1].to_string();
+    assert_eq!(cell.raw_lines()[1].to_string(), body.trim_start());
 }
 
 #[test]
@@ -2311,7 +2318,7 @@ fn ran_cell_multiline_with_stderr_snapshot() {
 fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
     let msg = "_count_r\x1b[13;2:3uows";
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: msg.to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2335,7 +2342,7 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
     );
     let image_start = message.find("[Image #1]").unwrap();
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message,
         text_elements: vec![TextElement::new(
             (image_start..image_start + "[Image #1]".len()).into(),
@@ -2386,7 +2393,7 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 #[test]
 fn user_history_cell_renders_remote_image_urls() {
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "describe these".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2407,7 +2414,7 @@ fn user_image_labels_follow_the_painted_prompt_surface() {
 
     let placeholder = "[Image #1]";
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: format!("{placeholder} describe these"),
         text_elements: vec![TextElement::new(
             (0..placeholder.len()).into(),
@@ -2443,7 +2450,7 @@ fn user_image_labels_follow_the_painted_prompt_surface() {
 #[test]
 fn user_history_cell_summarizes_inline_data_urls() {
     let mut cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "describe inline image".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2469,7 +2476,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
 #[test]
 fn user_history_cell_numbers_multiple_remote_images() {
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "describe both".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2489,7 +2496,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
 #[test]
 fn user_history_cell_height_matches_rendered_lines_with_remote_images() {
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "line one\nline two".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2512,7 +2519,7 @@ fn user_history_cell_height_matches_rendered_lines_with_remote_images() {
 #[test]
 fn user_history_cell_trims_trailing_blank_message_lines() {
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "line one\n\n   \n\t \n".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2533,7 +2540,7 @@ fn user_history_cell_trims_trailing_blank_message_lines() {
 fn user_history_cell_trims_trailing_blank_message_lines_with_text_elements() {
     let message = "tokenized\n\n\n".to_string();
     let cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message,
         text_elements: vec![TextElement::new(
             (0..8).into(),
@@ -2557,7 +2564,7 @@ fn user_history_cell_trims_trailing_blank_message_lines_with_text_elements() {
 fn render_uses_wrapping_for_long_url_like_line() {
     let url = "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/with/a/very/long/path/that/keeps/going/for/testing/purposes-only-and-does/not/need/to/resolve/index.html?session_id=abc123def456ghi789jkl012mno345pqr678stu901vwx234yz";
     let cell: Box<dyn HistoryCell> = Box::new(UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: url.to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -2966,15 +2973,26 @@ fn deprecation_notice_renders_summary_with_details() {
 }
 
 #[test]
-fn legacy_zsh_migration_notice_snapshot() {
-    let mut features = codex_features::Features::default();
-    features.record_legacy_usage_force("shell_zsh_fork", codex_features::Feature::ShellZshFork);
-    let usage = features
-        .legacy_feature_usages()
-        .next()
-        .expect("migration notice");
-    let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
-    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n"));
+fn legacy_feature_migration_notices() {
+    for (key, snapshot) in [
+        ("shell_zsh_fork", "legacy_zsh_migration_notice_snapshot"),
+        ("daemon_auto_start", "daemon_auto_start_migration_notice"),
+    ] {
+        let mut features = codex_features::Features::with_defaults();
+        features.apply_map(&std::collections::BTreeMap::from([(
+            key.to_string(),
+            false,
+        )]));
+        let usage = features
+            .legacy_feature_usages()
+            .next()
+            .expect("migration notice");
+        let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
+        insta::assert_snapshot!(
+            snapshot,
+            render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n")
+        );
+    }
 }
 
 #[test]
@@ -3049,7 +3067,7 @@ fn agent_markdown_cell_narrow_width_shows_prefix_only() {
 #[test]
 fn wrapped_and_prefixed_cells_handle_tiny_widths() {
     let user_cell = UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "tiny width coverage for wrapped user history".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -3156,7 +3174,7 @@ fn consolidation_walker_replaces_agent_message_cells() {
 
     // Build a transcript with: [UserCell, AgentMsg(head), AgentMsg(cont), AgentMsg(cont)]
     let user = Arc::new(UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: "hello".to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),

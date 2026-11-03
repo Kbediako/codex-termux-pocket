@@ -1,5 +1,7 @@
-//! Translate canonical permissions into native MXC grants without expanding
-//! access. Denies and read-only carveouts remain separate kernel policy lists.
+//! Translate canonical permissions into MXC path grants.
+//! Denies and read-only carveouts remain separate kernel policy lists.
+//! Missing deny parents are created before deny globs and volume grants are expanded.
+//! Alias limitations are documented in the crate README.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -16,11 +18,6 @@ use codex_windows_sandbox::resolve_windows_deny_read_paths;
 use mxc_sdk::mxc_common::cmdline::CommandLineContext;
 use mxc_sdk::mxc_common::cmdline::CommandLineError;
 use mxc_sdk::mxc_common::cmdline::cmdline_from_argv_for_context;
-use mxc_sdk::mxc_common::filesystem_object::ExistingObjectComparison;
-use mxc_sdk::mxc_common::filesystem_object::compare_existing_filesystem_objects;
-use mxc_sdk::mxc_common::filesystem_object::normalize_object_conflicts;
-use mxc_sdk::mxc_common::logger::Logger;
-use mxc_sdk::mxc_common::logger::Mode;
 use mxc_sdk::mxc_common::models::BaseProcessUiConfig;
 use mxc_sdk::mxc_common::models::ContainerPolicy;
 use mxc_sdk::mxc_common::models::ExecutionRequest;
@@ -133,6 +130,19 @@ pub(super) fn build_request(
         return Err(PolicyError::RelativeCommandCwd);
     }
     let policy = materialize_temporary_paths(permissions.file_system_sandbox_policy(), &env)?;
+    #[cfg(windows)]
+    for denied in policy.get_unreadable_roots_with_cwd(cwd) {
+        if let Some(parent) = denied.as_path().parent()
+            && matches!(parent.try_exists(), Ok(false))
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                PolicyError::PolicyResolution(format!(
+                    "MXC currently requires deny paths to have existing parent directories. Could not create {}: {error}. Create this directory manually or correct the path/permissions, then retry.",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
     let full_disk_write = policy.has_full_disk_write_access();
     let volumes = volume_roots
         .iter()
@@ -205,23 +215,13 @@ pub(super) fn build_request(
         .collect::<std::io::Result<HashSet<_>>>()?;
     prune_unavailable_volume_roots(&mut write, &volume_roots);
     prune_unavailable_volume_roots(&mut read, &volume_roots);
-    // Normalize pre-expansion aliases so generated children inherit
-    // any tightened access applied to their volume root.
-    let normalized = normalize_policy(ContainerPolicy {
-        readwrite_paths: unicode_paths(write)?,
-        readonly_paths: unicode_paths(read)?,
-        denied_paths: unicode_paths(deny)?,
-        ..Default::default()
-    })?;
-    let write = collect_paths(normalized.readwrite_paths.into_iter().map(PathBuf::from))?;
-    let read = collect_paths(normalized.readonly_paths.into_iter().map(PathBuf::from))?;
-    let deny = collect_paths(normalized.denied_paths.into_iter().map(PathBuf::from))?;
-    // If expansion skips an unavailable writable volume, its generated read-only
-    // carveouts remain below. Pruning them requires retaining their root provenance,
-    // so we accept that rare normalization failure for now.
+    // BaseContainer owns alias precedence for the emitted paths. Do not call
+    // MXC's object normalizer: its metadata preflight rejects usable SMB grants
+    // and inaccessible deny paths before the native API can evaluate them.
+    // The hard-link and volume-root alias tradeoffs are intentional; see README.
+    // Read-only roots already grant recursive access; only expand writable roots.
     let mut write = expand_volume_roots(write, &volume_roots)?;
     write.retain(|key, _| !carveouts.contains_key(key) && !deny.contains_key(key));
-    let mut read = expand_volume_roots(read, &volume_roots)?;
     // Resolve equal-path write overrides before reaching MXC so the native
     // API receives one effective access mode for each path identity.
     read.retain(|key, _| !write.contains_key(key) && !deny.contains_key(key));
@@ -269,7 +269,7 @@ pub(super) fn build_request(
             ports: Vec::new(),
         });
     }
-    let mut request = ExecutionRequest {
+    Ok(ExecutionRequest {
         script_code: cmdline_from_argv_for_context(
             &command.command,
             CommandLineContext::WindowsCreateProcess,
@@ -311,21 +311,7 @@ pub(super) fn build_request(
             ..Default::default()
         },
         ..Default::default()
-    };
-    // Reconcile aliases introduced by expansion. MXC/PSEC separately enforces
-    // restrictions on junction-resolved targets at access time.
-    request.policy = normalize_policy(request.policy)?;
-    Ok(request)
-}
-
-fn normalize_policy(mut policy: ContainerPolicy) -> Result<ContainerPolicy, PolicyError> {
-    let mut logger = Logger::new(Mode::Buffer);
-    if let Some(normalized) =
-        normalize_object_conflicts(&policy, &mut logger).map_err(PolicyError::PolicyResolution)?
-    {
-        policy = normalized;
-    }
-    Ok(policy)
+    })
 }
 
 fn prune_unavailable_volume_roots(paths: &mut NativePaths, volume_roots: &HashSet<PathUri>) {
@@ -381,7 +367,7 @@ pub(super) fn materialize_volume_roots(
     Ok(fs)
 }
 
-// MXC volume-root grants are nonrecursive, so snapshot each root's current
+// MXC writable volume-root grants are nonrecursive, so snapshot each root's current
 // immediate children as recursive grants. A child created directly under the
 // root after policy construction is not granted. MXC/PSEC still enforces
 // restrictions on junction-resolved targets at access time.
@@ -399,10 +385,10 @@ fn expand_volume_roots(
                         if child.to_str().is_none() {
                             continue;
                         }
-                        // A self-comparison is MXC's public object-identity probe.
-                        // Generated grants can be skipped; explicit paths fail closed below.
-                        if compare_existing_filesystem_objects(&child, &child)
-                            != ExistingObjectComparison::Same
+                        // Windows supplies the file type with directory entries.
+                        // Only resolve links: broken targets prevent PSEC startup.
+                        if entry.file_type().is_ok_and(|kind| kind.is_symlink())
+                            && std::fs::metadata(&child).is_err()
                         {
                             continue;
                         }

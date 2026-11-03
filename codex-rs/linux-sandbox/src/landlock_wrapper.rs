@@ -11,7 +11,8 @@ use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
-use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::FileSystemSandboxPolicy;
+use codex_protocol::protocol::NetworkSandboxPolicy;
 
 #[path = "seccomp.rs"]
 mod original;
@@ -20,15 +21,17 @@ mod termux_read_only_seccomp;
 
 pub(crate) use original::is_termux_prefix;
 
-pub(crate) fn apply_permission_profile_to_current_thread(
-    permission_profile: &PermissionProfile,
+pub(crate) fn apply_sandbox_policies_to_current_thread(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    network_sandbox_policy: NetworkSandboxPolicy,
     cwd: &Path,
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
     proxy_routing_active: bool,
 ) -> Result<()> {
-    match original::apply_permission_profile_to_current_thread(
-        permission_profile,
+    match original::apply_sandbox_policies_to_current_thread(
+        file_system_sandbox_policy,
+        network_sandbox_policy,
         cwd,
         apply_landlock_fs,
         managed_network,

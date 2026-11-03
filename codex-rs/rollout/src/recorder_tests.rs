@@ -214,6 +214,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 
     let session_meta_line = SessionMetaLine {
         meta: SessionMeta {
+            account_scoped: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -1505,7 +1506,7 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .expect("state db lookup should succeed");
     assert_eq!(stored_metadata, Some(metadata));
     let cursor = page.next_cursor.expect("another thread remains");
-    assert_eq!(cursor.thread_id(), None);
+    assert_eq!(cursor.thread_id(), Some(valid_thread_id));
     runtime.close().await;
     let fallback = RolloutRecorder::list_threads(
         Some(runtime),

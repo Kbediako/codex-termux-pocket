@@ -84,22 +84,67 @@ async fn live_center_keeps_status_order_across_progress_refreshes() {
             .map(|thread| (ThreadId::from_string(&thread.id).unwrap(), Some(thread)))
             .collect();
         app.repaint_agents_overview();
-        assert_eq!(app.agents_overview.visible_thread_ids, expected);
+        assert_eq!(app.agents_overview.visible_thread_ids[1], id);
         let selected = app
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
             .unwrap();
         assert_eq!(app.agents_overview.visible_thread_ids[selected], ids[0]);
     }
+    app.agents_overview.pinned_thread_ids = Some(vec![ids[3], ids[2]]);
+    for parent in [ids[0], ids[3]] {
+        threads.push(overview_thread(
+            ThreadId::new(),
+            Some(parent),
+            "Failed subagent",
+            ThreadStatus::SystemError,
+        ));
+    }
     let view = app.agents_overview_view(threads, Some(ids[0]));
+    assert!(
+        view.rows[view.selected_index().unwrap()]
+            .details
+            .lines
+            .is_empty()
+    );
     let after = screen(&view, /*width*/ 100, /*height*/ 18);
     insta::assert_snapshot!(format!(
-        "Initial display:\n{before}\n\nAfter progress updates:\n{after}"
+        "Initial display:\n{before}\n\nAfter subagents fail under Alpha and Ready task:\n{after}"
     ));
 }
 
 #[tokio::test]
-async fn live_center_appends_arrivals_and_status_transitions() {
+async fn failed_background_worker_only_needs_attention_for_a_pending_request() {
+    let app = make_test_app().await;
+    let worker_id = ThreadId::new();
+    let mut worker = overview_thread(
+        worker_id,
+        /*parent_thread_id*/ None,
+        "Background review",
+        ThreadStatus::SystemError,
+    );
+    worker.source = SessionSource::SubAgent(SubAgentSource::Review);
+    let view = app.agents_overview_view(vec![worker.clone()], Some(worker_id));
+    assert_eq!(view.rows[0].group, AgentsOverviewGroup::Finished);
+    assert!(view.rows[0].details.lines.is_empty());
+
+    let child = overview_thread(
+        ThreadId::new(),
+        Some(worker_id),
+        "Check dependencies",
+        ThreadStatus::Active {
+            active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+        },
+    );
+    let view = app.agents_overview_view(vec![worker, child], Some(worker_id));
+    assert_eq!(view.rows[0].group, AgentsOverviewGroup::NeedsYou);
+    let rendered = screen(&view, /*width*/ 100, /*height*/ 32);
+    assert!(rendered.contains("● Needs input"));
+    assert!(rendered.contains("Waiting for approval."));
+}
+
+#[tokio::test]
+async fn live_center_sorts_arrivals_and_status_transitions_by_update_time() {
     let app = make_test_app().await;
     let [alpha, bravo, charlie, delta, child] = [1, 2, 3, 4, 5].map(ThreadId::from_u128);
     let working = ThreadStatus::Active {
@@ -133,49 +178,54 @@ async fn live_center_appends_arrivals_and_status_transitions() {
     let mut arrival = overview_thread(delta, /*parent_thread_id*/ None, "Delta", working);
     arrival.updated_at += 100;
     threads.push(arrival);
-    assert_eq!(
-        app.agents_overview_view(threads.clone(), Some(bravo))
-            .thread_ids(),
-        vec![alpha, bravo, delta, charlie]
-    );
-    threads[1].status = ThreadStatus::Idle;
-    assert_eq!(
-        app.agents_overview_view(threads.clone(), Some(bravo))
-            .thread_ids(),
-        vec![alpha, delta, charlie, bravo]
-    );
-    // A descendant can change the root's effective group without changing its own status.
-    threads.push(overview_thread(
+    let mut child = overview_thread(
         child,
-        Some(bravo),
+        /*parent_thread_id*/ None,
         "Child",
         ThreadStatus::SystemError,
-    ));
+    );
+    child.parent_thread_id = Some(bravo.to_string());
+    threads.push(child);
     assert_eq!(
         app.agents_overview_view(threads.clone(), Some(bravo))
             .thread_ids(),
-        vec![bravo, alpha, delta, charlie]
+        vec![delta, alpha, bravo, charlie]
+    );
+    threads[1].status = ThreadStatus::Idle;
+    let view = app.agents_overview_view(threads.clone(), Some(bravo));
+    assert_eq!(view.thread_ids(), vec![delta, alpha, bravo, charlie]);
+    let selected = &view.rows[view.selected_index().unwrap()];
+    assert_eq!(selected.group, AgentsOverviewGroup::Ready);
+    assert!(selected.details.lines.is_empty());
+    // A request from a descendant can still bring its idle parent to the top.
+    threads.last_mut().unwrap().status = ThreadStatus::Active {
+        active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+    };
+    assert_eq!(
+        app.agents_overview_view(threads.clone(), Some(bravo))
+            .thread_ids(),
+        vec![bravo, delta, alpha, charlie]
     );
     threads.pop();
     let view = app.agents_overview_view(threads.clone(), Some(bravo));
-    assert_eq!(view.thread_ids(), vec![alpha, delta, charlie, bravo]);
+    assert_eq!(view.thread_ids(), vec![delta, alpha, bravo, charlie]);
     assert_eq!(view.rows[view.selected_index().unwrap()].thread_id, bravo);
-    // Removed roots lose their rank, so rediscovery behaves like a new arrival.
+    // Rediscovery restores the task to its position by update time.
     let removed = threads.remove(/*index*/ 0);
     assert_eq!(
         app.agents_overview_view(threads.clone(), Some(bravo))
             .thread_ids(),
-        vec![delta, charlie, bravo]
+        vec![delta, bravo, charlie]
     );
     threads.push(removed);
     assert_eq!(
         app.agents_overview_view(threads, Some(bravo)).thread_ids(),
-        vec![delta, alpha, charlie, bravo]
+        vec![delta, alpha, bravo, charlie]
     );
 }
 
 #[tokio::test]
-async fn live_center_stable_order_preserves_filters_and_pins() {
+async fn live_center_status_order_tracks_updates_while_filtered_and_pinned() {
     let mut app = make_test_app().await;
     app.agents_overview.view_state.lock().unwrap().grouping = AgentsOverviewGrouping::Status;
     let ids = [1, 2, 3].map(ThreadId::from_u128);
@@ -198,6 +248,7 @@ async fn live_center_stable_order_preserves_filters_and_pins() {
             .lines()
             .filter_map(|line| {
                 let (_, task_column) = line.split('│').next()?.split_once("● ")?;
+                let task_column = task_column.trim_start_matches('📌').trim_start();
                 ["Alpha", "Bravo", "Charlie"]
                     .into_iter()
                     .find(|title| task_column.starts_with(title))
@@ -205,29 +256,29 @@ async fn live_center_stable_order_preserves_filters_and_pins() {
             .collect::<Vec<_>>()
     };
     let mut view = app.agents_overview_view(threads.clone(), Some(ids[1]));
-    // Searching only changes visibility, not the retained order of hidden rows.
+    // Hidden rows also pick up timestamp changes when the filter is cleared.
     view.handle_key_event(KeyCode::Char('/').into());
     view.handle_paste("Bravo".into());
     threads[2].updated_at += 100;
     view = app.agents_overview_view(threads.clone(), Some(ids[1]));
     assert_eq!(rendered_titles(&view), vec!["Bravo"]);
     view.handle_key_event(KeyCode::Esc.into());
-    assert_eq!(view.thread_ids(), ids.to_vec());
-    // A refresh while another status tab is empty must not discard the Working order.
+    assert_eq!(rendered_titles(&view), vec!["Charlie", "Alpha", "Bravo"]);
+    // Update another working task while the empty Needs input tab is selected.
     view.handle_key_event(KeyCode::Tab.into());
     assert!(rendered_titles(&view).is_empty());
     threads[1].updated_at += 200;
     view = app.agents_overview_view(threads.clone(), /*selected_thread_id*/ None);
     view.handle_key_event(KeyCode::Tab.into());
-    assert_eq!(rendered_titles(&view), vec!["Alpha", "Bravo", "Charlie"]);
+    assert_eq!(rendered_titles(&view), vec!["Bravo", "Charlie", "Alpha"]);
     view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
     view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    app.agents_overview.pinned_thread_ids = Some(vec![ids[2], ids[0]]);
+    app.agents_overview.pinned_thread_ids = Some(vec![ids[0], ids[2]]);
     view = app.agents_overview_view(threads.clone(), Some(ids[1]));
-    assert_eq!(rendered_titles(&view), vec!["Charlie", "Alpha", "Bravo"]);
+    assert_eq!(rendered_titles(&view), vec!["Alpha", "Charlie", "Bravo"]);
     app.agents_overview.pinned_thread_ids = Some(vec![]);
     view = app.agents_overview_view(threads, Some(ids[1]));
-    assert_eq!(rendered_titles(&view), vec!["Alpha", "Bravo", "Charlie"]);
+    assert_eq!(rendered_titles(&view), vec!["Bravo", "Charlie", "Alpha"]);
 }
 
 #[tokio::test]
@@ -283,7 +334,11 @@ async fn live_center_columns() {
     ));
     crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, child);
     app.agents_overview.pinned_thread_ids = Some(vec![current, ThreadId::from_u128(/*value*/ 44)]);
+    app.agents_overview
+        .unread
+        .insert(ThreadId::from_u128(/*value*/ 47));
     let mut view = app.agents_overview_view(threads, Some(current));
+    assert!(screen(&view, /*width*/ 50, /*height*/ 24).contains("● Error: Failed task"));
     insta::assert_snapshot!(screen(&view, /*width*/ 160, /*height*/ 22));
     view.pinned_thread_ranks = None;
     let mut selected_status_styles = Vec::new();
@@ -302,10 +357,6 @@ async fn live_center_columns() {
             .iter()
             .position(|cell| cell.symbol() == "›")
             .unwrap();
-        assert_eq!(
-            selected_row[marker + 2].style(),
-            selected_row[marker].style()
-        );
         selected_status_styles.push(format!(
             "{} | {:?}",
             selected_row[marker + 2].symbol(),

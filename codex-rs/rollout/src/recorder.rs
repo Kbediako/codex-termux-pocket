@@ -23,7 +23,6 @@ use codex_protocol::models::BaseInstructions;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
-use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -47,8 +46,6 @@ use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
-use super::list::parse_cursor;
-use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
 use super::ordinal::ordinal_state_for_rollout;
@@ -109,6 +106,7 @@ pub enum RolloutRecorderParams {
         source: Box<SessionSource>,
         thread_source: Option<ThreadSource>,
         originator: String,
+        account_scoped: bool,
         creator_user_id: Option<String>,
         creator_account_id: Option<String>,
         base_instructions: BaseInstructions,
@@ -230,6 +228,7 @@ impl RolloutRecorderParams {
             source: Box::new(source),
             thread_source,
             originator,
+            account_scoped: false,
             creator_user_id: None,
             creator_account_id: None,
             base_instructions,
@@ -245,13 +244,20 @@ impl RolloutRecorderParams {
     }
 
     /// Record the authenticated identity at thread creation, or preserve it on revert.
-    pub fn with_creator(mut self, user_id: Option<String>, account_id: Option<String>) -> Self {
+    pub fn with_creator(
+        mut self,
+        user_id: Option<String>,
+        account_id: Option<String>,
+        account_scoped: bool,
+    ) -> Self {
         if let Self::Create {
             creator_user_id,
             creator_account_id,
+            account_scoped: scoped,
             ..
         } = &mut self
         {
+            *scoped = account_scoped;
             *creator_user_id = user_id;
             *creator_account_id = account_id;
         }
@@ -411,7 +417,7 @@ impl RolloutRecorder {
         default_provider: &str,
         search_term: Option<&str>,
     ) -> std::io::Result<ThreadsPage> {
-        let mut page = Self::list_threads_with_db_fallback(
+        Self::list_threads_with_db_fallback(
             state_db_ctx,
             config,
             page_size,
@@ -426,14 +432,7 @@ impl RolloutRecorder {
             ThreadListRepairMode::ScanAndRepair,
             search_term,
         )
-        .await?;
-        // Continuation may fall back to filesystem pagination, which only honors timestamps.
-        if sort_key == ThreadSortKey::CreatedAt
-            && let Some(cursor) = page.next_cursor.as_mut()
-        {
-            *cursor = Cursor::new(cursor.timestamp());
-        }
-        Ok(page)
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -483,7 +482,7 @@ impl RolloutRecorder {
         default_provider: &str,
         search_term: Option<&str>,
     ) -> std::io::Result<ThreadsPage> {
-        let mut page = Self::list_threads_with_db_fallback(
+        Self::list_threads_with_db_fallback(
             state_db_ctx,
             config,
             page_size,
@@ -498,14 +497,7 @@ impl RolloutRecorder {
             ThreadListRepairMode::ScanAndRepair,
             search_term,
         )
-        .await?;
-        // Continuation may fall back to filesystem pagination, which only honors timestamps.
-        if sort_key == ThreadSortKey::CreatedAt
-            && let Some(cursor) = page.next_cursor.as_mut()
-        {
-            *cursor = Cursor::new(cursor.timestamp());
-        }
-        Ok(page)
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -937,6 +929,7 @@ impl RolloutRecorder {
                 source,
                 thread_source,
                 originator,
+                account_scoped,
                 creator_user_id,
                 creator_account_id,
                 base_instructions,
@@ -974,6 +967,7 @@ impl RolloutRecorder {
                     cwd: cwd.clone(),
                     runtime_workspace_roots,
                     originator,
+                    account_scoped,
                     creator_user_id,
                     creator_account_id,
                     cli_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1355,20 +1349,10 @@ fn truncate_fs_page(
         return page;
     }
     page.items.truncate(page_size);
-    page.next_cursor = page.items.last().and_then(|item| {
-        let file_name = item.path.file_name()?.to_str()?;
-        let (created_at, _id) = parse_timestamp_uuid_from_filename(file_name)?;
-        let cursor_token = match sort_key {
-            ThreadSortKey::CreatedAt => created_at.format(&Rfc3339).ok()?,
-            ThreadSortKey::UpdatedAt => item.updated_at.as_deref()?.to_string(),
-            ThreadSortKey::RecencyAt => item
-                .recency_at
-                .as_deref()
-                .or(item.updated_at.as_deref())?
-                .to_string(),
-        };
-        parse_cursor(cursor_token.as_str())
-    });
+    page.next_cursor = page
+        .items
+        .last()
+        .and_then(|item| item.filesystem_cursor(sort_key));
     page
 }
 
@@ -1549,7 +1533,7 @@ async fn list_threads_from_files_desc(
         let next_cursor = if more_matches_available {
             matching_items
                 .last()
-                .and_then(|item| cursor_from_thread_item(item, sort_key))
+                .and_then(|item| item.filesystem_cursor(sort_key))
         } else {
             None
         };
@@ -1664,7 +1648,7 @@ async fn list_threads_from_files_asc(
 
     let mut keyed_items = all_items
         .into_iter()
-        .filter_map(|item| thread_item_sort_key(&item, sort_key).map(|key| (key, item)))
+        .filter_map(|item| item.filesystem_sort_key(sort_key).map(|key| (key, item)))
         .collect::<Vec<_>>();
     keyed_items.sort_by_key(|(key, _)| *key);
     let mut all_items = keyed_items
@@ -1680,12 +1664,11 @@ async fn list_threads_from_files_asc(
                 .and_then(|id| uuid::Uuid::parse_str(&id.to_string()).ok()),
         );
         all_items.retain(|item| {
-            thread_item_sort_key(item, sort_key).is_some_and(|key| match anchor.1 {
-                Some(anchor_id) if sort_key == ThreadSortKey::RecencyAt => {
-                    key > (anchor.0, anchor_id)
-                }
-                _ => key.0 > anchor.0,
-            })
+            item.filesystem_sort_key(sort_key)
+                .is_some_and(|key| match anchor.1 {
+                    Some(anchor_id) => key > (anchor.0, anchor_id),
+                    _ => key.0 > anchor.0,
+                })
         });
     }
 
@@ -1694,7 +1677,7 @@ async fn list_threads_from_files_asc(
     let next_cursor = if more_matches_available {
         all_items
             .last()
-            .and_then(|item| cursor_from_thread_item(item, sort_key))
+            .and_then(|item| item.filesystem_cursor(sort_key))
     } else {
         None
     };
@@ -1730,41 +1713,6 @@ async fn filter_thread_items_by_search_term(
             .is_some_and(|title| title.contains(search_term))
     });
     Ok(())
-}
-
-fn thread_item_sort_key(
-    item: &ThreadItem,
-    sort_key: ThreadSortKey,
-) -> Option<(OffsetDateTime, uuid::Uuid)> {
-    let file_name = item.path.file_name()?.to_str()?;
-    let (created_at, id) = parse_timestamp_uuid_from_filename(file_name)?;
-    let timestamp = match sort_key {
-        ThreadSortKey::CreatedAt => created_at,
-        ThreadSortKey::UpdatedAt => {
-            let updated_at = item.updated_at.as_deref().or(item.created_at.as_deref())?;
-            OffsetDateTime::parse(updated_at, &Rfc3339).ok()?
-        }
-        ThreadSortKey::RecencyAt => {
-            let recency_at = item
-                .recency_at
-                .as_deref()
-                .or(item.updated_at.as_deref())
-                .or(item.created_at.as_deref())?;
-            OffsetDateTime::parse(recency_at, &Rfc3339).ok()?
-        }
-    };
-    Some((timestamp, id))
-}
-
-fn cursor_from_thread_item(item: &ThreadItem, sort_key: ThreadSortKey) -> Option<Cursor> {
-    let (timestamp, id) = thread_item_sort_key(item, sort_key)?;
-    match sort_key {
-        ThreadSortKey::RecencyAt => Some(Cursor::with_thread_id(
-            timestamp,
-            ThreadId::from_string(&id.to_string()).ok()?,
-        )),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => Some(Cursor::new(timestamp)),
-    }
 }
 
 fn precompute_new_rollout_path(
@@ -2260,7 +2208,8 @@ async fn resume_candidate_matches_cwd(
     if let Ok((items, _, _)) = RolloutRecorder::load_rollout_items(rollout_path).await
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(&turn_context.cwd),
-            RolloutItem::SessionMeta(_)
+            RolloutItem::DynamicToolsUpdated { .. }
+            | RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

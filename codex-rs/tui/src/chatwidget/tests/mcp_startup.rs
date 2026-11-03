@@ -269,9 +269,13 @@ async fn inline_review_submits_during_mcp_startup() {
 }
 
 #[tokio::test]
-async fn review_during_mcp_startup_preserves_draft_when_foreground_work_is_pending() {
+async fn review_and_fork_during_mcp_startup_preserve_drafts_when_foreground_work_is_pending() {
     for activity in ["turn", "review", "pending", "queued", "images"] {
-        for draft in ["/review", "/review check regressions"] {
+        for draft in ["/review", "/review changes", "/fork", "/fork named"] {
+            let command = draft.split_whitespace().next().unwrap();
+            if activity == "queued" && command == "/fork" {
+                continue;
+            }
             let (mut chat, mut rx, mut op_rx) =
                 make_chatwidget_manual(/*model_override*/ None).await;
             chat.set_mcp_startup_expected_servers(["slow".to_string()]);
@@ -309,7 +313,9 @@ async fn review_during_mcp_startup_preserves_draft_when_foreground_work_is_pendi
                 .collect::<Vec<_>>();
             assert_eq!(
                 errors,
-                vec!["■ '/review' is disabled while a task is in progress.\n".to_string()]
+                vec![format!(
+                    "■ '{command}' is disabled while a task is in progress.\n"
+                )]
             );
             assert!(
                 !std::iter::from_fn(|| op_rx.try_recv().ok())
@@ -429,6 +435,17 @@ async fn pending_mcp_startup_does_not_unblock_external_review() {
     notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
     chat.thread_id = Some(ThreadId::new());
 
+    chat.set_local_worktree_operations(/*enabled*/ false);
+    chat.bottom_pane
+        .set_composer_text("/fork".into(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::ForkCurrentSession { name: None }))
+    );
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+
     handle_entered_review_mode(&mut chat, "current changes");
     assert!(chat.bottom_pane.status_indicator_visible());
     chat.queue_user_message("queued follow-up".into());
@@ -440,7 +457,10 @@ async fn pending_mcp_startup_does_not_unblock_external_review() {
 
     while rx.try_recv().is_ok() {}
     chat.dispatch_command(crate::slash_command::SlashCommand::Fork);
-    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    insta::assert_snapshot!(
+        lines_to_single_string(&drain_insert_history(&mut rx).concat()),
+        @"■ '/fork' is disabled while a task is in progress."
+    );
 
     chat.finish_mcp_startup(Vec::new(), Vec::new());
     assert!(chat.bottom_pane.is_task_running());

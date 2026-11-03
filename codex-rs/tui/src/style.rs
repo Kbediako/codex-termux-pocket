@@ -13,6 +13,7 @@ use crate::terminal_palette::effective_stdout_color_level;
 use crate::terminal_palette::rgb_color;
 use crate::terminal_palette::stdout_color_level;
 use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 
 const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (28, 100, 200);
@@ -25,6 +26,27 @@ pub(crate) const CHATGPT_BLUE_200: (u8, u8, u8) = (99, 168, 248);
 
 /// Shared accent for picker selection backgrounds and transcript foreground emphasis.
 pub(crate) const UI_ACCENT: (u8, u8, u8) = CHATGPT_BLUE_200;
+
+/// The result marker inherits the row fill, including the reverse-video selection fallback.
+pub(crate) fn task_marker(unread: bool, row: Style) -> ratatui::text::Span<'static> {
+    let (symbol, rgb, ansi) = if unread {
+        ("●", (0x3b, 0x82, 0xf6), Color::Blue)
+    } else {
+        ("○", (128, 128, 128), Color::DarkGray)
+    };
+    let color = match effective_stdout_color_level() {
+        StdoutColorLevel::Ansi16 => ansi,
+        StdoutColorLevel::Ansi256 => best_color(rgb),
+        StdoutColorLevel::TrueColor | StdoutColorLevel::Unknown => rgb_color(rgb),
+    };
+    // In reverse video the terminal paints glyphs with the background color.
+    let style = if row.add_modifier.contains(Modifier::REVERSED) {
+        row.bg(color)
+    } else {
+        row.fg(color)
+    };
+    ratatui::text::Span::styled(symbol, style)
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum StatusTone {
@@ -62,9 +84,12 @@ pub fn user_message_style() -> Style {
 }
 
 /// Submitted prompts use a lighter fill than the editable composer in either theme.
+///
+/// Some terminals do not answer the optional default-color probe. Keep submitted prompts shaded
+/// with an ANSI-safe fallback instead of dropping the surface.
 pub(crate) fn history_prompt_style() -> Style {
     let Some(background) = default_bg() else {
-        return Style::default();
+        return Style::default().bg(Color::DarkGray);
     };
     let (foreground, alpha) = if is_light(background) {
         ((0, 0, 0), 0.02)
@@ -150,6 +175,17 @@ pub(crate) fn secondary_text_style() -> Style {
         .fg(readable_color_on(preferred, /*background*/ None))
         .not_dim()
         .not_bold()
+}
+
+/// Bring a focusable surface closer to the terminal background while keeping its text readable.
+pub(crate) fn quiet_workspace_style() -> Style {
+    let base = Style::default().not_bold().not_reversed().not_underlined();
+    let Some(bg) = default_bg() else {
+        return base.fg(Color::Reset).bg(Color::Reset).dim();
+    };
+    let fill = best_color(blend(user_message_bg_rgb(bg), bg, 0.40));
+    let foreground = default_fg().map_or(Color::Reset, |fg| best_color(blend(fg, bg, 0.66)));
+    base.bg(fill).fg(readable_color_on(foreground, Some(fill)))
 }
 
 pub(crate) fn selection_style() -> Style {

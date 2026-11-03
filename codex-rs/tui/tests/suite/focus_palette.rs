@@ -35,7 +35,8 @@ fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> R
     let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
 
-    let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-alt-screen"])?;
+    let mut terminal =
+        PtyCodex::start(&repo_root, codex_home, &["--no-daemon", "--no-alt-screen"])?;
     terminal.wait_for_startup()?;
 
     let startup_output_len = terminal.output.len();
@@ -165,7 +166,7 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
-    let mut terminal = PtyCodex::start(&repo_root, codex_home, &[])?;
+    let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-daemon"])?;
     terminal.wait_for_startup()?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     while !terminal.parser.screen().alternate_screen() && Instant::now() < deadline {
@@ -227,8 +228,22 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
         (1, (u16::try_from(composer_row)?, 2), false),
         "first owned-screen frame must contain one composer with its visible cursor"
     );
+    let exit_start = terminal.output.len();
     terminal.write_input(b"\x1b[99;5u")?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !contains_bytes(&terminal.output[exit_start..], b"\x1b[c") {
+        terminal.ensure_running()?;
+        ensure!(Instant::now() < deadline, "missing exit DA1 query");
+        terminal.read_output(Duration::from_millis(/*millis*/ 50))?;
+    }
+    assert_eq!(
+        terminal.parser.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None
+    );
+    // The DA1 reply straddles the first 1 KiB of in-flight mouse reports.
+    let mut reports = b"\x1b[<51;23;56M".repeat(85);
+    reports.extend_from_slice(b"\x1b[?1;2c");
+    terminal.write_input(&reports)?;
     loop {
         terminal.read_output(Duration::from_millis(/*millis*/ 50))?;
         if let Some(status) = terminal.child.try_wait()? {
@@ -241,6 +256,10 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
             terminal.screen_contents()
         );
     }
+    terminal.write_input(b"shell\n")?;
+    let mut shell_input = [0; 6];
+    terminal.slave.read_exact(&mut shell_input)?;
+    assert_eq!(&shell_input, b"shell\n");
     ensure!(
         !terminal.parser.screen().alternate_screen(),
         "alternate screen was not restored"
@@ -262,7 +281,7 @@ fn fullscreen_transcript_can_opt_out_to_terminal_scrollback() -> Result<()> {
     let mut terminal = PtyCodex::start(
         &repo_root,
         codex_home,
-        &["-c", "tui.fullscreen_transcript=false"],
+        &["--no-daemon", "-c", "tui.fullscreen_transcript=false"],
     )?;
     terminal.wait_for_startup()?;
     terminal.wait_for_screen("GPT-5.6-Terra")?;
@@ -278,6 +297,7 @@ fn fullscreen_transcript_can_opt_out_to_terminal_scrollback() -> Result<()> {
 
 pub(super) struct PtyCodex {
     master: File,
+    slave: File,
     child: Child,
     parser: vt100::Parser,
     output: Vec<u8>,
@@ -370,12 +390,13 @@ impl PtyCodex {
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave.try_clone()?)
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
         Ok(Self {
             master,
+            slave,
             child,
             parser: vt100::Parser::new(
                 /*rows*/ 32, /*cols*/ 120, /*scrollback_len*/ 0,
@@ -446,8 +467,10 @@ impl PtyCodex {
             self.cursor_answered = true;
         }
 
-        if !self.keyboard_answered && contains_bytes(&self.output, b"\x1b[?u") {
-            self.write_input(b"\x1b[?7u")?;
+        if !self.keyboard_answered && contains_bytes(&self.output, b"\x1b[c") {
+            if contains_bytes(&self.output, b"\x1b[?u") {
+                self.write_input(b"\x1b[?7u")?;
+            }
             self.write_input(b"\x1b[?1;2c")?;
             self.keyboard_answered = true;
         }
@@ -548,7 +571,6 @@ pub(super) fn write_test_config(codex_home: &Path, repo_root: &Path) -> Result<(
     let config = format!(
         "model = \"gpt-5.6-terra\"\nmodel_provider = \"openai\"\n\
          suppress_unstable_features_warning = true\nanalytics.enabled = false\n\
-         features.daemon_auto_start = false\n\
          notice.model_migrations.\"gpt-5.6-terra\" = \"gpt-6-sol\"\n\n\
          [projects.\"{repo_root}\"]\ntrust_level = \"trusted\"\n"
     );
@@ -567,12 +589,6 @@ fn no_daemon_skips_startup_and_discovery() -> Result<()> {
         let workspace = tempfile::tempdir()?;
         let home = tempfile::tempdir()?;
         write_test_config(home.path(), workspace.path())?;
-        let config = home.path().join("config.toml");
-        let contents = std::fs::read_to_string(&config)?;
-        std::fs::write(
-            config,
-            contents.replace("features.daemon_auto_start = false\n", ""),
-        )?;
         let socket_path = codex_app_server_client::app_server_control_socket_path(home.path())?;
         std::fs::create_dir_all(socket_path.as_path().parent().unwrap())?;
         let listener = if running {
@@ -615,12 +631,6 @@ fn auto_daemon_start_failure_exits_with_manual_fallback_hint() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let home = tempfile::tempdir()?;
     write_test_config(home.path(), workspace.path())?;
-    let config = home.path().join("config.toml");
-    let contents = std::fs::read_to_string(&config)?;
-    std::fs::write(
-        config,
-        contents.replace("features.daemon_auto_start = false\n", ""),
-    )?;
     // An incomplete selected package must fail without installing a replacement.
     std::fs::create_dir_all(home.path().join("packages/app-server-daemon/current"))?;
     let mut terminal = PtyCodex::start(

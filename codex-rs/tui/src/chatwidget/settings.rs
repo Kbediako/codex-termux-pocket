@@ -29,7 +29,13 @@ impl ChatWidget {
     /// UI and turn-selection eligibility; the catalog and server still determine program access.
     pub(crate) fn daybreak_account_eligible(&self) -> bool {
         self.daybreak_feature_enabled()
-            && self.config.model_provider_id == "openai"
+            && self
+                .config
+                .model_providers
+                .get(&self.config.model_provider_id)
+                .is_some_and(|provider| {
+                    provider.supports_cyber_access_programs(&self.config.model_provider_id)
+                })
             && (self.has_chatgpt_account
                 || matches!(
                     self.status_account_display,
@@ -131,7 +137,7 @@ impl ChatWidget {
         }
         if matches!(feature, Feature::FastMode | Feature::UltrafastMode) {
             self.refresh_effective_service_tier();
-            self.sync_service_tier_commands();
+            self.refresh_model_dependent_surfaces();
         }
         if feature == Feature::Plugins {
             self.sync_plugins_command_enabled();
@@ -213,10 +219,17 @@ impl ChatWidget {
         self.model_catalog.clone()
     }
 
-    pub(crate) fn on_account_email_loaded(&mut self, current_email: Option<String>) {
-        if let Some(StatusAccountDisplay::ChatGpt { email, .. }) = &mut self.status_account_display
+    pub(crate) fn on_account_email_loaded(
+        &mut self,
+        current_email: Option<String>,
+        current_workspace: Option<String>,
+    ) {
+        if let Some(StatusAccountDisplay::ChatGpt {
+            email, workspace, ..
+        }) = &mut self.status_account_display
         {
             *email = current_email;
+            *workspace = current_workspace;
         }
     }
 
@@ -497,6 +510,7 @@ impl ChatWidget {
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
+        self.set_daybreak_enabled(self.daybreak_enabled);
         self.set_service_tier(settings.service_tier.clone());
         if let Err(err) = self
             .config

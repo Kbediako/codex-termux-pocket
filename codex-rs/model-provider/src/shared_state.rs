@@ -46,6 +46,7 @@ impl ModelProviderSharedState {
             resource: config.resource.clone(),
             scopes: config.scopes.clone(),
             redirect_port: config.redirect_port,
+            credentials_store: config.credentials_store,
         };
         let mut managers = self
             .gateway_managers
@@ -120,9 +121,9 @@ impl ModelProviderSharedState {
     }
 }
 
+#[path = "shared_state_test_support.rs"]
+pub(crate) mod test_support;
+
 #[cfg(test)]
 #[path = "shared_state_tests.rs"]
 mod tests;
-
-#[path = "shared_state_test_support.rs"]
-pub(crate) mod test_support;

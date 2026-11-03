@@ -24,6 +24,9 @@ use tokio_util::task::AbortOnDropHandle;
 pub struct UserInputMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_order: Option<u64>,
+    /// Optional host-assigned UUID for this particular Responses user item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_item_uuid: Option<uuid::Uuid>,
     #[serde(
         default,
         skip_serializing_if = "codex_history::UserInputOrigin::is_user"
@@ -79,18 +82,45 @@ mod turn_input_response_item {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Steering takes precedence when several kinds of input are pending together.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum InputQueueActivity {
     Mailbox,
     Steer,
+}
+
+impl TurnInput {
+    fn is_queue_only_mail(&self) -> bool {
+        match self {
+            Self::InterAgentCommunication(communication) => !communication.trigger_turn,
+            Self::ResponseItem(ResponseItemEnvelope {
+                item: ResponseItem::AgentMessage { .. },
+                ..
+            }) => true,
+            Self::UserInput { .. } | Self::FunctionCallOutput(_) | Self::ResponseItem(_) => false,
+        }
+    }
+
+    fn wait_activity(&self) -> InputQueueActivity {
+        match self {
+            Self::InterAgentCommunication(_)
+            | Self::ResponseItem(ResponseItemEnvelope {
+                item: ResponseItem::AgentMessage { .. },
+                ..
+            }) => InputQueueActivity::Mailbox,
+            Self::UserInput { .. } | Self::FunctionCallOutput(_) | Self::ResponseItem(_) => {
+                InputQueueActivity::Steer
+            }
+        }
+    }
 }
 
 /// Turn-local pending input storage owned by the input queue flow.
 #[derive(Default)]
 pub(crate) struct TurnInputQueue {
     items: Vec<TurnInput>,
-    /// Response items queued through a notifying injection, unlike passive context.
-    has_pending_injection: bool,
+    /// Activity from notifying writes. Passive response items do not wake a wait.
+    notified_activity: Option<InputQueueActivity>,
 }
 
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
@@ -228,6 +258,32 @@ impl InputQueue {
                 .is_some_and(|(_, _, updates)| *updates.borrow())
     }
 
+    /// Native mailbox backlog qualifies regardless of turn ID or delivery phase.
+    /// Injected mail qualifies only while its matching turn still accepts mail.
+    pub(crate) async fn should_preempt_sampling_for_mail(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+        sub_id: &str,
+    ) -> bool {
+        if self.has_pending_mailbox_items().await {
+            return true;
+        }
+        let Some(turn_state) = self.turn_state_for_sub_id(active_turn, sub_id).await else {
+            return false;
+        };
+        let turn_state = turn_state.lock().await;
+        turn_state.accepts_mailbox_delivery_for_current_turn()
+            && turn_state.pending_input.items.iter().any(|input| {
+                matches!(
+                    input,
+                    TurnInput::ResponseItem(ResponseItemEnvelope {
+                        item: ResponseItem::AgentMessage { .. },
+                        ..
+                    })
+                )
+            })
+    }
+
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
         self.mailbox_pending_mails
             .lock()
@@ -334,14 +390,14 @@ impl InputQueue {
             return;
         };
         let mut turn_state = turn_state.lock().await;
-        // Explicit same-turn work still needs a follow-up. Queue-only child mail does not: keep
+        // Explicit same-turn work still needs a follow-up. Queue-only agent mail does not: keep
         // it pending so task completion records it for the next turn without sampling again.
-        if turn_state.pending_input.items.iter().any(|input| {
-            !matches!(
-                input,
-                TurnInput::InterAgentCommunication(communication) if !communication.trigger_turn
-            )
-        }) {
+        if turn_state
+            .pending_input
+            .items
+            .iter()
+            .any(|input| !input.is_queue_only_mail())
+        {
             return;
         }
         turn_state.set_mailbox_delivery_phase(MailboxDeliveryPhase::NextTurn);
@@ -370,20 +426,24 @@ impl InputQueue {
             .accept_mailbox_delivery_for_current_turn();
     }
 
-    pub(super) async fn extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+    pub(super) async fn extend_pending_input_and_notify_for_turn_state(
         &self,
         turn_state: &Mutex<TurnState>,
         input: Vec<TurnInput>,
     ) {
+        let activity = input.iter().map(TurnInput::wait_activity).max();
+        let queue_only_mail = !input.is_empty() && input.iter().all(TurnInput::is_queue_only_mail);
         {
             let mut turn_state = turn_state.lock().await;
-            turn_state.pending_input.has_pending_injection |= input
-                .iter()
-                .any(|input| matches!(input, TurnInput::ResponseItem(_)));
+            turn_state.pending_input.notified_activity =
+                turn_state.pending_input.notified_activity.max(activity);
             turn_state.pending_input.items.extend(input);
-            turn_state.accept_mailbox_delivery_for_current_turn();
+            if !queue_only_mail {
+                turn_state.accept_mailbox_delivery_for_current_turn();
+            }
         }
-        self.activity_tx.send_replace(InputQueueActivity::Steer);
+        self.activity_tx
+            .send_replace(activity.unwrap_or(InputQueueActivity::Steer));
     }
 
     pub(crate) async fn extend_pending_input_for_turn_state(
@@ -479,24 +539,15 @@ impl TurnInputQueue {
     }
 
     fn pending_activity(&self) -> Option<InputQueueActivity> {
-        if self.has_pending_injection
-            || self.items.iter().any(|input| {
-                matches!(
-                    input,
-                    TurnInput::UserInput { .. } | TurnInput::FunctionCallOutput(_)
-                )
-            })
-        {
-            Some(InputQueueActivity::Steer)
-        } else if self
-            .items
-            .iter()
-            .any(|input| matches!(input, TurnInput::InterAgentCommunication(_)))
-        {
-            Some(InputQueueActivity::Mailbox)
-        } else {
-            None
+        if self.notified_activity == Some(InputQueueActivity::Steer) {
+            return self.notified_activity;
         }
+        self.items
+            .iter()
+            .filter(|input| !matches!(input, TurnInput::ResponseItem(_)))
+            .map(TurnInput::wait_activity)
+            .chain(self.notified_activity)
+            .max()
     }
 }
 
@@ -609,7 +660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_queue_notifies_steer_subscribers() {
+    async fn input_queue_distinguishes_new_agent_input_from_pending_steering() {
         let input_queue = InputQueue::new();
         let turn_state = Mutex::new(TurnState::default());
         let (mut activity_rx, pending_activity) =
@@ -617,7 +668,7 @@ mod tests {
         assert_eq!(pending_activity, None);
 
         input_queue
-            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+            .extend_pending_input_and_notify_for_turn_state(
                 &turn_state,
                 vec![TurnInput::UserInput {
                     metadata: Default::default(),
@@ -632,6 +683,28 @@ mod tests {
 
         activity_rx.changed().await.expect("steer update");
         assert_eq!(*activity_rx.borrow_and_update(), InputQueueActivity::Steer);
+
+        let mail = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "follow-up",
+            /*trigger_turn*/ true,
+        );
+        input_queue
+            .extend_pending_input_and_notify_for_turn_state(
+                &turn_state,
+                vec![TurnInput::InterAgentCommunication(mail.into())],
+            )
+            .await;
+        activity_rx.changed().await.expect("mailbox update");
+        assert_eq!(
+            *activity_rx.borrow_and_update(),
+            InputQueueActivity::Mailbox
+        );
+        assert_eq!(
+            input_queue.subscribe_activity(Some(&turn_state)).await.1,
+            Some(InputQueueActivity::Steer)
+        );
     }
 
     #[tokio::test]
@@ -650,7 +723,7 @@ mod tests {
             None
         );
         input_queue
-            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+            .extend_pending_input_and_notify_for_turn_state(
                 &turn_state,
                 vec![passive_output.clone()],
             )
@@ -687,7 +760,7 @@ mod tests {
             Some(InputQueueActivity::Mailbox)
         );
         input_queue
-            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+            .extend_pending_input_and_notify_for_turn_state(
                 &turn_state,
                 vec![TurnInput::UserInput {
                     metadata: Default::default(),

@@ -209,6 +209,13 @@ impl SideParentStatusChange {
     }
 }
 
+/// Transcript state retained while the other conversation is active.
+pub(super) struct SideCompanion {
+    pub(super) display: crate::app_event::CapturedSideDisplay,
+    pub(super) cells: Vec<Arc<dyn HistoryCell>>,
+    pub(super) view: crate::transcript_view::TranscriptView,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct SideThreadState {
     /// Thread to return to when the current side conversation is dismissed.
@@ -227,6 +234,15 @@ impl SideThreadState {
 }
 
 impl App {
+    pub(super) async fn running_side_thread_id(&self) -> Option<ThreadId> {
+        for thread_id in self.side_threads.keys().copied() {
+            if self.active_turn_id_for_thread(thread_id).await.is_some() {
+                return Some(thread_id);
+            }
+        }
+        None
+    }
+
     pub(super) fn sync_side_thread_ui(&mut self) {
         let clear_side_ui = |chat_widget: &mut crate::chatwidget::ChatWidget| {
             chat_widget.set_side_conversation_context_label(/*label*/ None);
@@ -297,6 +313,20 @@ impl App {
         self.current_displayed_thread_id()
             .and_then(|thread_id| self.side_threads.get(&thread_id))
             .map(|state| state.parent_thread_id)
+    }
+
+    pub(super) fn side_retention_enabled(&self, tui: &tui::Tui) -> bool {
+        self.config.features.enabled(Feature::TuiWorkspace)
+            && self.local_settings.transcript_mode.is_owned()
+            && tui.is_owned_screen()
+    }
+
+    pub(super) fn side_pair_key(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        if self.side_threads.contains_key(&thread_id) {
+            Some(thread_id)
+        } else {
+            self.side_thread_for_parent(thread_id)
+        }
     }
 
     pub(super) fn side_thread_for_parent(&self, parent_thread_id: ThreadId) -> Option<ThreadId> {
@@ -534,6 +564,7 @@ impl App {
         self.pending_server_profiles.remove(&thread_id);
         self.agents_overview.activity.remove(&thread_id);
         self.side_threads.remove(&thread_id);
+        self.side_companions.remove(&thread_id);
         self.agent_navigation.remove(thread_id);
         if self.active_thread_id == Some(thread_id) {
             self.clear_active_thread().await;
@@ -776,6 +807,7 @@ impl App {
                     /*agent_role*/ None,
                     /*is_closed*/ false,
                 );
+                self.sync_agent_picker_thread(child_thread_id);
                 if let Err(err) = app_server
                     .thread_inject_items(child_thread_id, vec![Self::side_boundary_prompt_item()])
                     .await

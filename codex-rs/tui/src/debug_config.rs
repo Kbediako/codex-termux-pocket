@@ -358,8 +358,18 @@ fn render_debug_config_lines(
     }
 
     if let Some(network) = requirements.network.as_ref() {
+        let key = if requirements_toml
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.network.as_ref())
+            .is_some()
+        {
+            "permissions.network"
+        } else {
+            "network_proxy"
+        };
         requirement_lines.push(requirement_line(
-            "experimental_network",
+            key,
             format_network_constraints(&network.value),
             Some(&network.source),
         ));
@@ -670,6 +680,7 @@ mod tests {
     use codex_config::ConfigLayerStack;
     use codex_config::ConfigRequirements;
     use codex_config::ConfigRequirementsToml;
+    use codex_config::ConfigRequirementsWithSources;
     use codex_config::Constrained;
     use codex_config::ConstrainedWithSource;
     use codex_config::ConstraintError;
@@ -955,6 +966,7 @@ interrupt_message = false
             cli_auth_credentials_store: None,
             chatgpt_base_url: None,
             sqlite_home: Some(sqlite_home),
+            unsafe_enforce_sqlite_journal_mode: None,
             log_dir: Some(log_dir),
             model_catalog_json: Some(model_catalog_json),
             model_provider: None,
@@ -1000,6 +1012,7 @@ interrupt_message = false
             )])),
             plugins: None,
             marketplaces: None,
+            otel: None,
             apps: None,
             rules: None,
             enforce_residency: Some(ResidencyRequirement::Us),
@@ -1070,7 +1083,7 @@ interrupt_message = false
             "enforce_residency: us (source: {requirements_source})"
         )));
         assert!(rendered.contains(&format!(
-            "experimental_network: enabled=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
+            "network_proxy: enabled=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
         )));
         assert!(!rendered.contains("secret-looking-value"));
         assert!(
@@ -1226,8 +1239,29 @@ interrupt_message = false
         let rendered = render_stack_to_text(&stack);
         let requirements_source = (RequirementSource::LegacyManagedConfigTomlFromMdm).to_string();
         assert!(rendered.contains(&format!(
-            "experimental_network: unix_sockets={{/tmp/blocked.sock=deny, /tmp/codex.sock=allow}} (source: {requirements_source})"
+            "network_proxy: unix_sockets={{/tmp/blocked.sock=deny, /tmp/codex.sock=allow}} (source: {requirements_source})"
         )));
+    }
+
+    #[test]
+    fn debug_config_network_requirement_surfaces() {
+        let mut outputs = Vec::new();
+        for table in [
+            "network_proxy",
+            "experimental_network",
+            "permissions.network",
+        ] {
+            let toml: ConfigRequirementsToml =
+                toml::from_str(&format!("[{table}]\nenabled = true")).expect("requirements");
+            let mut sourced = ConfigRequirementsWithSources::default();
+            sourced.merge_unset_fields(RequirementSource::Unknown, toml.clone());
+            let requirements = ConfigRequirements::try_from(sourced).expect("valid requirements");
+            let stack =
+                ConfigLayerStack::new(Vec::new(), requirements, toml).expect("config layer stack");
+            outputs.push(format!("{table}:\n{}", render_stack_to_text(&stack)));
+        }
+
+        insta::assert_snapshot!(outputs.join("\n\n"));
     }
 
     #[test]

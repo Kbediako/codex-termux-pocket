@@ -1,16 +1,17 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use codex_code_mode_protocol::CellId;
+use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
-use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
+use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::StartedCell;
+use codex_code_mode_protocol::TerminateRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use tokio::sync::Semaphore;
@@ -31,10 +32,12 @@ pub(super) struct ReconnectableSession {
 
 struct ReconnectInner {
     provider: GrpcCodeModeSessionProvider,
-    limits: CodeModeSessionCellExecutionLimits,
+    options: CodeModeSessionOptions,
     binding: Mutex<Option<SessionBinding>>,
+    // The negotiated mode belongs to the logical session, including after
+    // shutdown releases the binding. Never pin a mode from an unpublished open.
+    output_truncation: OnceLock<CodeModeOutputTruncation>,
     opening_permit: Semaphore,
-    next_generation: AtomicU64,
     shutdown_requested: CancellationToken,
     shutdown_result: Mutex<Option<ShutdownResultReceiver>>,
 }
@@ -48,15 +51,15 @@ struct SessionBinding {
 impl ReconnectableSession {
     pub(super) fn new(
         provider: GrpcCodeModeSessionProvider,
-        limits: CodeModeSessionCellExecutionLimits,
+        options: CodeModeSessionOptions,
     ) -> Self {
         Self {
             inner: Arc::new(ReconnectInner {
                 provider,
-                limits,
+                options,
                 binding: Mutex::new(None),
+                output_truncation: OnceLock::new(),
                 opening_permit: Semaphore::new(/*permits*/ 1),
-                next_generation: AtomicU64::new(1),
                 shutdown_requested: CancellationToken::new(),
                 shutdown_result: Mutex::new(None),
             }),
@@ -69,6 +72,14 @@ impl ReconnectableSession {
 }
 
 impl CodeModeSession for ReconnectableSession {
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        self.inner
+            .output_truncation
+            .get()
+            .copied()
+            .unwrap_or_default()
+    }
+
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
@@ -97,6 +108,7 @@ impl CodeModeSession for ReconnectableSession {
         Box::pin(async move {
             let binding = self.inner.binding_for_request(generation).await?;
             let request = WaitRequest {
+                max_output_tokens: request.max_output_tokens,
                 cell_id: generation::remote_cell_id(binding.generation, &request.cell_id)?,
                 yield_time_ms: request.yield_time_ms,
             };
@@ -105,15 +117,21 @@ impl CodeModeSession for ReconnectableSession {
         })
     }
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+    fn terminate<'a>(
+        &'a self,
+        request: TerminateRequest,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
         Box::pin(async move {
             // Cleanup must not replace the runtime and hide its loss from the next request.
             let binding = self
                 .inner
                 .binding()
                 .ok_or_else(|| SHUTDOWN_ERROR.to_string())?;
-            let cell_id = generation::remote_cell_id(binding.generation, &cell_id)?;
-            let outcome = binding.session.terminate(cell_id).await?;
+            let cell_id = generation::remote_cell_id(binding.generation, &request.cell_id)?;
+            let outcome = binding
+                .session
+                .terminate(TerminateRequest { cell_id, ..request })
+                .await?;
             Ok(generation::public_wait_outcome(binding.generation, outcome))
         })
     }
@@ -171,13 +189,16 @@ impl ReconnectInner {
             wait_for_watch(binding.session.inner.request_shutdown()).await?;
         }
 
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let generation = self
+            .provider
+            .next_generation
+            .fetch_add(1, Ordering::Relaxed);
         let session = tokio::select! {
             biased;
             _ = self.shutdown_requested.cancelled() => {
                 return Err(SHUTDOWN_ERROR.to_string());
             }
-            session = self.provider.open_binding(self.limits.clone()) => session?,
+            session = self.provider.open_binding(&self.options, self.output_truncation.get().copied()) => session?,
         };
         let binding = SessionBinding {
             session,
@@ -189,6 +210,8 @@ impl ReconnectInner {
                 false
             } else {
                 *current = Some(binding.clone());
+                self.output_truncation
+                    .get_or_init(|| binding.session.output_truncation());
                 true
             }
         };

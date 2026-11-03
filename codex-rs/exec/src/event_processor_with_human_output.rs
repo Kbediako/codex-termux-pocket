@@ -5,10 +5,11 @@ use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::config::Config;
+use codex_exec_server::BoundOutput;
 use codex_model_provider_info::WireApi;
 use codex_protocol::num_format::format_with_separators;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -67,16 +68,16 @@ impl EventProcessorWithHumanOutput {
         }
     }
 
-    fn render_item_started(&self, item: &ThreadItem) {
+    fn render_item_started(&self, item: &ThreadItemPayload) {
         match item {
-            ThreadItem::CommandExecution { command, cwd, .. } => {
+            ThreadItemPayload::CommandExecution { command, cwd, .. } => {
                 eprintln!(
                     "{}\n{} in {cwd}",
                     "exec".style(self.italic).style(self.magenta),
                     command.style(self.bold),
                 );
             }
-            ThreadItem::McpToolCall { server, tool, .. } => {
+            ThreadItemPayload::McpToolCall { server, tool, .. } => {
                 eprintln!(
                     "{} {} {}",
                     "mcp:".style(self.bold),
@@ -84,22 +85,22 @@ impl EventProcessorWithHumanOutput {
                     "started".style(self.dimmed)
                 );
             }
-            ThreadItem::WebSearch(item) => {
+            ThreadItemPayload::WebSearch(item) => {
                 eprintln!("{} {}", "web search:".style(self.bold), item.query);
             }
-            ThreadItem::FileChange { .. } => {
+            ThreadItemPayload::FileChange { .. } => {
                 eprintln!("{}", "apply patch".style(self.bold));
             }
-            ThreadItem::CollabAgentToolCall { tool, .. } => {
+            ThreadItemPayload::CollabAgentToolCall { tool, .. } => {
                 eprintln!("{} {:?}", "collab:".style(self.bold), tool);
             }
             _ => {}
         }
     }
 
-    fn render_item_completed(&mut self, item: ThreadItem) {
+    fn render_item_completed(&mut self, item: ThreadItemPayload) {
         match item {
-            ThreadItem::AgentMessage { text, .. } => {
+            ThreadItemPayload::AgentMessage { text, .. } => {
                 eprintln!(
                     "{}\n{}",
                     "codex".style(self.italic).style(self.magenta),
@@ -108,7 +109,7 @@ impl EventProcessorWithHumanOutput {
                 self.final_message = Some(text);
                 self.final_message_rendered = true;
             }
-            ThreadItem::Reasoning {
+            ThreadItemPayload::Reasoning {
                 summary, content, ..
             } => {
                 if self.show_agent_reasoning
@@ -119,7 +120,7 @@ impl EventProcessorWithHumanOutput {
                     eprintln!("{}", text.style(self.dimmed));
                 }
             }
-            ThreadItem::CommandExecution {
+            ThreadItemPayload::CommandExecution {
                 command: _,
                 aggregated_output,
                 exit_code,
@@ -163,7 +164,7 @@ impl EventProcessorWithHumanOutput {
                     eprintln!("{output}");
                 }
             }
-            ThreadItem::FileChange {
+            ThreadItemPayload::FileChange {
                 changes, status, ..
             } => {
                 let status_text = match status {
@@ -177,7 +178,7 @@ impl EventProcessorWithHumanOutput {
                     eprintln!("{}", change.path.style(self.dimmed));
                 }
             }
-            ThreadItem::McpToolCall {
+            ThreadItemPayload::McpToolCall {
                 server,
                 tool,
                 status,
@@ -199,10 +200,10 @@ impl EventProcessorWithHumanOutput {
                     eprintln!("{}", error.message.style(self.red));
                 }
             }
-            ThreadItem::WebSearch(item) => {
+            ThreadItemPayload::WebSearch(item) => {
                 eprintln!("{} {}", "web search:".style(self.bold), item.query);
             }
-            ThreadItem::ContextCompaction { .. } => {
+            ThreadItemPayload::ContextCompaction { .. } => {
                 eprintln!("{}", "context compacted".style(self.dimmed));
             }
             _ => {}
@@ -287,11 +288,11 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {
-                self.render_item_started(&notification.item);
+                self.render_item_started(&notification.item.payload);
                 CodexStatus::Running
             }
             ServerNotification::ItemCompleted(notification) => {
-                self.render_item_completed(notification.item);
+                self.render_item_completed(notification.item.payload);
                 CodexStatus::Running
             }
             ServerNotification::ModelRerouted(notification) => {
@@ -390,12 +391,22 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         CodexStatus::Running
     }
 
-    fn print_final_output(&mut self) {
-        if self.emit_final_message_on_shutdown
-            && let Some(path) = self.last_message_path.as_deref()
+    fn print_final_output(&mut self, output: Option<BoundOutput>) -> anyhow::Result<()> {
+        let print_to_stdout = should_print_final_message_to_stdout(
+            self.emit_final_message_on_shutdown
+                .then_some(self.final_message.as_deref())
+                .flatten(),
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        );
+        let output_result = if self.emit_final_message_on_shutdown
+            && let (Some(path), Some(file)) = (self.last_message_path.as_deref(), output)
+            && !(print_to_stdout && file.is_stdout())
         {
-            handle_last_message(self.final_message.as_deref(), path);
-        }
+            handle_last_message(self.final_message.as_deref(), path, file)
+        } else {
+            Ok(())
+        };
 
         if let Some(usage) = &self.last_total_token_usage {
             eprintln!(
@@ -406,14 +417,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         }
 
         #[allow(clippy::print_stdout)]
-        if should_print_final_message_to_stdout(
-            self.emit_final_message_on_shutdown
-                .then_some(self.final_message.as_deref())
-                .flatten(),
-            std::io::stdout().is_terminal(),
-            std::io::stderr().is_terminal(),
-        ) && let Some(message) = self.final_message.as_deref()
-        {
+        if print_to_stdout && let Some(message) = self.final_message.as_deref() {
             println!("{message}");
         } else if should_print_final_message_to_tty(
             self.emit_final_message_on_shutdown
@@ -430,6 +434,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 message
             );
         }
+        output_result
     }
 }
 
@@ -499,17 +504,19 @@ fn reasoning_text(
     }
 }
 
-fn final_message_from_turn_items(items: &[ThreadItem]) -> Option<String> {
+fn final_message_from_turn_items(
+    items: &[impl std::borrow::Borrow<ThreadItemPayload>],
+) -> Option<String> {
     items
         .iter()
         .rev()
-        .find_map(|item| match item {
-            ThreadItem::AgentMessage { text, .. } => Some(text.clone()),
+        .find_map(|item| match item.borrow() {
+            ThreadItemPayload::AgentMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .or_else(|| {
-            items.iter().rev().find_map(|item| match item {
-                ThreadItem::Plan { text, .. } => Some(text.clone()),
+            items.iter().rev().find_map(|item| match item.borrow() {
+                ThreadItemPayload::Plan { text, .. } => Some(text.clone()),
                 _ => None,
             })
         })

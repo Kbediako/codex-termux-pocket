@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use crate::bundle_loader::cloud_config_bundle_loader_for_service;
+use crate::bundle_loader::managed_config_bundle_loader_for_service;
 use crate::service::CLOUD_CONFIG_BUNDLE_TIMEOUT;
 use crate::service::CloudConfigBundleService;
 use codex_config::CloudConfigBundleLoader;
@@ -27,7 +27,7 @@ fn remote_loader(url: String, codex_home: PathBuf) -> CloudConfigBundleLoader {
         .http_client_factory()
         .clone();
     let source = ConfigServerSource::new(url, /*oauth*/ None, codex_home.clone(), factory).unwrap();
-    cloud_config_bundle_loader_for_service(CloudConfigBundleService::from_source(
+    managed_config_bundle_loader_for_service(CloudConfigBundleService::from_source(
         source,
         codex_home,
         CLOUD_CONFIG_BUNDLE_TIMEOUT,
@@ -44,6 +44,7 @@ fn oauth_config(base_url: &str) -> OAuthSessionConfig {
         resource: None,
         scopes: vec![],
         redirect_port: None,
+        credentials_store: Default::default(),
     }
 }
 

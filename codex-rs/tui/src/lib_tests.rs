@@ -11,6 +11,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::Turn;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -75,55 +76,86 @@ requires_openai_auth = {requires_openai_auth}
 }
 
 #[tokio::test]
-async fn bedrock_setup_wizard_requires_eligible_onboarding() -> color_eyre::Result<()> {
+async fn provider_setup_wizards_require_eligible_onboarding() -> color_eyre::Result<()> {
     let shared_endpoint = RemoteAppServerEndpoint::WebSocket {
         websocket_url: "ws://127.0.0.1:4500/".to_string(),
         auth_token: None,
     };
-    let enabled = "[features]\nbedrock_setup_wizard = true\n";
+    let enabled = "[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n";
 
     for (label, config_toml, login_status, target, expected) in [
         (
-            "enabled by default",
+            "provider defaults",
             "",
             LoginStatus::NotAuthenticated,
             AppServerTarget::Embedded,
-            true,
+            [true, false],
         ),
         (
             "explicitly disabled",
-            "[features]\nbedrock_setup_wizard = false\n",
+            "[features]\nbedrock_setup_wizard = false\ngcp_setup_wizard = false\n",
             LoginStatus::NotAuthenticated,
             AppServerTarget::Embedded,
-            false,
+            [false, false],
+        ),
+        (
+            "only GCP enabled",
+            "[features]\nbedrock_setup_wizard = false\ngcp_setup_wizard = true\n",
+            LoginStatus::NotAuthenticated,
+            AppServerTarget::Embedded,
+            [false, true],
         ),
         (
             "enabled for the default provider",
             enabled,
             LoginStatus::NotAuthenticated,
             AppServerTarget::Embedded,
-            true,
+            [true, true],
         ),
         (
-            "explicit provider",
-            "model_provider = \"openai\"\n[features]\nbedrock_setup_wizard = true\n",
+            "explicit OpenAI provider with default flags",
+            "model_provider = \"openai\"\n",
             LoginStatus::NotAuthenticated,
             AppServerTarget::Embedded,
-            false,
+            [true, false],
+        ),
+        (
+            "explicit OpenAI provider with both wizards enabled",
+            "model_provider = \"openai\"\n[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n",
+            LoginStatus::NotAuthenticated,
+            AppServerTarget::Embedded,
+            [true, true],
+        ),
+        (
+            "custom provider requiring OpenAI auth",
+            r#"
+model_provider = "test-provider"
+[model_providers.test-provider]
+name = "Test provider"
+base_url = "http://example.test/v1"
+wire_api = "responses"
+requires_openai_auth = true
+[features]
+bedrock_setup_wizard = true
+gcp_setup_wizard = true
+"#,
+            LoginStatus::NotAuthenticated,
+            AppServerTarget::Embedded,
+            [false, false],
         ),
         (
             "forced ChatGPT login",
-            "forced_login_method = \"chatgpt\"\n[features]\nbedrock_setup_wizard = true\n",
+            "forced_login_method = \"chatgpt\"\n[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n",
             LoginStatus::NotAuthenticated,
             AppServerTarget::Embedded,
-            false,
+            [false, false],
         ),
         (
             "existing authentication",
             enabled,
             LoginStatus::AuthMode(AuthMode::Chatgpt),
             AppServerTarget::Embedded,
-            false,
+            [false, false],
         ),
         (
             "shared local daemon",
@@ -133,7 +165,7 @@ async fn bedrock_setup_wizard_requires_eligible_onboarding() -> color_eyre::Resu
                 allow_embedded_fallback: true,
                 endpoint: shared_endpoint.clone(),
             },
-            false,
+            [false, false],
         ),
         (
             "remote app server",
@@ -142,23 +174,35 @@ async fn bedrock_setup_wizard_requires_eligible_onboarding() -> color_eyre::Resu
             AppServerTarget::Remote {
                 endpoint: shared_endpoint,
             },
-            false,
+            [false, false],
         ),
     ] {
         let codex_home = TempDir::new()?;
         std::fs::write(codex_home.path().join("config.toml"), config_toml)?;
         let config = build_config(&codex_home).await?;
-
-        assert_eq!(
-            should_show_bedrock_setup_wizard(
+        for (feature, expected) in [Feature::BedrockSetupWizard, Feature::GcpSetupWizard]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                should_show_provider_setup_wizard(
+                    login_status,
+                    /*requires_openai_auth*/ true,
+                    &config,
+                    &target,
+                    feature,
+                ),
+                expected,
+                "{label}: {feature:?}"
+            );
+            assert!(!should_show_provider_setup_wizard(
                 login_status,
-                /*requires_openai_auth*/ true,
+                /*requires_openai_auth*/ false,
                 &config,
-                &target
-            ),
-            expected,
-            "{label}"
-        );
+                &target,
+                feature,
+            ));
+        }
     }
 
     Ok(())
@@ -942,13 +986,13 @@ async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
     let cwd = temp_dir.path().join("project");
 
     let params = latest_session_lookup_params(
-        /*model_provider*/ None,
+        Some(Vec::new()),
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, None);
+    assert_eq!(params.model_providers, Some(vec![]));
     assert_eq!(
         params.cwd,
         Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
@@ -956,7 +1000,7 @@ async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
     assert!(params.use_state_db_only);
 
     let scan_params = latest_session_lookup_params(
-        /*model_provider*/ None,
+        Some(Vec::new()),
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::ScanAndRepair,
@@ -970,7 +1014,7 @@ async fn latest_session_lookup_params_honor_explicit_provider() -> color_eyre::R
     let temp_dir = TempDir::new()?;
     let cwd = temp_dir.path().join("project");
     let params = latest_session_lookup_params(
-        Some("selected-provider".to_string()),
+        Some(vec!["selected-provider".to_string()]),
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
@@ -991,13 +1035,13 @@ async fn latest_session_lookup_params_honor_explicit_provider() -> color_eyre::R
 async fn latest_session_lookup_params_omit_local_filters_for_remote_sessions() -> std::io::Result<()>
 {
     let params = latest_session_lookup_params(
-        /*model_provider*/ None,
+        Some(Vec::new()),
         /*cwd_filter*/ None,
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, None);
+    assert_eq!(params.model_providers, Some(vec![]));
     assert_eq!(params.cwd, None);
     Ok(())
 }
@@ -1005,7 +1049,7 @@ async fn latest_session_lookup_params_omit_local_filters_for_remote_sessions() -
 #[tokio::test]
 async fn latest_session_lookup_params_can_include_non_interactive_sources() -> std::io::Result<()> {
     let params = latest_session_lookup_params(
-        /*model_provider*/ None,
+        Some(Vec::new()),
         /*cwd_filter*/ None,
         /*include_non_interactive*/ true,
         LatestSessionLookupMode::StateDbOnly,
@@ -1029,13 +1073,13 @@ async fn latest_session_lookup_params_keep_explicit_cwd_filter_for_remote_sessio
     let cwd = Path::new("repo/on/server");
 
     let params = latest_session_lookup_params(
-        /*model_provider*/ None,
+        Some(Vec::new()),
         Some(cwd),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, None);
+    assert_eq!(params.model_providers, Some(vec![]));
     assert_eq!(
         params.cwd,
         Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
@@ -1158,6 +1202,7 @@ async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre
         /*show_all*/ false,
     );
     let scoped_target = lookup_latest_session_target_with_app_server(
+        crate::resume_picker::SessionPickerAction::Fork,
         &mut app_server,
         &config,
         filter_cwd,
@@ -1170,6 +1215,7 @@ async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre
         /*show_all*/ true,
     );
     let show_all_target = lookup_latest_session_target_with_app_server(
+        crate::resume_picker::SessionPickerAction::Fork,
         &mut app_server,
         &config,
         show_all_filter_cwd,
@@ -1212,11 +1258,12 @@ async fn latest_session_lookup_falls_back_for_rollout_missing_from_state_db()
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "legacy writer session",
-        config.model_provider_id.as_str(),
+        "previous-provider",
         &project_cwd,
     )?;
 
     let target = lookup_latest_session_target_with_app_server(
+        crate::resume_picker::SessionPickerAction::Resume,
         &mut app_server,
         &config,
         Some(project_cwd.as_path()),
@@ -1346,6 +1393,19 @@ async fn config_cwd_for_app_server_target_omits_cwd_for_remote_exec_server() -> 
         )?),
     )
     .await;
+
+    assert_eq!(
+        backend_preference_local_cwd(remote_only_cwd, &target, &environment_manager),
+        std::env::current_dir().ok(),
+    );
+    assert_eq!(
+        backend_preference_local_cwd(
+            remote_only_cwd,
+            &target,
+            &EnvironmentManager::default_for_tests(),
+        ),
+        Some(remote_only_cwd.to_path_buf()),
+    );
 
     let config_cwd = config_cwd_for_app_server_target(
         Some(remote_only_cwd),
@@ -1489,11 +1549,11 @@ async fn resume_picker_loads_complete_paginated_and_legacy_transcripts() -> colo
                 started
                     .turns
                     .iter()
-                    .flat_map(|turn| &turn.items)
+                    .flat_map(Turn::item_payloads)
                     .any(|item| {
                         matches!(
                             item,
-                            codex_app_server_protocol::ThreadItem::UserMessage { .. }
+                            codex_app_server_protocol::ThreadItemPayload::UserMessage { .. }
                         )
                     })
             );

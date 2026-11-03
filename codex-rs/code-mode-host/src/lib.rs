@@ -11,7 +11,12 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
+use codex_code_mode_protocol::CodeModeSessionOptions;
+use codex_code_mode_protocol::TerminateRequest;
+use codex_code_mode_protocol::WaitRequest;
+use codex_code_mode_protocol::host::BOUNDED_OUTPUT_CAPABILITY;
 use codex_code_mode_protocol::host::Capability;
 use codex_code_mode_protocol::host::CapabilitySet;
 use codex_code_mode_protocol::host::ClientToHost;
@@ -44,13 +49,16 @@ use self::delegate::RemoteDelegate;
 use self::peer::HostPeer;
 
 pub use self::grpc::GrpcCodeModeHost;
+pub use self::process_metrics::CodeModeProcessMetricsCollector;
 pub use self::transport::DEFAULT_LISTEN_URL;
+pub use codex_code_mode_protocol::CodeModeProcessMetrics;
 
 mod delegate;
 mod grpc;
 mod grpc_stdio;
 mod grpc_transport;
 mod peer;
+mod process_metrics;
 mod transport;
 
 const MAX_IN_FLIGHT_REQUESTS: usize = 256;
@@ -95,7 +103,20 @@ impl HostLimits {
     fields(otel.name = "code_mode_host.run_main")
 )]
 pub async fn run_main(listen_url: &str) -> Result<()> {
-    transport::run_transport(listen_url).await
+    transport::run_transport(listen_url, GrpcCodeModeHost::new()).await
+}
+
+/// Runs with an optional gRPC metrics collector initialized before sandbox entry.
+/// The legacy stdio transport remains unchanged.
+pub async fn run_main_with_process_metrics(
+    listen_url: &str,
+    collector: CodeModeProcessMetricsCollector,
+) -> Result<()> {
+    transport::run_transport(
+        listen_url,
+        GrpcCodeModeHost::with_process_metrics(collector),
+    )
+    .await
 }
 
 /// Runs one code-mode host connection over the process standard streams.
@@ -262,6 +283,7 @@ async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         [
             SESSION_RESOURCE_LIMITS_CAPABILITY,
             YIELD_OBSERVATION_CAPABILITY,
+            BOUNDED_OUTPUT_CAPABILITY,
         ]
         .into_iter()
         .map(Capability::new)
@@ -382,12 +404,23 @@ impl HostState {
             HostRequest::OpenSession {
                 session_id,
                 cell_execution_limits,
+                output_truncation,
             } => {
                 let result = CodeModeSessionCellExecutionLimits::try_from(
                     cell_execution_limits.unwrap_or_default(),
                 )
                 .map_err(|error| format!("invalid code-mode session execution limits: {error}"))
-                .and_then(|limits| self.open_session(session_id.clone(), limits))
+                .and_then(|limits| {
+                    self.open_session(
+                        session_id.clone(),
+                        CodeModeSessionOptions {
+                            cell_execution_limits: limits,
+                            output_truncation: output_truncation
+                                .map(CodeModeOutputTruncation::from)
+                                .unwrap_or_default(),
+                        },
+                    )
+                })
                 .map(|()| HostResponse::SessionReady { session_id });
                 self.respond(request_id, result);
             }
@@ -452,6 +485,7 @@ impl HostState {
             HostRequest::Wait {
                 session_id,
                 request,
+                max_output_tokens,
             } => {
                 let result = match self.session(&session_id) {
                     Ok(session) => {
@@ -460,7 +494,10 @@ impl HostState {
                             _ = cancellation.cancelled() => {
                                 Err("code-mode request cancelled".to_string())
                             }
-                            result = session.wait(request.into(), Some(yield_signal)) => result.and_then(|outcome| {
+                            result = session.wait(WaitRequest {
+                                max_output_tokens,
+                                ..request.into()
+                            }, Some(yield_signal)) => result.and_then(|outcome| {
                                 let outcome = outcome.with_code_mode_host_duration(received_at.elapsed());
                                 Ok(HostResponse::WaitCompleted {
                                     outcome: WireWaitOutcome::try_from(outcome)
@@ -476,15 +513,23 @@ impl HostState {
             HostRequest::Terminate {
                 session_id,
                 cell_id,
+                max_output_tokens,
             } => {
                 let result = match self.session(&session_id) {
-                    Ok(session) => session.terminate(cell_id.into()).await.and_then(|outcome| {
-                        let outcome = outcome.with_code_mode_host_duration(received_at.elapsed());
-                        Ok(HostResponse::WaitCompleted {
-                            outcome: WireWaitOutcome::try_from(outcome)
-                                .map_err(|error| error.to_string())?,
+                    Ok(session) => session
+                        .terminate(TerminateRequest {
+                            cell_id: cell_id.into(),
+                            max_output_tokens,
                         })
-                    }),
+                        .await
+                        .and_then(|outcome| {
+                            let outcome =
+                                outcome.with_code_mode_host_duration(received_at.elapsed());
+                            Ok(HostResponse::WaitCompleted {
+                                outcome: WireWaitOutcome::try_from(outcome)
+                                    .map_err(|error| error.to_string())?,
+                            })
+                        }),
                     Err(err) => Err(err),
                 };
                 self.respond(request_id, result);
@@ -513,7 +558,7 @@ impl HostState {
     fn open_session(
         &self,
         session_id: SessionId,
-        cell_execution_limits: CodeModeSessionCellExecutionLimits,
+        options: CodeModeSessionOptions,
     ) -> Result<(), String> {
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         if sessions.contains_key(&session_id) {
@@ -540,9 +585,9 @@ impl HostState {
         });
         sessions.insert(
             session_id,
-            Arc::new(InProcessCodeModeSession::with_task_failure_handler(
-                task_failure_handler,
-                cell_execution_limits,
+            Arc::new(InProcessCodeModeSession::with_options(
+                options,
+                Some(task_failure_handler),
             )),
         );
         Ok(())

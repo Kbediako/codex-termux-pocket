@@ -124,6 +124,9 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
 
+#[path = "control/spawn_publication_tests.rs"]
+mod spawn_publication;
+
 impl LocalAgentControl {
     /// Create a child fixture through the production spawn entry point.
     pub(crate) async fn spawn_agent_with_metadata(
@@ -489,7 +492,11 @@ async fn mcp_attribution_in_constructed_request(thread: &CodexThread) -> McpAttr
             .session
             .clone_history()
             .await
-            .for_prompt(&step_context.settings.model_info.input_modalities),
+            .for_prompt(
+                &step_context.settings.model_info.input_modalities,
+                thread.session.services.image_store.as_ref(),
+            )
+            .await,
         &step_context,
         thread.session.get_prompt_base_instructions().await,
         thread
@@ -780,11 +787,12 @@ async fn spawn_failure_context_survives_manager_and_fork_errors() {
 async fn spawn_failure_context_preserves_shutdown_during_child_startup() {
     let harness = AgentControlHarness::new().await;
     let state = harness.control.runtime.upgrade().expect("live manager");
+    let parent_id = ThreadId::new();
     let spawn = harness.control.spawn_agent(
         harness.config.clone(),
         text_input("hello"),
         Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: ThreadId::new(),
+            parent_thread_id: parent_id,
             depth: 1,
             agent_path: None,
             agent_nickname: None,
@@ -823,6 +831,22 @@ async fn spawn_failure_context_preserves_shutdown_during_child_startup() {
         .wait()
         .await
         .expect("spawn releases its membership");
+    let closed_children = harness
+        .state_db
+        .as_ref()
+        .expect("manager should retain state db")
+        .list_thread_spawn_children_with_status(
+            parent_id,
+            codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed child edges should load");
+    assert_eq!(
+        closed_children.len(),
+        1,
+        "failed startup closes its published edge"
+    );
+    assert_thread_not_loaded(&harness.manager, closed_children[0]).await;
 }
 
 #[tokio::test]
@@ -886,6 +910,20 @@ async fn cancelled_spawn_after_input_admission_discards_child() {
         .wait()
         .await
         .expect("provisional cleanup releases tree membership");
+    assert_eq!(
+        harness
+            .state_db
+            .as_ref()
+            .expect("manager should retain state db")
+            .list_thread_spawn_children_with_status(
+                parent_id,
+                codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+            .expect("closed child edge should load"),
+        vec![child_id],
+        "cancelled startup must close its published edge"
+    );
 }
 
 #[tokio::test]
@@ -2614,8 +2652,8 @@ async fn spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginate
         Vec::new()
     };
     assert_eq!(
-        child_thread.session.dynamic_tools().await,
-        expected_dynamic_tools
+        child_thread.session.dynamic_tools().await.as_ref(),
+        expected_dynamic_tools.as_slice()
     );
     assert!(
         !history_contains_text(
@@ -2661,6 +2699,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
 
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     let parent_resume_metadata = codex_history::CompactionResumeMetadata {
+        dynamic_tools: None,
         multi_agent_version: Some(MultiAgentVersion::V2),
         last_started_turn_id: Some("parent-turn".to_string()),
         turn_attribution: Some(codex_history::TurnAttribution {
@@ -3754,10 +3793,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             Arc::new(crate::test_support::EmptyUserInstructionsProvider),
             /*analytics_events_client*/ None,
             crate::thread_manager::passthrough_image_store(),
-            crate::thread_manager::thread_store_from_config(
-                &parent_config,
-                harness.state_db.clone(),
-            ),
+            crate::ThreadStoreBuilder::from_config(&parent_config, harness.state_db.clone())
+                .build(),
             crate::thread_manager::local_agent_graph_store_from_state_db(harness.state_db.as_ref()),
             uuid::Uuid::new_v4().to_string(),
             /*attestation_provider*/ None,
@@ -3818,6 +3855,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 compaction_response_id: None,
                 latest_token_usage_record: None,
                 resume_metadata: Some(codex_history::CompactionResumeMetadata {
+                    dynamic_tools: None,
                     multi_agent_version: Some(MultiAgentVersion::V2),
                     last_started_turn_id: None,
                     turn_attribution: None,
@@ -3952,6 +3990,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         assert_eq!(
             inherited_state,
             Some(codex_history::CompactionResumeMetadata {
+                dynamic_tools: None,
                 multi_agent_version: Some(MultiAgentVersion::V2),
                 last_started_turn_id: None,
                 turn_attribution: None,

@@ -886,9 +886,20 @@ fn search_scans_a_page_inserted_after_the_retained_session_header() {
     view.paste_search("needle");
     finish_scan(&mut view, &cells);
     assert!(view.search.needs_history(view.history));
-    cells.insert(/*index*/ 1, cell("older NEEDLE"));
+    view.search.saved_select = Some(SavedSelectSearch {
+        query: "needle".to_string(),
+        current: None,
+        progress: view.search.progress,
+        page_start: view.search.page_start,
+    });
+    view.search.progress = Progress::Restart;
+    cells.insert(/*index*/ 1, cell("older messages"));
+    view.history = TranscriptHistoryState::Partial;
+    view.history_loaded(&cells, 1..2);
+    cells.insert(/*index*/ 1, cell("oldest NEEDLE"));
     view.history = TranscriptHistoryState::Complete;
     view.history_loaded(&cells, 1..2);
+    assert!(view.search.restore_saved_select());
     finish_scan(&mut view, &cells);
     let found = view
         .search
@@ -902,9 +913,55 @@ fn search_scans_a_page_inserted_after_the_retained_session_header() {
             found.anchor.offset,
             found.end
         ),
-        (EntryKey::cell(&cells[1]), 1, 6, 12)
+        (EntryKey::cell(&cells[1]), 1, 7, 13)
     );
     assert!(Arc::ptr_eq(&cells[0], &header));
+}
+
+#[test]
+fn search_finds_the_first_older_entry_after_replaying_the_session_header() {
+    let header = || -> Arc<dyn HistoryCell> {
+        Arc::new(crate::history_cell::SessionHeaderHistoryCell::new(
+            "test model".to_string(),
+            /*reasoning_effort*/ None,
+            std::path::PathBuf::from("/project"),
+            "test",
+        ))
+    };
+    let parked = vec![header(), cell("recent needle")];
+    let mut view = TranscriptView {
+        history: TranscriptHistoryState::Partial,
+        ..TranscriptView::default()
+    };
+    view.begin_search();
+    view.paste_search("needle");
+    finish_scan(&mut view, &parked);
+    view.handle_key(KeyCode::Enter.into(), &parked);
+
+    let mut replayed = vec![header(), cell("recent needle")];
+    view.restore_after_replay(
+        &parked, &replayed, /*replay_may_have_output*/ false, /*replayed_live*/ None,
+    );
+    view.handle_key(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &replayed,
+    );
+    finish_scan(&mut view, &replayed);
+    assert!(view.needs_history(&replayed));
+
+    let oldest = cell("oldest needle");
+    replayed.splice(1..1, [Arc::clone(&oldest), cell("older messages")]);
+    view.history = TranscriptHistoryState::Complete;
+    view.history_loaded(&replayed, 1..3);
+    assert!(Arc::ptr_eq(
+        &view.snapshot().expect("held reading").cells[0],
+        &parked[0]
+    ));
+    finish_scan(&mut view, &replayed);
+    assert_eq!(
+        view.search.current.as_ref().map(|found| found.anchor.key),
+        Some(EntryKey::cell(&oldest)),
+    );
 }
 
 #[test]

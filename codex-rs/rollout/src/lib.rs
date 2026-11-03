@@ -123,6 +123,8 @@ pub use list::ThreadSortKey;
 pub use list::ThreadsPage;
 pub use list::find_archived_thread_path_by_id_str;
 pub use list::find_rollout_path_by_rollout_id;
+pub use list::find_rollout_path_by_rollout_id_excluding;
+pub use list::find_rollout_paths_by_rollout_ids;
 pub use list::find_thread_path_by_id_str;
 #[deprecated(note = "use find_thread_path_by_id_str")]
 pub use list::find_thread_path_by_id_str as find_conversation_path_by_id_str;
@@ -139,6 +141,7 @@ pub use maintenance::try_acquire_rollout_maintenance_lock;
 pub use metadata::builder_from_items;
 pub use metadata::forked_from_ordinal_exclusive;
 pub use metadata::rollout_id_from_path;
+pub use metadata::thread_id_from_rollout_path;
 pub use model_context::ModelContextScan;
 pub use model_context::ModelContextScanProgress;
 pub use persistence_metrics::RolloutPersistenceBatchMeasurement;

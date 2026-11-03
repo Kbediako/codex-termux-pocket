@@ -69,7 +69,9 @@ impl App {
         if !app_server.is_older_history_page_pending(thread_id, cursor) {
             return Ok(());
         }
+        // The widget can already belong to the destination while the transcript still replays.
         if self.chat_widget.thread_id() != Some(thread_id)
+            || self.awaiting_side_replay(tui)
             || (tui.is_owned_screen() && !self.scrollback_has_older_history)
         {
             app_server.cancel_older_history_page(thread_id, cursor);
@@ -155,8 +157,8 @@ impl App {
         }
         let user_items = turns
             .iter()
-            .flat_map(|turn| turn.items.iter())
-            .filter(|item| matches!(item, ThreadItem::UserMessage { .. }))
+            .flat_map(Turn::item_payloads)
+            .filter(|item| matches!(item, ThreadItemPayload::UserMessage { .. }))
             .map(|item| (item.id().to_string(), item.clone()))
             .collect::<Vec<_>>();
         let projected_user_cells = thread_items_to_transcript_cells(
@@ -217,7 +219,7 @@ impl App {
     /// Project successful turn completion metadata after the corresponding page's final item.
     fn project_older_history_cells(
         &mut self,
-        items: Vec<ThreadItem>,
+        items: Vec<ThreadItemPayload>,
         turns: &[Turn],
         hidden_item_ids: &HashSet<&str>,
         thread_id: ThreadId,
@@ -243,6 +245,9 @@ impl App {
             {
                 cells.push(Arc::new(completion));
             }
+        }
+        for cell in cells.iter_mut().filter_map(Arc::get_mut) {
+            self.link_viewed_image(cell);
         }
         cells
     }
@@ -287,8 +292,13 @@ impl App {
         };
         let continue_to_start = previous == TranscriptHistoryState::LoadingBeginning;
         if continue_to_start && !self.scrollback_has_older_history {
-            self.transcript_view
-                .jump_to_entry(&self.transcript_cells, /*index*/ 0);
+            if self.transcript_view.is_select_mode() {
+                self.transcript_view
+                    .complete_select_beginning(&self.transcript_cells);
+            } else {
+                self.transcript_view
+                    .jump_to_beginning(&self.transcript_cells);
+            }
         }
         if self.scrollback_has_older_history
             && (continue_to_start
@@ -363,10 +373,12 @@ fn hidden_review_item_ids(turns: &[Turn]) -> HashSet<&str> {
                 crate::app_backtrack::is_hidden_nested_review_turn(previous, turn)
             });
         for item in &turn.items {
-            match item {
-                ThreadItem::EnteredReviewMode { .. } => review_mode = true,
-                ThreadItem::ExitedReviewMode { .. } => review_mode = false,
-                ThreadItem::UserMessage { .. } if review_mode || hidden_nested_review_turn => {
+            match &item.payload {
+                ThreadItemPayload::EnteredReviewMode { .. } => review_mode = true,
+                ThreadItemPayload::ExitedReviewMode { .. } => review_mode = false,
+                ThreadItemPayload::UserMessage { .. }
+                    if review_mode || hidden_nested_review_turn =>
+                {
                     hidden.insert(item.id());
                 }
                 _ => {}

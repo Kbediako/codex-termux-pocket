@@ -5,6 +5,7 @@ use crate::common::SafetyBuffering;
 use crate::common::SafetyBufferingTreatment;
 use crate::error::ApiError;
 use crate::error::parse_terminal_provider_error;
+use crate::guardian_assessment::parse_guardian_assessment;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
@@ -98,6 +99,7 @@ pub fn spawn_response_stream(
     });
 
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,
@@ -163,6 +165,7 @@ pub struct ResponsesStreamEvent {
     pub(crate) headers: Option<Value>,
     metadata: Option<Value>,
     response: Option<Value>,
+    response_id: Option<Value>,
     error: Option<Value>,
     item: Option<Value>,
     item_id: Option<String>,
@@ -216,6 +219,33 @@ impl ResponsesStreamEvent {
         self.headers
             .as_ref()
             .and_then(header_turn_state_value_from_json)
+    }
+
+    /// Collects independent typed notifications in delivery order. The transport
+    /// supplies safety buffering after applying its response-header treatment.
+    pub(crate) fn metadata_events(
+        &self,
+        safety_buffering: Option<SafetyBuffering>,
+    ) -> Vec<ResponseEvent> {
+        let guardian = if self.kind() == "response.metadata" {
+            parse_guardian_assessment(
+                self.response_id.as_ref().and_then(Value::as_str),
+                self.metadata.as_ref(),
+            )
+        } else {
+            None
+        };
+        [
+            self.model_verifications()
+                .map(ResponseEvent::ModelVerifications),
+            self.turn_moderation_metadata()
+                .map(ResponseEvent::TurnModerationMetadata),
+            safety_buffering.map(ResponseEvent::SafetyBuffering),
+            guardian.map(ResponseEvent::GuardianAssessment),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     pub(crate) fn model_verifications(&self) -> Option<Vec<ModelVerification>> {
@@ -445,6 +475,15 @@ pub fn process_responses_event(
                         .map(Into::into);
                     return Err(ResponsesEventError::Api(ApiError::ResponseIncomplete(
                         Box::new(ResponseIncompleteError {
+                            partial_output: response
+                                .and_then(|r| r.get("output")?.as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter(|item| {
+                                    item.get("status").and_then(Value::as_str) == Some("incomplete")
+                                })
+                                .cloned()
+                                .collect(),
                             reason: reason.to_string(),
                             response_id,
                             token_usage,
@@ -604,9 +643,8 @@ async fn process_sse_with_treatment(
                 continue;
             }
         };
-        let model_verifications = event.model_verifications();
-        let turn_moderation_metadata = event.turn_moderation_metadata();
         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+        let metadata_events = event.metadata_events(safety_buffering);
 
         if let Some(model) = event.response_model()
             && last_server_model.as_deref() != Some(model.as_str())
@@ -620,29 +658,10 @@ async fn process_sse_with_treatment(
             }
             last_server_model = Some(model);
         }
-        if let Some(verifications) = model_verifications
-            && tx_event
-                .send(Ok(ResponseEvent::ModelVerifications(verifications)))
-                .await
-                .is_err()
-        {
-            return;
-        }
-        if let Some(metadata) = turn_moderation_metadata
-            && tx_event
-                .send(Ok(ResponseEvent::TurnModerationMetadata(metadata)))
-                .await
-                .is_err()
-        {
-            return;
-        }
-        if let Some(buffering) = safety_buffering
-            && tx_event
-                .send(Ok(ResponseEvent::SafetyBuffering(buffering)))
-                .await
-                .is_err()
-        {
-            return;
+        for metadata_event in metadata_events {
+            if tx_event.send(Ok(metadata_event)).await.is_err() {
+                return;
+            }
         }
 
         match process_responses_event(event) {
@@ -1395,6 +1414,25 @@ mod tests {
                 other => panic!("unexpected event for {code}: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_retains_partial_output_on_the_error() {
+        let call = json!({
+            "type": "function_call", "status": "incomplete", "id": "fc_attempt",
+            "call_id": "attempt", "name": "unknown", "arguments": "{}",
+        });
+        let terminal = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1", "incomplete_details": {"reason": "invalid_recipient"},
+                "output": [{"type": "message", "status": "completed"}, call],
+            }
+        });
+        let sse = format!("event: response.incomplete\ndata: {terminal}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+        assert_matches!(events.as_slice(), [Err(ApiError::ResponseIncomplete(error))]
+            if error.reason == "invalid_recipient" && error.partial_output == [call]);
     }
 
     #[tokio::test]

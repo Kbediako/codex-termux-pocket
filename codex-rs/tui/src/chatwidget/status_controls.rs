@@ -5,6 +5,8 @@
 //! history-facing `/status` surface.
 
 use super::*;
+use crate::bottom_pane::footer_content::FooterContent;
+use crate::status::thread_cost_micros;
 
 impl ChatWidget {
     /// Update the status indicator header and details.
@@ -82,13 +84,8 @@ impl ChatWidget {
     }
 
     /// Sets the currently rendered footer status-line value.
-    pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
+    pub(crate) fn set_status_line(&mut self, status_line: Option<FooterContent>) {
         self.bottom_pane.set_status_line(status_line);
-    }
-
-    /// Sets the terminal hyperlink target for the currently rendered footer status line.
-    pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
-        self.bottom_pane.set_status_line_hyperlink(url);
     }
 
     /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
@@ -371,6 +368,8 @@ impl ChatWidget {
             }),
         );
         preview_data.thread_id = self.thread_id;
+        preview_data.renderer = self.status_line_renderer();
+        preview_data.pull_request_url = self.status_line_pull_request_url().map(str::to_owned);
 
         if self.rate_limit_snapshots_by_limit_id.contains_key("codex") {
             for item in [
@@ -385,7 +384,7 @@ impl ChatWidget {
 
         if self
             .estimated_thread_usage()
-            .is_some_and(|usage| usage.estimated_usage_usd_micros.is_none())
+            .is_some_and(|usage| thread_cost_micros(usage, self.plan_type).is_none())
         {
             preview_data.suppress_placeholder(StatusSurfacePreviewItem::EstimatedThreadCost);
         }

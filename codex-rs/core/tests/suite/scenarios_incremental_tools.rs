@@ -38,7 +38,7 @@ use super::super::rmcp_client::remote_aware_environment_id;
 use super::super::rmcp_client::remote_aware_stdio_server_bin;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Result<()> {
+async fn prediction_fork_keeps_inherited_tools() -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -55,7 +55,7 @@ async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Resu
         .with_model_info_override("gpt-5.4", |model| {
             model.use_responses_lite = true;
             model.supports_search_tool = false;
-            model.tool_mode = Some(ToolMode::Direct);
+            model.tool_mode = Some(ToolMode::CodeModeOnly);
         })
         .with_config(move |config| {
             config.workspace_roots = vec![config.cwd.clone()];
@@ -77,7 +77,7 @@ async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Resu
     wait_for_mcp_server(&test.codex, "echo_service").await?;
     let mock = responses::mount_sse_sequence(
         &server,
-        ["parent", "child", "child-again", "parent-again"]
+        ["parent", "prediction", "continued-parent"]
             .into_iter()
             .map(|id| responses::sse(vec![responses::ev_completed(id)]))
             .collect(),
@@ -111,7 +111,6 @@ async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Resu
     child.thread.restore_thread_settings(settings).await?;
     test.codex = child.thread;
     test.submit_text_turn("Predict the next message.").await?;
-    test.submit_text_turn("Predict again.").await?;
     test.codex = parent;
     test.submit_text_turn("Continue using the echo service.")
         .await?;
@@ -120,14 +119,26 @@ async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Resu
     let parent = requests[0].body_json();
     let child = requests[1].body_json();
     let prefix = parent["input"].as_array().expect("parent input");
+    let exec = prefix
+        .iter()
+        .filter(|item| item["type"] == "additional_tools")
+        .find_map(|item| responses::namespace_child_tool(item, "functions", "exec"))
+        .expect("parent declares functions.exec");
+    assert!(
+        exec["description"]
+            .as_str()
+            .expect("exec description")
+            .contains("mcp__echo_service__echo"),
+        "the inherited functions.exec must describe the MCP helper",
+    );
     assert_eq!(
         &child["input"].as_array().expect("child input")[..prefix.len()],
         prefix
     );
     insta::assert_snapshot!(
-        "prediction_fork_mcp_removal",
+        "prediction_fork_inherited_tools",
         context_snapshot::format_request_history_snapshot(
-            "The prediction fork preserves the incremental parent's complete prefix, then appends MCP removal. Its second turn retains that update; continuing the parent keeps its original tools.",
+            "Request 1 starts the parent thread. Request 2 is the prediction child's only turn. Request 3 continues the original parent and verifies that it still has its MCP tools.",
             &requests,
             &ContextSnapshotOptions::default()
                 .rewrite_known_segments()
@@ -137,11 +148,13 @@ async fn prediction_fork_appends_mcp_removal_without_rewriting_history() -> Resu
     Ok(())
 }
 
-#[test_case(true; "responses_lite")]
-#[test_case(false; "responses_api")]
+#[test_case(true, None; "responses_lite")]
+#[test_case(true, Some(true); "announcements_suppressed")]
+#[test_case(false, None; "responses_api")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incremental_tools_append_changed_catalog_without_rewriting_history(
     use_responses_lite: bool,
+    suppress_model_change_announcements: Option<bool>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
@@ -188,6 +201,12 @@ async fn incremental_tools_append_changed_catalog_without_rewriting_history(
             }
         })
         .with_config(move |config| {
+            if let Some(suppress) = suppress_model_change_announcements {
+                config
+                    .features
+                    .set_enabled(Feature::SuppressModelChangeAnnouncements, suppress)
+                    .expect("configure model announcements");
+            }
             if !use_responses_lite {
                 config.base_instructions =
                     Some("Use the available tools to help the user.".to_string());
@@ -357,13 +376,17 @@ async fn incremental_tools_append_changed_catalog_without_rewriting_history(
         );
     }
     insta::assert_snapshot!(
-        if use_responses_lite {
+        if suppress_model_change_announcements == Some(true) {
+            "incremental_tools_suppressed_announcements"
+        } else if use_responses_lite {
             "incremental_tools"
         } else {
             "incremental_tools_responses_api"
         },
         context_snapshot::format_request_history_snapshot(
-            if use_responses_lite {
+            if suppress_model_change_announcements == Some(true) {
+                "A model switch suppresses the model ID announcement while appending changed tools and replacement instructions. Repeated turns preserve the prefix; compaction starts a new window with the updated base."
+            } else if use_responses_lite {
                 "Tool definitions precede the initial base instructions. A model switch appends one developer notice, changed tools, and replacement instructions without rewriting the prefix; compaction starts a new window with the updated base."
             } else {
                 "Regular Responses requests carry the full current tool catalog without an incremental notice; changed execution instructions replace the catalog on subsequent requests."

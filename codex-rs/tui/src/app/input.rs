@@ -9,6 +9,8 @@ use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 use crate::keymap::bindings_for_action;
 use crate::keymap::keymap_action_ids;
 
+mod select_mode;
+
 impl App {
     pub(super) fn should_recover_vim_insert_escape(&self, key_event: KeyEvent) -> bool {
         let active_contexts = self.active_keymap_contexts();
@@ -90,14 +92,16 @@ impl App {
         if self.overlay.is_none() && self.chat_widget.handle_quick_dial_menu(key_event) {
             return None;
         }
-        if matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.owns_interaction_key(key_event))
+        let select_mode_chord = self.select_mode_owns_chord(tui, key_event);
+        if (matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.owns_interaction_key(key_event))
             || (tui.is_owned_screen()
                 && self.overlay.is_none()
                 && self.chat_widget.no_modal_or_popup_active()
                 && self.transcript_view.owns_interaction_key(key_event)
                 && (self.transcript_view.has_active_interaction()
                     || self.backtrack.overlay_preview_active
-                    || crate::transcript_view::JumpTarget::from_key(key_event).is_none()))
+                    || crate::transcript_view::JumpTarget::from_key(key_event).is_none())))
+            && !select_mode_chord
         {
             let close_chord = tui.is_owned_screen()
                 && self.overlay.is_none()
@@ -232,7 +236,13 @@ impl App {
             } else {
                 KeymapContext::Pager
             };
-            let contexts = KeymapContextSet::new(context).with_voice_toggle(&self.keymap);
+            let contexts =
+                if matches!(overlay, Overlay::Transcript(_)) && context == KeymapContext::Pager {
+                    KeymapContextSet::transcript()
+                } else {
+                    KeymapContextSet::new(context)
+                }
+                .with_voice_toggle(&self.keymap);
             return if self.backtrack.overlay_preview_active && context == KeymapContext::Pager {
                 KeymapContextSet::browsing().with_voice_toggle(&self.keymap)
             } else {
@@ -241,6 +251,9 @@ impl App {
         }
         if self.transcript_view.is_search_editing() && self.chat_widget.no_modal_or_popup_active() {
             return KeymapContextSet::new(KeymapContext::Editor).with_voice_toggle(&self.keymap);
+        }
+        if self.transcript_view.is_select_mode() && self.chat_widget.no_modal_or_popup_active() {
+            return KeymapContextSet::transcript().with_voice_toggle(&self.keymap);
         }
         if self.transcript_view.is_activity_focused() && self.chat_widget.no_modal_or_popup_active()
         {
@@ -394,21 +407,42 @@ impl App {
         if self.chat_widget.fork_in_progress {
             return;
         }
+        if self.chat_widget.has_provider_error()
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+            && key_event.kind == KeyEventKind::Press
+            && key_event.modifiers == KeyModifiers::NONE
+        {
+            match key_event.code {
+                KeyCode::Char('c') if self.chat_widget.rollout_path().is_some() => {
+                    if let Some(thread_id) = self.chat_widget.thread_id() {
+                        self.app_event_tx
+                            .send(AppEvent::ContinueProviderChat { thread_id });
+                    }
+                    return;
+                }
+                KeyCode::Char('n') => {
+                    self.app_event_tx.send(AppEvent::NewSession { name: None });
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.app_event_tx.send(AppEvent::OpenResumePicker);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.chat_widget.is_external_writer_view()
             && self.overlay.is_none()
             && self.chat_widget.no_modal_or_popup_active()
             && key_event.kind == KeyEventKind::Press
         {
             let modifiers = key_event.modifiers;
-            if key_event.code == KeyCode::Esc
-                && modifiers == KeyModifiers::NONE
-                && !matches!(self.app_server_target, AppServerTarget::Embedded)
-            {
+            if key_event.code == KeyCode::Esc && modifiers == KeyModifiers::NONE {
                 self.open_agents_overview(app_server);
                 return;
             }
             let quit = match key_event.code {
-                KeyCode::Esc => modifiers == KeyModifiers::NONE,
                 KeyCode::Char('q' | 'Q') => {
                     modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT
                 }
@@ -512,12 +546,7 @@ impl App {
             let mut running_side_thread_id =
                 running_thread_id.filter(|thread_id| self.side_threads.contains_key(thread_id));
             if running_side_thread_id.is_none() {
-                for thread_id in self.side_threads.keys().copied() {
-                    if self.active_turn_id_for_thread(thread_id).await.is_some() {
-                        running_side_thread_id = Some(thread_id);
-                        break;
-                    }
-                }
+                running_side_thread_id = self.running_side_thread_id().await;
             }
             if running_thread_id.is_none() {
                 running_thread_id = running_side_thread_id;
@@ -583,8 +612,11 @@ impl App {
         }
 
         let find_transcript = self.keymap.app.find_transcript.is_pressed(key_event);
+        let select_transcript = self.keymap.app.select_transcript.is_pressed(key_event);
         if app_keymap_shortcuts_available
-            && (self.keymap.app.open_transcript.is_pressed(key_event) || find_transcript)
+            && (self.keymap.app.open_transcript.is_pressed(key_event)
+                || find_transcript
+                || select_transcript)
         {
             self.scrollback_has_older_history = self
                 .chat_widget
@@ -594,6 +626,10 @@ impl App {
             if find_transcript && let Some(Overlay::Transcript(overlay)) = &mut self.overlay {
                 overlay.set_keymap_bindings(&self.keymap);
                 overlay.begin_search();
+            }
+            if select_transcript && let Some(Overlay::Transcript(overlay)) = &mut self.overlay {
+                overlay.set_keymap_bindings(&self.keymap);
+                overlay.begin_select_mode();
             }
             return;
         }
@@ -606,7 +642,6 @@ impl App {
                 && key_event.code == KeyCode::Left
                 && key_event.modifiers == KeyModifiers::NONE
                 && self.chat_widget.agents_navigation_key_available()
-                && !matches!(self.app_server_target, AppServerTarget::Embedded)
             {
                 self.open_agents_overview(app_server);
             }
@@ -752,8 +787,7 @@ impl App {
                 self.chat_widget
                     .add_error_message(format!("Failed to clear terminal UI: {err}"));
             } else {
-                self.reset_app_ui_state_after_clear();
-                self.queue_clear_ui_header(tui);
+                self.start_cleared_display(tui);
                 tui.frame_requester().schedule_frame();
             }
             return true;
@@ -773,6 +807,7 @@ impl App {
 
     pub(crate) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {
         !self.chat_widget.is_external_writer_view()
+            && !self.chat_widget.has_provider_error()
             && !self.chat_widget.side_conversation_active()
             && !self.chat_widget.shortcut_overlay_visible()
             && self.chat_widget.is_normal_backtrack_mode()

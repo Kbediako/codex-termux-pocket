@@ -5,6 +5,7 @@ use codex_guardian_context::ContextTarget;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -24,6 +25,19 @@ use super::MAX_TOOL_ENTRY_TOKENS;
 use super::MAX_TOOL_TRANSCRIPT_TOKENS;
 use super::TranscriptConfig;
 use super::TranscriptSource;
+
+// Existing rendering tests exercise the same fresh-conversation preparation and
+// delivery filtering as the classifier, without retaining the snapshot formatter.
+impl super::TranscriptConfig {
+    fn build_context(
+        &self,
+        input: ContextInput<'_>,
+    ) -> Result<codex_guardian_context::ComposedContext, codex_guardian_context::SectionError> {
+        let (mut context, _) = self.collect_context(input)?.compose(/*cursor*/ None, &[])?;
+        context.retain_new_instructions(&[]);
+        Ok(context)
+    }
+}
 
 struct TestConversationHistory<'a>(&'a [ResponseItem]);
 
@@ -1179,7 +1193,9 @@ fn transcript_omits_media_payloads_and_keeps_readable_content() {
                     detail: None,
                 },
                 ContentItem::InputAudio {
-                    audio_url: "data:audio/wav;base64,audio-payload".to_string(),
+                    audio: AudioReference::Inline {
+                        audio_url: "data:audio/wav;base64,audio-payload".to_string(),
+                    },
                 },
             ],
             phase: None,
@@ -1354,7 +1370,7 @@ trait TranscriptEntries {
     fn transcript_entries(self) -> Vec<String>;
 }
 
-impl TranscriptEntries for super::RenderedContext {
+impl TranscriptEntries for codex_guardian_context::ComposedContext {
     fn transcript_entries(self) -> Vec<String> {
         let messages = self.into_messages();
         let [ResponseItem::Message { role, content, .. }] = messages.as_slice() else {

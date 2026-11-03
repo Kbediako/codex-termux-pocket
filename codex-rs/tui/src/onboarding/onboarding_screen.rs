@@ -52,7 +52,7 @@ use crate::onboarding::trust_directory::TrustDirectoryWidget;
 use crate::onboarding::welcome::WelcomeWidget;
 use crate::startup_draft::StartupCancelled;
 use crate::tui::FrameRequester;
-use crate::tui::OverlayInput;
+use crate::tui::MouseCapture;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
@@ -106,6 +106,7 @@ pub(crate) struct OnboardingScreenArgs {
     pub remote_project_trust: Option<RemoteProjectTrust>,
     pub show_login_screen: bool,
     pub bedrock_setup_enabled: bool,
+    pub gcp_setup_enabled: bool,
     pub login_status: LoginStatus,
     pub app_server_target: crate::AppServerTarget,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
@@ -133,6 +134,7 @@ impl OnboardingScreen {
             remote_project_trust,
             show_login_screen,
             bedrock_setup_enabled,
+            gcp_setup_enabled,
             login_status,
             app_server_target,
             app_server_request_handle,
@@ -171,12 +173,13 @@ impl OnboardingScreen {
                 if auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
                     SignInOption::ChatGpt
                 } else {
-                    SignInOption::ApiKey
+                    SignInOption::OtherMethods
                 };
             if let Some(app_server_request_handle) = app_server_request_handle {
                 steps.push(Step::Auth(AuthModeWidget {
                     request_frame: tui.frame_requester(),
                     highlighted_mode,
+                    activation_key_guard: None,
                     error: Arc::new(RwLock::new(None)),
                     sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
                     login_status,
@@ -184,6 +187,7 @@ impl OnboardingScreen {
                     app_server_request_handle,
                     auth_config,
                     bedrock_setup_enabled,
+                    gcp_setup_enabled,
                     animations_enabled: local_settings.tui.animations
                         && local_settings.tui.effects.shimmer,
                     animations_suppressed: std::cell::Cell::new(false),
@@ -346,10 +350,13 @@ impl KeyboardHandler for OnboardingScreen {
     /// Route key events to onboarding steps while preserving text-entry safety.
     ///
     /// OpenAI API-key entry suppresses printable quit bindings after typing
-    /// starts, while Bedrock fields suppress them from the first character.
+    /// starts, while cloud provider fields suppress them from the first character.
     /// Control/alt quit chords still work as emergency exits.
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        if key_event.kind == KeyEventKind::Release {
+            if let Some(widget) = self.auth_widget_mut() {
+                widget.handle_key_event(key_event);
+            }
             return;
         }
         let text_entry_context = self.text_entry_context();
@@ -599,8 +606,8 @@ async fn run_onboarding_screen(
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     // Let the terminal select and copy login URLs and device codes, even in fullscreen mode.
-    let previous_input = tui.overlay_input;
-    let result = match tui.set_overlay_input(OverlayInput::Onboarding) {
+    let previous_mouse_capture = tui.mouse_capture;
+    let result = match tui.set_mouse_capture(MouseCapture::Disabled) {
         Ok(()) => {
             run_onboarding_screen_inner(
                 onboarding_screen,
@@ -612,7 +619,7 @@ async fn run_onboarding_screen(
         }
         Err(error) => Err(error.into()),
     };
-    let restore = tui.set_overlay_input(previous_input);
+    let restore = tui.set_mouse_capture(previous_mouse_capture);
     result.and_then(|result| restore.map(|()| result).map_err(Into::into))
 }
 
