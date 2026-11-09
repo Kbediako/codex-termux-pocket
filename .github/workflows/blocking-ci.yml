@@ -85,7 +85,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check Rust dependency policy
-        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
+        uses: EmbarkStudios/cargo-deny-action@9c67a826e39827395bfa619cd85cb2aaeb43cfaa # v2
         with:
           rust-version: 1.99.1
           manifest-path: ./codex-rs/Cargo.toml
