@@ -22,6 +22,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianBudgetOmission;
@@ -55,7 +56,7 @@ impl<'a> PreparedReviewContext<'a> {
             Some(config) => Ok(Self::Elastic(
                 context
                     .prepare_elastic_entries(config)?
-                    .prepare_sync_delivery(history)?,
+                    .prepare_delivery(history)?,
             )),
             None => {
                 codex_guardian_context::prepare_sync_delivery(&mut context, history)?;
@@ -251,9 +252,7 @@ pub(crate) async fn finalize(
         .pending_budget_reminder(session.thread_id(), &session.current_window_id().await)
         .await
     {
-        let reminder = ContextualUserFragment::into(crate::context::RolloutBudgetContext {
-            remaining_tokens: reminder.remaining_tokens,
-        });
+        let reminder = session.budget_reminder_item(&reminder);
         existing = existing.saturating_add(
             usize::try_from(estimate_item_token_count(&reminder)).unwrap_or(usize::MAX),
         );
@@ -261,7 +260,7 @@ pub(crate) async fn finalize(
     // Reserve the real input annotations as well as the shared content cost.
     // Removing optional items can only reduce this metadata. The remaining
     // margin covers IDs and timestamps assigned when recording the message.
-    let mut framing = session.response_item_from_user_input(content.clone());
+    let mut framing = session.response_item_from_user_input(content);
     if let ResponseItem::Message { content, .. } = &mut framing {
         content.clear();
     }
@@ -316,9 +315,28 @@ pub(crate) async fn finalize(
     let observations = std::mem::take(&mut context.truncations);
     match context.clone().into_annotated_user_inputs() {
         Ok((user_input, metadata)) => {
+            let user_input = user_input
+                .into_iter()
+                .map(|item| match item {
+                    UserInput::Text {
+                        text,
+                        text_elements,
+                    } => Ok(ResolvedUserInput::Text {
+                        text,
+                        text_elements,
+                    }),
+                    UserInput::Image { image, detail } => Ok(ResolvedUserInput::Image {
+                        image: image.into(),
+                        detail,
+                    }),
+                    _ => Err(CodexErr::InvalidRequest(
+                        "Unsupported Guardian input content".to_owned(),
+                    )),
+                })
+                .collect::<CodexResult<Vec<_>>>()?;
             if metadata.is_some() {
                 input[0] = TurnInput::ResponseItem(codex_history::ResponseItemEnvelope {
-                    item: session.response_item_from_user_input(user_input),
+                    item: session.response_item_from_user_input(&user_input),
                     metadata,
                 });
             } else if let TurnInput::UserInput { content, .. } = &mut input[0] {
@@ -340,14 +358,15 @@ pub(crate) async fn finalize(
                         let user_input = content
                             .iter()
                             .map(|item| match item {
-                                ContentItem::InputText { text } => Ok(UserInput::Text {
-                                    text: text.clone(),
-                                    text_elements: Vec::new(),
-                                }),
-                                ContentItem::InputImage { image, detail } => Ok(UserInput::Image {
-                                    image: image.clone(),
-                                    detail: *detail,
-                                }),
+                                ContentItem::InputText { text } => {
+                                    Ok(ResolvedUserInput::text(text.clone()))
+                                }
+                                ContentItem::InputImage { image, detail } => {
+                                    Ok(ResolvedUserInput::Image {
+                                        image: std::sync::Arc::new(image.clone()),
+                                        detail: *detail,
+                                    })
+                                }
                                 ContentItem::OutputText { .. } | ContentItem::InputAudio { .. } => {
                                     Err(CodexErr::InvalidRequest(
                                         "Unsupported Guardian input content".to_owned(),
@@ -355,7 +374,7 @@ pub(crate) async fn finalize(
                                 }
                             })
                             .collect::<CodexResult<Vec<_>>>()?;
-                        envelope.item = session.response_item_from_user_input(user_input);
+                        envelope.item = session.response_item_from_user_input(&user_input);
                     }
                     Ok(TurnInput::ResponseItem(envelope))
                 })

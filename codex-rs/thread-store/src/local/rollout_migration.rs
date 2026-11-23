@@ -85,7 +85,7 @@ struct MigrationLocks {
     _maintenance: Option<Arc<RolloutMaintenanceGuard>>,
     _writer: WriterLockGuard,
     // Let local writers proceed only after releasing the cross-process locks.
-    _live_writer: OwnedMutexGuard<()>,
+    _live_writer: OwnedMutexGuard<u64>,
 }
 
 enum CanonicalizationAttempt {
@@ -1220,11 +1220,10 @@ impl LocalThreadStore {
                     } else {
                         project_rollout_line(&line)
                     },
-                    realtime_item: match line.item {
-                        RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => {
-                            Some(item)
-                        }
-                        _ => None,
+                    realtime_item: if is_inherited_subagent_history {
+                        None
+                    } else {
+                        line.item.realtime_item().map(std::borrow::Cow::into_owned)
                     },
                 },
             )));

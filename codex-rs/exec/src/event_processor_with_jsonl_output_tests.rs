@@ -16,6 +16,7 @@ fn failed_turn_does_not_overwrite_output_last_message_file() {
             "thread-1".to_string(),
             "turn-1".to_string(),
             ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "msg-1".to_string(),
                 text: "partial answer".to_string(),
                 phase: None,
@@ -103,6 +104,7 @@ fn mcp_tool_call_result_preserves_meta_in_jsonl_event() {
             ThreadItemPayload::McpToolCall {
                 id: "mcp-1".to_string(),
                 server: "search service".to_string(),
+                environment_id: None,
                 tool: "web_run".to_string(),
                 status: McpToolCallStatus::Completed,
                 arguments: json!({"search_query": [{"q": "OpenAI Codex CLI documentation"}]}),

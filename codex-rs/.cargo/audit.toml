@@ -1,6 +1,7 @@
 [advisories]
 # Reviewed 2026-07-02. Keep this list in sync with ../deny.toml.
 ignore = [
+    "RUSTSEC-2026-0543", # Temporary owner-approved exception tracked in #198; remove after Codex and SQLx are off Chrono.
     "RUSTSEC-2026-0387", # Temporary timing-leak risk exception tracked in issue #175; crypto-bigint 0.5.5 via elliptic-curve 0.13.8 has no patched compatible release; remove after all paths migrate to a patched version
     "RUSTSEC-2024-0388", # derivative 2.2.0 via starlark/starlark_syntax; upstream crate is unmaintained
     "RUSTSEC-2024-0449", # unsafe-libyaml via serde_yaml in skills, ext/skills, core-plugins, external-agent-migration; remove when migrated off serde_yaml/unsafe-libyaml
@@ -8,10 +9,6 @@ ignore = [
     "RUSTSEC-2024-0436", # paste 1.0.15 via starlark/v8; upstream crate is unmaintained
     "RUSTSEC-2023-0089", # atomic-polyfill via postcard/heapless/pagable; upstream crate is unmaintained
     "RUSTSEC-2025-0141", # bincode via syntect; remove when syntect drops or updates it
-    "RUSTSEC-2026-0118", # hickory-proto via rama-dns/rama-tcp; remove when rama updates to hickory 0.26.1 or hickory-net
-    "RUSTSEC-2026-0119", # hickory-proto via rama-dns/rama-tcp; remove when rama updates to hickory 0.26.1 or hickory-net
-    "RUSTSEC-2026-0194", # quick-xml via plist/syntect and wayland-scanner; trusted inputs only; remove when rust-plist#191 and wayland-rs#938 are released
-    "RUSTSEC-2026-0195", # quick-xml via plist/syntect and wayland-scanner; trusted inputs only; remove when rust-plist#191 and wayland-rs#938 are released
     "RUSTSEC-2026-0370", # zvariant 4.2.0 via zbus 4.4.0 in Linux TUI and keyring/secret-service; remove when those paths migrate off the retired standalone crates
     "RUSTSEC-2026-0371", # zbus_names 3.0.0 via zbus 4.4.0 in Linux TUI and keyring/secret-service; remove when those paths migrate off the retired standalone crates
     "RUSTSEC-2026-0372", # zvariant_derive 4.2.0 via zbus 4.4.0 in Linux TUI and keyring/secret-service; remove when those paths migrate off the retired standalone crates

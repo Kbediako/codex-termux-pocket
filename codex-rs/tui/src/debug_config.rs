@@ -328,18 +328,6 @@ fn render_debug_config_lines(
         ));
     }
 
-    if let Some(servers) = requirements_toml.mcp_servers.as_ref() {
-        let value = join_or_empty(servers.keys().cloned().collect::<Vec<_>>());
-        requirement_lines.push(requirement_line(
-            "mcp_servers",
-            value,
-            requirements
-                .mcp_servers
-                .as_ref()
-                .map(|sourced| &sourced.source),
-        ));
-    }
-
     // TODO(gt): Expand this debug output with detailed skills and rules display.
     if requirements_toml.rules.is_some() {
         requirement_lines.push(requirement_line(
@@ -563,6 +551,7 @@ fn format_network_constraints(network: &NetworkConstraints) -> String {
         enabled,
         http_port,
         socks_port,
+        transparent_tcp,
         allow_upstream_proxy,
         dangerously_allow_non_loopback_proxy,
         dangerously_allow_all_unix_sockets,
@@ -582,6 +571,9 @@ fn format_network_constraints(network: &NetworkConstraints) -> String {
     }
     if let Some(socks_port) = socks_port {
         parts.push(format!("socks_port={socks_port}"));
+    }
+    if let Some(transparent_tcp) = transparent_tcp {
+        parts.push(format!("transparent_tcp={transparent_tcp}"));
     }
     if let Some(allow_upstream_proxy) = allow_upstream_proxy {
         parts.push(format!("allow_upstream_proxy={allow_upstream_proxy}"));
@@ -680,7 +672,6 @@ mod tests {
     use codex_config::ConfigLayerStack;
     use codex_config::ConfigRequirements;
     use codex_config::ConfigRequirementsToml;
-    use codex_config::ConfigRequirementsWithSources;
     use codex_config::Constrained;
     use codex_config::ConstrainedWithSource;
     use codex_config::ConstraintError;
@@ -691,8 +682,6 @@ mod tests {
     use codex_config::LoaderOverrides;
     use codex_config::ManagedHooksRequirementsToml;
     use codex_config::MatcherGroup;
-    use codex_config::McpServerIdentity;
-    use codex_config::McpServerRequirement;
     use codex_config::NetworkConstraints;
     use codex_config::NetworkDomainPermissionToml;
     use codex_config::NetworkDomainPermissionsToml;
@@ -700,11 +689,13 @@ mod tests {
     use codex_config::NetworkUnixSocketPermissionToml;
     use codex_config::NetworkUnixSocketPermissionsToml;
     use codex_config::RequirementSource;
+    use codex_config::RequirementsLayerEntry;
     use codex_config::ResidencyRequirement;
     use codex_config::SandboxModeRequirement;
     use codex_config::Sourced;
     use codex_config::WebSearchModeRequirement;
     use codex_config::WindowsRequirementsToml;
+    use codex_config::compose_requirements;
     use codex_config::sandbox_mode_requirement_for_permission_profile;
     use codex_config::types::FeedbackConfigToml;
     use codex_protocol::config_types::ApprovalsReviewer;
@@ -886,17 +877,6 @@ interrupt_message = false
                     file: requirements_file.clone(),
                 }),
             ),
-            mcp_servers: Some(Sourced::new(
-                BTreeMap::from([(
-                    "docs".to_string(),
-                    McpServerRequirement::Identity {
-                        identity: McpServerIdentity::Command {
-                            command: "codex-mcp".to_string(),
-                        },
-                    },
-                )]),
-                RequirementSource::LegacyManagedConfigTomlFromMdm,
-            )),
             enforce_residency: ConstrainedWithSource::new(
                 Constrained::allow_any(Some(ResidencyRequirement::Us)),
                 Some(RequirementSource::LegacyManagedConfigTomlFromMdm),
@@ -920,12 +900,14 @@ interrupt_message = false
             feature_requirements: Some(Sourced::new(
                 FeatureRequirementsToml {
                     entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
+                    ..Default::default()
                 },
                 RequirementSource::LegacyManagedConfigTomlFromMdm,
             )),
             network: Some(Sourced::new(
                 NetworkConstraints {
                     enabled: Some(true),
+                    transparent_tcp: Some(true),
                     domains: Some(NetworkDomainPermissionsToml {
                         entries: BTreeMap::from([(
                             "example.com".to_string(),
@@ -1000,16 +982,10 @@ interrupt_message = false
             guardian_extra_policy: None,
             feature_requirements: Some(FeatureRequirementsToml {
                 entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
+                ..Default::default()
             }),
             hooks: None,
-            mcp_servers: Some(BTreeMap::from([(
-                "docs".to_string(),
-                McpServerRequirement::Identity {
-                    identity: McpServerIdentity::Command {
-                        command: "codex-mcp".to_string(),
-                    },
-                },
-            )])),
+            mcp_servers: None,
             plugins: None,
             marketplaces: None,
             otel: None,
@@ -1078,12 +1054,11 @@ interrupt_message = false
         assert!(rendered.contains(&format!(
             "features: guardian_approval=true (source: {requirements_source})"
         )));
-        assert!(rendered.contains("mcp_servers: docs (source: MDM managed_config.toml (legacy))"));
         assert!(rendered.contains(&format!(
             "enforce_residency: us (source: {requirements_source})"
         )));
         assert!(rendered.contains(&format!(
-            "network_proxy: enabled=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
+            "network_proxy: enabled=true, transparent_tcp=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
         )));
         assert!(!rendered.contains("secret-looking-value"));
         assert!(
@@ -1251,13 +1226,20 @@ interrupt_message = false
             "experimental_network",
             "permissions.network",
         ] {
-            let toml: ConfigRequirementsToml =
-                toml::from_str(&format!("[{table}]\nenabled = true")).expect("requirements");
-            let mut sourced = ConfigRequirementsWithSources::default();
-            sourced.merge_unset_fields(RequirementSource::Unknown, toml.clone());
-            let requirements = ConfigRequirements::try_from(sourced).expect("valid requirements");
-            let stack =
-                ConfigLayerStack::new(Vec::new(), requirements, toml).expect("config layer stack");
+            let layer = RequirementsLayerEntry::from_toml(
+                RequirementSource::EnterpriseManaged {
+                    id: "network".to_string(),
+                    name: "Network policy".to_string(),
+                },
+                format!("[{table}]\nenabled = true"),
+            );
+            let sourced = compose_requirements([layer])
+                .expect("compose requirements")
+                .expect("managed network requirements");
+            let requirements =
+                ConfigRequirements::try_from(sourced.clone()).expect("valid requirements");
+            let stack = ConfigLayerStack::new(Vec::new(), requirements, sourced.into_toml())
+                .expect("config layer stack");
             outputs.push(format!("{table}:\n{}", render_stack_to_text(&stack)));
         }
 
@@ -1435,6 +1417,7 @@ approval_policy = "never"
                                 timeout_sec: Some(10),
                                 r#async: false,
                                 status_message: Some("checking".to_string()),
+                                on_failure: None,
                                 additional_context_limit: None,
                             }],
                         }],

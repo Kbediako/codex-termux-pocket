@@ -186,6 +186,7 @@ mod tests {
     use codex_home::CodexHomeUserInstructionsProvider;
     use codex_login::AuthManager;
     use codex_login::CodexAuth;
+    use codex_models_manager::manager::ModelCatalogSettings;
     use codex_protocol::protocol::SessionSource;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
@@ -527,15 +528,20 @@ enabled = false
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
         let executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider> = Arc::new(
             codex_skills_extension::ExecutorSkillProvider::new_with_restriction_product(
-                Arc::clone(&environment_manager),
                 SessionSource::Exec.restriction_product(),
             ),
         );
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             ThreadManager::new(
                 &good_config,
-                auth_manager.clone(),
-                codex_core::build_models_manager(&good_config, auth_manager.clone()),
+                codex_core::build_startup_models(
+                    &good_config,
+                    auth_manager.clone(),
+                    "11111111-1111-4111-8111-111111111111".to_string(),
+                    Arc::new(ModelCatalogSettings::disk(
+                        good_config.codex_home.to_path_buf(),
+                    )),
+                ),
                 codex_core::CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
@@ -567,7 +573,6 @@ enabled = false
                 codex_core::passthrough_image_store(),
                 Arc::clone(&thread_store),
                 codex_core::local_agent_graph_store_from_state_db(Some(&state_db)),
-                "11111111-1111-4111-8111-111111111111".to_string(),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ None,
             )

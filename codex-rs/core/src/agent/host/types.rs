@@ -12,6 +12,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::TurnEnvironmentRequest;
@@ -32,7 +33,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 pub struct RestrictRootCapabilities;
 
-/// The root's session ID, supplied by a trusted host when starting a fresh child.
+/// The root's session ID, supplied by a trusted host for a fresh child or a prepared fork.
 ///
 /// Insert this into the thread's startup [`codex_extension_api::ExtensionDataInit`].
 /// The child keeps its own distinct thread ID. Resumed threads take their session
@@ -62,6 +63,13 @@ pub struct HostThreadSpawnReservation {
 /// Repository instructions are discovered at the destination.
 pub struct PreparedChildContext {
     pub originator: String,
+    /// Effective parent base instructions, including whether they are custom or model-owned.
+    /// Apply both `text` and `provenance` to the destination config so model-owned instructions
+    /// retain their normal model-switch behavior. Apply requested child overrides afterwards.
+    pub base_instructions: BaseInstructions,
+    /// Developer instructions under native inheritance rules, including the V2 subagent override.
+    /// Requested child role overrides are applied after this inherited value.
+    pub developer_instructions: Option<String>,
     pub user_instructions: Option<String>,
     pub thread_instructions: Option<String>,
     pub cwd: AbsolutePathBuf,

@@ -51,6 +51,13 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn reject_user_shell_command(&mut self, message: String) {
+        // No turn event will arrive to clear the pending shell submission.
+        self.input_queue.user_turn_pending_start = false;
+        self.add_error_message(message);
+        self.maybe_send_next_queued_input();
+    }
+
     fn submit_shell_command_with_history(
         &mut self,
         command: &str,
@@ -165,9 +172,11 @@ impl ChatWidget {
             || self.pending_image_submission.is_some()
             || self.safety_recourse.is_some()
         {
-            let model_prompt = source == UserMessageSource::Prompt
-                && (shell_escape_policy == ShellEscapePolicy::Disallow
-                    || !user_message.text.starts_with('!'));
+            let model_prompt = matches!(
+                source,
+                UserMessageSource::Prompt | UserMessageSource::DirectEnter
+            ) && (shell_escape_policy == ShellEscapePolicy::Disallow
+                || !user_message.text.starts_with('!'));
             // A prepared submission was accepted before any messages queued behind it.
             let queue_index = if prepared_images.is_some() {
                 0
@@ -198,9 +207,11 @@ impl ChatWidget {
             return (true, None);
         }
         if !self.is_session_configured() {
-            let model_prompt = source == UserMessageSource::Prompt
-                && (shell_escape_policy == ShellEscapePolicy::Disallow
-                    || !user_message.text.starts_with('!'));
+            let model_prompt = matches!(
+                source,
+                UserMessageSource::Prompt | UserMessageSource::DirectEnter
+            ) && (shell_escape_policy == ShellEscapePolicy::Disallow
+                || !user_message.text.starts_with('!'));
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.input_queue
                 .queued_user_messages
@@ -297,6 +308,21 @@ impl ChatWidget {
             }));
         }
 
+        use crate::app_command::CloudSubmissionIntent;
+        let (cloud_submission, source) = match source {
+            UserMessageSource::DirectEnter => (
+                CloudSubmissionIntent::StartOrSteer,
+                UserMessageSource::Prompt,
+            ),
+            UserMessageSource::Prompt => (CloudSubmissionIntent::StartIfIdle, source),
+            UserMessageSource::QuestionAnswer => (
+                CloudSubmissionIntent::QuestionAnswer {
+                    during_turn: !render_in_history,
+                },
+                source,
+            ),
+            UserMessageSource::SafetyRecourse => (CloudSubmissionIntent::UseKnownTurn, source),
+        };
         if !text.is_empty() {
             items.push(UserInput::Text {
                 text: text.clone(),
@@ -462,6 +488,8 @@ impl ChatWidget {
         crate::startup_recovery::bind_submission(&text, &client_user_message_id);
         let pending_steer = (!render_in_history).then(|| PendingSteer {
             client_id: client_user_message_id.clone(),
+            admitted_turn_id: None,
+            optimistically_rendered: false,
             user_message: UserMessage {
                 text: text.clone(),
                 local_images: local_images.clone(),
@@ -481,9 +509,10 @@ impl ChatWidget {
             } else {
                 "user"
             },
+            cloud_submission,
             client_user_message_id.clone(),
             items,
-            self.config.cwd.to_path_buf(),
+            self.session_cwd().to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             active_permission_profile,
             effective_mode.model().to_string(),
@@ -530,6 +559,7 @@ impl ChatWidget {
         if render_in_history {
             self.input_queue.user_turn_pending_start = true;
             self.input_queue.pending_user_message_client_id = Some(client_user_message_id.clone());
+            self.input_queue.pending_user_message_history_record = Some(history_record.clone());
         }
 
         // Persist the submitted text to cross-session message history. Mentions are encoded into

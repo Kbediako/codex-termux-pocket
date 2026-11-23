@@ -1,3 +1,4 @@
+use crate::bespoke_event_handling::CommandExecutionCompletionItem;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use codex_app_server_protocol::RequestId;
@@ -5,6 +6,7 @@ use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadHistoryTurnMetadata;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemEntry;
 use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError;
@@ -35,7 +37,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::error;
 
-type PendingInterruptQueue = Vec<ConnectionRequestId>;
+type PendingInterruptQueue = Vec<(String, ConnectionRequestId)>;
 
 // The unload that inserts an entry owns its removal. Dropping the sender wakes deferred
 // listener attachment only after that unload finishes cleanup.
@@ -86,6 +88,11 @@ pub(crate) enum ThreadListenerCommand {
     EmitThreadGoalSnapshot {
         state_db: StateDbHandle,
     },
+    CompleteLateCommandApproval {
+        turn_id: String,
+        item_id: String,
+        completion_item: Box<CommandExecutionCompletionItem>,
+    },
     // ResolveServerRequest is used to notify the client that the request has been resolved.
     // It is executed in the thread listener's context to ensure that the resolved notification is ordered with regard to the request itself.
     ResolveServerRequest {
@@ -100,26 +107,12 @@ pub(crate) struct PendingNetworkApproval {
     pub(crate) permission_guard: crate::thread_status::ThreadWatchActiveGuard,
 }
 
-/// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
+/// Metadata accumulated for one turn until its terminal notification.
 #[derive(Default, Clone)]
 pub(crate) struct TurnSummary {
     pub(crate) started_at: Option<i64>,
-    pub(crate) command_start_times: HashMap<String, i64>,
     pub(crate) last_error: Option<TurnError>,
     pub(crate) last_agent_message: Option<ThreadItem>,
-}
-
-impl TurnSummary {
-    pub(crate) fn record_command_start(&mut self, item_id: String, started_at_ms: i64) -> bool {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.command_start_times.entry(item_id)
-        {
-            entry.insert(started_at_ms);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[derive(Default)]
@@ -127,7 +120,13 @@ pub(crate) struct ThreadState {
     goal_resume_lock: Arc<Mutex<()>>,
     pub(crate) pending_interrupts: PendingInterruptQueue,
     pub(crate) network_approvals: HashMap<String, PendingNetworkApproval>,
-    pub(crate) turn_summary: TurnSummary,
+    pub(crate) turn_summaries: HashMap<String, TurnSummary>,
+    // A background command can emit events even after its originating turn finishes.
+    pub(crate) command_start_times: HashMap<String, HashMap<String, i64>>,
+    /// A terminal event can arrive after the listener has already started the next turn.
+    pub(crate) last_started_turn_id: Option<String>,
+    // A delegate may announce a different ID from the one on its terminal event.
+    pub(crate) forwarded_turn_id: Option<String>,
     pub(crate) last_terminal_turn_id: Option<String>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
     /// `ShutdownComplete` event before that listener is superseded.
@@ -135,6 +134,9 @@ pub(crate) struct ThreadState {
     pub(crate) cancel_tx: Option<oneshot::Sender<()>>,
     pub(crate) experimental_raw_events: bool,
     pub(crate) listener_generation: u64,
+    /// The listener no longer consumes terminal events from this runtime. Unlike Core's
+    /// agent status, this stays closed when a detached finalizer completes after shutdown.
+    pub(crate) listener_shutdown: bool,
     last_thread_settings: Option<ThreadSettings>,
     listener_command_tx: Option<mpsc::UnboundedSender<ThreadListenerCommand>>,
     current_turn_history: ThreadHistoryBuilder,
@@ -172,15 +174,19 @@ impl ThreadState {
         shutdown_drain: watch::Receiver<bool>,
         conversation: &Arc<CodexThread>,
         watch_registration: WatchRegistration,
-        thread_settings_baseline: ThreadSettings,
+        thread_settings_baseline: Option<ThreadSettings>,
         history_mode: ThreadHistoryMode,
     ) -> (mpsc::UnboundedReceiver<ThreadListenerCommand>, u64) {
         if let Some(previous) = self.cancel_tx.replace(cancel_tx) {
             let _ = previous.send(());
         }
+        self.forwarded_turn_id = None;
+        self.turn_summaries.clear();
+        self.command_start_times.clear();
         self.shutdown_drain = Some(shutdown_drain);
         self.listener_generation = self.listener_generation.wrapping_add(1);
-        self.last_thread_settings = Some(thread_settings_baseline);
+        self.listener_shutdown = false;
+        self.last_thread_settings = thread_settings_baseline;
         self.history_mode = history_mode;
         self.evict_superseded_agent_text =
             history_mode == ThreadHistoryMode::Paginated && conversation.rollout_path().is_some();
@@ -198,6 +204,10 @@ impl ThreadState {
         self.shutdown_drain = None;
         self.listener_command_tx = None;
         self.current_turn_history.reset();
+        self.last_started_turn_id = None;
+        self.forwarded_turn_id = None;
+        self.turn_summaries.clear();
+        self.command_start_times.clear();
         self.listener_thread = None;
         self.watch_registration = WatchRegistration::default();
     }
@@ -214,6 +224,10 @@ impl ThreadState {
 
     pub(crate) fn active_turn_snapshot(&self) -> Option<Turn> {
         self.current_turn_history.active_turn_snapshot()
+    }
+
+    pub(crate) fn release_saved_mcp_results(&mut self, entries: &[ThreadItemEntry]) {
+        self.current_turn_history.release_saved_mcp_results(entries);
     }
 
     /// Returns the same turn ID as `active_turn_snapshot` without cloning its items.
@@ -233,9 +247,61 @@ impl ThreadState {
         self.current_turn_history.active_turn_metadata_snapshot()
     }
 
+    pub(crate) fn record_command_start(
+        &mut self,
+        turn_id: &str,
+        item_id: String,
+        started_at_ms: i64,
+    ) -> bool {
+        let starts = self
+            .command_start_times
+            .entry(turn_id.to_owned())
+            .or_default();
+        if let Entry::Vacant(entry) = starts.entry(item_id) {
+            entry.insert(started_at_ms);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn take_command_start(&mut self, turn_id: &str, item_id: &str) -> Option<i64> {
+        let starts = self.command_start_times.get_mut(turn_id)?;
+        let started_at = starts.remove(item_id);
+        if starts.is_empty() {
+            self.command_start_times.remove(turn_id);
+        }
+        started_at
+    }
+
+    pub(crate) fn take_turn_summary(&mut self, turn_id: &str) -> TurnSummary {
+        self.command_start_times.remove(turn_id);
+        self.turn_summaries.remove(turn_id).unwrap_or_default()
+    }
+
+    pub(crate) fn note_turn_started(&mut self, turn_id: &str, started_at: Option<i64>) {
+        self.last_started_turn_id = Some(turn_id.to_owned());
+        self.turn_summaries.insert(
+            turn_id.to_owned(),
+            TurnSummary {
+                started_at,
+                ..Default::default()
+            },
+        );
+    }
+
     pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
         if let EventMsg::TurnStarted(payload) = event {
-            self.turn_summary.started_at = payload.started_at;
+            self.note_turn_started(event_turn_id, payload.started_at);
+            self.forwarded_turn_id =
+                (payload.turn_id != event_turn_id).then(|| payload.turn_id.clone());
+        } else if let EventMsg::ItemStarted(payload) = event
+            && matches!(payload.item, CoreTurnItem::EnteredReviewMode(_))
+        {
+            // Inline reviews can finish before their delegate emits TurnStarted.
+            self.turn_summaries
+                .entry(event_turn_id.to_owned())
+                .or_default();
         }
         if let EventMsg::ItemCompleted(payload) = event
             && let CoreTurnItem::AgentMessage(item) = &payload.item
@@ -243,8 +309,9 @@ impl ThreadState {
             && item.content.iter().any(|content| {
                 matches!(content, CoreAgentMessageContent::Text { text } if !text.trim().is_empty())
             })
+            && let Some(summary) = self.turn_summaries.get_mut(event_turn_id)
         {
-            self.turn_summary.last_agent_message = Some(ThreadItem::from(payload));
+            summary.last_agent_message = Some(ThreadItem::from(payload));
         }
         if self.evict_superseded_agent_text {
             self.current_turn_history.handle_live_paginated_event(event);
@@ -330,7 +397,10 @@ mod tests {
     fn thread_settings(model: &str) -> ThreadSettings {
         ThreadSettings {
             disabled_plugin_ids: Vec::new(),
-            cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
+            environments: Some(Vec::new()),
+            cwd: AbsolutePathBuf::from_absolute_path("/tmp")
+                .expect("absolute path")
+                .into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::ReadOnly {
@@ -356,9 +426,17 @@ mod tests {
     }
 }
 
+async fn stop_replay(stop: Option<watch::Sender<()>>) {
+    if let Some(stop) = stop {
+        let _ = stop.send(());
+        // The worker drops its receiver once it can no longer enqueue requests.
+        stop.closed().await;
+    }
+}
+
 struct ThreadEntry {
     state: Arc<Mutex<ThreadState>>,
-    connection_ids: HashSet<ConnectionId>,
+    subscriptions: HashMap<ConnectionId, Option<watch::Sender<()>>>,
     has_connections_watcher: watch::Sender<bool>,
 }
 
@@ -372,7 +450,7 @@ impl ThreadEntry {
     fn new(state: Arc<Mutex<ThreadState>>) -> Self {
         Self {
             state,
-            connection_ids: HashSet::new(),
+            subscriptions: HashMap::new(),
             has_connections_watcher: watch::channel(false).0,
         }
     }
@@ -380,7 +458,7 @@ impl ThreadEntry {
     fn update_has_connections(&self) {
         let _ = self.has_connections_watcher.send_if_modified(|current| {
             let prev = *current;
-            *current = !self.connection_ids.is_empty();
+            *current = !self.subscriptions.is_empty();
             prev != *current
         });
     }
@@ -468,8 +546,8 @@ impl ThreadStateManager {
         state
             .threads
             .get(&thread_id)?
-            .connection_ids
-            .iter()
+            .subscriptions
+            .keys()
             .filter_map(|connection_id| {
                 state
                     .live_connections
@@ -502,7 +580,7 @@ impl ThreadStateManager {
         state
             .threads
             .get(&thread_id)
-            .map(|thread_entry| thread_entry.connection_ids.iter().copied().collect())
+            .map(|thread_entry| thread_entry.subscriptions.keys().copied().collect())
             .unwrap_or_default()
     }
 
@@ -595,7 +673,7 @@ impl ThreadStateManager {
         let mut state = self.state.lock().await;
         if thread_state.listener_generation != generation
             || !state.threads.get(&thread_id).is_some_and(|entry| {
-                Arc::ptr_eq(&entry.state, expected) && entry.connection_ids.is_empty()
+                Arc::ptr_eq(&entry.state, expected) && entry.subscriptions.is_empty()
             })
         {
             return false;
@@ -630,12 +708,27 @@ impl ThreadStateManager {
         }
     }
 
+    pub(crate) async fn begin_resume_replay(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> Option<watch::Receiver<()>> {
+        let (stop, stopped) = watch::channel(());
+        let previous = {
+            let mut state = self.state.lock().await;
+            let entry = state.threads.get_mut(&thread_id)?;
+            entry.subscriptions.get_mut(&connection_id)?.replace(stop)
+        };
+        stop_replay(previous).await;
+        Some(stopped)
+    }
+
     pub(crate) async fn unsubscribe_connection_from_thread(
         &self,
         thread_id: ThreadId,
         connection_id: ConnectionId,
     ) -> bool {
-        {
+        let stop = {
             let mut state = self.state.lock().await;
             if !state
                 .thread_ids_by_connection
@@ -651,12 +744,13 @@ impl ThreadStateManager {
                     state.thread_ids_by_connection.remove(&connection_id);
                 }
             }
-            if let Some(thread_entry) = state.threads.get_mut(&thread_id) {
-                thread_entry.connection_ids.remove(&connection_id);
+            state.threads.get_mut(&thread_id).and_then(|thread_entry| {
+                let stop = thread_entry.subscriptions.remove(&connection_id);
                 thread_entry.update_has_connections();
-            }
+                stop.flatten()
+            })
         };
-
+        stop_replay(stop).await;
         true
     }
 
@@ -666,7 +760,7 @@ impl ThreadStateManager {
             .await
             .threads
             .get(&thread_id)
-            .is_some_and(|thread_entry| !thread_entry.connection_ids.is_empty())
+            .is_some_and(|thread_entry| !thread_entry.subscriptions.is_empty())
     }
 
     /// Publishes a new state only when listener installation succeeds, or reuses a current state.
@@ -701,7 +795,7 @@ impl ThreadStateManager {
                     .entry(connection_id)
                     .or_default()
                     .insert(thread_id);
-                entry.connection_ids.insert(connection_id);
+                entry.subscriptions.entry(connection_id).or_default();
             }
         }
         entry.update_has_connections();
@@ -727,7 +821,7 @@ impl ThreadStateManager {
             .or_default()
             .insert(thread_id);
         let thread_entry = state.threads.entry(thread_id).or_default();
-        thread_entry.connection_ids.insert(connection_id);
+        thread_entry.subscriptions.entry(connection_id).or_default();
         thread_entry.update_has_connections();
         true
     }
@@ -742,7 +836,7 @@ impl ThreadStateManager {
                 .unwrap_or_default();
             for thread_id in &thread_ids {
                 if let Some(thread_entry) = state.threads.get_mut(thread_id) {
-                    thread_entry.connection_ids.remove(&connection_id);
+                    thread_entry.subscriptions.remove(&connection_id);
                     thread_entry.update_has_connections();
                 }
             }
@@ -752,7 +846,7 @@ impl ThreadStateManager {
                     state
                         .threads
                         .get(thread_id)
-                        .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
+                        .is_some_and(|thread_entry| thread_entry.subscriptions.is_empty())
                 })
                 .collect::<Vec<_>>()
         }

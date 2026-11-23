@@ -26,6 +26,7 @@ use crate::style::secondary_text_style;
 use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
 use crate::text_formatting::truncate_text;
+use crate::thread_label::ThreadLabelStyle;
 use crate::thread_transcript::RawReasoningVisibility;
 use crate::thread_transcript::TranscriptCells;
 use crate::thread_transcript::load_session_transcript;
@@ -158,7 +159,9 @@ pub enum SessionPickerAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionPickerLaunchContext {
     Startup,
-    ExistingSession { current_thread_id: Option<ThreadId> },
+    ExistingSession {
+        current_thread_id: Option<(BackendId, ThreadId)>,
+    },
 }
 
 impl SessionPickerAction {
@@ -365,6 +368,7 @@ enum BackgroundEvent {
         page: std::io::Result<PickerPage>,
     },
     Preview {
+        backend_id: BackendId,
         thread_id: ThreadId,
         preview: std::io::Result<Vec<TranscriptPreviewLine>>,
     },
@@ -374,6 +378,7 @@ enum BackgroundEvent {
         transcript: std::io::Result<LoadedTranscript>,
     },
     Archive {
+        backend_id: BackendId,
         thread_id: ThreadId,
         result: std::io::Result<()>,
     },
@@ -471,6 +476,7 @@ struct SessionPickerViewPersistence {
 
 struct SessionPickerRunOptions {
     backend_id: crate::backend_id::BackendId,
+    cloud_backends: HashSet<BackendId>,
     use_theme_colors: bool,
     copy_on_select: bool,
     copy_on_select_clear_selection: bool,
@@ -580,7 +586,9 @@ pub(crate) async fn run_resume_picker_from_existing_session_with_app_servers(
         show_all,
         backends,
         displayed_owner,
-        SessionPickerLaunchContext::ExistingSession { current_thread_id },
+        SessionPickerLaunchContext::ExistingSession {
+            current_thread_id: current_thread_id.map(|id| (displayed_owner, id)),
+        },
     )
     .await
 }
@@ -625,6 +633,12 @@ async fn run_resume_picker_with_launch_context(
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         backend_id: app_server.session.backend_id(),
+        cloud_backends: app_servers
+            .iter()
+            .map(|backend| &backend.session)
+            .filter(|session| session.thread_params_mode() == crate::ThreadParamsMode::Cloud)
+            .map(AppServerSession::backend_id)
+            .collect(),
         use_theme_colors: local_settings.tui.status_line_use_colors,
         copy_on_select: local_settings.copy_on_select(&codex_terminal_detection::terminal_info()),
         copy_on_select_clear_selection: local_settings.tui.copy_on_select_clear_selection,
@@ -679,6 +693,10 @@ pub async fn run_fork_picker_with_app_server(
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         backend_id: app_server.backend_id(),
+        cloud_backends: (app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud)
+            .then(|| app_server.backend_id())
+            .into_iter()
+            .collect(),
         use_theme_colors: local_settings.tui.status_line_use_colors,
         copy_on_select: local_settings.copy_on_select(&codex_terminal_detection::terminal_info()),
         copy_on_select_clear_selection: local_settings.tui.copy_on_select_clear_selection,
@@ -754,6 +772,7 @@ async fn run_session_picker_event_loop(
         options.local_filter_cwd.clone(),
         options.action,
     );
+    state.cloud_backends = options.cloud_backends;
     state.filter_mode =
         SessionFilterMode::from_show_all(options.show_all, options.filter_cwd.as_deref());
     state.filter_cwd = options.filter_cwd;
@@ -788,11 +807,7 @@ async fn run_session_picker_event_loop(
             Some(ev) = tui_events.next() => {
                 alt.tui.clipboard.poll();
                 let screen_size = alt.tui.screen_size_for_event(&ev)?;
-                if matches!(&ev, TuiEvent::Paste(_) | TuiEvent::FocusLost)
-                    || matches!(&ev, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
-                {
-                    state.chord_matcher.cancel();
-                }
+                if alt.tui.dismiss_shortcut_on_input(&ev, &mut state.chord_matcher) { continue; }
                 let ev = if let TuiEvent::Key(key) = ev {
                     let Some(key) = state.route_key_chord(key) else {
                         continue;
@@ -939,6 +954,11 @@ fn spawn_app_server_source(backend: AppServerPickerBackend) -> sources::Source {
         config,
     } = backend;
     let backend_id = app_server.backend_id();
+    let initial_mode = if app_server.uses_remote_workspace() {
+        PageLoadMode::StoreDefault
+    } else {
+        PageLoadMode::StateDbOnly
+    };
     let (bg_tx, events) = mpsc::unbounded_channel();
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<PickerLoadRequest>();
 
@@ -1003,7 +1023,11 @@ fn spawn_app_server_source(backend: AppServerPickerBackend) -> sources::Source {
                         preview = load_transcript_preview(&mut app_server, thread_id, config.as_ref()) => preview,
                         _ = bg_tx.closed() => continue,
                     };
-                    let _ = bg_tx.send(BackgroundEvent::Preview { thread_id, preview });
+                    let _ = bg_tx.send(BackgroundEvent::Preview {
+                        backend_id,
+                        thread_id,
+                        preview,
+                    });
                 }
                 PickerLoadRequest::Transcript {
                     thread_id,
@@ -1042,7 +1066,11 @@ fn spawn_app_server_source(backend: AppServerPickerBackend) -> sources::Source {
                         .await
                         .map(|_| ())
                         .map_err(std::io::Error::other);
-                    let _ = bg_tx.send(BackgroundEvent::Archive { thread_id, result });
+                    let _ = bg_tx.send(BackgroundEvent::Archive {
+                        backend_id,
+                        thread_id,
+                        result,
+                    });
                 }
                 PickerLoadRequest::Unarchive { thread_id, .. } => {
                     let result = archive_request_handle
@@ -1075,6 +1103,7 @@ fn spawn_app_server_source(backend: AppServerPickerBackend) -> sources::Source {
 
     sources::Source {
         backend_id,
+        initial_mode,
         loader: Arc::new(move |request: PickerLoadRequest| {
             let _ = request_tx.send(request);
         }),
@@ -1113,6 +1142,7 @@ impl Drop for AltScreenGuard<'_> {
 
 struct PickerState {
     backend_id: crate::backend_id::BackendId,
+    cloud_backends: HashSet<BackendId>,
     clock_format: ClockFormat,
     use_theme_colors: bool,
     copy_on_select: bool,
@@ -1152,11 +1182,12 @@ struct PickerState {
     sort_key: ThreadSortKey,
     inline_error: Option<String>,
     archive_state: archive::ArchiveState,
-    expanded_thread_id: Option<ThreadId>,
-    transcript_previews: HashMap<ThreadId, TranscriptPreviewState>,
+    expanded_thread_id: Option<(BackendId, ThreadId)>,
+    transcript_previews: HashMap<(BackendId, ThreadId), TranscriptPreviewState>,
     transcript_cells: HashMap<(BackendId, ThreadId), SessionTranscriptState>,
     pending_transcript_open: Option<(BackendId, ThreadId)>,
     unread: HashMap<(BackendId, ThreadId), String>,
+    overlay_backend_id: BackendId,
     overlay_receipt: Option<PickerLoadRequest>,
     pending_transcript_cancellation: Option<oneshot::Sender<()>>,
     transcript_loading_frame_shown: bool,
@@ -1317,6 +1348,13 @@ impl Row {
 }
 
 impl PickerState {
+    fn label_style(&self, row: &Row) -> ThreadLabelStyle {
+        ThreadLabelStyle::from_is_cloud(
+            self.cloud_backends
+                .contains(&row.backend_id.unwrap_or(self.backend_id)),
+        )
+    }
+
     fn new(
         backend_id: crate::backend_id::BackendId,
         requester: FrameRequester,
@@ -1328,6 +1366,7 @@ impl PickerState {
     ) -> Self {
         Self {
             backend_id,
+            cloud_backends: HashSet::new(),
             clock_format: ClockFormat::system(),
             use_theme_colors: true,
             copy_on_select: false,
@@ -1371,6 +1410,7 @@ impl PickerState {
             transcript_cells: HashMap::new(),
             pending_transcript_open: None,
             unread: HashMap::new(),
+            overlay_backend_id: backend_id,
             overlay_receipt: None,
             pending_transcript_cancellation: None,
             transcript_loading_frame_shown: false,
@@ -1382,29 +1422,66 @@ impl PickerState {
     }
 
     fn route_key_chord(&mut self, key: KeyEvent) -> Option<KeyEvent> {
-        if matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.owns_interaction_key(key))
-        {
-            self.chord_matcher.cancel();
-            return Some(key);
-        }
-        let context = if matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_editing())
-        {
-            crate::keymap::KeymapContext::Editor
-        } else if self.overlay.is_some() {
-            crate::keymap::KeymapContext::Pager
+        use crate::keymap::KeyChordMatch;
+        use crate::keymap::KeymapContext;
+        use crate::keymap::KeymapContextSet;
+
+        let mut contexts = KeymapContextSet::new(if self.overlay.is_some() {
+            KeymapContext::Pager
         } else {
-            crate::keymap::KeymapContext::List
-        };
-        match self.chord_matcher.advance(
-            key,
-            &self.keymap.chords,
-            crate::keymap::KeymapContextSet::new(context),
-        ) {
-            crate::keymap::KeyChordMatch::PassThrough => Some(key),
-            crate::keymap::KeyChordMatch::Completed(dispatch_event) => Some(dispatch_event),
-            crate::keymap::KeyChordMatch::Pending(_)
-            | crate::keymap::KeyChordMatch::Cancelled
-            | crate::keymap::KeyChordMatch::Ignored => None,
+            KeymapContext::List
+        });
+        if let Some(Overlay::Transcript(overlay)) = &self.overlay {
+            if overlay.is_search_editing() {
+                contexts = KeymapContextSet::new(KeymapContext::Editor);
+            }
+            let selecting = overlay.is_select_mode() && !overlay.is_search_editing();
+            if selecting {
+                contexts = contexts.with_transcript_select();
+            }
+            if overlay.owns_interaction_key(key) {
+                let markdown_chord = selecting
+                    && match self
+                        .chord_matcher
+                        .clone()
+                        .advance(key, &self.keymap.chords, contexts)
+                    {
+                        KeyChordMatch::Completed(key) => {
+                            self.keymap.pager.mark_markdown.is_pressed(key)
+                        }
+                        KeyChordMatch::Pending(prefix) => {
+                            self.keymap.chords.bindings.iter().any(|binding| {
+                                binding.action.action == "mark_markdown"
+                                    && binding.chord.prefix == prefix
+                            })
+                        }
+                        KeyChordMatch::PassThrough
+                        | KeyChordMatch::Cancelled
+                        | KeyChordMatch::Ignored => false,
+                    };
+                if !markdown_chord {
+                    if self.chord_matcher.cancel() {
+                        self.requester.schedule_frame();
+                    }
+                    return Some(key);
+                }
+            }
+        }
+        let was_pending = self.chord_matcher.is_pending();
+        let result = self
+            .chord_matcher
+            .advance(key, &self.keymap.chords, contexts);
+        if was_pending && !self.chord_matcher.is_pending() {
+            self.requester.schedule_frame();
+        }
+        match result {
+            KeyChordMatch::PassThrough => Some(key),
+            KeyChordMatch::Completed(dispatch_event) => Some(dispatch_event),
+            KeyChordMatch::Pending(_) | KeyChordMatch::Cancelled => {
+                self.requester.schedule_frame();
+                None
+            }
+            KeyChordMatch::Ignored => None,
         }
     }
 
@@ -1462,6 +1539,7 @@ impl PickerState {
                     thread_id,
                     revision,
                 });
+        self.overlay_backend_id = backend_id;
         self.overlay = Some(overlay);
         self.pending_transcript_open = None;
         self.transcript_loading_frame_shown = false;
@@ -1476,12 +1554,23 @@ impl PickerState {
             event,
             TuiEvent::Draw | TuiEvent::FocusGained | TuiEvent::Resume | TuiEvent::Resize(_)
         );
-        overlay.handle_event(tui, event)?;
+        let hud = self
+            .chord_matcher
+            .guide(&self.keymap.chords, &self.requester);
+        tui.with_shortcut_hud(hud, |tui| overlay.handle_event(tui, event))?;
         if draw
             && tui.is_terminal_focused()
             && let Some(receipt) = self.overlay_receipt.take()
         {
             (self.picker_loader)(receipt);
+        }
+        if let Overlay::Transcript(transcript) = overlay
+            && let Some(thread_id) = transcript.pending_thread_link.take()
+        {
+            tui.set_mouse_capture(crate::tui::MouseCapture::Inherit)?;
+            self.overlay = None;
+            self.open_thread_transcript(self.overlay_backend_id, thread_id);
+            return Ok(());
         }
         if overlay.is_done() {
             self.overlay = None;
@@ -1512,7 +1601,10 @@ impl PickerState {
             self.request_frame();
             return;
         };
-        let backend_id = row.backend_id.unwrap_or(self.backend_id);
+        self.open_thread_transcript(row.backend_id.unwrap_or(self.backend_id), thread_id);
+    }
+
+    fn open_thread_transcript(&mut self, backend_id: BackendId, thread_id: ThreadId) {
         let key = (backend_id, thread_id);
         self.pending_transcript_open = Some(key);
         self.transcript_loading_frame_shown = false;
@@ -1903,9 +1995,20 @@ impl PickerState {
                 let completed_token = self.search_state.active_token();
                 self.continue_search_if_token_matches(completed_token);
             }
-            BackgroundEvent::Preview { thread_id, preview } => {
+            BackgroundEvent::Preview {
+                backend_id,
+                thread_id,
+                preview,
+            } => {
+                // Archiving removes the owned cache entry; ignore its late preview.
+                if !matches!(
+                    self.transcript_previews.get(&(backend_id, thread_id)),
+                    Some(TranscriptPreviewState::Loading)
+                ) {
+                    return Ok(None);
+                }
                 self.transcript_previews.insert(
-                    thread_id,
+                    (backend_id, thread_id),
                     match preview {
                         Ok(lines) => TranscriptPreviewState::Loaded(lines),
                         Err(_) => TranscriptPreviewState::Failed,
@@ -1954,8 +2057,12 @@ impl PickerState {
                 }
                 self.request_frame();
             }
-            BackgroundEvent::Archive { thread_id, result } => {
-                self.handle_archive_result(thread_id, result);
+            BackgroundEvent::Archive {
+                backend_id,
+                thread_id,
+                result,
+            } => {
+                self.handle_archive_result(backend_id, thread_id, result);
             }
             BackgroundEvent::Unarchive { thread_id, result } => {
                 return Ok(self.handle_unarchive_result(thread_id, result));
@@ -2378,14 +2485,14 @@ impl PickerState {
             return;
         };
         let backend_id = row.backend_id.unwrap_or(self.backend_id);
-        if self.expanded_thread_id == Some(thread_id) {
+        if self.expanded_thread_id == Some((backend_id, thread_id)) {
             self.expanded_thread_id = None;
             self.request_frame();
             return;
         }
-        self.expanded_thread_id = Some(thread_id);
+        self.expanded_thread_id = Some((backend_id, thread_id));
         if let std::collections::hash_map::Entry::Vacant(e) =
-            self.transcript_previews.entry(thread_id)
+            self.transcript_previews.entry((backend_id, thread_id))
         {
             e.insert(TranscriptPreviewState::Loading);
             (self.picker_loader)(PickerLoadRequest::Preview {
@@ -2407,7 +2514,10 @@ impl PickerState {
                 let is_selected = row_idx == self.selected;
                 let is_expanded = is_selected
                     && row.thread_id.is_some()
-                    && self.expanded_thread_id == row.thread_id;
+                    && self.expanded_thread_id
+                        == row
+                            .thread_id
+                            .map(|id| (row.backend_id.unwrap_or(self.backend_id), id));
                 render_session_lines(
                     row,
                     self,
@@ -2438,8 +2548,12 @@ impl PickerState {
         for (offset, row) in self.filtered_rows[self.scroll_top..].iter().enumerate() {
             let row_idx = self.scroll_top + offset;
             let is_selected = row_idx == self.selected;
-            let is_expanded =
-                is_selected && row.thread_id.is_some() && self.expanded_thread_id == row.thread_id;
+            let is_expanded = is_selected
+                && row.thread_id.is_some()
+                && self.expanded_thread_id
+                    == row
+                        .thread_id
+                        .map(|id| (row.backend_id.unwrap_or(self.backend_id), id));
             let row_height = render_session_lines(
                 row,
                 self,
@@ -2515,7 +2629,9 @@ fn thread_list_params(
     use_state_db_only: bool,
 ) -> ThreadListParams {
     ThreadListParams {
+        include_attached_threads: false,
         current_account_only: true,
+        included_thread_ids: None,
         excluded_thread_ids: None,
         attached_to_thread_id: None,
         originators: None,
@@ -2579,7 +2695,12 @@ fn parse_timestamp_str(ts: &str) -> Option<DateTime<Utc>> {
 }
 
 fn draw_picker(tui: &mut Tui, state: &PickerState, screen_size: Size) -> std::io::Result<()> {
-    tui.draw(screen_size.height, |frame| layout::render(frame, state))
+    let hud = state
+        .chord_matcher
+        .guide(&state.keymap.chords, &state.requester);
+    tui.draw_with_shortcut_hud(screen_size.height, hud, |frame| {
+        layout::render(frame, state)
+    })
 }
 
 fn list_viewport_width(width: u16) -> u16 {
@@ -3215,8 +3336,12 @@ fn render_list(frame: &mut crate::custom_terminal::Frame, area: Rect, state: &Pi
         }
         let row_idx = start + idx;
         let is_selected = row_idx == state.selected;
-        let is_expanded =
-            is_selected && row.thread_id.is_some() && state.expanded_thread_id == row.thread_id;
+        let is_expanded = is_selected
+            && row.thread_id.is_some()
+            && state.expanded_thread_id
+                == row
+                    .thread_id
+                    .map(|id| (row.backend_id.unwrap_or(state.backend_id), id));
         let is_zebra = row_idx.is_multiple_of(2);
         for line in render_session_lines(row, state, is_selected, is_expanded, is_zebra, area.width)
         {
@@ -3307,7 +3432,7 @@ fn render_comfortable_session_lines(
     };
     let marker = selection_marker(is_selected, is_expanded);
     let unread = state.unread_revision(row).is_some();
-    let title = truncate_text(
+    let title = state.label_style(row).render_text(
         row.display_preview(),
         (width as usize).saturating_sub(marker.width() + 2 * usize::from(unread)),
     );
@@ -3410,6 +3535,7 @@ fn render_dense_session_lines(
         marker,
         date: &date,
         title: row.display_preview(),
+        label_style: state.label_style(row),
         unread: state.unread_revision(row).is_some(),
         thread_id: row.thread_id,
         use_theme_colors: state.use_theme_colors,
@@ -3430,6 +3556,7 @@ struct DenseSummaryInput<'a> {
     marker: Span<'static>,
     date: &'a str,
     title: &'a str,
+    label_style: ThreadLabelStyle,
     is_selected: bool,
     is_zebra: bool,
     width: u16,
@@ -3446,13 +3573,15 @@ fn dense_summary_line(input: DenseSummaryInput<'_>) -> Line<'static> {
     let marker_width = input.marker.width();
     let available = (input.width as usize).saturating_sub(marker_width);
     let columns = dense_columns(available);
+    let title_width = columns
+        .title_width
+        .saturating_sub(2 * usize::from(input.unread));
+    let title = input
+        .label_style
+        .render_text(input.title, title_width.saturating_sub(1));
+    let title = pad_dense_column(title, title_width);
     let title = session_title_span(
-        dense_column_text(
-            input.title,
-            columns
-                .title_width
-                .saturating_sub(2 * usize::from(input.unread)),
-        ),
+        title,
         input.thread_id,
         input.use_theme_colors,
         input.is_selected,
@@ -3523,7 +3652,10 @@ fn dense_row_background_style(selected: bool) -> Style {
 }
 
 fn dense_column_text(text: &str, width: usize) -> String {
-    let text = truncate_text(text, width.saturating_sub(1));
+    pad_dense_column(truncate_text(text, width.saturating_sub(1)), width)
+}
+
+fn pad_dense_column(text: String, width: usize) -> String {
     let padding = width.saturating_sub(UnicodeWidthStr::width(text.as_str()));
     format!("{text}{}", " ".repeat(padding))
 }
@@ -3745,7 +3877,10 @@ fn render_transcript_preview_lines(
     let Some(thread_id) = row.thread_id else {
         return details;
     };
-    let preview_lines = match state.transcript_previews.get(&thread_id) {
+    let preview_lines = match state
+        .transcript_previews
+        .get(&(row.backend_id.unwrap_or(state.backend_id), thread_id))
+    {
         Some(TranscriptPreviewState::Loading) => {
             vec![
                 vec![
@@ -3789,6 +3924,10 @@ fn render_expanded_session_details(
         (None, Some(thread_id)) => thread_id.to_string(),
         (None, None) => "-".to_string(),
     };
+    let session_label_style = row
+        .thread_name
+        .as_ref()
+        .map_or(ThreadLabelStyle::Plain, |_| state.label_style(row));
     let directory = row
         .cwd
         .as_ref()
@@ -3800,7 +3939,9 @@ fn render_expanded_session_details(
     );
 
     vec![
-        expanded_detail_line("Session:", &session, width),
+        expanded_detail_line_with("Session:", width, |value_width| {
+            session_label_style.render_text(&session, value_width)
+        }),
         expanded_time_detail_line(
             "Created:",
             reference,
@@ -3938,17 +4079,25 @@ fn conversation_user_style() -> Style {
 }
 
 fn expanded_detail_line(label: &'static str, value: &str, width: u16) -> Line<'static> {
+    expanded_detail_line_with(label, width, |value_width| {
+        truncate_text(value, value_width)
+    })
+}
+
+fn expanded_detail_line_with(
+    label: &'static str,
+    width: u16,
+    render_value: impl FnOnce(usize) -> String,
+) -> Line<'static> {
     const LABEL_WIDTH: usize = 10;
-    let prefix_width = 4;
-    let gap_width = 2;
-    let value_width = (width as usize)
-        .saturating_sub(prefix_width + LABEL_WIDTH + gap_width)
+    let value_width = usize::from(width)
+        .saturating_sub("  │ ".width() + LABEL_WIDTH + "  ".width())
         .max(1);
     vec![
         "  │ ".set_style(secondary_text_style()),
         format!("{label:<LABEL_WIDTH$}").set_style(secondary_text_style()),
         "  ".set_style(secondary_text_style()),
-        truncate_text(value, value_width).into(),
+        render_value(value_width).into(),
     ]
     .into()
 }
@@ -4741,6 +4890,11 @@ mod tests {
         assert!(rendered.contains("Created:    17 minutes ago · 2026-05-02 14:31:08"));
         assert!(rendered.contains("Updated:    now · 2026-05-02 14:48:19"));
         assert!(rendered.contains(&format!("Directory:  {expected_directory}")));
+        state.cloud_backends.insert(state.backend_id);
+        insta::assert_snapshot!(
+            render_expanded_session_details(&row, &state, /*width*/ 53)[0].to_string(),
+            @"  │ Session:    ☁️ feat(tui): add raw scrollback mod…"
+        );
         assert!(rendered.contains("Branch:      codex/raw-scrollback-mode"));
         assert!(rendered.contains("Conversation:"));
     }
@@ -5031,6 +5185,7 @@ mod tests {
         ];
         let local_backend = state.backend_id;
         let cloud_backend = crate::backend_id::BackendId::new();
+        state.cloud_backends.insert(cloud_backend);
         rows[0].backend_id = Some(cloud_backend);
         for row in &mut rows[1..] {
             row.backend_id = Some(local_backend);
@@ -5076,6 +5231,20 @@ mod tests {
 
         let snapshot = render_picker_list(&state, /*width*/ 80, /*height*/ 12);
         assert_snapshot!("resume_picker_table", snapshot);
+        let cloud_row = &state.filtered_rows[0];
+        insta::assert_snapshot!(
+            render_dense_session_lines(
+                cloud_row,
+                &state,
+                /*is_selected*/ false,
+                /*is_expanded*/ false,
+                /*is_zebra*/ false,
+                /*width*/ 30,
+            )[0]
+                .to_string()
+                .trim_end(),
+            @"  42s ago     ☁️ Fix resume …"
+        );
     }
 
     #[test]
@@ -5871,8 +6040,8 @@ mod tests {
             None
         );
         assert!(state.chord_matcher.is_pending());
-        assert_eq!(state.route_key_chord(select), Some(select));
-        assert!(!state.chord_matcher.is_pending());
+        tokio::time::pause();
+        tokio::time::advance(crate::keymap::CHORD_REVEAL_DELAY).await;
         let mut tui = crate::tui::test_support::make_test_tui().expect("tui");
         assert!(receipts.try_recv().is_err());
         tui.defer_screen_size(Size::new(80, 24));
@@ -5884,6 +6053,14 @@ mod tests {
             matches!(receipts.try_recv(), Ok(PickerLoadRequest::Acknowledge { backend_id, thread_id: id, revision })
             if backend_id == owner && id == thread_id && revision == "observed")
         );
+        assert!(tui.shortcut_hud_area.is_some());
+        let (requester, mut frames) = FrameRequester::test_channel();
+        state.requester = requester;
+        assert_eq!(state.route_key_chord(select), Some(select));
+        assert!(!state.chord_matcher.is_pending());
+        frames
+            .try_recv()
+            .expect("redraw after a transcript key clears the guide");
         state
             .handle_overlay_event(
                 &mut tui,
@@ -5931,6 +6108,97 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text.contains("BAtail"), "Find query: {text}");
+
+        state.overlay = None;
+        state.keymap = RuntimeKeymap::from_config(
+            &serde_json::from_value(serde_json::json!({"list": {"page_up": "leader p"}})).unwrap(),
+        )
+        .unwrap();
+        for completion in [KeyCode::Char('p'), KeyCode::F(12)] {
+            assert_eq!(
+                state.route_key_chord(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+                None
+            );
+            while frames.try_recv().is_ok() {}
+            let _ = state.route_key_chord(KeyEvent::new(completion, KeyModifiers::NONE));
+            assert!(!state.chord_matcher.is_pending());
+            frames
+                .try_recv()
+                .expect("redraw even when the routed key has no effect");
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_transcript_handoff_restores_mouse_capture() {
+        use crate::tui::MouseCapture;
+
+        for outcome in ["canceled", "failed", "loaded"] {
+            let mut state = PickerState::new(
+                BackendId::new(),
+                FrameRequester::test_dummy(),
+                page_only_loader(|_| {}),
+                ProviderFilter::MatchDefault(String::from("openai")),
+                /*show_all*/ true,
+                /*filter_cwd*/ None,
+                SessionPickerAction::Resume,
+            );
+            let thread_id = ThreadId::new();
+            let key = (state.backend_id, thread_id);
+            state.overlay = Some(Overlay::new_transcript(
+                Vec::new(),
+                state.keymap.pager.clone(),
+                state.copy_on_select,
+                state.mouse_scroll_speed,
+            ));
+            let mut tui = crate::tui::test_support::make_test_tui().expect("tui");
+            state
+                .handle_overlay_event(&mut tui, TuiEvent::Draw)
+                .unwrap();
+            assert_eq!(tui.mouse_capture, MouseCapture::Enabled);
+            let Some(Overlay::Transcript(transcript)) = &mut state.overlay else {
+                panic!("transcript preview");
+            };
+            transcript.pending_thread_link = Some(thread_id);
+            state
+                .handle_overlay_event(&mut tui, TuiEvent::Draw)
+                .unwrap();
+            assert_eq!(state.pending_transcript_open, Some(key));
+            assert_eq!(tui.mouse_capture, MouseCapture::Inherit);
+
+            if outcome == "canceled" {
+                state
+                    .handle_transcript_loading_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            } else {
+                let transcript = if outcome == "failed" {
+                    Err(std::io::Error::other("failed"))
+                } else {
+                    Ok(LoadedTranscript {
+                        cells: Vec::new(),
+                        unread_revision: None,
+                    })
+                };
+                state
+                    .handle_background_event(BackgroundEvent::Transcript {
+                        backend_id: key.0,
+                        thread_id,
+                        transcript,
+                    })
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(tui.mouse_capture, MouseCapture::Inherit);
+            if outcome == "loaded" {
+                assert!(state.note_transcript_loading_frame_drawn());
+                state.open_pending_transcript_if_ready();
+                state
+                    .handle_overlay_event(&mut tui, TuiEvent::Draw)
+                    .unwrap();
+                assert_eq!(tui.mouse_capture, MouseCapture::Enabled);
+            } else {
+                assert!(state.overlay.is_none());
+                assert_eq!(state.pending_transcript_open, None);
+            }
+        }
     }
 
     #[tokio::test]
@@ -6139,7 +6407,10 @@ session_picker_view = "dense"
             .await
             .unwrap();
 
-        assert_eq!(state.expanded_thread_id, Some(thread_id));
+        assert_eq!(
+            state.expanded_thread_id,
+            Some((state.backend_id, thread_id))
+        );
         assert_eq!(*recorded_requests.lock().unwrap(), vec![thread_id]);
 
         state
@@ -6181,7 +6452,10 @@ session_picker_view = "dense"
             .await
             .unwrap();
 
-        assert_eq!(state.expanded_thread_id, Some(thread_id));
+        assert_eq!(
+            state.expanded_thread_id,
+            Some((state.backend_id, thread_id))
+        );
     }
 
     #[test]
@@ -6363,6 +6637,7 @@ session_picker_view = "dense"
             marker: selection_marker(/*is_selected*/ true, /*is_expanded*/ false),
             date: "15m ago",
             title: "Selected dense row",
+            label_style: ThreadLabelStyle::Plain,
             thread_id: None,
             use_theme_colors: true,
             is_selected: true,
@@ -6382,6 +6657,7 @@ session_picker_view = "dense"
             marker: selection_marker(/*is_selected*/ false, /*is_expanded*/ false),
             date: "15m ago",
             title: "Zebra dense row",
+            label_style: ThreadLabelStyle::Plain,
             thread_id: None,
             use_theme_colors: true,
             is_selected: false,
@@ -6507,9 +6783,9 @@ session_picker_view = "dense"
         state.filtered_rows = vec![row];
         state.relative_time_reference =
             Some(parse_timestamp_str("2026-04-28T18:00:00Z").expect("timestamp"));
-        state.expanded_thread_id = Some(thread_id);
+        state.expanded_thread_id = Some((state.backend_id, thread_id));
         state.transcript_previews.insert(
-            thread_id,
+            (state.backend_id, thread_id),
             TranscriptPreviewState::Loaded(vec![
                 TranscriptPreviewLine {
                     speaker: TranscriptPreviewSpeaker::User,
@@ -7451,6 +7727,7 @@ session_picker_view = "dense"
             extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::from("remote thread"),
             ephemeral: false,
@@ -7467,7 +7744,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -7498,6 +7775,7 @@ session_picker_view = "dense"
             extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
@@ -7514,7 +7792,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -7537,6 +7815,7 @@ session_picker_view = "dense"
                         }],
                     }),
                     ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                        moderation: None,
                         id: String::from("agent-1"),
                         text: String::from("hello from assistant"),
                         phase: None,
@@ -7599,6 +7878,7 @@ session_picker_view = "dense"
             extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
@@ -7615,7 +7895,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -7678,6 +7958,7 @@ session_picker_view = "dense"
             extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
@@ -7694,7 +7975,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,

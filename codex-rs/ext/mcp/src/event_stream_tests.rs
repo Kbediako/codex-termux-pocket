@@ -277,12 +277,13 @@ impl Fixture {
         let startup_cancellation_token = CancellationToken::new();
         let runtime_input = || McpRuntimeInput {
             network_policy_metadata: None,
+            runtime_auth: None,
             startup_policy: McpStartupPolicy::Eager,
             config: Arc::clone(&config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
-                CODEX_APPS_MCP_SERVER_NAME.into(),
+                codex_mcp::McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
                 EffectiveMcpServer::from_host_config(server_config.clone()),
             )]),
             submit_id: "test".into(),

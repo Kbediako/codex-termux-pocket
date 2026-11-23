@@ -6,6 +6,8 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthRouteConfig;
+use codex_models_manager::manager::ModelsManager;
+use codex_models_manager::manager::OpenAiModelsManager;
 use codex_runtime_agent_instance::AgentHostAuthorization;
 use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
 use codex_runtime_agent_instance::RuntimeRole;
@@ -18,13 +20,43 @@ use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+#[derive(Clone, Copy)]
+enum Caller {
+    Catalog,
+    Startup,
+    CapturedCredential,
+    SourceGeneration,
+}
+
 #[tokio::test]
 async fn catalog_timeout_preserves_refreshed_tokens_with_and_without_runtime_auth() {
+    check_timeout_preserves_refreshed_tokens(Caller::Catalog).await;
+}
+
+#[tokio::test]
+async fn catalog_startup_timeout_preserves_refreshed_tokens() {
+    check_timeout_preserves_refreshed_tokens(Caller::Startup).await;
+}
+
+#[tokio::test]
+async fn cancelled_runtime_client_selection_persists_the_rotated_token() {
+    check_timeout_preserves_refreshed_tokens(Caller::CapturedCredential).await;
+    check_timeout_preserves_refreshed_tokens(Caller::SourceGeneration).await;
+}
+
+async fn check_timeout_preserves_refreshed_tokens(caller: Caller) {
     for mode in [
         None,
         Some(RuntimeAuthMode::DualHeader),
         Some(RuntimeAuthMode::AssertionOnly),
     ] {
+        if matches!(
+            caller,
+            Caller::CapturedCredential | Caller::SourceGeneration
+        ) && mode != Some(RuntimeAuthMode::DualHeader)
+        {
+            continue;
+        }
         let server = MockServer::start().await;
         let home = tempfile::tempdir().unwrap();
         let token = |expires| {
@@ -138,26 +170,84 @@ async fn catalog_timeout_preserves_refreshed_tokens_with_and_without_runtime_aut
         });
         let mut info = ModelProviderInfo::create_openai_provider(Some(server.uri()));
         info.env_http_headers = None;
-        let endpoint = OpenAiModelsEndpoint::new(
-            info,
-            Some(Arc::clone(&credentials)),
-            /*gateway_auth_manager*/ None,
-        )
-        .with_runtime_auth(runtime_auth);
-        let error = endpoint
-            .list_models("test", factory.clone())
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error.details(),
-            codex_protocol::error::CodexErrorDetails::RequestTimeout
-        ));
+        let endpoint = Arc::new(
+            OpenAiModelsEndpoint::new(
+                info,
+                Some(Arc::clone(&credentials)),
+                /*gateway_auth_manager*/ None,
+            )
+            .with_runtime_auth(runtime_auth.clone()),
+        );
+        match caller {
+            Caller::CapturedCredential => {
+                let auth = credentials.auth_cached().unwrap();
+                assert!(
+                    timeout(
+                        MODELS_REFRESH_TIMEOUT,
+                        crate::auth_provider_for_request(
+                            &auth,
+                            runtime_auth.as_ref(),
+                            &http::HeaderMap::new()
+                        )
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            Caller::SourceGeneration => {
+                let generation = credentials
+                    .auth_change_state_receiver()
+                    .borrow()
+                    .source_generation;
+                let runtime = runtime_auth
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .bind(Arc::clone(&credentials));
+                assert!(
+                    timeout(
+                        MODELS_REFRESH_TIMEOUT,
+                        crate::select_runtime_auth_for_source(
+                            &runtime,
+                            generation,
+                            &http::HeaderMap::new()
+                        )
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            Caller::Startup => {
+                let manager = OpenAiModelsManager::new_without_cache(
+                    endpoint.clone(),
+                    Some(Arc::clone(&credentials)),
+                );
+                manager.refresh_after_auth_change(factory.clone()).await;
+            }
+            Caller::Catalog => {
+                let error = endpoint
+                    .list_models("test", factory.clone())
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error.details(),
+                    codex_protocol::error::CodexErrorDetails::RequestTimeout
+                ));
+            }
+        }
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/oauth/token")
+                .count(),
+            1,
+        );
 
         // Wait through the existing refresh lock; this must reuse the completed refresh.
-        let current = timeout(Duration::from_secs(5), credentials.auth())
-            .await
-            .unwrap()
-            .unwrap();
+        let current = credentials.auth().await.unwrap();
         assert_eq!(current.get_token().unwrap(), new_token);
         let saved = codex_login::load_auth_dot_json(
             home.path(),

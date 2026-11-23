@@ -68,9 +68,122 @@ fn auth_owner_generation_distinguishes_refreshes_from_identity_changes() {
     }
 }
 
+#[test]
+fn api_workload_identity_changes_retire_previous_owner() {
+    let identity = ApiTokenMetadata {
+        api_organization_id: "organization".into(),
+        api_project_id: "project".into(),
+        user_id: "service-account".into(),
+    };
+    let auth = |workload_identity| {
+        CodexAuth::ApiKey(ApiKeyAuth {
+            api_key: "same-bearer".into(),
+            workload_identity,
+        })
+    };
+    for replacement in [
+        None,
+        Some(ApiTokenMetadata {
+            api_organization_id: "another-organization".into(),
+            ..identity.clone()
+        }),
+        Some(ApiTokenMetadata {
+            api_project_id: "another-project".into(),
+            ..identity.clone()
+        }),
+        Some(ApiTokenMetadata {
+            user_id: "another-service-account".into(),
+            ..identity.clone()
+        }),
+    ] {
+        let previous = auth(Some(identity.clone()));
+        let current = auth(replacement);
+        for (previous, current) in [(previous.clone(), current.clone()), (current, previous)] {
+            let manager = AuthManager::from_auth_for_testing(previous);
+            let before = *manager.auth_change_state_receiver().borrow();
+            manager.set_cached_auth(Some(current));
+            assert_eq!(
+                *manager.auth_change_state_receiver().borrow(),
+                AuthChangeState {
+                    generation: before.generation + 1,
+                    owner_generation: before.owner_generation + 1,
+                    source_generation: before.source_generation + 1,
+                    login_generation: before.login_generation + 1,
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn platform_wif_refresh_preserves_source_but_family_changes_retire_it() {
+    let claims = json!({
+        "iss": "https://auth.openai.com",
+        "sub": "service-account",
+        "session_id": "family-a",
+        "iat": 100,
+        "exp": 200,
+        "jti": "token-a",
+        "https://api.openai.com/auth": {
+            "user_id": "service-account",
+            "wif_product": "api",
+            "wif_identity_provider_id": "provider-a",
+            "wif_federation_rule_id": "mapping-a",
+            "wif_runtime_authorization_version": 1,
+            "wif_provider_revision": "provider-revision-a",
+            "wif_mapping_revision": "mapping-revision-a"
+        }
+    });
+    let auth = |claims: &serde_json::Value| {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+        CodexAuth::ApiKey(ApiKeyAuth {
+            api_key: format!("header.{payload}.signature"),
+            workload_identity: Some(ApiTokenMetadata {
+                api_organization_id: "organization".into(),
+                api_project_id: "project".into(),
+                user_id: "service-account".into(),
+            }),
+        })
+    };
+    let mut refreshed = claims.clone();
+    refreshed["iat"] = json!(200);
+    refreshed["exp"] = json!(300);
+    refreshed["jti"] = json!("token-b");
+    let mut new_family = refreshed.clone();
+    new_family["session_id"] = json!("family-b");
+    let mut new_provider = refreshed.clone();
+    new_provider["https://api.openai.com/auth"]["wif_provider_revision"] =
+        json!("provider-revision-b");
+    let mut new_mapping = refreshed.clone();
+    new_mapping["https://api.openai.com/auth"]["wif_mapping_revision"] =
+        json!("mapping-revision-b");
+    let mut missing_family = refreshed.clone();
+    missing_family.as_object_mut().unwrap().remove("session_id");
+    let mut empty_family = refreshed.clone();
+    empty_family["session_id"] = json!("");
+    for (replacement, same_source) in [
+        (refreshed, true),
+        (new_family, false),
+        (new_provider, false),
+        (new_mapping, false),
+        (missing_family, false),
+        (empty_family, false),
+    ] {
+        let manager = AuthManager::from_auth_for_testing(auth(&claims));
+        let before = *manager.auth_change_state_receiver().borrow();
+        manager.set_cached_auth(Some(auth(&replacement)));
+        let after = *manager.auth_change_state_receiver().borrow();
+        assert_eq!(
+            after.source_generation == before.source_generation,
+            same_source
+        );
+        assert_eq!(after.generation, before.generation + 1);
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial(codex_auth_env)]
-async fn auth_refresh_read_failure_is_transient_and_preserves_network_permit() {
+async fn auth_reload_and_refresh_read_failure_preserves_network_permit() {
     let home = tempfile::tempdir().unwrap();
     let storage = FileAuthStorage::new(home.path().to_path_buf());
     let initial = chatgpt_auth("user-a", "workspace-a", "token-1");
@@ -120,9 +233,15 @@ async fn auth_refresh_read_failure_is_transient_and_preserves_network_permit() {
         jwt_auth.as_str(),
     ] {
         std::fs::write(home.path().join("auth.json"), contents).unwrap();
+        let reload_error = manager.reload_with_cached_auth().await.unwrap_err();
         let error = manager.refresh_token().await.unwrap_err();
         assert!(matches!(error, RefreshTokenError::Transient(_)));
-        for formatted in [error.to_string(), format!("{error:?}")] {
+        for formatted in [
+            reload_error.to_string(),
+            format!("{reload_error:?}"),
+            error.to_string(),
+            format!("{error:?}"),
+        ] {
             assert!(
                 !formatted.contains("private-credential-value"),
                 "{formatted}"

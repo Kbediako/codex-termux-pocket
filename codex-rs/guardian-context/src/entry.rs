@@ -1,8 +1,8 @@
 //! Structured transcript evidence shared by synchronous and asynchronous Guardian.
 //!
 //! Entry kinds preserve source attribution for consumer-specific retention and
-//! rendering. Sync entries remain complete until request preparation; async collection
-//! retains its existing caps. Original sizes remain available for accounting.
+//! rendering. Both consumers keep originals until request preparation applies caps.
+//! Original sizes remain available for accounting.
 
 /// Semantic role of one parent-conversation transcript entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,8 +17,12 @@ pub enum ConversationTranscriptEntryKind {
     ProtectedAssistant,
     /// Named tool invocation, including shell and web-search calls.
     ToolCall(String),
+    /// The textual tool call verified by the host to enclose the current approval.
+    EnclosingToolCall(String),
     /// Tool result with a call-derived, explicit, or generic fallback label.
     ToolOutput(String),
+    /// Whole Code Mode exec output selected by its host-recorded nested tool calls.
+    SelectedExecOutput,
     /// Result from a Node REPL-backed tool that may receive a larger sync cap.
     NodeReplToolOutput(String),
     /// Plaintext model reasoning that the async consumer explicitly enables.
@@ -32,9 +36,11 @@ impl ConversationTranscriptEntryKind {
             Self::User => "user",
             Self::Developer => "developer",
             Self::Assistant | Self::ProtectedAssistant => "assistant",
-            Self::ToolCall(role) | Self::ToolOutput(role) | Self::NodeReplToolOutput(role) => {
-                role.as_str()
-            }
+            Self::ToolCall(role)
+            | Self::EnclosingToolCall(role)
+            | Self::ToolOutput(role)
+            | Self::NodeReplToolOutput(role) => role.as_str(),
+            Self::SelectedExecOutput => "tool exec result",
             Self::Reasoning => "reasoning",
         }
     }
@@ -44,7 +50,7 @@ impl ConversationTranscriptEntryKind {
 #[derive(Clone, PartialEq)]
 pub enum TranscriptContent {
     Text(String),
-    /// Original scheduler input, compressed only during synchronous preparation.
+    /// Original scheduler input, compressed only during request preparation.
     ScheduledMessage(ScheduledTranscriptMessage),
     /// Host-attributed text prepared by the profile, rendered at delivery.
     Record(crate::TranscriptRecord),
@@ -67,7 +73,7 @@ impl std::fmt::Debug for TranscriptContent {
 pub struct ConversationTranscriptEntry {
     /// Semantic role used for consumer-specific retention and truncation.
     pub kind: ConversationTranscriptEntryKind,
-    /// Complete authorization evidence, or other text bounded by per-entry limits.
+    /// Original captured evidence, or content bounded during preparation.
     pub content: TranscriptContent,
     /// Size before truncation, retained for omission and truncation accounting.
     pub original_bytes: usize,

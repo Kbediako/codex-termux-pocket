@@ -120,6 +120,8 @@ pub(crate) enum ApprovalAction {
         id: String,
         environment_id: String,
         server: String,
+        #[serde(skip_serializing)]
+        server_key: codex_mcp::McpServerKey,
         tool_name: String,
         arguments: Option<serde_json::Value>,
         connector_id: Option<String>,
@@ -136,6 +138,8 @@ pub(crate) enum ApprovalAction {
         approval_mode: AppToolApproval,
         allow_session_remember: bool,
         allow_persistent_approval: bool,
+        #[serde(skip_serializing)]
+        prompt_permissions: Option<(String, Arc<codex_file_system::FileSystemSandboxContext>)>,
     },
     NetworkAccess {
         id: String,
@@ -399,6 +403,7 @@ impl ApprovalAction {
                 tool_title,
                 tool_description,
                 annotations,
+                prompt_permissions,
                 ..
             } => crate::guardian::GuardianApprovalRequest::McpToolCall {
                 id,
@@ -412,6 +417,7 @@ impl ApprovalAction {
                 tool_title,
                 tool_description,
                 annotations,
+                prompt_permissions,
             },
             Self::NetworkAccess {
                 id,

@@ -97,6 +97,7 @@ async fn starts_and_forks_use_server_provider_unless_explicitly_selected() -> Re
         .fork_thread_at(
             &local_settings,
             server_config,
+            /*workspace_roots*/ None,
             parent,
             /*last_turn_id*/ None,
             /*before_turn_id*/ None,
@@ -127,6 +128,16 @@ async fn selected_profile_provider_is_explicit() -> Result<()> {
         provider_selection::explicit_provider(&config),
         Some("openai".into())
     );
+    let mut server = crate::start_embedded_app_server_for_picker(&config).await?;
+    assert_eq!(server.client_provider_override_for_new_chats(&config), None);
+    server.thread_params_mode = ThreadParamsMode::Remote;
+    assert_eq!(
+        server.client_provider_override_for_new_chats(&config),
+        Some("openai".into())
+    );
+    server.thread_params_mode = ThreadParamsMode::Cloud;
+    assert_eq!(server.client_provider_override_for_new_chats(&config), None);
+    server.shutdown().await?;
     Ok(())
 }
 
@@ -153,6 +164,10 @@ async fn required_provider_overrides_oss_history_selection() -> Result<()> {
     let mut server = crate::start_embedded_app_server_for_picker(&config).await?;
     server.model_provider_override = Some("ollama".into());
     assert_eq!(config.model_provider_id, "openai");
+    assert_eq!(
+        server.client_provider_override_for_new_chats(&config),
+        Some("openai".into())
+    );
     assert_eq!(
         server.history_model_provider(&config).await?,
         Some("openai".into())
@@ -183,7 +198,7 @@ requires_openai_auth = false
 }
 
 #[tokio::test]
-async fn resume_discovers_other_providers_but_rejects_mismatched_resume() -> Result<()> {
+async fn resume_discovers_and_reopens_the_saved_gateway() -> Result<()> {
     let home = tempfile::tempdir()?;
     write_provider_config(home.path())?;
     let original = ConfigBuilder::default()
@@ -250,18 +265,15 @@ async fn resume_discovers_other_providers_but_rejects_mismatched_resume() -> Res
         .await?
         .is_none()
     );
-    let error = server
+    let resumed = server
         .resume_thread(
             &local_settings,
             config.clone(),
             parent,
             ResumeModelSettings::RestoreFromThread,
         )
-        .await
-        .expect_err("a different configured provider must block resume");
-    assert!(error.to_string().contains(
-        "This chat uses server-provider, but your current provider is client-provider. Switch to server-provider to continue."
-    ));
+        .await?;
+    assert_eq!(resumed.session.model_provider_id, "server-provider");
     assert_eq!(
         server
             .start_thread(&config)

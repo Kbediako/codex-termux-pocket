@@ -13,6 +13,7 @@ use codex_core::SpawnAgentForkMode;
 use codex_core::StartIfIdleSubmission;
 use codex_core::ThreadCreateRequest;
 use codex_core::ThreadSpawnError;
+use codex_core::TurnStartOptions;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::Instructions;
 use codex_extension_api::ThreadInstructionsProvider;
@@ -23,6 +24,8 @@ use codex_http_client::NetworkPolicy;
 use codex_http_client::NetworkPolicyController;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolCallRequest;
+use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -109,7 +112,7 @@ async fn host_spawn_invocation(
     server: &MockServer,
     parent: &Arc<CodexThread>,
     call_id: &str,
-    message: &str,
+    input: TurnInputRequest,
 ) -> Result<DynamicToolCallRequest> {
     responses::mount_sse_once(
         server,
@@ -119,9 +122,7 @@ async fn host_spawn_invocation(
         ]),
     )
     .await;
-    parent
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![text(message)]))
-        .await?;
+    parent.start_or_steer_turn(input).await?;
     Ok(wait_for_event_match(parent, |event| match event {
         EventMsg::DynamicToolCallRequest(call) => Some(call.clone()),
         _ => None,
@@ -165,6 +166,115 @@ fn create_request(name: &str, fork_history: bool) -> ThreadCreateRequest {
     }
 }
 
+#[test_case::test_case(Some("Keep the custom base instructions."), None; "custom")]
+#[test_case::test_case(Some("Keep the custom base instructions."), Some("Report worker findings concisely."); "subagent override")]
+#[test_case::test_case(None, None; "model owned")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepared_child_instructions_preserve_native_inheritance(
+    custom_base: Option<&'static str>,
+    subagent_developer: Option<&'static str>,
+) -> Result<()> {
+    const PARENT_DEVELOPER: &str = "Explain the reasoning behind your findings.";
+    const CHILD_MODEL: &str = "gpt-5.6-terra";
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let (test, parent, _) = host_spawn_fixture(
+        &server,
+        test_codex().with_config(move |config| {
+            config.workspace_roots = vec![config.cwd.clone()];
+            config.base_instructions = custom_base.map(str::to_owned);
+            config.developer_instructions = Some(PARENT_DEVELOPER.into());
+            config.multi_agent_v2.subagent_developer_instructions =
+                subagent_developer.map(str::to_owned);
+            config
+                .features
+                .enable(Feature::IncrementalTools)
+                .expect("test config should allow incremental tools");
+        }),
+        NetworkPolicy::unmanaged(),
+        /*thread_instructions_provider*/ None,
+    )
+    .await?;
+    let invocation = host_spawn_invocation(
+        &server,
+        &parent,
+        "prepare-worker",
+        TurnInputRequest::user_input(vec![text("Prepare a worker with my instructions.")]),
+    )
+    .await?;
+    let context = parent.tool_invocation(&invocation.turn_id, &invocation.call_id)?;
+    let prepared = parent.prepare_child(&context).await?;
+    let catalog = bundled_models_response()?;
+    let parent_model = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6-astra")
+        .context("parent model")?;
+    assert_eq!(
+        prepared.base_instructions,
+        BaseInstructions {
+            text: custom_base
+                .map(str::to_owned)
+                .unwrap_or_else(|| codex_prompts::render_model_instructions(parent_model)),
+            provenance: Some(match custom_base {
+                Some(_) => BaseInstructionsProvenance::Custom,
+                None => BaseInstructionsProvenance::Model {
+                    model: parent_model.slug.clone(),
+                },
+            }),
+        }
+    );
+
+    // A portable host forwards prepared instructions into its destination config, then applies
+    // the requested child model. Model-owned instructions must still resolve for that model.
+    let mut options = test.start_thread_options().await;
+    options.config.base_instructions = Some(prepared.base_instructions.text);
+    options.config.base_instructions_provenance = prepared.base_instructions.provenance;
+    options.config.developer_instructions = prepared.developer_instructions;
+    options.config.model = Some(CHILD_MODEL.into());
+    options.environments = Some(prepared.environments);
+    let child = test.thread_manager.start_thread(options).await?.thread;
+    finish_spawn_tool(&server, &parent, &invocation).await?;
+    let mock = responses::mount_sse_once(&server, sse(vec![ev_completed("worker-done")])).await;
+    child
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![text(
+            "Report your findings.",
+        )]))
+        .await?;
+    wait_for_successful_turn(&child).await;
+    let request = mock.single_request();
+    let child_model = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == CHILD_MODEL)
+        .context("child model")?;
+    let expected_base = custom_base
+        .map(str::to_owned)
+        .unwrap_or_else(|| codex_prompts::render_model_instructions(child_model));
+    assert!(request.body_contains_text(&expected_base));
+    assert!(request.body_contains_text(subagent_developer.unwrap_or(PARENT_DEVELOPER)));
+    assert_eq!(
+        request.body_contains_text(PARENT_DEVELOPER),
+        subagent_developer.is_none()
+    );
+    let requests = responses::received_responses_requests(&server).await;
+    assert_eq!(requests.len(), 3);
+    // One complete history shows both inherited fields; the assertions above cover every case.
+    if custom_base.is_some() && subagent_developer.is_some() {
+        insta::assert_snapshot!(
+            "prepared_child_instructions_subagent_override",
+            context_snapshot::format_request_history_snapshot(
+                "Host preparation preserves custom base instructions and applies the native subagent developer override when starting a child with a different model.",
+                &requests,
+                &ContextSnapshotOptions::default().include_request_settings(),
+            )
+        );
+    }
+    child.shutdown_and_wait().await?;
+    parent.shutdown_and_wait().await?;
+    Ok(())
+}
+
 #[test_case::test_case(false; "fresh")]
 #[test_case::test_case(true; "forked")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -190,7 +300,14 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
                 ));
                 Arc::new(extensions.build())
             })
-            .with_config(|config| config.allow_persistent_dynamic_tool_updates = true),
+            .with_config(|config| {
+                config.allow_persistent_dynamic_tool_updates = true;
+                config.service_tier = Some("flex".into());
+                config
+                    .features
+                    .enable(Feature::FastMode)
+                    .expect("test config should allow fast mode");
+            }),
         network_policy.clone(),
         Some(provider.clone()),
     )
@@ -198,8 +315,16 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     let root_id = test.session_configured.thread_id;
     let captured = parent.config_snapshot().await;
     let parent_message = "Start the worker.";
-    let invocation =
-        host_spawn_invocation(&server, &parent, "spawn-worker", parent_message).await?;
+    let invocation = host_spawn_invocation(
+        &server,
+        &parent,
+        "spawn-worker",
+        TurnInputRequest::user_input(vec![text(parent_message)]).on_start(TurnStartOptions {
+            service_tier: Some("priority".into()),
+            ..Default::default()
+        }),
+    )
+    .await?;
     let context = parent.tool_invocation(&invocation.turn_id, &invocation.call_id)?;
     test.thread_store
         .add_thread_attachment(AddThreadAttachmentParams {
@@ -253,6 +378,7 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     let spawned = parent
         .create_child(&context, request(), reservation())
         .await?;
+    assert_eq!(spawned.config.service_tier.as_deref(), Some("flex"));
     assert_eq!(spawned.config.approval_policy, captured.approval_policy);
     assert_eq!(spawned.config.environments, captured.environments);
     assert_eq!(
@@ -296,10 +422,12 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
         accounting.reports.lock().expect("usage reports").as_slice(),
         [report] if report.thread_id == child_id
             && report.turn_id == turn_id
-            && report.usage.total_tokens == 42
+            && report.usage.as_ref().is_some_and(|usage| usage.total_tokens == 42)
     ));
     let child_request = child_request.single_request();
+    assert_eq!(child_request.body_json()["service_tier"], "flex");
     assert!(child_request.body_contains_text(UPDATED_RULE));
+    assert!(!child_request.body_contains_text("only as direct tool calls"));
     assert_eq!(
         child_request.body_contains_text(parent_message),
         fork_history
@@ -361,8 +489,13 @@ async fn cancelled_creation_cleans_registered_child() -> Result<()> {
         /*thread_instructions_provider*/ None,
     )
     .await?;
-    let invocation =
-        host_spawn_invocation(&server, &parent, "cancel-spawn", "Start a worker.").await?;
+    let invocation = host_spawn_invocation(
+        &server,
+        &parent,
+        "cancel-spawn",
+        TurnInputRequest::user_input(vec![text("Start a worker.")]),
+    )
+    .await?;
     let context = parent.tool_invocation(&invocation.turn_id, &invocation.call_id)?;
     let spawn = tokio::spawn({
         let parent = Arc::clone(&parent);

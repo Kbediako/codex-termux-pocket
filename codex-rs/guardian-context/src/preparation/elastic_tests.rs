@@ -75,6 +75,7 @@ fn entry_caps_bound_required_and_optional_text_preserving_metadata_and_opaque_pa
             },
         ],
         truncations: Vec::new(),
+        enclosing_call: None,
     };
     assert!(
         context
@@ -89,6 +90,7 @@ fn entry_caps_bound_required_and_optional_text_preserving_metadata_and_opaque_pa
             (ElasticSection::TranscriptMessages, limits),
         ]
         .into(),
+        ..Default::default()
     });
     let prepared = context.prepare_elastic_entries(&config).unwrap();
     let SectionDelivery::UserContent(items) = &prepared.context.sections[0].delivery else {
@@ -128,7 +130,7 @@ fn entry_caps_bound_required_and_optional_text_preserving_metadata_and_opaque_pa
 }
 
 #[test]
-fn exact_actions_stay_whole_while_supporting_context_is_capped() {
+fn exact_actions_and_permissions_stay_whole_while_supporting_context_is_capped() {
     const ENTRY_TOKENS: usize = 128;
     const REPEATS: usize = 1_000;
     let json = serde_json::json!({"tool": "write_record", "arguments": {
@@ -136,6 +138,7 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
     }})
     .to_string();
     let supporting = "supporting context ".repeat(REPEATS);
+    let permissions = "denied path ".repeat(REPEATS);
     let (permission_start, permission_end) =
         <crate::PermissionContext as codex_context_fragments::ContextualUserFragment>::type_markers(
         );
@@ -152,7 +155,7 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
                 crate::ContextSection::PermissionContext {
                     items: vec![
                         permission_start.into(),
-                        supporting.clone(),
+                        permissions.clone(),
                         permission_end.into(),
                     ],
                 },
@@ -169,7 +172,7 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
                 }),
             ],
         };
-        crate::preparation::prepare_sync_sections(&mut collected, crate::ContextBudgeting::Elastic)
+        crate::preparation::prepare_sections(&mut collected, crate::ContextBudgeting::Elastic)
             .unwrap();
         let context = collected
             .compose_prepared(
@@ -183,7 +186,9 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
                 },
             )
             .unwrap();
-        let limits = ElasticSectionLimits::new(ENTRY_TOKENS, ENTRY_TOKENS).unwrap();
+        let limits = ElasticSectionLimits::new(ENTRY_TOKENS, ENTRY_TOKENS)
+            .and_then(|limits| limits.with_max_total_section_tokens(ENTRY_TOKENS))
+            .unwrap();
         let config = crate::budget::tests::complete_minimum_budget(ElasticBudgetConfig {
             sections: [
                 ElasticSection::PlannedAction,
@@ -192,6 +197,7 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
             ]
             .map(|section| (section, limits))
             .into(),
+            ..Default::default()
         });
         let prepared = context.prepare_elastic_entries(&config).unwrap();
         let SectionDelivery::UserContent(items) =
@@ -202,6 +208,7 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
         let expected = ContentItem::InputText {
             text: format!("{json}\n"),
         };
+        let permission_tokens = section_content_tokens(&permissions.clone().into());
         for item in items {
             if !item.protected {
                 assert!(
@@ -216,7 +223,9 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
                 .clone()
                 .enforce_budget(
                     crate::RequestBudget {
-                        max_input_tokens: crate::budget::content_tokens(&expected) - 1,
+                        max_input_tokens: crate::budget::content_tokens(&expected)
+                            + permission_tokens
+                            - 1,
                         existing_context_tokens: 0,
                     },
                     "Evidence omitted.".to_owned(),
@@ -238,18 +247,19 @@ fn exact_actions_stay_whole_while_supporting_context_is_capped() {
                 .unwrap()
                 .contains(&supporting)
         );
-        for (start, end) in [
-            (permission_start, permission_end),
+        for (start, end, body) in [
+            (permission_start, permission_end, permissions.as_str()),
             (
                 ">>> SENDER EVIDENCE CONTEXT START\nHost:",
                 ">>> SENDER EVIDENCE CONTEXT END\n",
+                "supporting context",
             ),
         ] {
             assert!(messages.iter().any(|message| matches!(message,
                 ResponseItem::Message { content, .. } if
                     content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text.starts_with(start))) &&
                     content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text == end)) &&
-                    content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text.contains("supporting context"))))));
+                    content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text.contains(body))))));
         }
     }
 }

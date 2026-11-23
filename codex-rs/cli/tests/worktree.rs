@@ -81,7 +81,7 @@ async fn rejected_start(
     expected: &str,
 ) -> anyhow::Result<String> {
     let spawned = codex_utils_pty::spawn_pty_process(
-        &program.to_string_lossy(),
+        program.as_os_str(),
         args,
         cwd,
         env,
@@ -192,6 +192,7 @@ cli_auth_credentials_store = "file"
 chatgpt_base_url = "{}/source/backend-api"
 analytics.enabled = false
 check_for_update_on_startup = false
+features.daemon_auto_start = {}
 features.mcp_oauth_refresh_coordination = true
 model_provider = "local"
 model = "test-model"
@@ -210,6 +211,7 @@ trust_level = "trusted"
 trust_level = "trusted"
 "#,
             server.uri(),
+            backend == "daemon",
             server.uri(),
             serde_json::to_string(&source)?,
             serde_json::to_string(&launcher)?
@@ -388,9 +390,6 @@ trust_level = "trusted"
             .mount(&server)
             .await;
         let mut args = worktree_args.clone();
-        if backend == "embedded" && !analytics {
-            args.push("--no-daemon".into());
-        }
         if backend == "daemon" && previous.is_empty() {
             args.extend(["-c".into(), "features.auth_elicitation=true".into()]);
         }
@@ -444,7 +443,7 @@ trust_level = "trusted"
             assert!(!home.join("worktrees").exists());
         }
         let spawned = codex_utils_pty::spawn_pty_process(
-            &program.to_string_lossy(),
+            program.as_os_str(),
             &args,
             &launcher,
             &env,
@@ -636,8 +635,9 @@ trust_level = "trusted"
         } else {
             session.terminate();
         }
-        let exit =
-            tokio::time::timeout(Duration::from_secs(/*secs*/ 10), spawned.exit_rx).await??;
+        let exit = tokio::time::timeout(Duration::from_secs(/*secs*/ 30), spawned.exit_rx)
+            .await
+            .context("timed out waiting for the worktree TUI to exit")??;
         // Include shutdown output: ConPTY can retain the channel after process exit.
         let _ = tokio::time::timeout(Duration::from_secs(/*secs*/ 1), async {
             while let Some(bytes) = stdout.recv().await {
@@ -699,6 +699,14 @@ trust_level = "trusted"
                 ("terminal_rows", "40-79"),
                 ("multiplexer", "none"),
                 ("daemon_selection_reason", "incompatible_option"),
+                (
+                    "daemon_auto_start",
+                    if backend == "daemon" {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                ),
                 ("auto_update", "enabled"),
                 ("auto_update_setting", "default"),
                 ("update_interval_setting", "default"),

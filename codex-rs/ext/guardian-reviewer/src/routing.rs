@@ -25,6 +25,9 @@ use tokio_util::sync::CancellationToken;
 /// One captured action and its host-enforced constraints. Guardian derives the
 /// contributor input and owns cancellation for the complete review operation.
 pub struct ReviewRequest<'a, H> {
+    /// Issuing action's model and turn, retained across yielded code cells.
+    pub sampling_model: &'a str,
+    pub turn_id: &'a str,
     /// Final serving value retained by the host for this action.
     pub serving_assessment: Option<bool>,
     pub host: H,
@@ -34,6 +37,7 @@ pub struct ReviewRequest<'a, H> {
     pub action: Option<&'a serde_json::Value>,
     pub thread_id: ThreadId,
     pub thread_store: &'a ExtensionData,
+    pub turn_store: &'a ExtensionData,
     pub category: GuardianScope,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
@@ -111,6 +115,7 @@ impl<H: ReviewHost> ReviewRequest<'_, H> {
                 action,
                 thread_id: self.thread_id,
                 thread_store: self.thread_store,
+                turn_store: self.turn_store,
                 category: self.category,
                 approval_policy: self.approval_policy,
                 approvals_reviewer: self.approvals_reviewer,

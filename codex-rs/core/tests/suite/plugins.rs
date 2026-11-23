@@ -937,7 +937,13 @@ async fn thread_disabled_plugins_filter_skills_and_tools_without_changing_shared
             // Saving pending settings must not change the admitted runtime.
             for (server_name, tool, arguments) in &tool_calls {
                 test.codex
-                    .call_mcp_tool(server_name, tool, arguments.clone(), /*meta*/ None)
+                    .call_mcp_tool(
+                        server_name,
+                        /*environment_id*/ None,
+                        tool,
+                        arguments.clone(),
+                        /*meta*/ None,
+                    )
                     .await?;
             }
         }
@@ -1015,7 +1021,13 @@ async fn thread_disabled_plugins_filter_skills_and_tools_without_changing_shared
         for (server_name, tool, arguments) in &tool_calls {
             let result = test
                 .codex
-                .call_mcp_tool(server_name, tool, arguments.clone(), /*meta*/ None)
+                .call_mcp_tool(
+                    server_name,
+                    /*environment_id*/ None,
+                    tool,
+                    arguments.clone(),
+                    /*meta*/ None,
+                )
                 .await;
             assert_eq!(
                 result.is_ok(),
@@ -1598,7 +1610,7 @@ async fn curated_plugin_skills_follow_auth_switch() -> Result<()> {
         let skills_snapshot = test_codex
             .thread_manager
             .skills_service()
-            .snapshot_for_config(&skills_input, /*fs*/ None)
+            .snapshot_for_config(&skills_input, /*repository*/ None)
             .await;
         skills_snapshot
             .outcome()

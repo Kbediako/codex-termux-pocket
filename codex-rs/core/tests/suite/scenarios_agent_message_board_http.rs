@@ -164,7 +164,8 @@ async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<(
             ]
             .into(),
             clock: Default::default(),
-            fail_clock: Default::default(),
+            // MCP timestamps must not depend on the runner's clock.
+            fail_clock: true.into(),
             agent_path_calls: Default::default(),
             active: Default::default(),
             fail_notifications: Default::default(),
@@ -200,15 +201,15 @@ async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<(
             .map_or(output.as_str(), |(_, json)| json);
         serde_json::from_str(json).with_context(|| format!("board result: {output}"))
     };
-    let posted = responses::mount_sse_sequence(
-        &server,
-        board_turn(
-            "worker-post",
-            "post",
-            json!({"new_channel_name":"design","text":"Worker's durable decision."}),
-        ),
-    )
-    .await;
+    let mut post_arguments =
+        json!({"new_channel_name":"design","text":"Worker's durable decision."});
+    if mode == BoardMode::Feature {
+        post_arguments["agents_to_notify"] = json!(["/root"]);
+    }
+    let posted =
+        responses::mount_sse_sequence(&server, board_turn("worker-post", "post", post_arguments))
+            .await;
+    let before_post = chrono::Utc::now().timestamp_millis();
     child
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "Find the board tools and post your decision.".into(),
@@ -221,9 +222,11 @@ async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<(
         "worker-post",
     )?;
     assert_eq!(post["author"], "/root/worker");
-    if mode == BoardMode::InMemory {
-        assert_eq!(post["created_at"], "2026-09-18T12:00:00Z");
-    }
+    let created_at = chrono::DateTime::parse_from_rfc3339(
+        post["created_at"].as_str().context("post timestamp")?,
+    )?
+    .timestamp_millis();
+    assert!((before_post..=chrono::Utc::now().timestamp_millis()).contains(&created_at));
     if mode != BoardMode::Feature {
         child.shutdown_and_wait().await?;
     }
@@ -261,6 +264,38 @@ async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<(
     if let Some(writer) = writer {
         writer.rollback().await?;
     }
+    let preview = codex_message_board::PostPreview {
+        metadata: serde_json::from_value(post.clone())?,
+        text_preview: "Worker's durable decision.".into(),
+        n_chars: "Worker's durable decision.".chars().count(),
+        truncated: false,
+    };
+    if mode == BoardMode::Feature {
+        let notices = read.requests()[1]
+            .inputs_of_type("agent_message")
+            .into_iter()
+            .filter(|item| {
+                item["content"]
+                    .to_string()
+                    .contains("Message Type: CHANNEL_POST")
+            })
+            .map(|item| {
+                json!({
+                    "author": item["author"],
+                    "recipient": item["recipient"],
+                    "content": item["content"],
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices,
+            vec![json!({
+                "author": "/root/worker",
+                "recipient": "/root",
+                "content": [{"type":"input_text", "text":preview.notification_text()}],
+            })]
+        );
+    }
     let result = board_result(
         read.requests().last().context("parent follow-up")?,
         "root-read",
@@ -270,12 +305,7 @@ async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<(
             result
         )?,
         codex_message_board::Page {
-            results: vec![codex_message_board::PostPreview {
-                metadata: serde_json::from_value(post.clone())?,
-                text_preview: "Worker's durable decision.".into(),
-                n_chars: "Worker's durable decision.".chars().count(),
-                truncated: false,
-            }],
+            results: vec![preview],
             next_cursor: None,
         }
     );

@@ -9,9 +9,11 @@ use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirementsToml;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::EnvironmentAccess;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::ExecutorFileSystemFuture;
 use codex_exec_server::FileMetadata;
+use codex_exec_server::FileSystemEnvironmentAccessor;
 use codex_exec_server::FileSystemReadStream;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::GetMetadataOptions;
@@ -22,6 +24,9 @@ use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
 use codex_exec_server::WriteFileOptions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillMetadata;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -37,6 +42,8 @@ use tokio::sync::Semaphore;
 use super::repo_agents_skill_roots;
 use super::resolve_skill_roots_with_home_dir;
 use super::roots_from_layer_stack;
+use crate::HostSkillsLoadInput;
+use crate::HostSkillsService;
 use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
 use crate::loader::load_and_merge_host_skill_roots;
 
@@ -47,6 +54,9 @@ struct BlockingMetadataFileSystem {
 
 struct BlockingMetadataCalls {
     paths: Mutex<Vec<PathUri>>,
+    marker_paths: Mutex<Vec<PathUri>>,
+    denied_marker: Mutex<Option<PathUri>>,
+    canonicalized_paths: Mutex<Vec<PathUri>>,
     started: Notify,
     release: Semaphore,
     round_trip: std::time::Duration,
@@ -59,6 +69,9 @@ impl Default for BlockingMetadataCalls {
     fn default() -> Self {
         Self {
             paths: Mutex::new(Vec::new()),
+            marker_paths: Mutex::new(Vec::new()),
+            denied_marker: Mutex::new(None),
+            canonicalized_paths: Mutex::new(Vec::new()),
             started: Notify::new(),
             release: Semaphore::new(0),
             round_trip: std::time::Duration::ZERO,
@@ -104,6 +117,11 @@ impl ExecutorFileSystem for BlockingMetadataFileSystem {
         path: &'a PathUri,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, PathUri> {
+        self.calls
+            .canonicalized_paths
+            .lock()
+            .unwrap()
+            .push(path.clone());
         self.inner.canonicalize(path, sandbox)
     }
 
@@ -152,6 +170,12 @@ impl ExecutorFileSystem for BlockingMetadataFileSystem {
         Box::pin(async move {
             if !self.calls.round_trip.is_zero() {
                 tokio::time::sleep(self.calls.round_trip).await;
+            }
+            if path.to_abs_path().is_ok_and(|path| path.ends_with(".git")) {
+                self.calls.marker_paths.lock().unwrap().push(path.clone());
+                if self.calls.denied_marker.lock().unwrap().as_ref() == Some(path) {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
             }
             if path
                 .to_abs_path()
@@ -280,6 +304,7 @@ fn expected_skill(path: AbsolutePathBuf, name: &str, scope: SkillScope) -> Skill
 
 #[test]
 fn layer_roots_preserve_scope_precedence_and_disabled_projects() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let system_folder = absolute(temp_dir.path().join("etc/codex"));
     let home_folder = absolute(temp_dir.path().join("home"));
@@ -304,14 +329,10 @@ fn layer_roots_preserve_scope_precedence_and_disabled_projects() {
         project_layer(&nested_project_folder),
     ]);
 
-    let roots = roots_from_layer_stack(
-        &config_stack,
-        Some(&home_folder),
-        Some(Arc::clone(&LOCAL_FS)),
-    )
-    .into_iter()
-    .map(|root| (root.scope, root.path))
-    .collect::<Vec<_>>();
+    let roots = roots_from_layer_stack(&config_stack, Some(&home_folder), Some(&access), &access)
+        .into_iter()
+        .map(|root| (root.scope, root.path))
+        .collect::<Vec<_>>();
 
     assert_eq!(
         roots,
@@ -328,6 +349,7 @@ fn layer_roots_preserve_scope_precedence_and_disabled_projects() {
 
 #[tokio::test]
 async fn plugin_roots_preserve_plugin_resolution_metadata() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = absolute(temp_dir.path().join("workspace"));
     let plugin_root = absolute(temp_dir.path().join("plugins/example"));
@@ -340,8 +362,10 @@ async fn plugin_roots_preserve_plugin_resolution_metadata() {
 
     let roots = resolve_skill_roots_with_home_dir(
         /*repository_file_system*/ None,
+        &access,
         &stack(Vec::new()),
         &cwd,
+        /*project_markers*/ None,
         /*home_dir*/ None,
         vec![PluginSkillRoot {
             path: skills_root.clone(),
@@ -375,11 +399,12 @@ async fn plugin_roots_preserve_plugin_resolution_metadata() {
             SkillDiscoveryMode::DirectChildren,
         )
     );
-    assert!(Arc::ptr_eq(&root.file_system, &LOCAL_FS));
+    assert_eq!(root.file_system.cache_key(), access.cache_key());
 }
 
 #[tokio::test]
 async fn unique_extra_root_loads_as_recursive_user_root() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = absolute(temp_dir.path().join("workspace"));
     let extra_root = absolute(temp_dir.path().join("runtime-skills"));
@@ -387,8 +412,10 @@ async fn unique_extra_root_loads_as_recursive_user_root() {
 
     let roots = resolve_skill_roots_with_home_dir(
         /*repository_file_system*/ None,
+        &access,
         &stack(Vec::new()),
         &cwd,
+        /*project_markers*/ None,
         /*home_dir*/ None,
         Vec::new(),
         vec![extra_root.clone()],
@@ -416,7 +443,7 @@ async fn unique_extra_root_loads_as_recursive_user_root() {
             SkillDiscoveryMode::Recursive,
         )
     );
-    assert!(Arc::ptr_eq(&root.file_system, &LOCAL_FS));
+    assert_eq!(root.file_system.cache_key(), access.cache_key());
 
     let outcome = load_and_merge_host_skill_roots(
         roots,
@@ -439,6 +466,7 @@ async fn unique_extra_root_loads_as_recursive_user_root() {
 
 #[tokio::test]
 async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let outer = absolute(temp_dir.path().join("outer"));
     let cwd = outer.join("nested/inner");
@@ -473,9 +501,10 @@ async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
     )]);
 
     let roots = repo_agents_skill_roots(
-        Some(Arc::clone(&LOCAL_FS)),
+        Some(&access),
         &config_stack,
         &cwd,
+        /*project_markers*/ None,
         /*empty_remote_roots*/ None,
     )
     .await
@@ -504,15 +533,22 @@ async fn time_empty_remote_repo_skill_discovery() {
         inner: Arc::clone(&LOCAL_FS),
         calls: Arc::clone(&calls),
     });
+    let access = FileSystemEnvironmentAccessor::unrestricted(&remote);
     let config = stack(Vec::new());
     let cache = Mutex::new(super::EmptyRemoteRootsCache::default());
     for (label, cache) in [("baseline", None), ("warm", Some(&cache))] {
         // Prewarm before measuring admission, as session initialization does.
         let setup = std::time::Instant::now();
         assert!(
-            repo_agents_skill_roots(Some(remote.clone()), &config, &cwd, cache)
-                .await
-                .is_empty()
+            repo_agents_skill_roots(
+                Some(&access),
+                &config,
+                &cwd,
+                /*project_markers*/ None,
+                cache
+            )
+            .await
+            .is_empty()
         );
         eprintln!("{label} first scan: {:?}", setup.elapsed());
         if cache.is_some() {
@@ -524,9 +560,15 @@ async fn time_empty_remote_repo_skill_discovery() {
         for _ in 0..20 {
             let start = std::time::Instant::now();
             assert!(
-                repo_agents_skill_roots(Some(remote.clone()), &config, &cwd, cache)
-                    .await
-                    .is_empty()
+                repo_agents_skill_roots(
+                    Some(&access),
+                    &config,
+                    &cwd,
+                    /*project_markers*/ None,
+                    cache
+                )
+                .await
+                .is_empty()
             );
             times.push(start.elapsed());
         }
@@ -538,7 +580,7 @@ async fn time_empty_remote_repo_skill_discovery() {
 #[tokio::test(start_paused = true)]
 async fn empty_remote_repo_skills_are_reused_until_watch_invalidation() {
     let temp = TempDir::new().unwrap();
-    let cwd = absolute(temp.path());
+    let cwd = absolute(dunce::canonicalize(temp.path()).unwrap());
     fs::write(cwd.join(".git"), "gitdir: repo\n").unwrap();
     let calls = Arc::new(BlockingMetadataCalls::default());
     calls.release.add_permits(10);
@@ -546,26 +588,153 @@ async fn empty_remote_repo_skills_are_reused_until_watch_invalidation() {
         inner: Arc::clone(&LOCAL_FS),
         calls: Arc::clone(&calls),
     });
-    let cache = Mutex::new(super::EmptyRemoteRootsCache::default());
-    let config = stack(Vec::new());
-    let discover =
-        || repo_agents_skill_roots(Some(Arc::clone(&remote)), &config, &cwd, Some(&cache));
-    assert!(discover().await.is_empty());
+    let access = FileSystemEnvironmentAccessor::unrestricted(&remote);
+    let service = HostSkillsService::new(cwd.clone(), /*bundled_skills_enabled*/ false);
+    let input = HostSkillsLoadInput::new(cwd.clone(), Vec::new(), stack(Vec::new()))
+        .with_environment_id("remote");
+    let discover = async || {
+        service
+            .snapshot_for_config_on_executor(&input, Some((&remote, &access)))
+            .await
+    };
+    assert!(discover().await.outcome().skills.is_empty());
     calls.watch_ready.notified().await;
-    // No clock deadline or polling during an idle connection.
+    let cold_marker_probes = calls.marker_paths.lock().unwrap().clone();
+    assert!(!cold_marker_probes.is_empty());
+    // No marker or skill-root RPCs, clock deadline, or polling during an idle connection.
     tokio::time::advance(std::time::Duration::from_secs(3600)).await;
-    assert!(discover().await.is_empty());
+    assert!(discover().await.outcome().skills.is_empty());
+    assert_eq!(
+        calls.marker_paths.lock().unwrap().as_slice(),
+        cold_marker_probes
+    );
     assert_eq!(calls.paths.lock().unwrap().len(), 1);
+
+    // The same executor with different captured permissions must scan again.
+    let read_only = FileSystemEnvironmentAccessor::new(
+        &remote,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::read_only(),
+            PathUri::from_abs_path(&cwd),
+        ),
+    );
+    assert!(
+        service
+            .snapshot_for_config_on_executor(&input, Some((&remote, &read_only)))
+            .await
+            .outcome()
+            .skills
+            .is_empty()
+    );
+    assert_eq!(calls.paths.lock().unwrap().len(), 2);
+    assert!(calls.marker_paths.lock().unwrap().len() > cold_marker_probes.len());
+    calls.watch_ready.notified().await;
+    assert!(discover().await.outcome().skills.is_empty());
+    calls.watch_ready.notified().await;
+
+    // Read restrictions cannot use the executor's unsandboxed watch operation.
+    let restricted = FileSystemEnvironmentAccessor::new(
+        &remote,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(
+                &FileSystemSandboxPolicy::restricted(Vec::new()),
+                NetworkSandboxPolicy::Restricted,
+            ),
+            PathUri::from_abs_path(&cwd),
+        ),
+    );
+    assert!(
+        restricted
+            .watch_missing(
+                vec![PathUri::from_abs_path(&cwd.join(".agents/skills"))],
+                Some(PathUri::from_abs_path(&cwd.join(".git"))),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let skills = cwd.join(".agents/skills");
     fs::create_dir_all(&skills).unwrap();
+    let skill_path = skills.join("SKILL.md");
+    let skill_body = "---\nname: remote-skill\ndescription: Remote skill\n---\nBody";
+    fs::write(&skill_path, skill_body).unwrap();
     calls.watch.lock().unwrap().take();
-    assert_eq!(discover().await[0].path, skills);
-    fs::remove_dir(&skills).unwrap();
-    assert!(discover().await.is_empty());
+    let snapshot = discover().await;
+    assert_eq!(snapshot.outcome().skills.len(), 1);
+    assert_eq!(snapshot.outcome().skill_roots, vec![skills.clone()]);
+    // Remote discovery canonicalizes identity once and does no implicit-command index RPCs.
+    assert_eq!(
+        *calls.canonicalized_paths.lock().unwrap(),
+        vec![
+            PathUri::from_abs_path(&skills),
+            PathUri::from_abs_path(&skill_path)
+        ]
+    );
+    fs::remove_dir_all(&skills).unwrap();
+    assert!(discover().await.outcome().skill_roots.is_empty());
     fs::create_dir(&skills).unwrap();
-    cache.lock().unwrap().clear();
-    assert_eq!(discover().await[0].path, skills);
+    fs::write(&skill_path, skill_body).unwrap();
+    service.clear_cache();
+    assert_eq!(discover().await.outcome().skill_roots, vec![skills]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn incomplete_project_marker_probe_is_retried_before_loading_parent_skills() {
+    let temp = TempDir::new().unwrap();
+    let root = absolute(dunce::canonicalize(temp.path()).unwrap());
+    let cwd = root.join("nested");
+    fs::create_dir(&cwd).unwrap();
+    fs::write(root.join(".git"), "").unwrap();
+    fs::write(cwd.join(".git"), "").unwrap();
+    let parent_skills = root.join(".agents/skills");
+    fs::create_dir_all(&parent_skills).unwrap();
+    fs::write(
+        parent_skills.join("SKILL.md"),
+        "---\nname: parent-skill\ndescription: Parent skill\n---\nBody",
+    )
+    .unwrap();
+    let calls = Arc::new(BlockingMetadataCalls::default());
+    calls.release.add_permits(10);
+    *calls.denied_marker.lock().unwrap() = Some(PathUri::from_abs_path(&cwd.join(".git")));
+    let remote: Arc<dyn ExecutorFileSystem> = Arc::new(BlockingMetadataFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        calls: Arc::clone(&calls),
+    });
+    let access = FileSystemEnvironmentAccessor::unrestricted(&remote);
+    let service = HostSkillsService::new(root.clone(), /*bundled_skills_enabled*/ false);
+    let input = HostSkillsLoadInput::new(cwd.clone(), Vec::new(), stack(Vec::new()))
+        .with_environment_id("remote");
+    assert!(
+        service
+            .snapshot_for_config_on_executor(&input, Some((&remote, &access)))
+            .await
+            .outcome()
+            .skills
+            .is_empty()
+    );
+    assert!(calls.watch.lock().unwrap().is_none());
+    calls.paths.lock().unwrap().clear();
+    calls.denied_marker.lock().unwrap().take();
+    let read_only = FileSystemEnvironmentAccessor::new(
+        &remote,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::read_only(),
+            PathUri::from_abs_path(&cwd),
+        ),
+    );
+    assert!(
+        service
+            .snapshot_for_config_on_executor(&input, Some((&remote, &read_only)))
+            .await
+            .outcome()
+            .skills
+            .is_empty()
+    );
+    assert_eq!(
+        *calls.paths.lock().unwrap(),
+        vec![PathUri::from_abs_path(&cwd.join(".agents/skills"))]
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -584,17 +753,32 @@ async fn newly_created_roots_are_visible_before_watch_ack_or_without_watch_suppo
             inner: Arc::clone(&LOCAL_FS),
             calls,
         });
+        let access = FileSystemEnvironmentAccessor::unrestricted(&remote);
         let cache = Mutex::new(super::EmptyRemoteRootsCache::default());
         let config = stack(Vec::new());
         assert!(
-            repo_agents_skill_roots(Some(remote.clone()), &config, &cwd, Some(&cache))
-                .await
-                .is_empty()
+            repo_agents_skill_roots(
+                Some(&access),
+                &config,
+                &cwd,
+                /*project_markers*/ None,
+                Some(&cache)
+            )
+            .await
+            .is_empty()
         );
         let skills = cwd.join(".agents/skills");
         fs::create_dir_all(&skills).unwrap();
         assert_eq!(
-            repo_agents_skill_roots(Some(remote), &config, &cwd, Some(&cache)).await[0].path,
+            repo_agents_skill_roots(
+                Some(&access),
+                &config,
+                &cwd,
+                /*project_markers*/ None,
+                Some(&cache)
+            )
+            .await[0]
+                .path,
             skills
         );
     }
@@ -602,6 +786,7 @@ async fn newly_created_roots_are_visible_before_watch_ack_or_without_watch_suppo
 
 #[tokio::test]
 async fn repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let outer = absolute(temp_dir.path().join("outer"));
     let repository = outer.join("repo");
@@ -614,9 +799,10 @@ async fn repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order() {
     let config_stack = stack(Vec::new());
 
     let roots = repo_agents_skill_roots(
-        Some(Arc::clone(&LOCAL_FS)),
+        Some(&access),
         &config_stack,
         &nested,
+        /*project_markers*/ None,
         /*empty_remote_roots*/ None,
     )
     .await
@@ -635,6 +821,7 @@ async fn repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order() {
 
 #[tokio::test]
 async fn resolved_project_layer_loads_skill_without_git_marker() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let workspace = absolute(temp_dir.path().join("workspace"));
     let dot_codex = workspace.join(".codex");
@@ -644,9 +831,11 @@ async fn resolved_project_layer_loads_skill_without_git_marker() {
     let config_stack = stack(vec![project_layer(&dot_codex)]);
 
     let roots = resolve_skill_roots_with_home_dir(
-        Some(Arc::clone(&LOCAL_FS)),
+        Some(&access),
+        &access,
         &config_stack,
         &workspace,
+        /*project_markers*/ None,
         /*home_dir*/ None,
         Vec::new(),
         Vec::new(),
@@ -670,6 +859,7 @@ async fn resolved_project_layer_loads_skill_without_git_marker() {
 
 #[tokio::test]
 async fn resolved_project_layer_loads_skill_when_cwd_is_file() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let repository = absolute(temp_dir.path().join("repo"));
     let dot_codex = repository.join(".codex");
@@ -682,9 +872,11 @@ async fn resolved_project_layer_loads_skill_when_cwd_is_file() {
     let config_stack = stack(vec![project_layer(&dot_codex)]);
 
     let roots = resolve_skill_roots_with_home_dir(
-        Some(Arc::clone(&LOCAL_FS)),
+        Some(&access),
+        &access,
         &config_stack,
         &cwd,
+        /*project_markers*/ None,
         /*home_dir*/ None,
         Vec::new(),
         Vec::new(),
@@ -708,7 +900,7 @@ async fn resolved_project_layer_loads_skill_when_cwd_is_file() {
 
 #[tokio::test]
 async fn repo_ancestry_limits_concurrent_probes_and_preserves_order() {
-    const CONCURRENCY_LIMIT: usize = 256;
+    const CONCURRENCY_LIMIT: usize = 8;
 
     let temp_dir = TempDir::new().expect("temp dir");
     let repository = absolute(temp_dir.path().join("repo"));
@@ -775,11 +967,13 @@ async fn repo_ancestry_limits_concurrent_probes_and_preserves_order() {
         calls.release.add_permits(expected_probes.len());
     };
     let config_stack = stack(Vec::new());
+    let access = FileSystemEnvironmentAccessor::unrestricted(&file_system);
     let (roots, ()) = tokio::join!(
         repo_agents_skill_roots(
-            Some(file_system),
+            Some(&access),
             &config_stack,
             &cwd,
+            /*project_markers*/ None,
             /*empty_remote_roots*/ None
         ),
         assertions,
@@ -793,6 +987,7 @@ async fn repo_ancestry_limits_concurrent_probes_and_preserves_order() {
 
 #[tokio::test]
 async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_names() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let home_folder = absolute(temp_dir.path().join("home"));
     let codex_home = home_folder.join("codex");
@@ -842,9 +1037,11 @@ async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_name
     ]);
 
     let roots = resolve_skill_roots_with_home_dir(
-        Some(Arc::clone(&LOCAL_FS)),
+        Some(&access),
+        &access,
         &config_stack,
         &cwd,
+        /*project_markers*/ None,
         Some(&home_folder),
         Vec::new(),
         vec![user_skills],

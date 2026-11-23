@@ -41,7 +41,6 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
     let server_cwd = workspace_path.clone();
     let id = "00000000-0000-0000-0000-000000000001";
-    let server_home = codex_home.path().to_path_buf();
     let server = tokio::spawn(async move {
         let mut methods = Vec::new();
         let mut restore_rx = Some(restore_rx);
@@ -53,8 +52,8 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             "status": {"type": "active", "activeFlags": []}, "cwd": server_cwd,
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
-        // Startup probes the running daemon and checks compatibility before opening the session.
-        for connection in -2..7 {
+        // The first connection checks daemon compatibility before TUI startup.
+        for connection in -1..7 {
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -106,9 +105,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 }
                 let result = match request.method.as_str() {
-                    "initialize" => {
-                        json!({"userAgent": "reconnect-pty/0.0.0", "codexHome": server_home, "platformFamily": std::env::consts::FAMILY, "platformOs": std::env::consts::OS})
-                    }
+                    "initialize" => json!({"userAgent": "reconnect-pty"}),
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
                         json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
@@ -266,7 +263,17 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     complete_tx.send(()).unwrap();
     terminal.wait_for_screen("Recovered turn completed.")?;
     terminal.write_input(b"\r")?;
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), submitted_rx).await??;
+    // Keep draining redraws so a full PTY cannot block the TUI before it submits.
+    let submitted = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), submitted_rx);
+    tokio::pin!(submitted);
+    loop {
+        tokio::select! {
+            result = &mut submitted => break result??,
+            _ = tokio::time::sleep(Duration::from_millis(/*millis*/ 20)) => {
+                terminal.read_output(Duration::ZERO)?;
+            }
+        }
+    }
     drop(terminal);
     let methods = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), server).await???;
     assert_eq!(

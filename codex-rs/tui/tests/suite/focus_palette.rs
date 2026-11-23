@@ -35,8 +35,7 @@ fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> R
     let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
 
-    let mut terminal =
-        PtyCodex::start(&repo_root, codex_home, &["--no-daemon", "--no-alt-screen"])?;
+    let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-alt-screen"])?;
     terminal.wait_for_startup()?;
 
     let startup_output_len = terminal.output.len();
@@ -166,7 +165,7 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
-    let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-daemon"])?;
+    let mut terminal = PtyCodex::start(&repo_root, codex_home, &[])?;
     terminal.wait_for_startup()?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     while !terminal.parser.screen().alternate_screen() && Instant::now() < deadline {
@@ -281,7 +280,7 @@ fn fullscreen_transcript_can_opt_out_to_terminal_scrollback() -> Result<()> {
     let mut terminal = PtyCodex::start(
         &repo_root,
         codex_home,
-        &["--no-daemon", "-c", "tui.fullscreen_transcript=false"],
+        &["-c", "tui.fullscreen_transcript=false"],
     )?;
     terminal.wait_for_startup()?;
     terminal.wait_for_screen("GPT-5.6-Terra")?;
@@ -386,6 +385,9 @@ impl PtyCodex {
             .env_remove("STY")
             .env("TERM_PROGRAM", "kitty")
             .env_remove("TERM_PROGRAM_VERSION")
+            // Exercise the fixture's login state even on hosts configured with workload identity.
+            .env_remove(codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR)
+            .env_remove(codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR)
             .env("OPENAI_API_KEY", "focus-palette-test")
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
@@ -566,11 +568,30 @@ fn contains_bytes(buffer: &[u8], needle: &[u8]) -> bool {
     buffer.windows(needle.len()).any(|window| window == needle)
 }
 
+pub(super) fn write_test_config_with_bundled_models(
+    codex_home: &Path,
+    repo_root: &Path,
+) -> Result<()> {
+    write_test_config(codex_home, repo_root)?;
+    // Model fetches must not delay the startup screens this PTY is waiting for.
+    let catalog = codex_home.join("models.json");
+    std::fs::write(
+        &catalog,
+        serde_json::to_vec(&codex_models_manager::bundled_models_response()?)?,
+    )?;
+    let catalog = serde_json::to_string(&catalog)?;
+    let path = codex_home.join("config.toml");
+    let config = std::fs::read_to_string(&path)?;
+    std::fs::write(path, format!("model_catalog_json = {catalog}\n{config}"))?;
+    Ok(())
+}
+
 pub(super) fn write_test_config(codex_home: &Path, repo_root: &Path) -> Result<()> {
     let repo_root = repo_root.display();
     let config = format!(
         "model = \"gpt-5.6-terra\"\nmodel_provider = \"openai\"\n\
          suppress_unstable_features_warning = true\nanalytics.enabled = false\n\
+         features.daemon_auto_start = false\n\
          notice.model_migrations.\"gpt-5.6-terra\" = \"gpt-6-sol\"\n\n\
          [projects.\"{repo_root}\"]\ntrust_level = \"trusted\"\n"
     );
@@ -589,6 +610,12 @@ fn no_daemon_skips_startup_and_discovery() -> Result<()> {
         let workspace = tempfile::tempdir()?;
         let home = tempfile::tempdir()?;
         write_test_config(home.path(), workspace.path())?;
+        let config = home.path().join("config.toml");
+        let contents = std::fs::read_to_string(&config)?;
+        std::fs::write(
+            config,
+            contents.replace("features.daemon_auto_start = false\n", ""),
+        )?;
         let socket_path = codex_app_server_client::app_server_control_socket_path(home.path())?;
         std::fs::create_dir_all(socket_path.as_path().parent().unwrap())?;
         let listener = if running {
@@ -631,6 +658,12 @@ fn auto_daemon_start_failure_exits_with_manual_fallback_hint() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let home = tempfile::tempdir()?;
     write_test_config(home.path(), workspace.path())?;
+    let config = home.path().join("config.toml");
+    let contents = std::fs::read_to_string(&config)?;
+    std::fs::write(
+        config,
+        contents.replace("features.daemon_auto_start = false\n", ""),
+    )?;
     // An incomplete selected package must fail without installing a replacement.
     std::fs::create_dir_all(home.path().join("packages/app-server-daemon/current"))?;
     let mut terminal = PtyCodex::start(

@@ -1,4 +1,5 @@
 use crate::session::tests::update_turn_settings_for_test;
+use codex_mcp::McpServerKey;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -41,6 +42,7 @@ use serde_json::json;
 
 use crate::WaitForEnvironmentToolConfig;
 use crate::config::CurrentTimeReminderConfig;
+use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::responses_metadata::TurnToolFunctionInfo;
 use crate::responses_metadata::TurnToolNamespacesInfo;
@@ -396,7 +398,7 @@ fn duplicate_primary_environment(turn: &mut TurnContext) {
 
 fn mcp_tool(server: &str, namespace: &str, name: &str) -> ToolInfo {
     ToolInfo {
-        server_name: server.to_string(),
+        server_key: McpServerKey::unscoped(server),
         supports_parallel_tool_calls: false,
         server_origin: None,
         callable_name: name.to_string(),
@@ -431,6 +433,7 @@ fn mcp_runtime(
         runtime: handler,
         exposure,
         native_review: Default::default(),
+        is_trusted: false,
         model_spec: None,
     }
 }
@@ -634,6 +637,7 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
                 Some(codex_config::Sourced::new(
                     codex_config::FeatureRequirementsToml {
                         entries: BTreeMap::from([(feature.key().to_string(), false)]),
+                        ..Default::default()
                     },
                     codex_config::RequirementSource::Unknown,
                 )),
@@ -1017,6 +1021,15 @@ async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
 
 #[tokio::test]
 async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
+    let (attachment, _guard, _) = EnvironmentAttachment::new(
+        "remote",
+        Arc::new(
+            codex_exec_server::Environment::create_for_tests(Some(
+                "ws://127.0.0.1:1/remote-exec-server".to_string(),
+            ))
+            .expect("remote test environment"),
+        ),
+    );
     let remote_environment = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
         update_turn_settings_for_test(turn, |settings| {
@@ -1032,12 +1045,7 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
             panic!("primary environment should be ready");
         };
         environment.selection.environment_id = "remote".to_string();
-        environment.environment = Arc::new(
-            codex_exec_server::Environment::create_for_tests(Some(
-                "ws://127.0.0.1:1/remote-exec-server".to_string(),
-            ))
-            .expect("remote test environment"),
-        );
+        environment.attachment = attachment;
     })
     .await;
     remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
@@ -1737,6 +1745,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                 exposure,
                 native_review: Default::default(),
+                is_trusted: false,
                 model_spec: None,
             }
         })
@@ -2034,6 +2043,7 @@ async fn strict_tool_collisions_allow_multiple_tools_in_one_namespace() {
                     ),
                     exposure: ToolExposure::Direct,
                     native_review: Default::default(),
+                    is_trusted: false,
                     model_spec: None,
                 },
                 mcp_runtime("shared", "shared", "lookup", ToolExposure::Direct),
@@ -2077,6 +2087,7 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                 exposure: ToolExposure::Direct,
                 native_review: Default::default(),
+                is_trusted: false,
                 model_spec: None,
             }
         };
@@ -3125,6 +3136,55 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
         } else {
             plan.assert_visible_lacks(&["agents"]);
             plan.assert_registered_lacks(&[&spawn_agent_name, &followup_task_name]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_catalog_code_mode_follows_tool_mode_and_preserves_runtime_fallback() {
+    for (catalog, non_code_mode_only, follows_tool_mode) in [
+        (None, true, false),
+        (None, false, true),
+        (Some(true), true, true),
+        (Some(false), false, false),
+    ] {
+        for tool_mode in [ToolMode::Direct, ToolMode::CodeMode, ToolMode::CodeModeOnly] {
+            let plan = probe(|turn| {
+                set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+                update_config(turn, |config| {
+                    config.multi_agent_v2.non_code_mode_only = non_code_mode_only;
+                    config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+                });
+                update_turn_settings_for_test(turn, |settings| {
+                    let model = Arc::make_mut(&mut settings.model_info);
+                    model.tool_mode = Some(tool_mode);
+                    model.multi_agent_tools_in_code_mode = catalog;
+                });
+            })
+            .await;
+            for name in [
+                "spawn_agent",
+                "send_message",
+                "followup_task",
+                "wait_agent",
+                "interrupt_agent",
+                "list_agents",
+            ] {
+                assert_eq!(
+                    (
+                        plan.namespace_function_names("agents")
+                            .iter()
+                            .any(|tool| tool == name),
+                        plan.code_mode_tool_names
+                            .contains_key(&format!("agents__{name}")),
+                    ),
+                    (
+                        !follows_tool_mode || tool_mode != ToolMode::CodeModeOnly,
+                        follows_tool_mode && tool_mode != ToolMode::Direct,
+                    ),
+                    "{name}: catalog={catalog:?}, non_code_mode_only={non_code_mode_only}, mode={tool_mode:?}",
+                );
+            }
         }
     }
 }

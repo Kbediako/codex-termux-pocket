@@ -42,7 +42,9 @@ mod storage;
 #[path = "oauth_session_token.rs"]
 mod token;
 
+pub use crate::oauth::OAuthDeviceCodePrompt;
 pub use codex_model_provider_info::OAuthSessionConfig;
+pub use login::OAuthLoginAttempt;
 pub use login::OAuthLoginControl;
 pub use login::OAuthSessionStatus;
 pub use login::OAuthSessionStatusChange;
@@ -63,7 +65,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 20);
 pub enum OAuthSessionError {
     #[error("Gateway sign-in required. Choose Sign in or Reconnect, then retry your request")]
     LoginRequired,
-    #[error("Gateway authentication is in progress; retry after sign-in")]
+    #[error("Another sign-in for this credential is in progress. Finish or cancel it, then retry.")]
     LoginInProgress,
 }
 
@@ -107,9 +109,8 @@ struct OAuthSessionState {
     codex_home: PathBuf,
     storage: OAuthSessionStorage,
     http_client: HttpClient,
+    http_client_factory: HttpClientFactory,
     cached_token: Arc<Mutex<OAuthSessionCache>>,
-    // Reserve explicit login independently of background credential reads and refreshes.
-    login_attempt: Arc<Mutex<()>>,
     status: tokio::sync::watch::Sender<Option<login::OAuthSessionStatusSnapshot>>,
     status_tx: tokio::sync::broadcast::Sender<OAuthSessionStatusChange>,
 }
@@ -155,8 +156,8 @@ impl OAuthSessionManager {
                 status_tx: login::status_sender_for_host(&codex_home, http_client_factory),
                 codex_home,
                 http_client,
+                http_client_factory: http_client_factory.clone(),
                 cached_token: Arc::new(Mutex::new(OAuthSessionCache::default())),
-                login_attempt: Arc::new(Mutex::new(())),
                 status: tokio::sync::watch::channel(/*init*/ None).0,
             }),
         })
@@ -235,6 +236,7 @@ impl OAuthSessionManager {
             && cached.token == cached.login_required
         {
             if self.interactive_login_allowed() {
+                let _attempt = self.try_start_login()?;
                 return self.authorize_with_browser(&mut cached, open_browser).await;
             }
             return Err(self.login_required_error(cached.token.as_ref()));
@@ -284,6 +286,7 @@ impl OAuthSessionManager {
                 == Some(&OAuthSessionError::LoginRequired)
         }) && self.interactive_login_allowed()
         {
+            let _attempt = self.try_start_login()?;
             return self.authorize_with_browser(&mut cached, open_browser).await;
         }
         result

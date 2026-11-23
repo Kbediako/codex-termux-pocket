@@ -50,7 +50,7 @@ fn exec_server_defaults_preserve_local_and_noise_modes() {
 
 #[test]
 fn remote_forwarder_skips_cloud_config() {
-    let command = exec_server_from_args(&[
+    let mut command = exec_server_from_args(&[
         "forward",
         "--connect",
         "ws://localhost:8765",
@@ -60,6 +60,8 @@ fn remote_forwarder_skips_cloud_config() {
         "env-1",
     ]);
     assert!(!command.should_load_cloud_config());
+    command.chatgpt_token_stdin = true;
+    assert!(command.validate_remote_transport().is_err());
 }
 
 #[test]
@@ -163,6 +165,18 @@ fn exec_server_rejects_missing_or_conflicting_remote_options() {
         ),
         (
             vec!["--executor-credential-stdin", "--use-agent-identity-auth"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["--executor-credential-stdin", "--registration-bearer-stdin"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["--chatgpt-token-stdin", "--executor-credential-stdin"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["--chatgpt-token-stdin", "--registration-bearer-stdin"],
             ErrorKind::ArgumentConflict,
         ),
         (
@@ -336,4 +350,31 @@ fn standalone_help_documents_executor_options() {
         .collect::<Vec<_>>()
         .join("\n");
     insta::assert_snapshot!(help);
+}
+
+/// An inbound Noise listener requires remote registration and cannot expose direct RPC transport.
+#[test]
+fn inbound_noise_requires_registered_noise_transport() {
+    let command = exec_server_from_args(&[
+        "--remote",
+        "https://registry.example.com",
+        "--environment-id",
+        "env-1",
+        "--listen",
+        "ws://0.0.0.0:9001",
+    ]);
+    assert_eq!(command.listen.as_deref(), Some("ws://0.0.0.0:9001"));
+    command.validate_remote_transport().unwrap();
+    let command = exec_server_from_args(&[
+        "--remote",
+        "https://registry.example.com",
+        "--environment-id",
+        "env-1",
+        "--remote-transport",
+        "direct",
+        "--aws-sigv4",
+        "--listen",
+        "ws://0.0.0.0:9001",
+    ]);
+    assert!(command.validate_remote_transport().is_err());
 }

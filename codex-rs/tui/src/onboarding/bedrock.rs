@@ -6,6 +6,7 @@ use super::auth::onboarding_request_id;
 use super::keys;
 use super::provider_setup::FieldDisplay;
 use super::provider_setup::ProviderInput;
+use super::provider_setup::move_provider_field;
 use crate::key_hint::KeyBindingListExt;
 use crate::wrapping::word_wrap_lines;
 use codex_app_server_client::AppServerRequestHandle;
@@ -286,15 +287,9 @@ impl BedrockState {
             values,
             selected_field,
         } = &mut self.view
+            && move_provider_field(*key_event, selected_field, values.len())
         {
-            if key_event.code == KeyCode::Up || key_event.code == KeyCode::BackTab {
-                *selected_field = (*selected_field + values.len() - 1) % values.len();
-                return None;
-            }
-            if key_event.code == KeyCode::Down || key_event.code == KeyCode::Tab {
-                *selected_field = (*selected_field + 1) % values.len();
-                return None;
-            }
+            return None;
         }
 
         if keys::CONFIRM.is_pressed(*key_event) {
@@ -392,7 +387,7 @@ impl BedrockState {
                 } else if *list == BedrockMethodList::Detected
                     && !self.environment_credentials.is_empty()
                 {
-                    lines.push("  AWS credentials detected in your environment.".into());
+                    lines.push("  AWS credentials detected in the server environment.".into());
                 } else {
                     if *list == BedrockMethodList::Detected {
                         lines.push("  No AWS credentials found.".into());
@@ -454,7 +449,7 @@ impl BedrockState {
             }
             BedrockView::EnvironmentInstructions => {
                 lines.push(
-                    "  Configure AWS credentials in your environment, then restart Codex.".into(),
+                    "  Export AWS credentials, then run `codex --no-daemon` in that shell.".into(),
                 );
                 lines.push("".into());
                 lines.push(Line::from(vec![
@@ -587,9 +582,9 @@ impl BedrockState {
                     let description = if self.environment_credentials.iter().any(|credential| {
                         credential.credential_type == AwsCredentialType::BedrockApiKey
                     }) {
-                        "Use your existing Amazon Bedrock API key"
+                        "Use the Bedrock API key from the server environment"
                     } else {
-                        "Use your existing AWS credentials"
+                        "Use AWS access keys from the server environment"
                     };
                     (
                         "Continue with detected credentials".to_string(),
@@ -620,7 +615,7 @@ impl BedrockState {
                 ),
                 BedrockMethod::EnvironmentInstructions => (
                     "Environment variables".to_string(),
-                    "Configure AWS credentials in your environment, then return here".to_string(),
+                    "Use AWS credentials exported in your shell".to_string(),
                 ),
                 BedrockMethod::ApiKey => (
                     "Bedrock API key".to_string(),
@@ -764,7 +759,11 @@ impl AuthModeWidget {
                 BedrockCredential::ApiKey(api_key) => request_handle
                     .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                         request_id,
-                        params: LoginAccountParams::AmazonBedrock { api_key, region },
+                        params: LoginAccountParams::AmazonBedrock {
+                            api_key,
+                            region,
+                            provider_id: None,
+                        },
                     })
                     .await
                     .map_err(|error| error.to_string())
@@ -777,7 +776,11 @@ impl AuthModeWidget {
                 BedrockCredential::Profile(profile) => request_handle
                     .request_typed::<BedrockSetupResponse>(ClientRequest::BedrockSetup {
                         request_id,
-                        params: BedrockSetupParams::Profile { profile, region },
+                        params: BedrockSetupParams::Profile {
+                            profile,
+                            region,
+                            provider_id: None,
+                        },
                     })
                     .await
                     .map(|_| ())
@@ -785,7 +788,10 @@ impl AuthModeWidget {
                 BedrockCredential::Environment => request_handle
                     .request_typed::<BedrockSetupResponse>(ClientRequest::BedrockSetup {
                         request_id,
-                        params: BedrockSetupParams::Environment { region },
+                        params: BedrockSetupParams::Environment {
+                            region,
+                            provider_id: None,
+                        },
                     })
                     .await
                     .map(|_| ())
@@ -802,6 +808,7 @@ impl AuthModeWidget {
                             secret_access_key,
                             session_token,
                             region,
+                            provider_id: None,
                         },
                     })
                     .await

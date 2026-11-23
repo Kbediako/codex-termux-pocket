@@ -2,6 +2,7 @@
 //! Discarded requests still charge completed usage; session shutdown cancels remaining network work.
 //! Snapshot capture and launch registration hold session state; prompt preparation does not.
 
+use codex_login::AuthOwner;
 use std::sync::Arc;
 
 use crate::compact_remote_v2::BackgroundCompactionCandidate;
@@ -26,7 +27,7 @@ struct CompactionAttempt {
     history_version: u64,
     model_slug: String,
     compaction_hash: Option<String>,
-    auth_owner_generation: Option<u64>,
+    auth_owner: Option<AuthOwner>,
 }
 
 #[derive(Default)]
@@ -39,11 +40,11 @@ pub(crate) struct AsyncCompactionState {
 }
 
 pub(super) fn enabled(turn_context: &TurnContext) -> bool {
-    turn_context
-        .config
-        .features
-        .enabled(Feature::AsyncCompaction)
-        && !turn_context.config.features.enabled(Feature::TokenBudget)
+    let features = &turn_context.config.features;
+    features.enabled(Feature::AsyncCompaction)
+        && !(features.enabled(Feature::AsyncCompactionRootOnly)
+            && turn_context.session_source.is_non_root_agent())
+        && !features.enabled(Feature::TokenBudget)
         && matches!(
             turn_context.provider.capabilities().remote_compaction,
             RemoteCompactionSupport::V2
@@ -57,7 +58,7 @@ pub(super) async fn maybe_start(
     phase: CompactionPhase,
     turn_cancellation: &CancellationToken,
     token_status: &ContextWindowTokenStatus,
-    (turn_state, auth_owner_generation): (Option<String>, Option<u64>),
+    (turn_state, auth_owner): (Option<String>, Option<AuthOwner>),
 ) {
     let turn_context = &step_context.turn;
     // Let the foreground establish the backend's model pin before starting a parallel request.
@@ -65,6 +66,7 @@ pub(super) async fn maybe_start(
         return;
     }
     if !enabled(turn_context)
+        || sess.work_budget().is_exhausted()
         || token_status.token_limit_reached
         || (matches!(phase, CompactionPhase::PostTurn)
             && token_status.turn_end_compaction_threshold_reached)
@@ -89,14 +91,14 @@ pub(super) async fn maybe_start(
             history_version: state.history.history_version(),
             model_slug: model_info.slug.clone(),
             compaction_hash: model_info.comp_hash.clone(),
-            auth_owner_generation,
+            auth_owner: auth_owner.clone(),
         };
         // Stop blocks new launches; already-running compaction remains session-owned.
         if turn_cancellation.is_cancelled()
             || state.shutting_down
             || state.async_compaction.last_attempt.as_ref() == Some(&attempt)
             || state.history.annotated_items().is_empty()
-            || sess.services.model_client.auth_owner_generation() != auth_owner_generation
+            || sess.services.model_client.auth_owner() != auth_owner
         {
             return;
         }
@@ -108,7 +110,7 @@ pub(super) async fn maybe_start(
             state.history.clone(),
             base_instructions,
             turn_state,
-            auth_owner_generation,
+            auth_owner,
             sess.current_window_from_state(&state),
         );
         let tasks = state.async_compaction.tasks.clone();
@@ -187,7 +189,7 @@ pub(crate) async fn wait_for_pending(
         if attempt.history_version != state.history.history_version()
             || attempt.model_slug != model.slug
             || attempt.compaction_hash != model.comp_hash
-            || attempt.auth_owner_generation != sess.services.model_client.auth_owner_generation()
+            || attempt.auth_owner != sess.services.model_client.auth_owner()
         {
             return None;
         }

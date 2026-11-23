@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -21,6 +22,7 @@ use tokio::sync::oneshot;
 
 use super::TurnTokenUsage;
 use crate::agent::types::AgentExecutionGuard;
+use crate::session::SamplingInterrupt;
 use crate::session::TurnInput;
 use crate::session::TurnInputQueue;
 use crate::session::step_context::StepContext;
@@ -34,7 +36,12 @@ use codex_protocol::protocol::TokenUsage;
 
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
+    /// The slot's owner, retained after its task detaches to emit the terminal event.
+    pub(crate) turn_id: Option<String>,
+    /// Set only after execution admission succeeds; retained through finishing.
+    pub(crate) admitted: bool,
     pub(crate) task: Option<RunningTask>,
+    pub(crate) sampling_interrupt: Option<SamplingInterrupt>,
     /// Present when input admission is closed; cancelled when the final batch is recorded.
     /// Reservations that have not started still accept inputs.
     pub(crate) finishing: Option<CancellationToken>,
@@ -64,7 +71,10 @@ pub(crate) enum MailboxDeliveryPhase {
 impl Default for ActiveTurn {
     fn default() -> Self {
         Self {
+            turn_id: None,
+            admitted: false,
             task: None,
+            sampling_interrupt: None,
             finishing: None,
             turn_state: Arc::new(Mutex::new(TurnState::default())),
         }
@@ -83,11 +93,15 @@ pub(crate) struct RunningTask {
     pub(crate) kind: TaskKind,
     pub(crate) task: Arc<dyn AnySessionTask>,
     pub(crate) cancellation_token: CancellationToken,
+    /// MCP reviews can span sampling attempts and must stop even while the sampler drains.
+    pub(crate) mcp_elicitation_cancellation: CancellationToken,
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,
     pub(crate) _agent_execution_guard: Option<AgentExecutionGuard>,
-    /// Initial input still owned by Core while the host decides whether the task may run.
-    pub(crate) pending_admission_input: Option<Vec<TurnInput>>,
+    /// Follows the task into whichever finalizer claims its terminal event.
+    pub(crate) outcome_handoff: Option<TaskTrackerToken>,
+    /// Unrecorded input retained during host admission or preparation that can wait on the roster.
+    pub(crate) pending_initial_input: Option<Vec<TurnInput>>,
     pub(crate) _diagnostics_guard: GaugeGuard,
     // Timer recorded when the task drops to capture the full turn duration.
     pub(crate) _timer: Option<codex_otel::Timer>,

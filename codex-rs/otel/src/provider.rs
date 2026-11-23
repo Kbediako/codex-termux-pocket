@@ -2,6 +2,7 @@ use crate::config::OtelExporter;
 use crate::config::OtelHttpProtocol;
 use crate::config::OtelSettings;
 use crate::config::StatsigMetricsSettings;
+use crate::headers_helper::HeadersHelper;
 use crate::metrics::MetricsClient;
 use crate::metrics::MetricsConfig;
 use crate::targets::is_log_export_target;
@@ -44,6 +45,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -66,6 +68,7 @@ pub struct OtelProvider {
     pub tracer_provider: Option<SdkTracerProvider>,
     pub tracer: Option<Tracer>,
     pub metrics: Option<MetricsClient>,
+    headers_helper: Option<Arc<HeadersHelper>>,
     shutdown_started: AtomicBool,
     shutdown_worker: Option<mpsc::SyncSender<ShutdownWorker>>,
 }
@@ -108,6 +111,9 @@ impl OtelProvider {
         }
         if let Some(logger) = &self.logger {
             let _ = logger.shutdown();
+        }
+        if let Some(helper) = &self.headers_helper {
+            helper.shutdown();
         }
     }
 
@@ -194,10 +200,47 @@ impl OtelProvider {
     }
 
     pub fn try_new(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
-        let log_enabled = !matches!(settings.exporter, OtelExporter::None);
-        let trace_enabled = !matches!(settings.trace_exporter, OtelExporter::None);
-        let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);
-        let metrics_enabled = !matches!(metric_exporter, OtelExporter::None);
+        Self::try_new_with_exporters::<true, false, false>(settings)
+    }
+
+    /// Builds a provider for traces over OTLP/HTTP.
+    /// Returns an error if any other signal or transport is configured.
+    pub fn try_new_http_traces(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
+        Self::try_new_with_exporters::<false, true, false>(settings)
+    }
+
+    /// Builds a provider for metrics over OTLP/HTTP, including Statsig.
+    /// Returns an error if any other signal or transport is configured.
+    pub fn try_new_http_metrics(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
+        Self::try_new_with_exporters::<false, false, true>(settings)
+    }
+
+    /// Selects the reachable exporter builders at compile time while sharing setup and shutdown.
+    fn try_new_with_exporters<
+        const ALL_EXPORTERS: bool,
+        const HTTP_TRACES: bool,
+        const HTTP_METRICS: bool,
+    >(
+        settings: &OtelSettings,
+    ) -> Result<Option<Self>, Box<dyn Error>> {
+        let supports_traces = ALL_EXPORTERS || HTTP_TRACES;
+        let supports_metrics = ALL_EXPORTERS || HTTP_METRICS;
+        let log_configured = !matches!(settings.exporter, OtelExporter::None);
+        let trace_configured = !matches!(settings.trace_exporter, OtelExporter::None);
+        if (!ALL_EXPORTERS && log_configured)
+            || (!supports_traces && trace_configured)
+            || (!supports_metrics && !matches!(settings.metrics_exporter, OtelExporter::None))
+        {
+            return Err("configured exporter is not supported by this provider".into());
+        }
+
+        let log_enabled = ALL_EXPORTERS && log_configured;
+        let trace_enabled = supports_traces && trace_configured;
+        let metrics_enabled = supports_metrics
+            && !matches!(
+                crate::config::resolve_exporter(&settings.metrics_exporter),
+                OtelExporter::None
+            );
 
         if !log_enabled && !trace_enabled && !metrics_enabled {
             // Tracestate propagation is process-global; clear it when these
@@ -218,9 +261,34 @@ impl OtelProvider {
         }
         crate::trace_context::validate_tracestate_entries(&settings.tracestate)?;
 
-        let metrics = if matches!(metric_exporter, OtelExporter::None) {
-            None
-        } else {
+        let (helper_for_logs, helper_for_traces, helper_for_metrics) = settings
+            .headers_helper
+            .as_ref()
+            .map(|helper| {
+                (
+                    helper.apply_to_logs
+                        && matches!(settings.exporter, OtelExporter::OtlpHttp { .. }),
+                    helper.apply_to_traces
+                        && matches!(settings.trace_exporter, OtelExporter::OtlpHttp { .. }),
+                    helper.apply_to_metrics
+                        && matches!(settings.metrics_exporter, OtelExporter::OtlpHttp { .. }),
+                )
+            })
+            .unwrap_or_default();
+        let headers_helper = settings
+            .headers_helper
+            .as_ref()
+            .filter(|_| helper_for_logs || helper_for_traces || helper_for_metrics)
+            .map(|config| {
+                HeadersHelper::start(
+                    config,
+                    &settings.codex_home,
+                    settings.http_client_factory.network_policy().clone(),
+                )
+            })
+            .transpose()?;
+
+        let metrics = if metrics_enabled {
             let mut config = MetricsConfig::otlp(
                 settings.environment.clone(),
                 settings.service_name.clone(),
@@ -228,10 +296,15 @@ impl OtelProvider {
                 settings.metrics_exporter.clone(),
             )
             .with_http_client_factory(settings.http_client_factory.clone());
+            if helper_for_metrics {
+                config.headers_helper = headers_helper.clone();
+            }
             if settings.runtime_metrics {
                 config = config.with_runtime_reader();
             }
-            Some(MetricsClient::new(config)?)
+            Some(MetricsClient::new_with_transport::<ALL_EXPORTERS>(config)?)
+        } else {
+            None
         };
 
         let log_resource = make_resource(settings, ResourceKind::Logs);
@@ -242,17 +315,19 @@ impl OtelProvider {
                     &log_resource,
                     &settings.exporter,
                     &settings.http_client_factory,
+                    headers_helper.clone().filter(|_| helper_for_logs),
                 )
             })
             .transpose()?;
 
         let tracer_provider = trace_enabled
             .then(|| {
-                build_tracer_provider(
+                build_tracer_provider::<ALL_EXPORTERS>(
                     &trace_resource,
                     &settings.trace_exporter,
                     settings.span_attributes.clone(),
                     &settings.http_client_factory,
+                    headers_helper.clone().filter(|_| helper_for_traces),
                 )
             })
             .transpose()?;
@@ -266,6 +341,7 @@ impl OtelProvider {
             tracer_provider,
             tracer,
             metrics,
+            headers_helper,
             shutdown_started: AtomicBool::default(),
             shutdown_worker: None,
         };
@@ -455,7 +531,10 @@ fn build_logger(
     resource: &Resource,
     exporter: &OtelExporter,
     factory: &codex_http_client::HttpClientFactory,
+    headers_helper: Option<Arc<HeadersHelper>>,
 ) -> Result<SdkLoggerProvider, Box<dyn Error>> {
+    let headers_helper =
+        headers_helper.filter(|_| matches!(exporter, OtelExporter::OtlpHttp { .. }));
     let mut builder = SdkLoggerProvider::builder().with_resource(resource.clone());
 
     match crate::config::resolve_exporter(exporter) {
@@ -510,11 +589,12 @@ fn build_logger(
                 .with_protocol(protocol)
                 .with_headers(headers);
 
-            if factory.network_policy().is_managed() {
+            if headers_helper.is_some() || factory.network_policy().is_managed() {
                 let client = crate::otlp::build_async_http_client(
                     factory,
                     tls.as_ref(),
                     OTEL_EXPORTER_OTLP_LOGS_TIMEOUT,
+                    headers_helper,
                 )?;
                 exporter_builder = exporter_builder.with_http_client(client);
             } else if let Some(tls) = tls.as_ref() {
@@ -534,15 +614,21 @@ fn build_logger(
     Ok(builder.build())
 }
 
-fn build_tracer_provider(
+fn build_tracer_provider<const ALLOW_GRPC: bool>(
     resource: &Resource,
     exporter: &OtelExporter,
     span_attributes: HashMap<String, String>,
     factory: &codex_http_client::HttpClientFactory,
+    headers_helper: Option<Arc<HeadersHelper>>,
 ) -> Result<SdkTracerProvider, Box<dyn Error>> {
+    let headers_helper =
+        headers_helper.filter(|_| matches!(exporter, OtelExporter::OtlpHttp { .. }));
     let span_exporter = match crate::config::resolve_exporter(exporter) {
         OtelExporter::None => return Ok(tracer_provider_builder(resource, span_attributes).build()),
         OtelExporter::Statsig => unreachable!("statsig exporter should be resolved"),
+        OtelExporter::OtlpGrpc { .. } if !ALLOW_GRPC => {
+            return Err("this provider requires OTLP/HTTP for traces".into());
+        }
         OtelExporter::OtlpGrpc {
             endpoint,
             headers,
@@ -592,6 +678,7 @@ fn build_tracer_provider(
                     factory,
                     tls.as_ref(),
                     OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+                    headers_helper,
                 )?;
                 exporter_builder = exporter_builder.with_http_client(client);
 
@@ -620,11 +707,12 @@ fn build_tracer_provider(
                 .with_protocol(protocol)
                 .with_headers(headers);
 
-            if factory.network_policy().is_managed() {
+            if headers_helper.is_some() || factory.network_policy().is_managed() {
                 let client = crate::otlp::build_async_http_client(
                     factory,
                     tls.as_ref(),
                     OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+                    headers_helper,
                 )?;
                 exporter_builder = exporter_builder.with_http_client(client);
             } else if let Some(tls) = tls.as_ref() {
@@ -657,6 +745,8 @@ mod tests {
     use super::*;
     use crate::metrics::API_CALL_COUNT_METRIC;
     use crate::metrics::API_CALL_DURATION_METRIC;
+    use crate::metrics::EXEC_COMMAND_COUNT_METRIC;
+    use crate::metrics::EXEC_COMMAND_DURATION_TOTAL_METRIC;
     use crate::metrics::EXEC_SERVER_CLIENT_REQUEST_COUNT_METRIC;
     use crate::metrics::MetricsExporter;
     use crate::metrics::RESPONSES_API_ENGINE_IAPI_TTFT_DURATION_METRIC;
@@ -847,6 +937,8 @@ mod tests {
         )?;
         metrics.counter(TOOL_CALL_COUNT_METRIC, /*inc*/ 1, &[])?;
         metrics.record_duration(TOOL_CALL_DURATION_METRIC, Duration::from_millis(25), &[])?;
+        metrics.counter(EXEC_COMMAND_DURATION_TOTAL_METRIC, /*inc*/ 25, &[])?;
+        metrics.counter(EXEC_COMMAND_COUNT_METRIC, /*inc*/ 1, &[])?;
         metrics.counter(TURN_COST_MICROUSD_METRIC, /*inc*/ 1, &[])?;
         metrics.histogram(TURN_TOKEN_USAGE_METRIC, /*value*/ 100, &[])?;
         metrics.counter("codex.turns", /*inc*/ 1, &[])?;
@@ -861,13 +953,48 @@ mod tests {
             .collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names, vec!["codex.turns"]);
+        assert_eq!(
+            names,
+            vec![
+                EXEC_COMMAND_COUNT_METRIC,
+                EXEC_COMMAND_DURATION_TOTAL_METRIC,
+                "codex.turns"
+            ],
+        );
 
         Ok(())
     }
 
+    #[test]
+    fn restricted_providers_reject_unsupported_signals() {
+        let mut settings = test_otel_settings();
+        settings.metrics_exporter = OtelExporter::Statsig;
+        assert!(OtelProvider::try_new_http_traces(&settings).is_err());
+
+        settings = test_otel_settings();
+        settings.trace_exporter = OtelExporter::Statsig;
+        assert!(OtelProvider::try_new_http_metrics(&settings).is_err());
+    }
+
+    #[test]
+    fn http_providers_reject_grpc_for_their_supported_signal() {
+        let grpc = OtelExporter::OtlpGrpc {
+            endpoint: "http://127.0.0.1:4317".to_string(),
+            headers: HashMap::new(),
+            tls: None,
+        };
+        let mut settings = test_otel_settings();
+        settings.trace_exporter = grpc.clone();
+        assert!(OtelProvider::try_new_http_traces(&settings).is_err());
+
+        settings = test_otel_settings();
+        settings.metrics_exporter = grpc;
+        assert!(OtelProvider::try_new_http_metrics(&settings).is_err());
+    }
+
     fn test_otel_settings() -> OtelSettings {
         OtelSettings {
+            headers_helper: None,
             http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
             environment: "test".to_string(),
             service_name: "codex-test".to_string(),

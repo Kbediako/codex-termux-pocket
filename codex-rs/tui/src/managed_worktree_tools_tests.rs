@@ -1,5 +1,7 @@
 use super::*;
+use crate::app_server_session::SideChatStorage;
 use crate::legacy_core::config::ConfigOverrides;
+use crate::local_settings::LocalSettings;
 use crate::test_support::boxed_future;
 use codex_config::LoaderOverrides;
 use pretty_assertions::assert_eq;
@@ -83,19 +85,15 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
         .build()
         .await?;
     let mut server = Box::pin(start_server(&config)).await?;
-    let mut conflicting = config.clone();
-    let raw: codex_config::RawMcpServerConfig =
-        serde_json::from_value(json!({"url":"http://127.0.0.1:1/mcp"}))?;
-    let mut servers = conflicting.mcp_servers.get().clone();
-    servers.insert(
-        "codex_tui".to_owned(),
-        codex_config::McpServerConfig::try_from(raw).map_err(color_eyre::eyre::Report::msg)?,
-    );
-    conflicting.mcp_servers.set(servers)?;
-    let error = Box::pin(server.start_thread(&conflicting))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("MCP server owns"));
+    let config_path = home.path().join("config.toml");
+    let original = fs::read_to_string(&config_path)?;
+    fs::write(
+        &config_path,
+        format!("{original}\n[mcp_servers.codex_tui]\nurl = 'http://127.0.0.1:1/mcp'\n"),
+    )?;
+    let error = Box::pin(server.start_thread(&config)).await.unwrap_err();
+    assert!(error.to_string().contains("owns the TUI tools namespace"));
+    fs::write(config_path, original)?;
     let started = Box::pin(server.start_thread(&config)).await?;
     assert!(started.task_tools_available);
     let thread_id = started.session.thread_id.to_string();
@@ -140,16 +138,30 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
     let mut ephemeral_config = config.clone();
     ephemeral_config.ephemeral = true;
     let ephemeral = Box::pin(server.start_thread(&ephemeral_config)).await?;
-    let refused = tools
-        .execute(
-            server.request_handle(),
-            ephemeral.session.thread_id.to_string(),
-            "create_worktree",
-            json!({"allowAsync":true}),
-        )
-        .await;
-    assert!(!refused.success, "{refused:?}");
-    assert!(format!("{refused:?}").contains("Ephemeral side conversations"));
+    let saved_side = Box::pin(server.fork_side_thread(
+        &LocalSettings::from(&config),
+        config.clone(),
+        /*workspace_roots*/ None,
+        started.session.thread_id,
+        /*selected_profile*/ None,
+        SideChatStorage::Attached,
+    ))
+    .await?;
+    for blocked in [ephemeral, saved_side] {
+        let refused = tools
+            .execute(
+                server.request_handle(),
+                blocked.session.thread_id.to_string(),
+                "create_worktree",
+                json!({"allowAsync":true}),
+            )
+            .await;
+        assert!(!refused.success, "{refused:?}");
+        assert!(
+            format!("{refused:?}")
+                .contains("Side conversations cannot retain worktree attachments")
+        );
+    }
     assert!(!tools.manager.settings().root.exists());
     assert!(tools.operations.lock().await.is_empty());
     let call = |tool: &'static str, arguments| {

@@ -9,17 +9,20 @@ use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_execpolicy::AmendError;
 use codex_execpolicy::Decision;
-use codex_execpolicy::Error as ExecPolicyRuleError;
 use codex_execpolicy::Evaluation;
 use codex_execpolicy::MatchOptions;
-use codex_execpolicy::NetworkRuleProtocol;
 use codex_execpolicy::Policy;
 use codex_execpolicy::PolicyParser;
 use codex_execpolicy::RequirementsExecPolicy;
+use codex_execpolicy::RuleError as ExecPolicyRuleError;
 use codex_execpolicy::RuleMatch;
 use codex_execpolicy::blocking_append_allow_prefix_rule;
 use codex_execpolicy::blocking_append_network_rule;
+use codex_network_proxy::NetworkProxy;
 use codex_protocol::approvals::ExecPolicyAmendment;
+use codex_protocol::approvals::NetworkApprovalContext;
+use codex_protocol::approvals::NetworkPolicyAmendment;
+use codex_protocol::approvals::NetworkPolicyRuleAction;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxKind;
@@ -34,6 +37,8 @@ use tokio::task::spawn_blocking;
 use tracing::instrument;
 
 use crate::config::Config;
+use crate::network_policy_decision::ExecPolicyNetworkRuleAmendment;
+use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use codex_shell_command::bash::parse_shell_lc_plain_commands;
@@ -271,10 +276,13 @@ pub enum ExecPolicyUpdateError {
     JoinBlockingTask { source: tokio::task::JoinError },
 
     #[error("failed to update in-memory rules: {source}")]
-    AddRule {
-        #[from]
-        source: ExecPolicyRuleError,
-    },
+    AddRule { source: ExecPolicyRuleError },
+}
+
+impl From<ExecPolicyRuleError> for ExecPolicyUpdateError {
+    fn from(source: ExecPolicyRuleError) -> Self {
+        Self::AddRule { source }
+    }
 }
 
 pub(crate) struct ExecPolicyManager {
@@ -429,20 +437,35 @@ impl ExecPolicyManager {
                 let prompt_is_rule = evaluation.matched_rules.iter().any(|rule_match| {
                     is_policy_match(rule_match) && rule_match.decision() == evaluation.decision
                 });
-                match prompt_is_rejected_by_policy(approval_policy, prompt_is_rule) {
+                let dangerous_command = dangerous_command_match_for_heuristics(
+                    &evaluation,
+                    Decision::Prompt,
+                    command_origin,
+                    command_platform,
+                );
+                // Reviewing a dangerous command does not grant additional permissions.
+                // Keep explicit rules, escalation requests, and unavailable Windows
+                // sandbox protection on their existing approval-policy paths.
+                let allow_dangerous_command_prompt = matches!(
+                    approval_policy,
+                    AskForApproval::Granular(config) if !config.sandbox_approval
+                ) && !prompt_is_rule
+                    && dangerous_command.is_some()
+                    && !sandbox_permissions.requests_sandbox_override()
+                    && !(command_platform == DangerousCommandPlatform::Windows
+                        && windows_sandbox_level == WindowsSandboxLevel::Disabled
+                        && profile_has_managed_filesystem_restrictions(&permission_profile));
+                let rejection = if allow_dangerous_command_prompt {
+                    None
+                } else {
+                    prompt_is_rejected_by_policy(approval_policy, prompt_is_rule)
+                };
+                match rejection {
                     Some(reason) if prompt_is_rule => ExecApprovalRequirement::Forbidden {
                         reason: reason.to_string(),
                     },
                     Some(reason) => ExecApprovalRequirement::Forbidden {
-                        reason: derive_rejected_prompt_reason(
-                            reason,
-                            dangerous_command_match_for_heuristics(
-                                &evaluation,
-                                Decision::Prompt,
-                                command_origin,
-                                command_platform,
-                            ),
-                        ),
+                        reason: derive_rejected_prompt_reason(reason, dangerous_command),
                     },
                     None if evaluation.decision == Decision::PromptUser => {
                         ExecApprovalRequirement::NeedsHumanApproval {
@@ -451,15 +474,21 @@ impl ExecPolicyManager {
                     }
                     None => ExecApprovalRequirement::NeedsApproval {
                         reason: derive_prompt_reason(command, &evaluation),
-                        proposed_execpolicy_amendment: requested_amendment.or_else(|| {
-                            if auto_amendment_allowed {
-                                try_derive_execpolicy_amendment_for_prompt_rules(
-                                    &evaluation.matched_rules,
-                                )
-                            } else {
-                                None
-                            }
-                        }),
+                        // A reusable allow rule can bypass the sandbox on later calls.
+                        // This approval only authorizes execution with current permissions.
+                        proposed_execpolicy_amendment: if allow_dangerous_command_prompt {
+                            None
+                        } else {
+                            requested_amendment.or_else(|| {
+                                if auto_amendment_allowed {
+                                    try_derive_execpolicy_amendment_for_prompt_rules(
+                                        &evaluation.matched_rules,
+                                    )
+                                } else {
+                                    None
+                                }
+                            })
+                        },
                     },
                 }
             }
@@ -537,14 +566,16 @@ impl ExecPolicyManager {
         Ok(())
     }
 
-    pub(crate) async fn append_network_rule_and_update(
+    /// Keeps the policy used by subsequent calls in step with native enforcement and persistence.
+    pub(crate) async fn apply_network_rule_and_persist(
         &self,
         codex_home: &Path,
         host: &str,
-        protocol: NetworkRuleProtocol,
-        decision: Decision,
-        justification: Option<String>,
-    ) -> Result<(), ExecPolicyUpdateError> {
+        amendment: &NetworkPolicyAmendment,
+        approval_context: &NetworkApprovalContext,
+        proxy: Option<&NetworkProxy>,
+        on_policy_applied: impl FnOnce(),
+    ) -> anyhow::Result<()> {
         let _update_guard =
             self.update_lock
                 .acquire()
@@ -554,19 +585,48 @@ impl ExecPolicyManager {
                         "exec policy update semaphore closed".to_string(),
                     ),
                 })?;
+        let ExecPolicyNetworkRuleAmendment {
+            protocol,
+            decision,
+            justification,
+        } = execpolicy_network_rule_amendment(amendment, approval_context, host);
+        let mut updated_policy = self.current().as_ref().clone();
+        updated_policy.add_network_rule(host, protocol, decision, Some(justification.clone()))?;
+        let updated_policy = Arc::new(updated_policy);
+        if let Some(proxy) = proxy {
+            match amendment.action {
+                NetworkPolicyRuleAction::Allow => proxy
+                    .add_allowed_domain(host)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("failed to update runtime allowlist: {err}"))?,
+                NetworkPolicyRuleAction::Deny => proxy
+                    .add_denied_domain(host)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("failed to update runtime denylist: {err}"))?,
+            }
+        }
+        // Explicit denials also apply to owner-routed calls without a shared proxy. Publish
+        // before the cancellable write. Grants become available to other calls only after a save.
+        if decision == Decision::Forbidden {
+            self.policy.store(Arc::clone(&updated_policy));
+        }
+        let notify_after_save = if proxy.is_some() {
+            on_policy_applied();
+            None
+        } else {
+            Some(on_policy_applied)
+        };
         let policy_path = default_policy_path(codex_home);
-        let host = host.to_string();
         spawn_blocking({
             let policy_path = policy_path.clone();
-            let host = host.clone();
-            let justification = justification.clone();
+            let host = host.to_owned();
             move || {
                 blocking_append_network_rule(
                     &policy_path,
                     &host,
                     protocol,
                     decision,
-                    justification.as_deref(),
+                    Some(&justification),
                 )
             }
         })
@@ -577,9 +637,10 @@ impl ExecPolicyManager {
             source,
         })?;
 
-        let mut updated_policy = self.current().as_ref().clone();
-        updated_policy.add_network_rule(&host, protocol, decision, justification)?;
-        self.policy.store(Arc::new(updated_policy));
+        self.policy.store(updated_policy);
+        if let Some(notify) = notify_after_save {
+            notify();
+        }
         Ok(())
     }
 }

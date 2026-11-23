@@ -8,6 +8,7 @@ use codex_attachment_store::AttachmentStoreErrorKind;
 use codex_attachment_store::IsResolvableFuture;
 use codex_attachment_store::ResolveFuture;
 use codex_attachment_store::ResolveRequest;
+use codex_attachment_store::UploadContent;
 use codex_attachment_store::UploadFuture;
 use codex_attachment_store::UploadRequest;
 use codex_attachment_store::UploadResult;
@@ -265,7 +266,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
             },
             ContentItem::InputImage {
                 image: ImageReference::Inline { image_url },
-                detail: Some(DEFAULT_IMAGE_DETAIL),
+                detail: Some(ImageDetail::Original),
             },
             ContentItem::InputText {
                 text: codex_protocol::models::image_close_tag_text(),
@@ -360,7 +361,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
         content: vec![
             ContentItem::InputImage {
                 image: ImageReference::Inline { image_url },
-                detail: Some(DEFAULT_IMAGE_DETAIL),
+                detail: Some(ImageDetail::Original),
             },
             ContentItem::InputText {
                 text: "dropped image".to_string(),
@@ -640,8 +641,8 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let image_path = initial.cwd.path().join("large-image.png");
     ImageBuffer::from_pixel(
-        /*width*/ 2304,
-        /*height*/ 864,
+        /*width*/ 6400,
+        /*height*/ 256,
         Rgba([12u8, 34, 56, 255]),
     )
     .save(&image_path)?;
@@ -726,10 +727,17 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
             upload.thread_id,
             resumed.session_configured.thread_id.to_string(),
         );
-        assert_eq!(
-            image::load_from_memory(&upload.data)?.dimensions(),
-            (2048, 768)
-        );
+        let UploadContent::Image {
+            file_name,
+            tags,
+            data,
+        } = &upload.content
+        else {
+            panic!("expected image upload");
+        };
+        assert!(file_name.is_none());
+        assert!(tags.is_empty());
+        assert_eq!(image::load_from_memory(data)?.dimensions(), (6000, 240));
     }
 
     let request = resumed_mock.single_request();
@@ -769,7 +777,8 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
         .split_once(',')
         .context("historical image data URL")?;
     let historical_image = image::load_from_memory(&BASE64_STANDARD.decode(encoded_image)?)?;
-    assert_eq!(historical_image.dimensions(), (2048, 768));
+    // Replay honors the high detail recorded with the historical image.
+    assert_eq!(historical_image.dimensions(), (2048, 82));
     assert_eq!(
         input[image_message_indices[1]]
             .get("content")
@@ -782,7 +791,7 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let expected_notice = concat!(
         "<image_resize_notice>\n",
-        "Image 1 of 1 in the preceding user message was resized from 2304x864 to 2048x768 pixels.\n",
+        "Image 1 of 1 in the preceding user message was resized from 6400x256 to 6000x240 pixels.\n",
         "</image_resize_notice>"
     );
     let resize_notices = request
@@ -876,11 +885,11 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
             else {
                 return None;
             };
-            matches!(envelope.item, ResponseItem::Message { role, .. } if role == "developer")
-                .then(|| envelope.metadata.map(|metadata| metadata.client_authored))
+            matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer")
+                .then(|| envelope.is_always_retained())
         })
         .collect::<Vec<_>>();
-    assert_eq!(persisted_developer_metadata, vec![None, Some(true)]);
+    assert_eq!(persisted_developer_metadata, vec![false, true]);
 
     Ok(())
 }

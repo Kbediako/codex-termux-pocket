@@ -34,6 +34,7 @@ use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::http::HeaderName;
 use wiremock::http::HeaderValue;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
@@ -311,6 +312,22 @@ impl ResponsesRequest {
             .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_audio"))
             .filter_map(|span| {
                 span.get("audio_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// Returns all `input_audio` `file_id` spans from `message` inputs for the provided role.
+    pub fn message_input_audio_file_ids(&self, role: &str) -> Vec<String> {
+        self.inputs_of_type("message")
+            .into_iter()
+            .filter(|item| item.get("role").and_then(Value::as_str) == Some(role))
+            .filter_map(|item| item.get("content").and_then(Value::as_array).cloned())
+            .flatten()
+            .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_audio"))
+            .filter_map(|span| {
+                span.get("file_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
@@ -1143,6 +1160,20 @@ where
     response_mock
 }
 
+/// Choose a response from the decoded request, including compressed requests.
+pub async fn mount_response_handler(
+    server: &MockServer,
+    respond: impl Fn(ResponsesRequest) -> ResponseTemplate + Send + Sync + 'static,
+) -> ResponseMock {
+    let (mock, requests) = base_mock();
+    mock.respond_with(move |request: &wiremock::Request| {
+        respond(ResponsesRequest(request.clone()))
+    })
+    .mount(server)
+    .await;
+    requests
+}
+
 fn base_mock() -> (MockBuilder, ResponseMock) {
     let response_mock = ResponseMock::new();
     let mock = Mock::given(method("POST"))
@@ -1240,6 +1271,19 @@ pub async fn start_mock_server() -> MockServer {
     // Provide a default `/models` response so tests remain hermetic when the client queries it.
     let _ = mount_models_once(&server, ModelsResponse { models: Vec::new() }).await;
 
+    server
+}
+
+/// Start a server for tests that serve Responses over HTTP/SSE only.
+/// A 404 on WebSocket upgrade triggers retries; 426 selects the HTTP fallback immediately.
+pub async fn start_sse_server() -> MockServer {
+    let server = start_mock_server().await;
+    Mock::given(method("GET"))
+        .and(path_regex(".*/responses$"))
+        .and(header("upgrade", "websocket"))
+        .respond_with(ResponseTemplate::new(426))
+        .mount(&server)
+        .await;
     server
 }
 

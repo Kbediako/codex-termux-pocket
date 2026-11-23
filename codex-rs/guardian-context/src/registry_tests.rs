@@ -87,6 +87,7 @@ fn registry_collects_target_specific_sections_in_registration_order() {
         target: ContextTarget::Sync,
         history: &history,
         transcript: &transcript,
+        is_selected_exec_output: None,
         root_conversation: &[],
         root_conversation_candidates: None,
         trusted_user_answers: &[],
@@ -102,6 +103,7 @@ fn registry_collects_target_specific_sections_in_registration_order() {
         target: ContextTarget::Async,
         history: &history,
         transcript: &transcript,
+        is_selected_exec_output: None,
         root_conversation: &[],
         root_conversation_candidates: None,
         trusted_user_answers: &[],
@@ -168,6 +170,7 @@ fn registry_skips_optional_sections_and_stops_on_missing_required_evidence() {
                 target,
                 history: &[ResponseItem::Other],
                 transcript: &transcript,
+                is_selected_exec_output: None,
                 root_conversation: &[],
                 root_conversation_candidates: None,
                 trusted_user_answers: &[],
@@ -204,7 +207,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
     ];
     let answers = ["assistant: Publish?\nuser: No.\n".to_string()];
     let reviews = super::PreviousReviews::try_from_fragments(vec![super::PreviousReview {
-        id: codex_protocol::ResponseItemId::new("review"),
+        id: codex_thread_context_ids_test_support::thread_context_ids().next_item("review"),
         fragment: "<guardian_sync_review>debug-secret review</guardian_sync_review>".to_string(),
     }])
     .unwrap();
@@ -256,6 +259,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
             target,
             history: &history,
             transcript: &transcript,
+            is_selected_exec_output: None,
             root_conversation: &root,
             root_conversation_candidates: None,
             trusted_user_answers: &answers.iter().cloned().map(Into::into).collect::<Vec<_>>(),
@@ -321,15 +325,15 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
             let prepared = {
                 let context = super::default_registry().prepare(&input).unwrap();
                 let profile = &super::ContextProfile::synchronous();
-                let transcript = profile.prepare_transcript(
-                    context.transcript_entries(),
+                super::prepare_context(
+                    std::borrow::Cow::Owned(context),
+                    profile,
                     /*entry_number_offset*/ 0,
-                );
-                context.compose(
                     super::ContextPresentation::SyncFull {
                         session_id: "worker",
                     },
-                    transcript,
+                    super::ContextBudgeting::Fixed,
+                    &[],
                 )
             }
             .unwrap()
@@ -381,28 +385,30 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                 })
                 .unwrap();
             assert_eq!(
-                super::prepare_sync_context(
-                    collected.clone(),
+                super::prepare_context(
+                    std::borrow::Cow::Owned(collected.clone()),
                     &super::ContextProfile::synchronous(),
                     /*entry_number_offset*/ 0,
                     super::ContextPresentation::SyncFull {
                         session_id: "worker"
                     },
                     super::ContextBudgeting::Fixed,
+                    &[],
                 )
                 .err(),
                 Some(SectionError::EvidenceLimitExceeded {
                     section: "native_tool_call"
                 })
             );
-            let elastic = super::prepare_sync_context(
-                collected,
+            let elastic = super::prepare_context(
+                std::borrow::Cow::Owned(collected),
                 &super::ContextProfile::synchronous(),
                 /*entry_number_offset*/ 0,
                 super::ContextPresentation::SyncFull {
                     session_id: "worker",
                 },
                 super::ContextBudgeting::Elastic,
+                &[],
             )
             .unwrap();
             let config = super::ElasticBudgetConfig::default();
@@ -433,6 +439,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                     target,
                     history: &[],
                     transcript: &transcript,
+                    is_selected_exec_output: None,
                     root_conversation: &[],
                     root_conversation_candidates: None,
                     trusted_user_answers: &[],

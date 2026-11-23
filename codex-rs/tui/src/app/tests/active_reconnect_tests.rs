@@ -112,6 +112,7 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             let (notice, key) = crate::status::remote_connection::pending_server_version_notice(
                 &app.local_settings.tui,
                 &app.app_server_target,
+                app.config.features.enabled(Feature::DaemonUpdates),
                 /*server_home*/ None,
                 "2.1.0",
                 Some("2.0.0"),
@@ -187,7 +188,6 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
                 app.config.features.get().clone(),
                 app.app_event_tx.clone(),
                 app.dynamic_tool_status_updates.clone(),
-                /*managed_requirement*/ None,
                 /*worktrees*/ None,
             )
             .await?,
@@ -663,7 +663,10 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
         "reconnect_failed",
         format!(
             "{error}\n{}",
-            render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            super::disconnect::normalize_reconnect_status(&render_bottom_popup(
+                &app.chat_widget,
+                /*width*/ 80
+            ))
         )
     );
     tokio::time::resume();
@@ -672,7 +675,7 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
 
 #[tokio::test]
 async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result<()> {
-    for delay in [15, 150] {
+    for (delay, archived) in [(15, false), (15, true), (150, false)] {
         let (mut app, mut events, _) = make_test_app_with_channels().await;
         app.config.model = Some("gpt-test".into());
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -690,6 +693,12 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
                         tokio::time::pause();
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                         tokio::time::resume();
+                        if archived {
+                            return Some(json!({"error": {
+                                "code": -32600,
+                                "message": format!("session {id} is archived. Run `codex unarchive {id}` to unarchive it first."),
+                            }}));
+                        }
                     } else {
                         assert_eq!(request.method, "thread/read");
                     }
@@ -747,19 +756,27 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
                 app.chat_widget.composer_text_with_pending(),
                 "unavailable draft"
             );
-            let history = drain_history(&mut app, &mut tui, &mut session, &mut events).await?;
-            let history = &history[history.find("• This conversation is unavailable").unwrap()..];
-            assert_snapshot!(
-                "unavailable_conversation",
-                format!(
-                    "{history}\n{}",
-                    render_bottom_popup(&app.chat_widget, /*width*/ 80)
-                )
-                .replace(
-                    &test_path_buf("/tmp/project").display().to_string(),
-                    "/tmp/project"
-                )
-            );
+            assert_eq!(app.chat_widget.is_archived_view(), archived);
+            if archived {
+                let notice = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+                assert!(notice.contains("This thread was archived"));
+                assert!(notice.contains("Press U to unarchive"));
+            } else {
+                let history = drain_history(&mut app, &mut tui, &mut session, &mut events).await?;
+                let history =
+                    &history[history.find("• This conversation is unavailable").unwrap()..];
+                assert_snapshot!(
+                    "unavailable_conversation",
+                    format!(
+                        "{history}\n{}",
+                        render_bottom_popup(&app.chat_widget, /*width*/ 80)
+                    )
+                    .replace(
+                        &test_path_buf("/tmp/project").display().to_string(),
+                        "/tmp/project"
+                    )
+                );
+            }
             session.shutdown().await?;
             assert!((15..120).contains(&elapsed), "{elapsed}");
             let methods = server.await??;
@@ -797,7 +814,7 @@ pub(super) async fn drain_history(
                 | AppEvent::BeginThreadSwitchHistoryReplayBuffer
                 | AppEvent::EndInitialHistoryReplayBuffer
         ) {
-            app.handle_event(tui, session, event).await?;
+            crate::boxed_future!(app.handle_event(tui, session, event)).await?;
         }
     }
     Ok(lines_to_single_string(

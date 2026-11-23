@@ -51,7 +51,8 @@ async fn first_request_item_types_roles_and_content_annotations() -> Result<()> 
             });
             config.rollout_budget = Some(RolloutBudgetConfig {
                 enforce_limit: true,
-                limit_tokens: 100,
+                limit_budget: 100.0,
+                reminder_at_context_start: true,
                 reminder_at_remaining_tokens: Vec::new(),
                 sampling_token_weight: 1.0,
                 prefill_token_weight: 1.0,
@@ -210,11 +211,11 @@ async fn first_request_item_types_roles_and_content_annotations() -> Result<()> 
     message developer ["guardian.approved_action"]
     message developer ["generic.developer_instructions","token_budget.context_window_guidance","permissions.instructions","environments.instructions"]
     message developer ["token_budget.context_window","token_budget.context_window","token_budget.context_window"]
-    message developer ["multi_agent.usage_hint"]
+    message developer ["multi_agent.role_instructions"]
     message developer ["multi_agent.mode_instructions"]
     message user ["environments.environment_context"]
     message developer ["additional_content.automation_info"]
-    message user ["additional_content.browser_info"]
+    function_call_output - null
     message user ["user.text","user.image","user.audio"]
     message developer ["rollout_budget.remaining_tokens"]
     message developer ["current_time.reminder"]

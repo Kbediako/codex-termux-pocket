@@ -364,28 +364,43 @@ async fn apply_metadata_update(
     let sqlite_write_result: ThreadStoreResult<()> = if let Some(state_db) = state_db.as_ref() {
         let patch = patch.clone();
         async {
-            let existing =
+            let read_existing = || async {
                 state_db
                     .get_thread(thread_id)
                     .await
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
-                    })?;
-            // Existing timestamp-only observations must not rewrite metadata or its indexes.
-            // Missing rows and changed rollout paths still need the normal repair path.
+                    })
+            };
+            let mut existing = read_existing().await?;
+            // Timestamp and token observations need only the activity columns on an indexed
+            // thread. Keep the full write for path repairs, history promotion, and preview backfill.
             if let Some(updated_at) = patch.updated_at
-                && patch.is_empty_except_updated_at()
-                && existing.as_ref().is_some_and(|metadata| {
-                    rollout_path.as_ref().is_none_or(|path| path == &metadata.rollout_path)
-                })
-                && state_db
-                    .touch_thread_updated_at(thread_id, updated_at)
-                    .await
-                    .map_err(|err| ThreadStoreError::Internal {
-                        message: format!("failed to update thread timestamp for {thread_id}: {err}"),
-                    })?
+                && patch.is_empty_except_updated_at_and_token_usage()
+                && let Some(metadata) = existing.as_ref()
+                && rollout_path.as_ref().is_none_or(|path| path == &metadata.rollout_path)
             {
-                return Ok(());
+                let updated = match patch.token_usage.as_ref() {
+                    None => state_db.touch_thread_updated_at(thread_id, updated_at).await,
+                    Some(usage)
+                        if history_mode.is_none_or(|mode| mode == metadata.history_mode)
+                            && (metadata.preview.is_some() || metadata.first_user_message.is_none()) =>
+                    {
+                        state_db.update_thread_token_usage(metadata, updated_at, usage.total_tokens).await
+                    }
+                    Some(_) => Ok(false),
+                }
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to update thread activity for {thread_id}: {err}"),
+                })?;
+                if updated {
+                    return Ok(());
+                }
+                if patch.token_usage.is_some() {
+                    // A source change or deletion can race the first read. Repair from the
+                    // current row so an older snapshot cannot supply the wrong spawn parent.
+                    existing = read_existing().await?;
+                }
             }
             let project_id = if existing.is_none()
                 && let Some(Some(project_id)) = patch.project_id.as_ref()
@@ -656,22 +671,23 @@ async fn metadata_for_missing_sqlite_row(
         .created_at
         .or(patch.updated_at)
         .unwrap_or_else(Utc::now);
-    let mut builder = ThreadMetadataBuilder::new(
+    let builder = ThreadMetadataBuilder::new(
         thread_id,
         rollout_path.to_path_buf(),
         created_at,
         patch.source.clone().unwrap_or(SessionSource::Unknown),
-    );
-    builder.model_provider = patch.model_provider.clone();
+    )
+    .with_model_provider(patch.model_provider.clone());
     let (history_mode, attached_thread_parent_id) =
         canonical_history_mode_and_attachment(store, thread_id, rollout_path).await?;
-    builder.history_mode = history_mode;
-    builder.thread_source = patch.thread_source.clone().flatten();
-    builder.agent_nickname = patch.agent_nickname.clone().flatten();
-    builder.agent_role = patch.agent_role.clone().flatten();
-    builder.agent_path = patch.agent_path.clone().flatten();
-    builder.cwd = patch.cwd.clone().map(normalize_cwd).unwrap_or_default();
-    builder.cli_version = patch.cli_version.clone();
+    let builder = builder
+        .with_history_mode(history_mode)
+        .with_thread_source(patch.thread_source.clone().flatten())
+        .with_agent_nickname(patch.agent_nickname.clone().flatten())
+        .with_agent_role(patch.agent_role.clone().flatten())
+        .with_agent_path(patch.agent_path.clone().flatten())
+        .with_cwd(patch.cwd.clone().map(normalize_cwd).unwrap_or_default())
+        .with_cli_version(patch.cli_version.clone().unwrap_or_default());
     let mut metadata = builder.build(store.config.default_model_provider_id.as_str());
     metadata.attached_thread_parent_id = attached_thread_parent_id;
     if rollout_path_archived {
@@ -1068,6 +1084,7 @@ mod tests {
         assert_eq!(pinned_metadata.source, "cli");
         let pinned_page = store
             .list_threads(ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::RecencyAt,
@@ -2287,6 +2304,7 @@ mod tests {
         assert_eq!(metadata.cwd, normalized_cwd);
         let page = store
             .list_threads(ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::UpdatedAt,

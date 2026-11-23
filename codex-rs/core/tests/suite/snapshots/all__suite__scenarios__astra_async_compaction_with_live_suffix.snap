@@ -6,15 +6,15 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 
 ## Window 1
 -- request 1 (request) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -23,10 +23,9 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
           - function/wait_agent
 01:message/developer:
     <MODEL_INSTRUCTIONS>
-02:message/developer[3]:
+02:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
-    [03] install_budget: 400 tokens remain.
+    [02] install_budget: 400 tokens remain.
 03:message/developer:
     <MULTI_AGENT_ROLE>
 04:message/developer:
@@ -45,15 +44,15 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 
 ## Window 2 (after request 2: input diverged at item 10)
 -- request 3 (request) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -62,10 +61,9 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
           - function/wait_agent
 01:message/developer:
     <MODEL_INSTRUCTIONS>
-02:message/developer[3]:
+02:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
-    [03] install_budget: 400 tokens remain.
+    [02] install_budget: 400 tokens remain.
 03:message/developer:
     <MULTI_AGENT_ROLE>
 04:message/developer:
@@ -88,15 +86,15 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 
 ## Window 3 (after request 3: input diverged at item 02)
 -- request 4 (request) --
-00:additional_tools/developer (3; hash=bf2e30605ff5dc17):
-        - namespace/functions; hash=fada4a476a3754dd
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -108,10 +106,9 @@ Scenario: Astra compacts a completed launch-notes turn in the background. The us
 02:message/user:
     Draft the launch notes.
 03:compaction:encrypted=true; chars=23; hash=159cfcb231cc70f0
-04:message/developer[3]:
+04:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <COLLABORATION_MODE>
-    [03] install_budget: 400 tokens remain.
+    [02] install_budget: 400 tokens remain.
 05:message/developer:
     <MULTI_AGENT_ROLE>
 06:message/developer:

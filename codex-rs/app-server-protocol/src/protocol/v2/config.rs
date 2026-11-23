@@ -25,6 +25,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -202,6 +203,7 @@ pub struct AppsDefaultConfig {
 pub struct AppToolConfig {
     pub enabled: Option<bool>,
     pub approval_mode: Option<AppToolApproval>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -505,6 +507,8 @@ pub struct FeedbackRequirements {
 #[serde(rename_all = "snake_case")]
 #[ts(export_to = "v2/")]
 pub struct OtelRequirements {
+    pub headers_helper: Option<String>,
+    pub headers_helper_refresh_interval_ms: Option<NonZeroU64>,
     pub tool_result: Option<OtelToolResultLogConfig>,
     pub log_sse_deltas: Option<bool>,
     pub log_user_prompt: Option<bool>,
@@ -734,6 +738,14 @@ pub struct ConfiguredHookMatcherGroup {
     pub hooks: Vec<ConfiguredHookHandler>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ConfiguredHookFailurePolicy {
+    Continue,
+    Block,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(tag = "type")]
 #[ts(tag = "type", export_to = "v2/")]
@@ -752,6 +764,9 @@ pub enum ConfiguredHookHandler {
         #[serde(rename = "statusMessage")]
         #[ts(rename = "statusMessage")]
         status_message: Option<String>,
+        #[serde(rename = "onFailure")]
+        #[ts(rename = "onFailure")]
+        on_failure: Option<ConfiguredHookFailurePolicy>,
         /// Approximate token threshold for spilling this hook's `additionalContext` to disk.
         /// `null` uses 2,500 tokens; `0` disables spilling for this hook. The threshold is
         /// evaluated against the original context; a spilled preview also includes recovery
@@ -772,6 +787,9 @@ pub enum ConfiguredHookHandler {
         #[serde(rename = "statusMessage")]
         #[ts(rename = "statusMessage")]
         status_message: Option<String>,
+        #[serde(rename = "onFailure")]
+        #[ts(rename = "onFailure")]
+        on_failure: Option<ConfiguredHookFailurePolicy>,
     },
     #[serde(rename = "prompt")]
     #[ts(rename = "prompt")]

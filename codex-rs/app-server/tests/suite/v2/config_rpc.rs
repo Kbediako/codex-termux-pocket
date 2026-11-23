@@ -261,20 +261,23 @@ async fn config_requirements_read_includes_remote_control_and_managed_hooks() ->
 
 [hooks]
 
-[[hooks.SessionStart]]
+[[hooks.PreToolUse]]
+matcher = "config-read-fixture"
 
-[[hooks.SessionStart.hooks]]
+[[hooks.PreToolUse.hooks]]
 type = "command"
 command = "echo managed"
 additionalContextLimit = 4096
+onFailure = "block"
 
-[[hooks.SessionStart.hooks]]
+[[hooks.PreToolUse.hooks]]
 type = "mcp_tool"
 server = "security"
 tool = "scan"
 input = { path = "${tool_input.file_path}", metadata = { enabled = true, retries = 2 } }
 timeout = 30
 statusMessage = "Scanning file"
+onFailure = "continue"
 "#,
     )?;
     let mut mcp = TestAppServer::builder()
@@ -294,7 +297,10 @@ statusMessage = "Scanning file"
         requirements
             .hooks
             .expect("managed hooks should be returned")
-            .session_start[0]
+            .pre_tool_use
+            .into_iter()
+            .find(|group| group.matcher.as_deref() == Some("config-read-fixture"))
+            .expect("fixture hook group should be returned")
             .hooks,
         vec![
             ConfiguredHookHandler::Command {
@@ -303,6 +309,7 @@ statusMessage = "Scanning file"
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,
+                on_failure: Some(codex_app_server_protocol::ConfiguredHookFailurePolicy::Block),
                 additional_context_limit: Some(4_096),
             },
             ConfiguredHookHandler::McpTool {
@@ -314,6 +321,7 @@ statusMessage = "Scanning file"
                 }))?,
                 timeout_sec: Some(30),
                 status_message: Some("Scanning file".to_string()),
+                on_failure: Some(codex_app_server_protocol::ConfiguredHookFailurePolicy::Continue),
             },
         ]
     );
@@ -711,10 +719,17 @@ async fn config_requirements_read_redacts_otel_exporter_headers(
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
+    let helper = if cfg!(windows) {
+        "C:/company/otel-headers.exe"
+    } else {
+        "/opt/company/otel-headers"
+    };
     // Read policy without starting exporters or opening the example TLS files.
     std::fs::write(
         codex_home.path().join("requirements.toml"),
         r#"[otel]
+headers_helper = "$HELPER"
+headers_helper_refresh_interval_ms = 60000
 tool_result = { max_bytes = 1024 }
 log_user_prompt = false
 log_sse_deltas = false
@@ -726,6 +741,7 @@ trace_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317", headers = {
 metrics_exporter = "$METRICS_EXPORTER"
 span_attributes = { "service.name" = "managed-service" }
 tracestate = { managed = { tenant = "enterprise" } }"#
+            .replace("$HELPER", helper)
             .replace("$PROTOCOL", protocol)
             .replace("$METRICS_EXPORTER", metrics_exporter),
     )?;
@@ -735,6 +751,8 @@ tracestate = { managed = { tenant = "enterprise" } }"#
     assert_eq!(
         response["requirements"]["otel"],
         json!({
+            "headers_helper": helper,
+            "headers_helper_refresh_interval_ms": 60000,
             "tool_result": { "max_bytes": 1024 },
             "log_user_prompt": false,
             "log_sse_deltas": false,
@@ -854,6 +872,33 @@ metrics_exporter = { otlp-http = { endpoint = "http://127.0.0.1:1/v1/metrics", p
     Ok(())
 }
 
+#[tokio::test]
+async fn config_read_with_relative_cwd_picks_up_external_edits() -> Result<()> {
+    let home = TempDir::new()?;
+    write_config(&home, r#"model = "before""#)?;
+    let mut server = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let mut models = Vec::new();
+    for model in ["before", "after"] {
+        write_config(&home, &format!(r#"model = "{model}""#))?;
+        let id = server
+            .send_config_read_request(ConfigReadParams {
+                include_layers: false,
+                cwd: Some(".".into()),
+            })
+            .await?;
+        let response: ConfigReadResponse =
+            timeout(DEFAULT_READ_TIMEOUT, server.read_response(id)).await??;
+        models.push(response.config.model);
+    }
+    assert_eq!(models, [Some("before".into()), Some("after".into())]);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_read_returns_effective_and_layers() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -899,7 +944,7 @@ sandbox_mode = "workspace-write"
             .all(|origin| !matches!(&origin.name, ConfigLayerSource::PackagedDefaults { .. }))
     );
     let layers = layers.expect("layers present");
-    assert_layers_user_then_optional_system(&layers, user_file)?;
+    assert_config_layers(&layers, user_file, /*managed_file*/ None);
 
     Ok(())
 }
@@ -970,7 +1015,7 @@ allowed_domains = ["example.com"]
         }
     );
     let layers = layers.expect("layers present");
-    assert_layers_user_then_optional_system(&layers, user_file)?;
+    assert_config_layers(&layers, user_file, /*managed_file*/ None);
 
     Ok(())
 }
@@ -1379,6 +1424,7 @@ omit_tools_from = ["deferred"]
 approvals_reviewer = "user"
 destructive_enabled = false
 default_tools_approval_mode = "prompt"
+tools.list.approvals_reviewer = "auto_review"
 
 [apps.app1.links.link_work]
 approvals_reviewer = "auto_review"
@@ -1426,6 +1472,10 @@ enabled = false
         response["config"]["apps"]["app_with_empty_links"].get("links"),
         Some(&json!({})),
     );
+    assert_eq!(
+        response["config"]["apps"]["app1"]["tools"]["list"].get("approvals_reviewer"),
+        Some(&json!("auto_review")),
+    );
     let ConfigReadResponse {
         config,
         origins,
@@ -1453,7 +1503,9 @@ enabled = false
                         open_world_enabled: None,
                         default_tools_approval_mode: Some(AppToolApproval::Prompt),
                         default_tools_enabled: None,
-                        tools: Some(serde_json::from_value(json!({"list": {"enabled": false}}))?),
+                        tools: Some(serde_json::from_value(json!({
+                            "list": {"enabled": false, "approvals_reviewer": "auto_review"}
+                        }))?),
                         links: Some(AppLinksConfig {
                             links: std::collections::HashMap::from([
                                 (
@@ -1570,7 +1622,7 @@ enabled = false
         origins["apps.app1.tools.list.enabled"],
         origins["plugins.sample@test.apps.app1.tools.list.enabled"],
     );
-    assert_layers_user_then_optional_system(&layers, user_file)?;
+    assert_config_layers(&layers, user_file, /*managed_file*/ None);
 
     Ok(())
 }
@@ -1854,20 +1906,26 @@ writable_roots = [{}]
     );
 
     let layers = layers.expect("layers present");
-    assert_layers_managed_user_then_optional_system(&layers, managed_file, user_file)?;
+    assert_config_layers(&layers, user_file, Some(managed_file));
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_value_write_replaces_value() -> Result<()> {
+async fn config_value_write_replaces_value_despite_stale_daemon_update_setting() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let codex_home = temp_dir.path().canonicalize()?;
     write_config(
         &temp_dir,
         r#"
 model = "gpt-old"
+[features]
+daemon_updates = true
 "#,
+    )?;
+    std::fs::write(
+        codex_home.join("requirements.toml"),
+        "[features]\ndaemon_updates = false\n",
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -2875,59 +2933,48 @@ async fn config_batch_write_updates_multiple_desktop_settings() -> Result<()> {
     Ok(())
 }
 
-fn assert_layers_user_then_optional_system(
+fn assert_config_layers(
     layers: &[codex_app_server_protocol::ConfigLayer],
     user_file: AbsolutePathBuf,
-) -> Result<()> {
-    let mut first_index = 0;
-    if matches!(
+    managed_file: Option<AbsolutePathBuf>,
+) {
+    let layers = if matches!(
         layers.first().map(|layer| &layer.name),
         Some(ConfigLayerSource::LegacyManagedConfigTomlFromMdm)
     ) {
-        first_index = 1;
-    }
-    assert_eq!(layers.len(), first_index + 2);
+        &layers[1..]
+    } else {
+        layers
+    };
+    let layers = if let Some(file) = managed_file {
+        let (managed, remaining) = layers.split_first().expect("managed config layer");
+        assert_eq!(
+            managed.name,
+            ConfigLayerSource::LegacyManagedConfigTomlFromFile { file }
+        );
+        remaining
+    } else {
+        layers
+    };
+    let [flags, user, system] = layers else {
+        panic!("expected session flags, user, and system layers, got {layers:?}");
+    };
+    assert_eq!(flags.name, ConfigLayerSource::SessionFlags);
     assert_eq!(
-        layers[first_index].name,
+        flags.config,
+        json!({
+            "features": {
+                "tool_suggest": false,
+                "recommended_plugins": false,
+            },
+        })
+    );
+    assert_eq!(
+        user.name,
         ConfigLayerSource::User {
             file: user_file,
             profile: None
         }
     );
-    assert!(matches!(
-        layers[first_index + 1].name,
-        ConfigLayerSource::System { .. }
-    ));
-    Ok(())
-}
-
-fn assert_layers_managed_user_then_optional_system(
-    layers: &[codex_app_server_protocol::ConfigLayer],
-    managed_file: AbsolutePathBuf,
-    user_file: AbsolutePathBuf,
-) -> Result<()> {
-    let mut first_index = 0;
-    if matches!(
-        layers.first().map(|layer| &layer.name),
-        Some(ConfigLayerSource::LegacyManagedConfigTomlFromMdm)
-    ) {
-        first_index = 1;
-    }
-    assert_eq!(layers.len(), first_index + 3);
-    assert_eq!(
-        layers[first_index].name,
-        ConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
-    );
-    assert_eq!(
-        layers[first_index + 1].name,
-        ConfigLayerSource::User {
-            file: user_file,
-            profile: None
-        }
-    );
-    assert!(matches!(
-        layers[first_index + 2].name,
-        ConfigLayerSource::System { .. }
-    ));
-    Ok(())
+    assert!(matches!(system.name, ConfigLayerSource::System { .. }));
 }

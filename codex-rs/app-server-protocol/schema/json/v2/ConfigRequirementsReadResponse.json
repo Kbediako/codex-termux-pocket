@@ -673,6 +673,13 @@
       },
       "type": "object"
     },
+    "ConfiguredHookFailurePolicy": {
+      "enum": [
+        "continue",
+        "block"
+      ],
+      "type": "string"
+    },
     "ConfiguredHookHandler": {
       "oneOf": [
         {
@@ -696,6 +703,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "onFailure": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ConfiguredHookFailurePolicy"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "statusMessage": {
@@ -733,6 +750,16 @@
             "input": {
               "additionalProperties": true,
               "type": "object"
+            },
+            "onFailure": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ConfiguredHookFailurePolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "server": {
               "type": "string"
@@ -1264,6 +1291,20 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "headers_helper": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers_helper_refresh_interval_ms": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
           ]
         },
         "log_agent_responses": {

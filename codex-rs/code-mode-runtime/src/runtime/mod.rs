@@ -14,12 +14,12 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 
 use crate::TaskFailureHandler;
+use crate::ToolPreload;
+use crate::session_runtime::CreateCellRequest;
 use crate::session_runtime::OutputItem;
+use crate::session_runtime::ToolCatalog;
 use crate::v8_init::ensure_v8_initialized;
 use codex_code_mode_protocol::CodeModeToolKind;
-use codex_code_mode_protocol::EnabledToolMetadata;
-use codex_code_mode_protocol::ExecuteRequest;
-use codex_code_mode_protocol::normalize_code_mode_identifier;
 use codex_protocol::ToolName;
 pub(crate) use event_channel::RuntimeEventReceiver;
 pub(crate) use event_channel::RuntimeEventSender;
@@ -74,7 +74,7 @@ pub(crate) enum RuntimeEvent {
 
 pub(crate) fn spawn_runtime(
     stored_values: HashMap<String, Arc<JsonValue>>,
-    request: ExecuteRequest,
+    request: CreateCellRequest,
     event_tx: impl Into<RuntimeEventSender>,
     pending_mode: PendingRuntimeMode,
     task_failure_handler: Option<TaskFailureHandler>,
@@ -93,19 +93,10 @@ pub(crate) fn spawn_runtime(
     let (control_tx, control_rx) = std_mpsc::channel();
     let runtime_command_tx = command_tx.clone();
     let (isolate_handle_tx, isolate_handle_rx) = std_mpsc::sync_channel(1);
-    let enabled_tools = request
-        .enabled_tools
-        .into_iter()
-        .map(|definition| EnabledToolMetadata {
-            global_name: normalize_code_mode_identifier(&definition.name),
-            tool_name: definition.tool_name,
-            description: definition.description,
-            kind: definition.kind,
-        })
-        .collect::<Vec<_>>();
     let config = RuntimeConfig {
         tool_call_id: request.tool_call_id,
-        enabled_tools,
+        enabled_tools: request.enabled_tools,
+        tool_preloads: request.tool_preloads,
         source: request.source,
         stored_values,
     };
@@ -149,15 +140,10 @@ fn spawn_supervised_runtime_thread(
 #[derive(Clone)]
 struct RuntimeConfig {
     tool_call_id: String,
-    enabled_tools: Vec<EnabledToolMetadata>,
+    enabled_tools: ToolCatalog,
+    tool_preloads: &'static [ToolPreload],
     source: String,
     stored_values: HashMap<String, Arc<JsonValue>>,
-}
-
-// Callback indices refer to this cell's original catalog for its entire lifetime.
-struct ToolCallbackMetadata {
-    tool_name: ToolName,
-    kind: CodeModeToolKind,
 }
 
 pub(super) struct RuntimeState {
@@ -166,7 +152,7 @@ pub(super) struct RuntimeState {
     pending_timeouts: HashMap<u64, timers::ScheduledTimeout>,
     stored_values: HashMap<String, Arc<JsonValue>>,
     stored_value_writes: HashMap<String, Arc<JsonValue>>,
-    enabled_tools: Vec<ToolCallbackMetadata>,
+    enabled_tools: ToolCatalog,
     next_tool_call_id: u64,
     next_timeout_id: u64,
     tool_call_id: String,
@@ -199,31 +185,24 @@ fn run_runtime(
     let context = v8::Context::new(scope, Default::default());
     let scope = &mut v8::ContextScope::new(scope, context);
 
-    if let Err(error_text) = globals::install_globals(scope, &config.enabled_tools) {
-        send_result(&event_tx, HashMap::new(), Some(error_text));
-        return;
-    }
-
     scope.set_slot(RuntimeState {
         event_tx: event_tx.clone(),
         pending_tool_calls: HashMap::new(),
         pending_timeouts: HashMap::new(),
         stored_values: config.stored_values,
         stored_value_writes: HashMap::new(),
-        enabled_tools: config
-            .enabled_tools
-            .into_iter()
-            .map(|tool| ToolCallbackMetadata {
-                tool_name: tool.tool_name,
-                kind: tool.kind,
-            })
-            .collect(),
+        enabled_tools: config.enabled_tools,
         next_tool_call_id: 1,
         next_timeout_id: 1,
         tool_call_id: config.tool_call_id,
         runtime_command_tx,
         exit_requested: false,
     });
+
+    if let Err(error_text) = globals::install_globals(scope, config.tool_preloads) {
+        send_result(&event_tx, HashMap::new(), Some(error_text));
+        return;
+    }
 
     let _ = event_tx.blocking_send(RuntimeEvent::Started);
 
@@ -352,7 +331,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio::sync::mpsc;
 
-    use super::ExecuteRequest;
+    use super::CreateCellRequest;
     use super::PendingRuntimeMode;
     use super::RuntimeCommand;
     use super::RuntimeControlCommand;
@@ -361,13 +340,13 @@ mod tests {
     use super::spawn_supervised_runtime_thread;
     use crate::session_runtime::OutputItem;
 
-    fn execute_request(source: &str) -> ExecuteRequest {
-        ExecuteRequest {
+    fn execute_request(source: &str) -> CreateCellRequest {
+        CreateCellRequest {
             tool_call_id: "call_1".to_string(),
-            enabled_tools: Vec::new(),
+            enabled_tools: Default::default(),
+            tool_preloads: &[],
             source: source.to_string(),
-            yield_time_ms: Some(1),
-            max_output_tokens: None,
+            output_truncation: codex_code_mode_protocol::CodeModeOutputTruncation::Client,
         }
     }
 

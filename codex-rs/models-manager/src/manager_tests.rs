@@ -17,6 +17,7 @@ use codex_login::ExternalAuthRefreshContext;
 use codex_login::TokenData;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
+use codex_protocol::openai_models::DaybreakAvailability;
 use codex_protocol::openai_models::ModelAccessPrograms;
 use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelsResponse;
@@ -373,10 +374,8 @@ async fn file_cache_implements_models_cache_contract() {
         client_version: Some(client_version.clone()),
         models: vec![ModelInfo {
             available_access_programs: Some(ModelAccessPrograms {
-                cyber: vec![
-                    CyberAccessProgram::Standard,
-                    CyberAccessProgram::DaybreakBlue,
-                ],
+                daybreak_availability: DaybreakAvailability::EnrollmentRequired,
+                cyber: vec![CyberAccessProgram::Standard],
             }),
             ..remote_model("file-cached", "File Cached", /*priority*/ 0)
         }],
@@ -566,6 +565,9 @@ async fn injected_cache_write_error_does_not_fail_remote_refresh() {
         .await;
 
     assert_eq!(catalog.models, remote_models);
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
     assert_eq!(
         manager
             .model_catalog_with_origins(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
@@ -579,6 +581,34 @@ async fn injected_cache_write_error_does_not_fail_remote_refresh() {
             .collect::<Vec<_>>()
     );
     assert_eq!(endpoint.fetch_count(), 1);
+}
+
+#[tokio::test]
+async fn initialization_retains_loaded_catalogs_including_empty_responses() {
+    for models in [
+        Vec::new(),
+        vec![remote_model("remote", "Remote", /*priority*/ 0)],
+    ] {
+        let endpoint = TestModelsEndpoint::new(vec![models.clone()]);
+        let manager = OpenAiModelsManager::with_settings(
+            ModelCatalogSettings {
+                skip_bundled_seed: true,
+                ..Default::default()
+            },
+            endpoint.clone(),
+            /*auth_manager*/ None,
+        );
+        assert!(manager.remote_models.read().await.entry.models.is_empty());
+        let manager = manager.with_provider_catalog();
+        manager
+            .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+        manager
+            .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+        assert_eq!(manager.get_remote_models().await, models);
+        assert_eq!(endpoint.fetch_count(), 1);
+    }
 }
 
 #[tokio::test]
@@ -1200,6 +1230,7 @@ async fn authoritative_catalog_access_rejection_invalidates_cache_until_refresh_
                     .await,
                 ModelsResponse::default()
             );
+            assert!(manager.refreshed_model_catalog().is_none());
         }
         let restarted =
             OpenAiModelsManager::new_with_cache(cache, endpoint, /*auth_manager*/ None)
@@ -1267,6 +1298,8 @@ async fn authoritative_catalog_refresh_failure_preserves_snapshot_and_freshness(
         let initial = manager
             .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
             .await;
+        let updates = manager.model_catalog_updates().unwrap();
+        let refreshed = manager.refreshed_model_catalog();
         let initial_info = manager
             .get_model_info("provider-model", &ModelsManagerConfig::default())
             .await;
@@ -1285,6 +1318,11 @@ async fn authoritative_catalog_refresh_failure_preserves_snapshot_and_freshness(
         );
         assert_eq!(manager.remote_models.read().await.entry, stored[0]);
         assert_eq!(cache.stored_entries(), stored);
+        assert!(
+            !updates.has_changed().unwrap(),
+            "failed fetch must not publish a refreshed catalog"
+        );
+        assert_eq!(manager.refreshed_model_catalog(), refreshed);
 
         let restarted = OpenAiModelsManager::new_with_cache(
             cache.clone(),
@@ -1385,6 +1423,7 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
     let codex_home = tempdir().expect("temp dir");
     let granted_model = ModelInfo {
         available_access_programs: Some(ModelAccessPrograms {
+            daybreak_availability: Default::default(),
             cyber: vec![
                 CyberAccessProgram::Standard,
                 CyberAccessProgram::DaybreakBlue,
@@ -1393,7 +1432,10 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
         ..remote_model("access-programs", "Access Programs", /*priority*/ 0)
     };
     let revoked_model = ModelInfo {
-        available_access_programs: Some(ModelAccessPrograms { cyber: Vec::new() }),
+        available_access_programs: Some(ModelAccessPrograms {
+            cyber: Vec::new(),
+            daybreak_availability: Default::default(),
+        }),
         ..granted_model.clone()
     };
     let responses = vec![vec![granted_model.clone()], vec![revoked_model.clone()]];

@@ -2,6 +2,7 @@ use core_test_support::test_codex::local_requests;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_config::config_toml::ResponseProcessMode;
 use codex_core::CodexThread;
 use codex_core::InputWaitOutcome;
 use codex_core::StartIfIdleSubmission;
@@ -515,17 +516,26 @@ impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config>
     }
 }
 
-#[test_case(false, Some("automation"), None, false; "live_root")]
-#[test_case(true, Some("automation"), None, false; "reloaded_root")]
-#[test_case(true, Some("automation"), Some("original-parent"), false; "reloaded_delegated")]
-#[test_case(true, None, None, false; "reloaded_unknown")]
-#[test_case(false, Some("automation"), Some("original-parent"), true; "settings_while_asleep")]
+#[derive(Clone, Copy)]
+enum MailDelivery {
+    Native,
+    Injected,
+}
+
+#[test_case(false, Some("automation"), None, false, MailDelivery::Native; "live_root")]
+#[test_case(true, Some("automation"), None, false, MailDelivery::Native; "reloaded_root")]
+#[test_case(true, Some("automation"), Some("original-parent"), false, MailDelivery::Native; "reloaded_delegated")]
+#[test_case(true, None, None, false, MailDelivery::Native; "reloaded_unknown")]
+#[test_case(false, Some("automation"), Some("original-parent"), true, MailDelivery::Native; "settings_while_asleep")]
+#[test_case(false, Some("automation"), None, false, MailDelivery::Injected; "injected_live_root")]
+#[test_case(true, Some("automation"), Some("original-parent"), false, MailDelivery::Injected; "injected_reloaded_root")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context(
     reload: bool,
     trigger: Option<&str>,
     parent: Option<&str>,
     update_settings: bool,
+    delivery: MailDelivery,
 ) -> anyhow::Result<()> {
     const CHILD_MESSAGE: &str = "worker completed";
 
@@ -545,6 +555,18 @@ async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context(
     let mut builder = test_codex()
         .with_model("gpt-5.4")
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            if matches!(delivery, MailDelivery::Injected) {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("enable native mail");
+                config
+                    .features
+                    .disable(Feature::WakeOnAgentMessages)
+                    .expect("wake only for sleep");
+            }
+        })
         .with_extensions(Arc::new(extensions.build()));
     let mut test = builder.build_with_auto_env(&server).await?;
 
@@ -594,7 +616,22 @@ async fn queue_only_agent_mail_wakes_sleeping_root_with_previous_turn_context(
         )
         .await?;
     }
-    enqueue_queue_only_agent_mail(&test.codex, CHILD_MESSAGE).await;
+    if matches!(delivery, MailDelivery::Injected) {
+        test.codex
+            .inject_response_items(vec![
+                InterAgentCommunication::new(
+                    AgentPath::try_from("/root/worker").expect("worker path"),
+                    AgentPath::root(),
+                    Vec::new(),
+                    CHILD_MESSAGE.to_owned(),
+                    /*trigger_turn*/ false,
+                )
+                .to_model_input_item(),
+            ])
+            .await?;
+    } else {
+        enqueue_queue_only_agent_mail(&test.codex, CHILD_MESSAGE).await;
+    }
     wait_for_turn_complete(&test.codex).await;
 
     let captured = requests.requests();
@@ -1597,7 +1634,15 @@ async fn steer_interrupts_and_drains_websocket(
 ) -> anyhow::Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));
 
+    const CALL_ID: &str = "stale-write";
+    const FILE_NAME: &str = "stale-write.txt";
+    let mut write = responses::ev_apply_patch_custom_tool_call(
+        CALL_ID,
+        &format!("*** Begin Patch\n*** Add File: {FILE_NAME}\n+stale\n*** End Patch"),
+    );
+    write["item"]["id"] = json!("stale-write-item");
     let mut interrupted = ev_completed_with_tokens("resp-interrupted", /*total_tokens*/ 42);
+    interrupted["response"]["usage"]["codex_rollout_budget_units"] = json!(17);
     if acknowledgement == Some("response.interrupt.accepted") {
         interrupted["type"] = json!("response.incomplete");
         interrupted["response"]["status"] = json!("incomplete");
@@ -1607,7 +1652,10 @@ async fn steer_interrupts_and_drains_websocket(
         vec![ev_response_created("warm-1"), ev_completed("warm-1")],
         vec![
             ev_response_created("resp-interrupted"),
+            write,
             ev_reasoning_item_added("reason-1", &["thinking"]),
+            json!({"type":"response.metadata", "response_id":"resp-interrupted",
+                "metadata":{"type":"safety_buffering","use_cases":["cyber"],"reasons":["policy-check"]}}),
         ],
         // Finish the active response only after receiving response.interrupt.
         [
@@ -1623,7 +1671,7 @@ async fn steer_interrupts_and_drains_websocket(
                     "type": "response.output_item.interrupted",
                     "response_id": "resp-interrupted",
                     "item_id": "reason-1",
-                    "output_index": 0,
+                    "output_index": 1,
                     "sequence_number": 4,
                 })
             } else {
@@ -1640,12 +1688,27 @@ async fn steer_interrupts_and_drains_websocket(
         ],
     ]])
     .await;
+    let accounting = Arc::new(super::rollout_budget::HostAccounting::default());
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(accounting.clone());
     let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
         .with_model("gpt-5.4")
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.use_responses_lite = true;
         })
         .with_config(|config| {
+            config.response_process_mode = ResponseProcessMode::AfterCompleteResponse;
+            config.workspace_roots = vec![config.cwd.clone()];
+            config
+                .permissions
+                .set_workspace_roots(config.workspace_roots.clone());
+            config.permissions.approval_policy =
+                codex_core::config::Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write())
+                .expect("allow the fixture's patch inside its temporary workspace");
             config
                 .features
                 .enable(Feature::InstantInterrupt)
@@ -1656,7 +1719,11 @@ async fn steer_interrupts_and_drains_websocket(
     let codex = &test.codex;
 
     submit_user_input(codex, "first prompt").await;
-    wait_for_reasoning_item_started(codex).await;
+    // The safety notification follows the buffered call and reasoning item. The
+    // websocket is still open, and the provider awaits the client's interrupt.
+    wait_for_event(codex, |event| matches!(event, EventMsg::SafetyBuffering(_))).await;
+    let marker = test.workspace_path(FILE_NAME);
+    assert!(!marker.try_exists()?);
     let initial_request = server
         .wait_for_request(/*connection_index*/ 0, /*request_index*/ 1)
         .await
@@ -1682,6 +1749,10 @@ async fn steer_interrupts_and_drains_websocket(
         .filter(|text| text == "first prompt" || text == "second prompt")
         .collect::<Vec<_>>();
     assert_eq!(prompts, vec!["second prompt"]);
+    assert_eq!(
+        call_output_text(&follow_up, "custom_tool_call_output", CALL_ID).as_deref(),
+        Some("aborted before dispatch")
+    );
     wait_for_event(codex, |event| {
         matches!(
             event,
@@ -1691,6 +1762,16 @@ async fn steer_interrupts_and_drains_websocket(
     })
     .await;
     wait_for_successful_turn(codex).await;
+    assert!(!marker.try_exists()?);
+    let billed_units = accounting
+        .reports
+        .lock()
+        .expect("usage reports")
+        .iter()
+        .filter_map(|report| report.usage.as_ref()?.codex_rollout_budget_units.as_ref())
+        .map(serde_json::Number::as_i64)
+        .collect::<Vec<_>>();
+    assert_eq!(billed_units, [Some(17)]);
 
     assert_eq!(server.connections().len(), 1);
     codex.shutdown_and_wait().await?;

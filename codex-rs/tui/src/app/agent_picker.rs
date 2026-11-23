@@ -3,6 +3,7 @@
 use super::agent_navigation::AgentPickerThreadVisibility;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
+use super::sidebar_subagents::PendingLink;
 use super::*;
 use crate::app_event::AgentPickerThreadRefresh;
 use codex_app_server_protocol::RequestId;
@@ -40,7 +41,9 @@ impl App {
                             .request_typed::<ThreadListResponse>(ClientRequest::ThreadList {
                                 request_id: RequestId::String(Uuid::new_v4().to_string()),
                                 params: ThreadListParams {
+                                    include_attached_threads: false,
                                     current_account_only: false,
+                                    included_thread_ids: None,
                                     excluded_thread_ids: None,
                                     attached_to_thread_id: None,
                                     originators: None,
@@ -109,15 +112,16 @@ impl App {
         root: ThreadId,
         request_id: Uuid,
         result: Result<AgentPickerThreadRefresh, String>,
-    ) {
-        let Some(completion) = self
+    ) -> Option<PendingLink> {
+        let completion = self
             .agent_navigation
-            .finish_picker_refresh(root, request_id)
-        else {
-            return;
-        };
+            .finish_picker_refresh(root, request_id)?;
+        let pending_link = self
+            .sidebars
+            .get_mut(&Some(root))
+            .and_then(|pane| pane.agents.pending_link.take());
         if self.primary_thread_id != Some(root) {
-            return;
+            return None;
         }
         let refresh = match result {
             Ok(refresh) => refresh,
@@ -127,13 +131,14 @@ impl App {
                 if completion.follow_up_requested {
                     self.refresh_agent_picker_threads(app_server, root);
                 }
-                return;
+                return None;
             }
         };
         for thread in refresh.threads {
             let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
                 continue;
             };
+            let sidebar_agent = self.confirm_sidebar_agent(root, thread_id);
             if !completion.visibility_changed_threads.contains(&thread_id) {
                 self.update_agent_picker_thread_visibility(
                     thread_id,
@@ -166,6 +171,10 @@ impl App {
             if !live && update_liveness {
                 self.agent_navigation.set_running(thread_id, is_running);
             }
+            if sidebar_agent && !live && (is_running || thread.status == ThreadStatus::SystemError)
+            {
+                self.seed_discovered_sidebar_agent(root, thread_id, &thread.status);
+            }
         }
         for thread_id in refresh.archived_thread_ids {
             if !completion.visibility_changed_threads.contains(&thread_id) {
@@ -181,6 +190,7 @@ impl App {
         if completion.follow_up_requested {
             self.refresh_agent_picker_threads(app_server, root);
         }
+        pending_link.filter(|link| link.backend == app_server.backend_id())
     }
 
     pub(super) fn set_agent_picker_thread_visibility(
@@ -222,6 +232,18 @@ impl App {
         else {
             return;
         };
+        if matches!(notification, ServerNotification::ThreadArchived(_))
+            && (self.side_threads.contains_key(&thread_id)
+                || self
+                    .sidebars
+                    .values()
+                    .any(|pane| pane.chat_tabs().choice_index(thread_id).is_some()))
+        {
+            self.app_event_tx.send(AppEvent::SideChatArchived {
+                backend_id: app_server.backend_id(),
+                target: thread_id,
+            });
+        }
         let refresh_uncached_thread = matches!(visibility, AgentPickerThreadVisibility::Visible)
             && self.agent_navigation.get(&thread_id).is_none();
         self.set_agent_picker_thread_visibility(thread_id, visibility);

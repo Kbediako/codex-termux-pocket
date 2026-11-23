@@ -164,6 +164,11 @@ impl RollbackPlanner {
             RolloutItem::DynamicToolsUpdated { .. } | RolloutItem::SessionMeta(_) => {
                 self.record_boundaries[index] = None
             }
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                if event.thread_id.is_some() =>
+            {
+                self.record_boundaries[index] = None;
+            }
             RolloutItem::ResponseItem(response) => {
                 if matches!(&response.item, ResponseItem::Message { role, .. } if role == "assistant")
                     || matches!(&response.item, ResponseItem::FunctionCall { .. })
@@ -182,7 +187,7 @@ impl RollbackPlanner {
                     self.record_boundaries[index] = Some(boundary);
                     self.boundaries[boundary].message_id = response.id().cloned();
                     self.boundaries[boundary].input_source = response.metadata.as_ref().into();
-                } else if rollback::counts_as_boundary(&response.item) {
+                } else if rollback::counts_as_boundary(response) {
                     let boundary = self.start_boundary(index);
                     self.boundaries[boundary].message_id = response.id().cloned();
                     self.boundaries[boundary].input_source = response.metadata.as_ref().into();
@@ -196,7 +201,12 @@ impl RollbackPlanner {
                             content: content.clone(),
                         });
                     }
-                } else if rollback::is_pre_turn_context_update(&response.item) {
+                } else if !response
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.realtime_session_end_input)
+                    && rollback::is_pre_turn_context_update(&response.item)
+                {
                     // Until another user boundary arrives, this is trailing context for the
                     // previous turn. Keep that fallback owner so rollback drops it when there is
                     // no later turn to attach it to.
@@ -279,6 +289,11 @@ impl RollbackPlanner {
                     self.pending_turn_records.push(index);
                 }
             }
+            RolloutItem::RetainedContext(
+                codex_rollout::RetainedContextEvent::AcceptedFileAudio { evidence },
+            ) => {
+                self.assign_targeted_record(index, Some(&evidence.turn_id));
+            }
             RolloutItem::TokenUsageRecord(record) => {
                 self.assign_targeted_record(index, Some(record.turn_id.as_str()));
             }
@@ -307,6 +322,7 @@ impl RollbackPlanner {
                 codex_rollout::RetainedContextEvent::DeliveredAssistantMessage {
                     message,
                     acceptance_order,
+                    ..
                 },
             ) => {
                 // Nested calls have no response item; match them to instructions by acceptance order.

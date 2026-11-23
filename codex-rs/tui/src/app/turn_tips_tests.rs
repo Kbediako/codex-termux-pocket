@@ -248,6 +248,8 @@ async fn turn_tip_placements_and_completion_barrier() -> Result<()> {
             }
         }
         assert_eq!(saw_barrier, !working);
+        app.chat_widget
+            .set_status_line(Some("gpt-test default · /tmp/project".into()));
         let frames = tui.frame_requester();
         let mut painted = Default::default();
         tui.draw(height, |frame| {
@@ -485,7 +487,7 @@ async fn working_tip_stays_put_through_mouse_selection() -> Result<()> {
         if kind == Down(Left) {
             insta::assert_snapshot!(
                 "working_tip_mouse_down",
-                crate::chatwidget::tests::helpers::normalize_snapshot_paths(screen)
+                crate::chatwidget::tests::helpers::normalize_working_snapshot(screen)
             );
         }
     }
@@ -529,7 +531,7 @@ async fn working_tip_stays_put_through_mouse_selection() -> Result<()> {
     }
     insta::assert_snapshot!(
         "working_tip_selected",
-        crate::chatwidget::tests::helpers::normalize_snapshot_paths(buffer_text(
+        crate::chatwidget::tests::helpers::normalize_working_snapshot(buffer_text(
             crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal),
         ))
     );

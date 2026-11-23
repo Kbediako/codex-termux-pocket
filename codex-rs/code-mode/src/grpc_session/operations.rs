@@ -14,7 +14,9 @@ use codex_code_mode_protocol::TerminateRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use codex_code_mode_protocol::grpc;
+use codex_code_mode_protocol::host::MAX_FRAME_BYTES;
 use codex_protocol::protocol::W3cTraceContext;
+use prost::Message;
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -84,16 +86,33 @@ impl SessionInner {
             call_id = %request.tool_call_id,
         );
         let trace = codex_otel::span_w3c_trace_context(&execute_span);
-        let request = conversion::execute_request(&self.id, execution_id.clone(), request)?;
+        let admission = self.catalog.as_ref().and_then(|cache| {
+            crate::tool_catalog::CatalogAdmission::prepare(cache, &request.enabled_tools)
+        });
+        let mut request = conversion::execute_request(&self.id, execution_id.clone(), request)?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .begin_execution(&request, delegate)?;
+        if let Some(admission) = &admission {
+            request.catalog_revision = Some(admission.revision());
+            if admission.reuses_catalog() {
+                request.enabled_tools.clear();
+            }
+        }
         let ownership = ExecutionOwnership {
             session: Arc::clone(self),
             execution_id: execution_id.clone(),
             armed: true,
         };
+        // Check the actual request after catalog reuse. An encoder error in an
+        // HTTP/2 request body can otherwise surface as a transport reset.
+        let encoded_bytes = request.encoded_len();
+        if encoded_bytes > MAX_FRAME_BYTES {
+            return Err(format!(
+                "code-mode execute request of {encoded_bytes} encoded bytes exceeds the gRPC message limit of {MAX_FRAME_BYTES} bytes"
+            ));
+        }
         let (started_tx, started_rx) = oneshot::channel();
         let inner = Arc::clone(self);
         self.stream_tasks.spawn(async move {
@@ -108,9 +127,13 @@ impl SessionInner {
                 .instrument(execute_span)
                 .await;
         });
-        started_rx
+        let started = started_rx
             .await
-            .map_err(|_| "gRPC code-mode execution driver ended unexpectedly".to_string())?
+            .map_err(|_| "gRPC code-mode execution driver ended unexpectedly".to_string())??;
+        if let Some(admission) = admission {
+            admission.accepted();
+        }
+        Ok(started)
     }
 
     async fn drive_execution(
@@ -124,7 +147,7 @@ impl SessionInner {
             Duration::from_millis(request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS))
                 .saturating_add(Duration::from_secs(1));
         let opening = async {
-            let mut client = self.client();
+            let mut client = self.client()?;
             let mut request = self.request(request);
             if let Some(traceparent) = trace.and_then(|trace| trace.traceparent)
                 && let Ok(traceparent) = traceparent.parse()
@@ -319,7 +342,7 @@ impl SessionInner {
                 request.max_output_tokens,
             )?,
         };
-        let mut client = self.client();
+        let mut client = self.client()?;
         let watcher = preempt.map(|signal| {
             self.watch_yield(
                 signal,
@@ -341,17 +364,20 @@ impl SessionInner {
     }
 
     fn watch_yield(
-        &self,
+        self: &Arc<Self>,
         yield_signal: CancellationToken,
         observation: grpc::yield_observation_request::Observation,
     ) -> AbortOnDropHandle<()> {
-        let mut client = self.client();
+        let session = Arc::clone(self);
         let request = self.request(grpc::YieldObservationRequest {
             session_id: self.id.clone(),
             observation: Some(observation),
         });
         AbortOnDropHandle::new(tokio::spawn(async move {
             yield_signal.cancelled().await;
+            let Ok(mut client) = session.client() else {
+                return;
+            };
             if let Err(error) = deadline::startup("yield observation", async move {
                 client.yield_observation(request).await.map(|_| ())
             })
@@ -365,7 +391,7 @@ impl SessionInner {
 
     pub(super) async fn terminate(&self, request: TerminateRequest) -> Result<WaitOutcome, String> {
         self.require_open()?;
-        let mut client = self.client();
+        let mut client = self.client()?;
         let response = deadline::session_request(
             self,
             "termination",
@@ -475,7 +501,9 @@ impl Drop for WaitCancellation {
         }
         let session = Arc::clone(&self.session);
         self.session.runtime.spawn(async move {
-            let mut client = session.client();
+            let Ok(mut client) = session.client() else {
+                return;
+            };
             let result = deadline::request(
                 &session,
                 "wait cancellation",

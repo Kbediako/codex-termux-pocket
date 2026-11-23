@@ -6,6 +6,7 @@ use crate::catalog::SkillResourceId;
 use crate::provider::HostSkillProvider;
 use crate::provider::SkillListQuery;
 use crate::provider::SkillProvider;
+use codex_exec_server::FileSystemEnvironmentAccessor;
 use codex_exec_server::LOCAL_FS;
 use codex_extension_api::ContextualUserFragment;
 use codex_protocol::protocol::SkillScope;
@@ -64,7 +65,9 @@ fn edits_beyond_the_catalog_description_cap_keep_the_same_fingerprint() {
             )
             .unwrap();
         prepared
-            .entries_for_render(&rendered)
+            .entries_for_render(
+                &rendered, /*grants*/ None, /*primary_environment*/ None,
+            )
             .into_values()
             .next()
             .unwrap()
@@ -600,6 +603,7 @@ fn executor_aliases_preserve_literal_backslashes_in_package_ids() {
 
 #[tokio::test]
 async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn std::error::Error>> {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let parent = std::env::temp_dir().join(format!(
         "codex-skills-extension-alias-order-{}-{unique}",
@@ -624,12 +628,8 @@ async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn st
     let system_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&system_root_path)?)?;
     let outcome = load_and_merge_host_skill_roots(
         vec![
-            HostSkillRoot::host(user_root.clone(), SkillScope::User, Arc::clone(&LOCAL_FS)),
-            HostSkillRoot::host(
-                system_root.clone(),
-                SkillScope::System,
-                Arc::clone(&LOCAL_FS),
-            ),
+            HostSkillRoot::host(user_root.clone(), SkillScope::User, &access),
+            HostSkillRoot::host(system_root.clone(), SkillScope::System, &access),
         ],
         &Semaphore::new(/*permits*/ 2),
         /*restriction_product*/ None,
@@ -638,9 +638,8 @@ async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn st
     .await;
     let catalog = HostSkillProvider::new()
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
             executor_roots: Vec::new(),
-            resolved_executor_roots: Vec::new(),
             host_snapshot: Some(Arc::new(HostSkillsSnapshot::new(Arc::new(outcome)))),
             include_host_skills: true,
             include_bundled_skills: false,
@@ -981,6 +980,7 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
 #[tokio::test]
 async fn singleton_plugin_versions_share_the_marketplace_alias_root()
 -> Result<(), Box<dyn std::error::Error>> {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let parent = std::env::temp_dir().join(format!(
         "codex-skills-extension-marketplace-alias-{}-{unique}",
@@ -999,7 +999,7 @@ async fn singleton_plugin_versions_share_the_marketplace_alias_root()
         roots.push(HostSkillRoot::host(
             AbsolutePathBuf::try_from(std::fs::canonicalize(root)?)?,
             SkillScope::User,
-            Arc::clone(&LOCAL_FS),
+            &access,
         ));
     }
     let marketplace_root = dunce::canonicalize(&marketplace_path)?
@@ -1014,9 +1014,8 @@ async fn singleton_plugin_versions_share_the_marketplace_alias_root()
     .await;
     let catalog = HostSkillProvider::new()
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
             executor_roots: Vec::new(),
-            resolved_executor_roots: Vec::new(),
             host_snapshot: Some(Arc::new(HostSkillsSnapshot::new(Arc::new(outcome)))),
             include_host_skills: true,
             include_bundled_skills: false,

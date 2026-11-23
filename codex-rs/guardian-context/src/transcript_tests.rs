@@ -34,6 +34,133 @@ fn transcript_config() -> ConversationTranscriptConfig {
 }
 
 #[test]
+fn enclosing_call_is_matched_by_id_even_when_wrapper_arguments_match() {
+    let arguments = r#"{"code":"await checkout()"}"#;
+    let history = ["earlier", "enclosing", "later"]
+        .map(|id| {
+            serde_json::from_value::<ResponseItem>(serde_json::json!({
+                "type": "function_call", "name": "js", "call_id": id, "arguments": arguments,
+            }))
+            .unwrap()
+        })
+        .to_vec();
+    let config = transcript_config();
+    assert_eq!(
+        super::collect_transcript_for_review(
+            &history,
+            &config,
+            /*proposed_call_id*/ None,
+            /*enclosing_invocation_id*/ Some("enclosing"),
+            /*is_selected_exec_output*/ None,
+        ),
+        [
+            ConversationTranscriptEntryKind::ToolCall("tool js call".into()),
+            ConversationTranscriptEntryKind::EnclosingToolCall("tool js call".into()),
+            ConversationTranscriptEntryKind::ToolCall("tool js call".into()),
+        ]
+        .map(|kind| entry(kind, arguments))
+    );
+}
+
+#[test]
+fn budget_drops_the_enclosing_call_and_its_label_together() {
+    let arguments = serde_json::json!({ "code": "await checkout();".repeat(160) }).to_string();
+    let other_arguments = r#"{"code":"await inspect()"}"#;
+    let action = r#"{"tool_name":"submit_order","arguments":{}}"#;
+    let collected = crate::CollectedContext {
+        sections: vec![
+            ContextSection::ConversationTranscript {
+                items: vec![
+                    entry(
+                        ConversationTranscriptEntryKind::EnclosingToolCall("tool js call".into()),
+                        &arguments,
+                    ),
+                    entry(
+                        ConversationTranscriptEntryKind::ToolCall("tool js call".into()),
+                        other_arguments,
+                    ),
+                ],
+            },
+            ContextSection::PlannedAction(crate::PlannedAction {
+                kind: crate::PlannedActionKind::Nested {
+                    json: action.into(),
+                    enclosing_invocation_id: "verified".into(),
+                    enclosing_call: None,
+                },
+                reason: None,
+                tool_descriptions: None,
+            }),
+        ],
+    };
+    let profile = crate::ContextProfile::synchronous();
+    let parent_line = "Enclosing call for this review:";
+    let omission = "Evidence omitted.";
+    for (budgeting, max_input_tokens, elastic_entry_limit, includes_parent) in [
+        (crate::ContextBudgeting::Fixed, 400, None, false),
+        (crate::ContextBudgeting::Elastic, 400, None, false),
+        (crate::ContextBudgeting::Elastic, 4_000, Some(128), false),
+        (crate::ContextBudgeting::Elastic, 4_000, None, true),
+    ] {
+        let budget = crate::RequestBudget {
+            max_input_tokens,
+            existing_context_tokens: 0,
+        };
+        let context = crate::prepare_context(
+            std::borrow::Cow::Borrowed(&collected),
+            &profile,
+            /*entry_number_offset*/ 1,
+            crate::ContextPresentation::SyncDelta {
+                session_id: "review",
+            },
+            budgeting,
+            &[],
+        )
+        .unwrap();
+        let selected = match budgeting {
+            crate::ContextBudgeting::Fixed => {
+                context.enforce_budget(budget, omission.into(), crate::HistoryTruncation::Preserve)
+            }
+            crate::ContextBudgeting::Elastic => {
+                let mut config = crate::ElasticBudgetConfig::default();
+                if let Some(limit) = elastic_entry_limit {
+                    config.sections.insert(
+                        crate::ElasticSection::PlannedAction,
+                        crate::ElasticSectionLimits::new(limit, limit).unwrap(),
+                    );
+                }
+                let config = crate::budget::tests::complete_minimum_budget(config);
+                context
+                    .prepare_elastic_entries(&config)
+                    .unwrap()
+                    .enforce_budget(budget, omission.into())
+            }
+        }
+        .unwrap();
+        let text = selected
+            .into_messages()
+            .into_iter()
+            .filter_map(|item| match item {
+                ResponseItem::Message { content, .. } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|content| match content {
+                ContentItem::InputText { text } => Some(text),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(text.contains(other_arguments), "{budgeting:?}: {text}");
+        assert!(text.contains(action), "{budgeting:?}: {text}");
+        assert_eq!(text.contains(parent_line), includes_parent, "{budgeting:?}");
+        assert_eq!(
+            text.contains("await checkout()"),
+            includes_parent,
+            "{budgeting:?}"
+        );
+    }
+}
+
+#[test]
 fn heartbeat_references_preserve_positions_changes_and_human_messages() {
     let make = |time: &str, instructions: &str, kind: &str| {
         serde_json::from_value::<ResponseItem>(serde_json::json!({
@@ -51,7 +178,39 @@ fn heartbeat_references_preserve_positions_changes_and_human_messages() {
         make("03:00Z", "Monitor only.", "user.heartbeat"),
         make("03:10Z", "Monitor only.", "user.text"),
     ];
-    let entries = collect_transcript(&history, &transcript_config());
+    let raw = collect_transcript(&history, &transcript_config());
+    let collected = crate::CollectedContext {
+        sections: vec![ContextSection::ConversationTranscript { items: raw.clone() }],
+    };
+    let mut profile = crate::ContextProfile::asynchronous();
+    profile.transcript_format = crate::TranscriptFormat::Json;
+    let prepared = crate::prepare_context(
+        std::borrow::Cow::Borrowed(&collected),
+        &profile,
+        /*entry_number_offset*/ 0,
+        crate::ContextPresentation::Async,
+        crate::ContextBudgeting::Fixed,
+        &[],
+    )
+    .unwrap();
+    let entries = prepared
+        .sections
+        .into_iter()
+        .flat_map(|section| {
+            let crate::composition::SectionDelivery::UserContent(items) = section.delivery else {
+                panic!("expected transcript content");
+            };
+            items.into_iter().filter_map(|item| match item.content {
+                crate::composition::SectionContent::Transcript(record) => Some(record),
+                crate::composition::SectionContent::Other(_) => None,
+            })
+        })
+        .zip(&raw)
+        .map(|(record, entry)| ConversationTranscriptEntry {
+            content: crate::TranscriptContent::Text(record.text().to_owned()),
+            ..entry.clone()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(entries.len(), history.len());
     for index in [0, 2, 4, 5, 6] {
         let ResponseItem::Message { content, .. } = &history[index] else {
@@ -72,32 +231,9 @@ fn heartbeat_references_preserve_positions_changes_and_human_messages() {
         assert!(text.contains("unchanged from transcript entry [1]"));
         assert!(!text.contains("Monitor only."));
     }
-    // Sync collection keeps originals. Preparation compresses before slicing, so
-    // full and delta requests retain exactly the existing reference text and numbering.
-    let raw = super::collect_transcript_for_target(
-        &history,
-        &transcript_config(),
-        crate::ContextTarget::Sync,
-    );
-    let collected = crate::CollectedContext {
-        sections: vec![ContextSection::ConversationTranscript { items: raw.clone() }],
-    };
-    let prepared = crate::ContextProfile::synchronous().prepare_transcript(
-        collected.transcript_entries(),
-        /*entry_number_offset*/ 0,
-    );
-    assert!(matches!(
-        collected.compose(
-            crate::ContextPresentation::SyncFull {
-                session_id: "heartbeat"
-            },
-            prepared,
-        ),
-        Err(crate::SectionError::UnsupportedDelivery {
-            section: "sync_preparation"
-        })
-    ));
-    for offset in [0, 1, 3] {
+    assert_eq!(collected.transcript_entries(), raw.as_slice());
+    const DELTA_AFTER_HUMAN_MESSAGE: usize = 3;
+    for offset in [0, 1, DELTA_AFTER_HUMAN_MESSAGE] {
         let [expected, actual] = [entries.clone(), raw.clone()].map(|items| {
             let presentation = if offset == 0 {
                 crate::ContextPresentation::SyncFull {
@@ -108,34 +244,53 @@ fn heartbeat_references_preserve_positions_changes_and_human_messages() {
                     session_id: "heartbeat",
                 }
             };
-            crate::prepare_sync_context(
-                crate::CollectedContext {
+            crate::prepare_context(
+                std::borrow::Cow::Borrowed(&crate::CollectedContext {
                     sections: vec![crate::ContextSection::ConversationTranscript { items }],
-                },
+                }),
                 &crate::ContextProfile::synchronous(),
                 offset,
                 presentation,
                 crate::ContextBudgeting::Fixed,
+                &[],
             )
             .unwrap()
             .into_messages()
         });
         assert_eq!(actual, expected);
     }
-    // A rebuilt window starts with a full body, never a dangling old reference.
-    let rebuilt = collect_transcript(&history[3..].to_vec(), &transcript_config());
-    assert!(
-        matches!(&rebuilt[0].content, crate::TranscriptContent::Text(text) if text.contains("Monitor only."))
-    );
-    let interrupted = vec![
-        history[0].clone(),
-        make("02:00Z", &"x".repeat(/*n*/ 3_600), "user.heartbeat"),
-        history[1].clone(),
-    ];
-    let interrupted = collect_transcript(&interrupted, &transcript_config());
-    assert!(
-        matches!(&interrupted[2].content, crate::TranscriptContent::Text(text) if text.contains("Monitor only."))
-    );
+    // Rebuilt and interrupted runs start with a full body, never an old reference.
+    const OVERSIZED_HEARTBEAT_CHARS: usize = 3_600;
+    for history in [
+        history[DELTA_AFTER_HUMAN_MESSAGE..].to_vec(),
+        vec![
+            history[0].clone(),
+            make(
+                "02:00Z",
+                &"x".repeat(OVERSIZED_HEARTBEAT_CHARS),
+                "user.heartbeat",
+            ),
+            history[1].clone(),
+        ],
+    ] {
+        let context = crate::CollectedContext {
+            sections: vec![ContextSection::ConversationTranscript {
+                items: collect_transcript(&history, &transcript_config()),
+            }],
+        };
+        let prepared = crate::prepare_context(
+            std::borrow::Cow::Owned(context),
+            &crate::ContextProfile::asynchronous(),
+            /*entry_number_offset*/ 0,
+            crate::ContextPresentation::Async,
+            crate::ContextBudgeting::Fixed,
+            &[],
+        )
+        .unwrap();
+        let text = serde_json::to_string(&prepared.into_messages()).unwrap();
+        assert!(text.contains("Monitor only."));
+        assert!(!text.contains("unchanged from transcript entry"));
+    }
 }
 
 fn entry(kind: ConversationTranscriptEntryKind, text: &str) -> ConversationTranscriptEntry {
@@ -250,6 +405,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
             target: ContextTarget::Async,
             history: &history,
             transcript: &config,
+            is_selected_exec_output: None,
             root_conversation: &[],
             root_conversation_candidates: None,
             trusted_user_answers: &[],
@@ -340,6 +496,7 @@ fn excluded_tool_calls_still_attribute_included_results() {
             target: ContextTarget::Async,
             history: &history,
             transcript: &config,
+            is_selected_exec_output: None,
             root_conversation: &[],
             root_conversation_candidates: None,
             trusted_user_answers: &[],
@@ -359,6 +516,42 @@ fn excluded_tool_calls_still_attribute_included_results() {
             ConversationTranscriptEntryKind::ToolOutput("tool read_file result".to_string()),
             "file contents"
         )]
+    );
+}
+
+#[test]
+fn missing_exec_call_preserves_recorder_verified_output() {
+    let outputs = ["verified", "unknown"].map(|call_id| ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: call_id.to_owned(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text("saved instructions".to_owned()),
+        internal_chat_message_metadata_passthrough: None,
+    });
+    let is_verified = |output: &ResponseItem| matches!(output, ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == "verified");
+    let ordinary = entry(
+        ConversationTranscriptEntryKind::ToolOutput("tool result".into()),
+        "saved instructions",
+    );
+    assert_eq!(
+        collect_transcript(&outputs, &transcript_config()),
+        vec![ordinary.clone(), ordinary.clone()]
+    );
+    assert_eq!(
+        super::collect_transcript_for_review(
+            &outputs,
+            &transcript_config(),
+            /*proposed_call_id*/ None,
+            /*enclosing_invocation_id*/ None,
+            Some(&is_verified)
+        ),
+        vec![
+            entry(
+                ConversationTranscriptEntryKind::SelectedExecOutput,
+                "saved instructions"
+            ),
+            ordinary,
+        ]
     );
 }
 
@@ -455,6 +648,7 @@ fn outputs_with_call_ids_or_explicit_names_are_retained() {
                     target,
                     history: &history,
                     transcript: &config,
+                    is_selected_exec_output: None,
                     root_conversation: &[],
                     root_conversation_candidates: None,
                     trusted_user_answers: &[],
@@ -496,7 +690,7 @@ fn outputs_with_call_ids_or_explicit_names_are_retained() {
 }
 
 #[test]
-fn reused_registry_applies_current_history_sources_and_entry_limits() {
+fn reused_registry_applies_current_history_sources_and_preserves_originals() {
     let text = "é🙂".repeat(/*n*/ 10_000);
     let mut history = vec![ResponseItem::Message {
         status: None,
@@ -516,6 +710,7 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 target,
                 history: &history,
                 transcript: &config,
+                is_selected_exec_output: None,
                 root_conversation: &[],
                 root_conversation_candidates: None,
                 trusted_user_answers: &[],
@@ -552,6 +747,12 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
     });
     config.entry_limits.message_tokens = 60;
     config.entry_limits.tool_tokens = 30;
+    let mut assistant = history[0].clone();
+    let ResponseItem::Message { role, .. } = &mut assistant else {
+        unreachable!();
+    };
+    *role = "assistant".to_owned();
+    history.push(assistant);
     for include_tool_calls in [true, false] {
         config.options.include_tool_calls = include_tool_calls;
         let sections = registry
@@ -559,6 +760,7 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 target: ContextTarget::Async,
                 history: &history,
                 transcript: &config,
+                is_selected_exec_output: None,
                 root_conversation: &[],
                 root_conversation_candidates: None,
                 trusted_user_answers: &[],
@@ -582,13 +784,17 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 kind: ConversationTranscriptEntryKind::ToolCall(
                     "tool exec_command call".to_string(),
                 ),
-                content: crate::TranscriptContent::Text(truncate_text(
-                    &text, /*max_tokens*/ 30,
-                )),
+                content: crate::TranscriptContent::Text(text.clone()),
                 original_bytes: text.len(),
                 retained_source: None,
             });
         }
+        expected.push(ConversationTranscriptEntry {
+            kind: ConversationTranscriptEntryKind::ProtectedAssistant,
+            content: crate::TranscriptContent::Text(text.clone()),
+            original_bytes: text.len(),
+            retained_source: None,
+        });
         assert_eq!(transcript_items(&sections[0]), expected);
     }
 }
@@ -642,11 +848,7 @@ fn encrypted_messages_preserve_order_and_budget_for_both_reviewers() {
         if native_calls {
             let mut limited = profile.clone();
             limited.transcript.entry_limits.tool_tokens = 1;
-            let deferred = super::collect_transcript_for_target(
-                &vec![call.clone()],
-                &limited.transcript,
-                crate::ContextTarget::Sync,
-            );
+            let deferred = collect_transcript(&vec![call.clone()], &limited.transcript);
             assert!(
                 matches!(&deferred[0].content, crate::TranscriptContent::NativeMessage(item)
                 if item.as_ref() == &call)
@@ -681,7 +883,7 @@ fn encrypted_messages_preserve_order_and_budget_for_both_reviewers() {
                 items: entries.clone(),
             }],
         }
-        .compose(
+        .compose_prepared(
             ContextPresentation::SyncFull {
                 session_id: "worker",
             },
@@ -730,48 +932,136 @@ fn encrypted_messages_preserve_order_and_budget_for_both_reviewers() {
                 .iter()
                 .all(|item| item["type"] != "function_call_output")
         );
-        let mut limited = profile.transcript.clone();
-        limited.entry_limits.message_tokens = 10;
-        limited.entry_limits.tool_tokens = 10;
-        let entries = collect_transcript(&history, &limited);
-        let native_end = if native_calls { 3 } else { 2 };
-        assert!(entries[1..native_end].iter().all(|entry| matches!(
-            &entry.content, crate::TranscriptContent::Text(text) if text.contains("omitted")
-        )));
-        if profile.target == ContextTarget::Sync {
-            let mut limited_profile = profile;
-            limited_profile.transcript = limited.clone();
-            let raw = super::collect_transcript_for_target(&history, &limited, ContextTarget::Sync);
-            let actual = {
-                let context = crate::CollectedContext {
-                    sections: vec![ContextSection::ConversationTranscript { items: raw }],
-                };
-                let profile = &limited_profile;
-                let transcript = profile.prepare_transcript(
-                    context.transcript_entries(),
-                    /*entry_number_offset*/ 0,
-                );
-                context.compose(
-                    ContextPresentation::SyncFull {
-                        session_id: "worker",
-                    },
-                    transcript,
-                )
-            }
-            .unwrap();
-            let expected = crate::CollectedContext {
-                sections: vec![ContextSection::ConversationTranscript {
-                    items: entries.clone(),
-                }],
-            }
-            .compose(
-                ContextPresentation::SyncFull {
-                    session_id: "worker",
-                },
-                limited_profile.prepare_transcript(&entries, /*entry_number_offset*/ 0),
-            )
-            .unwrap();
-            assert_eq!(actual.into_messages(), expected.into_messages());
+    }
+}
+
+#[test]
+fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
+    let mut profile = crate::ContextProfile::synchronous();
+    let mut items = vec![
+        ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "check the repo".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            name: "read_file".to_string(),
+            namespace: None,
+            arguments: "{\"path\":\"README.md\"}".to_string(),
+            call_id: "call-1".to_string(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "repo is public".to_string(),
+            ),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
+                text: "I need to push a fix".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let entries = collect_transcript(&items, &profile.transcript);
+
+    assert_eq!(entries.len(), 4);
+    assert_eq!(
+        entries[1],
+        ConversationTranscriptEntry {
+            kind: ConversationTranscriptEntryKind::ToolCall("tool read_file call".to_string()),
+            content: crate::TranscriptContent::Text("{\"path\":\"README.md\"}".to_string()),
+            original_bytes: "{\"path\":\"README.md\"}".len(),
+            retained_source: None,
         }
+    );
+    assert_eq!(
+        entries[2],
+        ConversationTranscriptEntry {
+            kind: ConversationTranscriptEntryKind::ToolOutput("tool read_file result".to_string()),
+            content: crate::TranscriptContent::Text("repo is public".to_string()),
+            original_bytes: "repo is public".len(),
+            retained_source: None,
+        }
+    );
+    if let ResponseItem::FunctionCall { namespace, .. } = &mut items[1] {
+        *namespace = Some("mcp__node_repl__".to_string());
+    }
+    assert!(matches!(
+        collect_transcript(&items, &profile.transcript)[2].kind,
+        ConversationTranscriptEntryKind::NodeReplToolOutput(_)
+    ));
+
+    let oversized_result = "é🙂".repeat(/*n*/ 10_000);
+    if let ResponseItem::FunctionCallOutput { output, .. } = &mut items[2] {
+        *output =
+            codex_protocol::models::FunctionCallOutputPayload::from_text(oversized_result.clone());
+    }
+    for token_cap in [profile.transcript.entry_limits.tool_tokens, 6_000] {
+        profile.transcript.entry_limits.node_repl_output_tokens = token_cap;
+        let entries = collect_transcript(&items, &profile.transcript);
+        assert_eq!(
+            entries[2],
+            ConversationTranscriptEntry {
+                kind: ConversationTranscriptEntryKind::NodeReplToolOutput(
+                    "tool read_file result".to_string()
+                ),
+                content: crate::TranscriptContent::Text(oversized_result.clone()),
+                original_bytes: oversized_result.len(),
+                retained_source: None,
+            }
+        );
+        assert_eq!(entries.len(), 4);
+        let prepared = profile.prepare_transcript(&entries, /*entry_number_offset*/ 0);
+        let rendered = prepared
+            .items
+            .into_iter()
+            .map(|item| match item.content {
+                crate::TranscriptContent::Text(text) => text,
+                crate::TranscriptContent::Record(record) => record.to_string(),
+                crate::TranscriptContent::ScheduledMessage(_)
+                | crate::TranscriptContent::NativeMessage(_) => {
+                    panic!("expected text transcript")
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (rendered, prepared.omission_note),
+            (
+                vec![
+                    "[1] user: check the repo".to_string(),
+                    "[2] tool read_file call: {\"path\":\"README.md\"}".to_string(),
+                    format!(
+                        "[3] tool read_file result: {}",
+                        truncate_text(&oversized_result, token_cap)
+                    ),
+                    "[4] assistant: I need to push a fix".to_string(),
+                ],
+                None,
+            )
+        );
     }
 }

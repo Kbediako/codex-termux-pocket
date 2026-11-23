@@ -44,7 +44,7 @@ pub(crate) struct EventProcessorWithHumanOutput {
 impl EventProcessorWithHumanOutput {
     pub(crate) fn create_with_ansi(
         with_ansi: bool,
-        config: &Config,
+        config: Option<&Config>,
         last_message_path: Option<PathBuf>,
     ) -> Self {
         let style = |styled: Style, plain: Style| if with_ansi { styled } else { plain };
@@ -57,8 +57,8 @@ impl EventProcessorWithHumanOutput {
             magenta: style(Style::new().magenta(), Style::new()),
             red: style(Style::new().red(), Style::new()),
             yellow: style(Style::new().yellow(), Style::new()),
-            show_agent_reasoning: !config.hide_agent_reasoning,
-            show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            show_agent_reasoning: config.is_none_or(|config| !config.hide_agent_reasoning),
+            show_raw_agent_reasoning: config.is_some_and(|config| config.show_raw_agent_reasoning),
             last_message_path,
             final_message: None,
             final_message_rendered: false,
@@ -217,14 +217,21 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         config: &Config,
         prompt: &str,
         session_configured_event: &SessionConfiguredEvent,
+        workspace_roots: &[PathUri],
     ) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         eprintln!("OpenAI Codex v{VERSION}\n--------");
-        for (key, value) in config_summary_entries(config, session_configured_event) {
+        for (key, value) in
+            config_summary_entries(config, session_configured_event, workspace_roots)
+        {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
         eprintln!("--------");
         eprintln!("{}\n{}", "user".style(self.cyan), prompt);
+    }
+
+    fn print_thread_started(&mut self, thread_id: &str) {
+        eprintln!("thread id: {thread_id}");
     }
 
     fn process_server_notification(&mut self, notification: ServerNotification) -> CodexStatus {
@@ -441,10 +448,13 @@ impl EventProcessor for EventProcessorWithHumanOutput {
 fn config_summary_entries(
     config: &Config,
     session_configured_event: &SessionConfiguredEvent,
+    workspace_roots: &[PathUri],
 ) -> Vec<(&'static str, String)> {
-    let permission_profile = config.permissions.effective_permission_profile();
     let mut entries = vec![
-        ("workdir", config.cwd.display().to_string()),
+        (
+            "workdir",
+            session_configured_event.cwd.display().to_string(),
+        ),
         ("model", session_configured_event.model.clone()),
         (
             "provider",
@@ -457,9 +467,9 @@ fn config_summary_entries(
         (
             "sandbox",
             summarize_permission_profile(
-                &permission_profile,
-                &PathUri::from_abs_path(&config.cwd),
-                &config.effective_workspace_roots(),
+                &session_configured_event.permission_profile,
+                &PathUri::from_abs_path(&session_configured_event.cwd),
+                workspace_roots,
             ),
         ),
     ];

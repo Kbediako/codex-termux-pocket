@@ -8,8 +8,10 @@ use crate::formatted_truncate_text;
 use crate::mixed_output_at_token_boundaries;
 use crate::truncate_function_output_items_with_policy;
 use crate::truncate_mcp_tool_result;
+use crate::truncate_measured_tool_output;
 use crate::truncate_text;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageReference;
@@ -264,9 +266,7 @@ fn truncate_function_output_items_with_policy_discards_empty_text() {
             },
             detail: Some(DEFAULT_IMAGE_DETAIL),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
-        },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
         FunctionCallOutputContentItem::EncryptedContent {
             encrypted_content: "enc_opaque".to_string(),
         },
@@ -314,9 +314,7 @@ fn formatted_text_output_preserves_empty_leading_text_behavior() {
 
 #[test]
 fn formatted_mixed_output_budgets_text_and_audio_in_order() {
-    let audio = FunctionCallOutputContentItem::InputAudio {
-        audio_url: "audio:one".to_owned(),
-    };
+    let audio = FunctionCallOutputContentItem::inline_audio("audio:one".to_owned());
     let file_image = FunctionCallOutputContentItem::InputImage {
         image: ImageReference::File {
             file_id: "file_123".to_owned(),
@@ -378,9 +376,7 @@ fn truncate_function_output_items_with_policy_omits_audio_over_budget() {
         FunctionCallOutputContentItem::EncryptedContent {
             encrypted_content: "enc_opaque".to_string(),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
-        },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
     ];
 
     let output =
@@ -403,10 +399,30 @@ fn truncate_function_output_items_with_policy_omits_audio_over_budget() {
 }
 
 #[test]
-fn truncate_function_output_items_with_policy_charges_audio_against_byte_budget() {
+fn repeated_file_audio_and_text_share_one_output_budget() {
     let audio = FunctionCallOutputContentItem::InputAudio {
-        audio_url: "audio:one".to_string(),
+        audio: AudioReference::File {
+            file_id: "clip".into(),
+        },
     };
+    let items = [text("abcd"), audio.clone(), audio.clone()];
+    // Text takes one token. The first reference takes two, leaving too little
+    // for a second copy of the same clip under either budget.
+    for policy in [TruncationPolicy::Tokens(4), TruncationPolicy::Bytes(16)] {
+        assert_eq!(
+            truncate_function_output_items_with_policy(&items, policy, |_| 2),
+            vec![
+                text("abcd"),
+                audio.clone(),
+                text("[omitted 1 audio items ...]")
+            ],
+        );
+    }
+}
+
+#[test]
+fn truncate_function_output_items_with_policy_charges_audio_against_byte_budget() {
+    let audio = FunctionCallOutputContentItem::inline_audio("audio:one".to_string());
     let items = vec![
         audio.clone(),
         FunctionCallOutputContentItem::InputText {
@@ -477,7 +493,7 @@ fn inline_image(image_url: String) -> FunctionCallOutputContentItem {
 
 #[test]
 fn boundary_formatters_normalize_input_and_remap_truncated_text() {
-    let audio_cost: fn(&str) -> usize = |_| 1;
+    let audio_cost: fn(&AudioReference) -> usize = |_| 1;
     let items = [text("left-head"), text("right-tail")];
     let max_tokens = 2;
     let mut boundary = boundaries([(0, 0), (0, 2), (1, 0), (1, 8), (2, 0)]);
@@ -561,4 +577,27 @@ fn owned_mixed_output_moves_a_preserved_image_across_text_truncation() {
         panic!("expected preserved image")
     };
     assert_eq!(image_url.as_ptr(), url_ptr);
+}
+
+#[test]
+fn measured_tool_output_keeps_charges_paired_with_retained_clips() {
+    let clip = FunctionCallOutputContentItem::inline_audio("clip".into());
+    let text = FunctionCallOutputContentItem::InputText {
+        text: "keep".into(),
+    };
+    let omitted = FunctionCallOutputContentItem::InputText {
+        text: "[omitted 1 audio items ...]".into(),
+    };
+    assert_eq!(
+        truncate_measured_tool_output(
+            vec![
+                (clip.clone(), 9),
+                (text.clone(), 0),
+                (clip.clone(), 2),
+                (clip.clone(), 1)
+            ],
+            TruncationPolicy::Tokens(4)
+        ),
+        vec![(text, 0), (clip.clone(), 2), (clip, 1), (omitted, 0)]
+    );
 }

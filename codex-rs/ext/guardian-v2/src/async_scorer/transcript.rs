@@ -25,6 +25,8 @@ use codex_guardian_context::TranscriptRetentionConfig;
 use codex_guardian_context::TranscriptSelection;
 use codex_guardian_context::TrustedTool;
 use codex_guardian_context::default_registry;
+use codex_guardian_context::prepare_async_context;
+use codex_history::RetainedContext;
 
 const DEFAULT_PROFILE: &ContextProfile = &ContextProfile::asynchronous();
 pub(crate) const MAX_MESSAGE_ENTRY_TOKENS: usize =
@@ -41,7 +43,9 @@ pub(crate) struct ContextInput<'a> {
     pub(crate) target: ContextTarget,
     pub(crate) history: &'a dyn ConversationHistorySnapshot,
     pub(crate) root_conversation: &'a [GuardianRootMessage],
-    pub(crate) trusted_user_answers: &'a [String],
+    pub(crate) root_conversation_candidates:
+        Option<&'a codex_guardian_context::RootConversationInput>,
+    pub(crate) trusted_user_answers: &'a [codex_guardian_context::TrustedUserAnswer],
     pub(crate) planned_action: Option<&'a PlannedAction>,
     pub(crate) permissions: Option<&'a codex_guardian_context::PermissionContext>,
     pub(crate) previous_reviews: Option<&'a PreviousReviews>,
@@ -53,6 +57,7 @@ pub(crate) struct ContextInput<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptConfig {
     pub(crate) format: TranscriptFormat,
+    pub(crate) elastic: Option<codex_guardian_context::ElasticBudgetConfig>,
     pub(crate) sources: Vec<TranscriptSource>,
     pub(crate) include_images: bool,
     pub(crate) max_message_entry_tokens: usize,
@@ -66,6 +71,7 @@ impl Default for TranscriptConfig {
     fn default() -> Self {
         Self {
             format: TranscriptFormat::Line,
+            elastic: None,
             sources: vec![TranscriptSource::ToolCalls, TranscriptSource::ToolOutputs],
             include_images: ContextProfile::asynchronous().include_images,
             max_message_entry_tokens: MAX_MESSAGE_ENTRY_TOKENS,
@@ -78,14 +84,16 @@ impl Default for TranscriptConfig {
 }
 
 impl TranscriptConfig {
-    pub(super) fn collect_context(
+    pub(super) fn collect_with_retained(
         &self,
         input: ContextInput<'_>,
+        retained_context: Option<&RetainedContext>,
     ) -> Result<CollectedTranscript, SectionError> {
         let ContextInput {
             target,
             history,
             root_conversation,
+            root_conversation_candidates,
             trusted_user_answers,
             planned_action,
             permissions,
@@ -95,7 +103,7 @@ impl TranscriptConfig {
             node_repl_images,
         } = input;
         let history_version = history.review_history_version();
-        let history = SnapshotHistory(history);
+        let history = SnapshotHistory(history, retained_context);
         let profile = ContextProfile {
             target: ContextTarget::Async,
             transcript_format: self.format,
@@ -119,18 +127,14 @@ impl TranscriptConfig {
                 },
             },
         };
-        let trusted_user_answers = trusted_user_answers
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect::<Vec<_>>();
         let context = default_registry().prepare(&SectionInput {
             target,
             history: &history,
             transcript: &profile.transcript,
+            is_selected_exec_output: None,
             root_conversation,
-            root_conversation_candidates: None,
-            trusted_user_answers: &trusted_user_answers,
+            root_conversation_candidates,
+            trusted_user_answers,
             planned_action,
             permissions,
             previous_reviews,
@@ -147,16 +151,17 @@ impl TranscriptConfig {
             context,
             profile,
             history_version,
+            elastic: self.elastic.clone(),
         })
     }
 }
 
 /// Captured evidence stays typed until the owning conversation selects its delta.
-#[derive(Clone)]
 pub(super) struct CollectedTranscript {
     context: CollectedContext,
     profile: ContextProfile,
     history_version: u64,
+    pub(super) elastic: Option<codex_guardian_context::ElasticBudgetConfig>,
 }
 
 impl CollectedTranscript {
@@ -171,30 +176,38 @@ impl CollectedTranscript {
     }
 
     pub(super) fn compose(
-        mut self,
+        &self,
         cursor: Option<TranscriptCursor>,
         reviewer_history: &[codex_history::ResponseItemEnvelope],
     ) -> Result<(ComposedContext, TranscriptCursor), SectionError> {
-        self.context.retain_new_reviews(reviewer_history);
         let (selection, next) = self.select(cursor);
-        let (entries, offset, presentation) = match selection {
-            TranscriptSelection::Full(entries) => (entries, 0, ContextPresentation::Async),
-            TranscriptSelection::Delta { entries, offset } => {
-                (entries, offset, ContextPresentation::AsyncDelta)
-            }
+        let (offset, presentation) = match selection {
+            TranscriptSelection::Full(_) => (0, ContextPresentation::Async),
+            TranscriptSelection::Delta { offset, .. } => (offset, ContextPresentation::AsyncDelta),
         };
-        let transcript = self.profile.prepare_transcript(entries, offset);
-        let mut context = self.context.compose(presentation, transcript)?;
-        context.retain_new_native_messages(reviewer_history)?;
+        let mut context = prepare_async_context(
+            &self.context,
+            &self.profile,
+            offset,
+            presentation,
+            reviewer_history,
+            self.elastic.as_ref(),
+        )?;
+        if self.elastic.is_none() {
+            context.retain_new_native_messages(reviewer_history)?;
+        }
         Ok((context, next))
     }
 }
 
-struct SnapshotHistory<'a>(&'a dyn ConversationHistorySnapshot);
+struct SnapshotHistory<'a>(
+    &'a dyn ConversationHistorySnapshot,
+    Option<&'a RetainedContext>,
+);
 
 impl SectionHistory for SnapshotHistory<'_> {
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
-        self.0.retained_context()
+        self.1
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -208,11 +221,11 @@ impl SectionHistory for SnapshotHistory<'_> {
         self.0.review_items_with_sources()
     }
 
-    fn render_retained_assistant(
+    fn render_original_assistant(
         &self,
         message: &codex_history::RetainedUserMessage,
     ) -> Option<GuardianRootMessage> {
-        codex_core::context::render_retained_assistant_context(message)
+        codex_core::context::render_original_assistant_context(message)
             .map(GuardianRootMessage::Assistant)
     }
 }

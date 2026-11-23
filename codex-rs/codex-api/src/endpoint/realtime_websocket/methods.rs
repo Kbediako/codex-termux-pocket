@@ -880,6 +880,7 @@ fn contains_transcript_entry(entries: &[RealtimeTranscriptEntry], role: &str, te
 pub struct RealtimeWebsocketClient {
     provider: Provider,
     http_client_factory: HttpClientFactory,
+    auth: Option<crate::SharedAuthProvider>,
     webrtc_sideband_base_url: String,
 }
 
@@ -895,8 +896,21 @@ impl RealtimeWebsocketClient {
         Self {
             provider,
             http_client_factory,
+            auth: None,
             webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
         }
+    }
+
+    /// Use the transport captured with the selected authentication source.
+    pub fn with_http_client_factory(mut self, factory: HttpClientFactory) -> Self {
+        self.http_client_factory = factory;
+        self
+    }
+
+    /// Resolve request auth on every handshake, including sideband retries and reconnects.
+    pub fn with_auth(mut self, auth: crate::SharedAuthProvider) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     /// Overrides the direct WebRTC sideband URL for local development and tests.
@@ -1088,6 +1102,10 @@ impl RealtimeWebsocketClient {
             default_headers,
         );
         request.headers_mut().extend(headers);
+        if let Some(auth) = &self.auth {
+            let headers = std::mem::take(request.headers_mut());
+            *request.headers_mut() = auth.apply_auth_headers(headers).await?;
+        }
 
         info!("connecting realtime websocket: {ws_url}");
         // Realtime websocket TLS should honor the same custom-CA env vars as the rest of Codex's
@@ -1136,6 +1154,7 @@ impl RealtimeWebsocketClient {
             RealtimeSessionInitialization::ExistingCall => false,
         };
         if initialize_session {
+            let voice = config.voice_or_default();
             debug!(
                 session_id = config.session_id.as_deref().unwrap_or("<none>"),
                 "realtime websocket sending session.update"
@@ -1147,7 +1166,7 @@ impl RealtimeWebsocketClient {
                     config.initial_items,
                     config.session_mode,
                     config.output_modality,
-                    config.voice,
+                    voice,
                     config.delegation_ack_filler,
                 )
                 .await?;
@@ -2572,7 +2591,7 @@ mod tests {
                     event_parser: RealtimeEventParser::V1,
                     session_mode: RealtimeSessionMode::Conversational,
                     output_modality: RealtimeOutputModality::Audio,
-                    voice: RealtimeVoice::Breeze,
+                    voice: Some(RealtimeVoice::Breeze),
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -2898,7 +2917,7 @@ mod tests {
                     event_parser: RealtimeEventParser::RealtimeV2,
                     session_mode: RealtimeSessionMode::Conversational,
                     output_modality: RealtimeOutputModality::Audio,
-                    voice: RealtimeVoice::Cedar,
+                    voice: Some(RealtimeVoice::Cedar),
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -3025,7 +3044,7 @@ mod tests {
                     event_parser: RealtimeEventParser::RealtimeV2,
                     session_mode: RealtimeSessionMode::Transcription,
                     output_modality: RealtimeOutputModality::Audio,
-                    voice: RealtimeVoice::Marin,
+                    voice: Some(RealtimeVoice::Marin),
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -3131,7 +3150,7 @@ mod tests {
                     event_parser: RealtimeEventParser::V1,
                     session_mode: RealtimeSessionMode::Transcription,
                     output_modality: RealtimeOutputModality::Audio,
-                    voice: RealtimeVoice::Cove,
+                    voice: Some(RealtimeVoice::Cove),
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -3223,7 +3242,7 @@ mod tests {
                     event_parser: RealtimeEventParser::V1,
                     session_mode: RealtimeSessionMode::Conversational,
                     output_modality: RealtimeOutputModality::Audio,
-                    voice: RealtimeVoice::Cove,
+                    voice: Some(RealtimeVoice::Cove),
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -3264,3 +3283,7 @@ mod tests {
         server.await.expect("server task");
     }
 }
+
+#[cfg(test)]
+#[path = "methods_auth_tests.rs"]
+mod auth_tests;

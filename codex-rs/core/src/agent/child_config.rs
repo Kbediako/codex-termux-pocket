@@ -3,6 +3,7 @@
 //! Spawn and reload share live runtime policy; role and model precedence, full-history
 //! inheritance, and validation messages remain the same for each multi-agent version.
 
+use crate::agent::host::AgentRuntimeServices;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use crate::config::Config;
@@ -19,7 +20,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 
-pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
+pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 16;
 
 pub(crate) fn model_supports_multi_agent_backend(
     model: &ModelPreset,
@@ -69,6 +70,14 @@ pub(crate) async fn prepare_agent_spawn_config(
         options.reasoning_effort,
     )
     .await?;
+    let shares_service_tier = match &session.agent_runtime {
+        AgentRuntimeServices::Controller => true,
+        AgentRuntimeServices::Host(services) => services.service_tier.is_some(),
+    };
+    if !shares_service_tier {
+        // Inherit the parent's thread preference before applying child role overrides.
+        config.service_tier = session.thread_settings_snapshot().await.service_tier;
+    }
     if !options.full_history_fork
         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
     {
@@ -82,7 +91,9 @@ pub(crate) async fn prepare_agent_spawn_config(
                 .clone_from(&turn.developer_instructions);
         }
     }
-    apply_spawn_agent_service_tier(session, &mut config).await?;
+    if shares_service_tier {
+        apply_spawn_agent_service_tier(session, &mut config).await?;
+    }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
@@ -143,6 +154,12 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     // Preserve activation for history forks without freezing the parent's model-owned prompts.
     // Fresh child startup restores configured preferences from the retained snapshot.
     config.token_budget = turn.configured_token_budget.clone();
+    if let Some(thread_namespaces) = &turn.overridden_direct_only_tool_namespaces {
+        config
+            .code_mode
+            .direct_only_tool_namespaces
+            .clone_from(thread_namespaces);
+    }
     config.model = Some(turn.model_info().slug.clone());
     config.model_provider = turn.provider.info().clone();
     config.model_reasoning_effort = turn
@@ -150,19 +167,19 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
         .or(turn.model_info().default_reasoning_level.as_ref())
         .cloned();
     config.model_reasoning_summary = Some(turn.reasoning_summary());
-    config.developer_instructions = turn.developer_instructions.clone();
-    if turn.multi_agent_version == MultiAgentVersion::V2
-        && let Some(developer_instructions) = turn
-            .config
-            .multi_agent_v2
-            .subagent_developer_instructions
-            .clone()
-    {
-        config.developer_instructions = Some(developer_instructions);
-    }
+    config.developer_instructions = inherited_developer_instructions(turn);
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     Ok(config)
+}
+
+pub(crate) fn inherited_developer_instructions(turn: &TurnContext) -> Option<String> {
+    if turn.multi_agent_version == MultiAgentVersion::V2
+        && let Some(instructions) = &turn.config.multi_agent_v2.subagent_developer_instructions
+    {
+        return Some(instructions.clone());
+    }
+    turn.developer_instructions.clone()
 }
 
 fn reject_full_fork_agent_type_override(agent_type: Option<&str>) -> Result<(), String> {
@@ -265,7 +282,9 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     session: &Session,
     config: &mut Config,
 ) -> Result<(), String> {
-    let Some(service_tier) = session.services.agent_control.service_tier() else {
+    let Some(service_tier) =
+        crate::agent::host::service_tier(session, config.service_tier.clone()).await
+    else {
         config.service_tier = None;
         return Ok(());
     };

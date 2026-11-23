@@ -1,8 +1,11 @@
 use super::thread_processor::THREAD_ITEMS_MAX_LIMIT;
 use super::thread_processor::thread_turns_page_size;
 use super::*;
+use crate::bespoke_event_handling::complete_command_execution_item;
 use crate::extensions::send_thread_warning;
 use crate::thread_state::ListenerStateCandidate;
+use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_core::ThreadEvictionOutcome;
@@ -12,14 +15,20 @@ use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use std::borrow::Cow;
+use tokio::task::JoinSet;
 
 #[cfg(test)]
 #[path = "thread_listener_shutdown_tests.rs"]
 mod listener_shutdown_tests;
 
+#[cfg(test)]
+#[path = "thread_replay_tests.rs"]
+mod replay_tests;
+
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
     pub(super) thread_manager: Arc<ThreadManager>,
+    pub(super) thread_store: Arc<dyn ThreadStore>,
     pub(super) thread_state_manager: ThreadStateManager,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     pub(super) pending_thread_unloads: PendingThreadUnloads,
@@ -349,7 +358,7 @@ async fn start_listener(
         .await;
     let is_v2_child = conversation.multi_agent_version() == Some(MultiAgentVersion::V2)
         && matches!(config_snapshot.session_source, SessionSource::SubAgent(_));
-    let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
+    let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot).ok();
     let thread_state = Arc::clone(listener_state.state());
     let (mut listener_command_rx, listener_generation, mut unloading_state, attached) = {
         let (created, connection_ids, raw_events_enabled) = match &startup {
@@ -496,6 +505,7 @@ async fn start_listener(
     let ListenerTaskContext {
         outgoing,
         thread_manager,
+        thread_store,
         thread_state_manager,
         pending_thread_unloads,
         thread_watch_manager,
@@ -504,7 +514,13 @@ async fn start_listener(
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
+    let verify_mcp_results = config_snapshot.history_mode
+        == codex_protocol::protocol::ThreadHistoryMode::Paginated
+        && conversation.rollout_path().is_some();
     tokio::spawn(async move {
+        let mut replays = JoinSet::new();
+        let mut mcp_turn_id = String::new();
+        let mut mcp_result_ids = Vec::new();
         let shutdown_complete = loop {
             tokio::select! {
                 biased;
@@ -525,9 +541,15 @@ async fn start_listener(
                         &thread_watch_manager,
                         &outgoing_for_task,
                         &pending_thread_unloads,
+                        Some(&mut replays),
                         listener_command,
                     )
                     .await;
+                }
+                Some(result) = replays.join_next(), if !replays.is_empty() => {
+                    if let Err(error) = result {
+                        warn!("thread resume replay task failed: {error}");
+                    }
                 }
                 event = conversation.next_event() => {
                     let event = match event {
@@ -554,7 +576,7 @@ async fn start_listener(
                         let mut thread_state = thread_state.lock().await;
                         thread_state.track_current_turn_event(&event.id, &event.msg);
                         let terminal = matches!(event.msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
-                            .then(|| thread_state.turn_summary.clone());
+                            .then(|| thread_state.turn_summaries.get(&event.id).cloned().unwrap_or_default());
                         (thread_state.experimental_raw_events, terminal)
                     };
                     if matches!(
@@ -581,11 +603,28 @@ async fn start_listener(
                         ).await
                     {
                         super::thread_read_state::notify(
-                            &db, &thread_state_manager,
+                            &db,
                             &outgoing_for_task, conversation_id,
                         ).await;
                     }
                     let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
+                    let batch = if verify_mcp_results
+                        && let EventMsg::McpToolCallEnd(call) = &event.msg
+                        && call.is_success() && !call.turn_id.is_empty()
+                    {
+                        if mcp_turn_id != call.turn_id {
+                            mcp_turn_id.clone_from(&call.turn_id);
+                            mcp_result_ids.clear();
+                        }
+                        mcp_result_ids.push(call.call_id.clone());
+                        (mcp_result_ids.len() == THREAD_ITEMS_MAX_LIMIT).then(|| ThreadItemsReadParams {
+                            thread_id: conversation_id.to_string(),
+                            turn_id: mcp_turn_id.clone(),
+                            item_ids: std::mem::take(&mut mcp_result_ids),
+                        })
+                    } else {
+                        None
+                    };
                     apply_bespoke_event_handling(
                         event,
                         conversation_id,
@@ -598,6 +637,15 @@ async fn start_listener(
                     .await;
                     if is_shutdown_complete {
                         break true;
+                    }
+                    // Storage may hold only a preview. A failed lookup leaves the live results intact.
+                    if let Some(batch) = batch
+                        && let Ok(saved) = ThreadRequestProcessor::read_thread_items(thread_store.as_ref(), batch).await
+                    {
+                        let mut state = thread_state.lock().await;
+                        if state.listener_generation == listener_generation {
+                            state.release_saved_mcp_results(&saved.data);
+                        }
                     }
                 }
                 idle_guard = async {
@@ -746,6 +794,8 @@ async fn start_listener(
                 }
             }
         };
+        // Dropping the set aborts replay workers before this listener retires.
+        drop(replays);
         // The thread owns its event sender, so waiting for channel closure retains
         // the runtime. Keep only the notification relay after ShutdownComplete.
         drop(conversation);
@@ -754,6 +804,25 @@ async fn start_listener(
         drop(turn_cost_worker);
 
         if shutdown_complete {
+            // Close registration and take the queue under the same lock used by turn/interrupt.
+            // Detached finalizers can publish their terminal events after this listener retires.
+            let pending_interrupts = {
+                let mut state = thread_state.lock().await;
+                if state.listener_generation == listener_generation {
+                    state.listener_shutdown = true;
+                    std::mem::take(&mut state.pending_interrupts)
+                } else {
+                    Vec::new()
+                }
+            };
+            for (_, request_id) in pending_interrupts {
+                outgoing_for_task
+                    .send_error(
+                        request_id,
+                        internal_error("thread shut down before turn interruption completed"),
+                    )
+                    .await;
+            }
             drained_tx.send_replace(true);
             let relay_command = |command| {
                 handle_thread_listener_command(
@@ -765,6 +834,7 @@ async fn start_listener(
                     &thread_watch_manager,
                     &outgoing_for_task,
                     &pending_thread_unloads,
+                    /*replays*/ None,
                     command,
                 )
             };
@@ -922,7 +992,7 @@ pub(super) async fn unload_thread_without_subscribers(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_thread_listener_command(
+async fn handle_thread_listener_command(
     conversation_id: ThreadId,
     conversation: Option<&Arc<CodexThread>>,
     codex_home: &Path,
@@ -931,6 +1001,7 @@ pub(super) async fn handle_thread_listener_command(
     thread_watch_manager: &ThreadWatchManager,
     outgoing: &Arc<OutgoingMessageSender>,
     pending_thread_unloads: &PendingThreadUnloads,
+    replays: Option<&mut JoinSet<()>>,
     listener_command: ThreadListenerCommand,
 ) {
     match listener_command {
@@ -938,7 +1009,7 @@ pub(super) async fn handle_thread_listener_command(
             request: resume_request,
             completion_tx,
         } => {
-            let Some(conversation) = conversation else {
+            let (Some(conversation), Some(replays)) = (conversation, replays) else {
                 // Dropping the completion sender returns the closing error.
                 return;
             };
@@ -951,9 +1022,11 @@ pub(super) async fn handle_thread_listener_command(
                 thread_watch_manager,
                 outgoing,
                 pending_thread_unloads,
+                replays,
                 *resume_request,
             )
             .await;
+            // The resume response is complete even if its replay is later cancelled.
             let _ = completion_tx.send(());
         }
         ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, goal } => {
@@ -999,6 +1072,31 @@ pub(super) async fn handle_thread_listener_command(
         ThreadListenerCommand::EmitThreadGoalSnapshot { state_db } => {
             send_thread_goal_snapshot_notification(outgoing, conversation_id, &state_db).await;
         }
+        ThreadListenerCommand::CompleteLateCommandApproval {
+            turn_id,
+            item_id,
+            completion_item,
+        } => {
+            let subscribers = thread_state_manager
+                .subscribed_connection_ids(conversation_id)
+                .await;
+            let outgoing = ThreadScopedOutgoingMessageSender::new(
+                Arc::clone(outgoing),
+                subscribers,
+                conversation_id,
+            );
+            complete_command_execution_item(
+                &conversation_id,
+                turn_id,
+                item_id,
+                *completion_item,
+                CommandExecutionStatus::Declined,
+                /*completed_at_ms*/ None,
+                &outgoing,
+                thread_state,
+            )
+            .await;
+        }
         ThreadListenerCommand::ResolveServerRequest {
             request_id,
             completion_tx,
@@ -1020,7 +1118,7 @@ pub(super) async fn handle_thread_listener_command(
     clippy::await_holding_invalid_type,
     reason = "running-thread resume subscription must be serialized against pending unloads"
 )]
-pub(super) async fn handle_pending_thread_resume_request(
+async fn handle_pending_thread_resume_request(
     conversation_id: ThreadId,
     conversation: &Arc<CodexThread>,
     _codex_home: &Path,
@@ -1029,6 +1127,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     thread_watch_manager: &ThreadWatchManager,
     outgoing: &Arc<OutgoingMessageSender>,
     pending_thread_unloads: &PendingThreadUnloads,
+    replays: &mut JoinSet<()>,
     mut pending: crate::thread_state::PendingThreadResumeRequest,
 ) {
     let (active_turn_metadata, mut active_turn, active_page_params) = {
@@ -1069,7 +1168,7 @@ pub(super) async fn handle_pending_thread_resume_request(
                 .iter_mut()
                 .flat_map(|page| &mut page.data),
         );
-        if let Err(error) = restore_evicted_agent_text(store, conversation_id, turn, stored).await {
+        if let Err(error) = restore_evicted_payloads(store, conversation_id, turn, stored).await {
             outgoing.send_error(pending.request_id, error).await;
             return;
         }
@@ -1212,7 +1311,13 @@ pub(super) async fn handle_pending_thread_resume_request(
 
     let config_snapshot = pending.config_snapshot;
     let sandbox = config_snapshot.sandbox_policy().into();
-    let cwd = config_snapshot.cwd().clone();
+    let cwd = match thread_cwd_for_api(config_snapshot.cwd()) {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            outgoing.send_error(request_id, error).await;
+            return;
+        }
+    };
     let ThreadConfigSnapshot {
         model,
         disabled_plugin_ids,
@@ -1240,7 +1345,9 @@ pub(super) async fn handle_pending_thread_resume_request(
         model_provider: model_provider_id,
         service_tier,
         cwd,
-        runtime_workspace_roots: workspace_roots,
+        runtime_workspace_roots: codex_utils_path_uri::LegacyAppPathString::from_abs_paths(
+            &workspace_roots,
+        ),
         instruction_sources,
         approval_policy: approval_policy.into(),
         approvals_reviewer: approvals_reviewer.into(),
@@ -1253,6 +1360,11 @@ pub(super) async fn handle_pending_thread_resume_request(
         turns_backwards_cursor,
         items_backwards_cursor,
     };
+    // Retire the previous replay before the new response can reach this client.
+    // The connection retains the receipt for any write already queued.
+    let stopped = thread_state_manager
+        .begin_resume_replay(conversation_id, connection_id)
+        .await;
     outgoing
         .send_response_with_thread_originator(request_id, response, originator)
         .await;
@@ -1280,11 +1392,18 @@ pub(super) async fn handle_pending_thread_resume_request(
             );
         }
     }
-    outgoing
-        .replay_requests_to_connection_for_thread(connection_id, conversation_id)
-        .await;
-    // App-server owns resume response and snapshot ordering, so wait until
-    // replay completes before letting extensions react to the idle thread.
+    let requests = outgoing.pending_requests_for_thread(conversation_id).await;
+    if let Some(mut stopped) = stopped.filter(|_| !requests.is_empty()) {
+        let outgoing = Arc::clone(outgoing);
+        replays.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = stopped.changed() => {}
+                _ = outgoing.replay_requests_to_connection(connection_id, requests) => {}
+            }
+        });
+    }
+    // Give queued input a chance to start before releasing the next same-thread RPC.
     conversation
         .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
         .await;
@@ -1357,6 +1476,16 @@ pub(super) async fn resolve_pending_server_request(
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct HistoryItemId<'a>(Cow<'a, str>);
 
+pub(super) async fn restore_evicted_payloads<'a>(
+    store: &dyn ThreadStore,
+    thread_id: ThreadId,
+    turn: &mut Turn,
+    stored: impl Iterator<Item = &'a mut Turn>,
+) -> Result<(), JSONRPCErrorError> {
+    restore_evicted_mcp_results(store, thread_id, turn).await?;
+    restore_evicted_agent_text(store, thread_id, turn, stored).await
+}
+
 async fn restore_evicted_agent_text<'a>(
     store: &dyn ThreadStore,
     thread_id: ThreadId,
@@ -1386,12 +1515,7 @@ async fn restore_evicted_agent_text<'a>(
     // The prepared page can predate some of the listener's items. Fetch only those gaps.
     let ids: Vec<_> = missing.keys().cloned().collect();
     for chunk in ids.chunks(THREAD_ITEMS_MAX_LIMIT) {
-        let params = ThreadItemsReadParams {
-            thread_id: thread_id.to_string(),
-            turn_id: turn.id.clone(),
-            item_ids: chunk.iter().map(|id| id.0.to_string()).collect(),
-        };
-        let saved = ThreadRequestProcessor::read_thread_items(store, params).await?;
+        let saved = read_evicted_items(store, thread_id, &turn.id, chunk).await?;
         fill_agent_text(&mut missing, saved.data.into_iter().map(|entry| entry.item));
     }
     if missing.is_empty() {
@@ -1416,6 +1540,65 @@ fn fill_agent_text(
             *slot = text;
         }
     }
+}
+
+async fn restore_evicted_mcp_results(
+    store: &dyn ThreadStore,
+    thread_id: ThreadId,
+    turn: &mut Turn,
+) -> Result<(), JSONRPCErrorError> {
+    let mut missing: HashMap<_, _> = turn
+        .items
+        .iter_mut()
+        .filter_map(|item| match &mut item.payload {
+            ThreadItemPayload::McpToolCall {
+                id,
+                status: McpToolCallStatus::Completed,
+                result,
+                ..
+            } if result.is_none() => Some((HistoryItemId(Cow::Borrowed(id)), result)),
+            _ => None,
+        })
+        .collect();
+    // A prepared page may contain a stale result for the same call ID.
+    let ids: Vec<_> = missing.keys().cloned().collect();
+    for chunk in ids.chunks(THREAD_ITEMS_MAX_LIMIT) {
+        let saved = read_evicted_items(store, thread_id, &turn.id, chunk).await?;
+        for entry in saved.data {
+            if let ThreadItemPayload::McpToolCall {
+                id,
+                status: McpToolCallStatus::Completed,
+                result: Some(result),
+                ..
+            } = entry.item.payload
+                && let Some(slot) = missing.remove(&HistoryItemId(Cow::Owned(id)))
+            {
+                *slot = Some(result);
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(internal_error(format!(
+            "saved history is missing completed MCP results for turn {}",
+            turn.id
+        )))
+    }
+}
+
+async fn read_evicted_items(
+    store: &dyn ThreadStore,
+    thread_id: ThreadId,
+    turn_id: &str,
+    ids: &[HistoryItemId<'_>],
+) -> Result<codex_app_server_protocol::ThreadItemsReadResponse, JSONRPCErrorError> {
+    let params = ThreadItemsReadParams {
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.to_owned(),
+        item_ids: ids.iter().map(|id| id.0.to_string()).collect(),
+    };
+    ThreadRequestProcessor::read_thread_items(store, params).await
 }
 
 pub(super) fn merge_turn_history_with_active_turn(turns: &mut Vec<Turn>, active_turn: Turn) {

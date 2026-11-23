@@ -117,7 +117,7 @@ pub enum RolloutRecorderParams {
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
-        initial_window_id: Option<String>,
+        initial_window_id: Option<codex_protocol::ContextWindowId>,
     },
     Resume {
         path: PathBuf,
@@ -373,7 +373,10 @@ impl RolloutRecorderParams {
         self
     }
 
-    pub fn with_initial_window_id(mut self, initial_window_id: String) -> Self {
+    pub fn with_initial_window_id(
+        mut self,
+        initial_window_id: codex_protocol::ContextWindowId,
+    ) -> Self {
         if let Self::Create {
             initial_window_id: window_id,
             ..
@@ -416,6 +419,7 @@ impl RolloutRecorder {
         cwd_filters: Option<&[PathBuf]>,
         default_provider: &str,
         search_term: Option<&str>,
+        include_attached_threads: bool,
     ) -> std::io::Result<ThreadsPage> {
         Self::list_threads_with_db_fallback(
             state_db_ctx,
@@ -431,6 +435,7 @@ impl RolloutRecorder {
             ThreadListArchiveFilter::Active,
             ThreadListRepairMode::ScanAndRepair,
             search_term,
+            include_attached_threads,
         )
         .await
     }
@@ -463,6 +468,7 @@ impl RolloutRecorder {
             ThreadListArchiveFilter::Active,
             ThreadListRepairMode::StateDbOnly,
             search_term,
+            /*include_attached_threads*/ false,
         )
         .await
     }
@@ -481,6 +487,7 @@ impl RolloutRecorder {
         cwd_filters: Option<&[PathBuf]>,
         default_provider: &str,
         search_term: Option<&str>,
+        include_attached_threads: bool,
     ) -> std::io::Result<ThreadsPage> {
         Self::list_threads_with_db_fallback(
             state_db_ctx,
@@ -496,6 +503,7 @@ impl RolloutRecorder {
             ThreadListArchiveFilter::Archived,
             ThreadListRepairMode::ScanAndRepair,
             search_term,
+            include_attached_threads,
         )
         .await
     }
@@ -528,6 +536,7 @@ impl RolloutRecorder {
             ThreadListArchiveFilter::Archived,
             ThreadListRepairMode::StateDbOnly,
             search_term,
+            /*include_attached_threads*/ false,
         )
         .await
     }
@@ -547,6 +556,7 @@ impl RolloutRecorder {
         archive_filter: ThreadListArchiveFilter,
         repair_mode: ThreadListRepairMode,
         search_term: Option<&str>,
+        include_attached_threads: bool,
     ) -> std::io::Result<ThreadsPage> {
         let codex_home = config.codex_home();
         let sqlite = config.sqlite_config();
@@ -554,6 +564,8 @@ impl RolloutRecorder {
             ThreadListArchiveFilter::Active => false,
             ThreadListArchiveFilter::Archived => true,
         };
+        let relation_filter =
+            include_attached_threads.then_some(codex_state::ThreadRelationFilter::IncludeAttached);
         if matches!(repair_mode, ThreadListRepairMode::StateDbOnly) {
             return state_db::list_threads_db(
                 state_db_ctx.as_deref(),
@@ -565,7 +577,8 @@ impl RolloutRecorder {
                 allowed_sources,
                 model_providers,
                 cwd_filters,
-                /*relation_filter*/ None,
+                /*included_thread_ids*/ None,
+                relation_filter,
                 archived,
                 /*section*/ None,
                 /*project_id*/ None,
@@ -586,18 +599,32 @@ impl RolloutRecorder {
         // Filesystem-first listing intentionally overfetches so we can repair stale/missing
         // SQLite rows before returning the scan page for filtered listings or the DB page for
         // unfiltered listings.
+        let file_config = ThreadListConfig {
+            allowed_sources,
+            model_providers,
+            cwd_filters,
+            default_provider,
+            layout: if archived {
+                ThreadListLayout::Flat
+            } else {
+                ThreadListLayout::NestedByDate
+            },
+            include_attached_threads,
+        };
         let fs_page = match sort_direction {
             SortDirection::Asc => {
+                // SQLite needs one extra indexed row to produce a recency cursor.
+                let scan_size = if sort_key == ThreadSortKey::RecencyAt && state_db_ctx.is_some() {
+                    page_size.saturating_add(1)
+                } else {
+                    page_size
+                };
                 list_threads_from_files_asc(
                     codex_home,
-                    page_size,
+                    scan_size,
                     cursor,
                     sort_key,
-                    allowed_sources,
-                    model_providers,
-                    cwd_filters,
-                    default_provider,
-                    archived,
+                    file_config,
                     search_term,
                 )
                 .await?
@@ -608,18 +635,14 @@ impl RolloutRecorder {
                     page_size.saturating_mul(2),
                     cursor,
                     sort_key,
-                    allowed_sources,
-                    model_providers,
-                    cwd_filters,
-                    default_provider,
-                    archived,
+                    file_config,
                     search_term,
                 )
                 .await?
             }
         };
 
-        if state_db_ctx.is_none() {
+        let Some(state_db) = state_db_ctx.as_deref() else {
             // Keep legacy behavior when SQLite is unavailable: return filesystem results
             // at the requested page size.
             codex_state::record_fallback(
@@ -633,7 +656,7 @@ impl RolloutRecorder {
                 page_size,
                 sort_key,
             ));
-        }
+        };
 
         // For metadata-filtered listings the filesystem page is the page we return. Track those
         // IDs so the later DB page only triggers full reconciliation for DB-only hits.
@@ -648,14 +671,12 @@ impl RolloutRecorder {
         // enough there. Search can depend on full title metadata, so keep full reconciliation.
         for item in &fs_page.items {
             if search_term.is_some() {
-                state_db::reconcile_rollout(
-                    state_db_ctx.as_deref(),
+                state_db::reconcile_rollout_from_disk(
+                    state_db,
                     item.path.as_path(),
                     default_provider,
-                    /*builder*/ None,
-                    &[],
                     Some(archived),
-                    /*new_thread_memory_mode*/ None,
+                    Some(codex_home),
                 )
                 .await;
             } else {
@@ -679,7 +700,8 @@ impl RolloutRecorder {
             allowed_sources,
             model_providers,
             cwd_filters,
-            /*relation_filter*/ None,
+            /*included_thread_ids*/ None,
+            relation_filter,
             archived,
             /*section*/ None,
             /*project_id*/ None,
@@ -710,7 +732,8 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filters,
-                    /*relation_filter*/ None,
+                    /*included_thread_ids*/ None,
+                    relation_filter,
                     archived,
                     /*section*/ None,
                     /*project_id*/ None,
@@ -752,7 +775,8 @@ impl RolloutRecorder {
                         allowed_sources,
                         model_providers,
                         cwd_filters,
-                        /*relation_filter*/ None,
+                        /*included_thread_ids*/ None,
+                        relation_filter,
                         archived,
                         /*section*/ None,
                         /*project_id*/ None,
@@ -833,6 +857,7 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filter.as_ref().map(std::slice::from_ref),
+                    /*included_thread_ids*/ None,
                     /*relation_filter*/ None,
                     /*archived*/ false,
                     /*section*/ None,
@@ -996,6 +1021,9 @@ impl RolloutRecorder {
                     writer: None,
                     deferred_creation: true,
                     pending_items: Vec::new(),
+                    realtime_sync_pending: false,
+                    #[cfg(unix)]
+                    directories_to_sync: Vec::new(),
                     meta: Some(session_meta),
                     cwd: cwd.clone(),
                     rollout_path: path,
@@ -1010,6 +1038,9 @@ impl RolloutRecorder {
                     writer: Some(JsonlWriter { file }),
                     deferred_creation: false,
                     pending_items: Vec::new(),
+                    realtime_sync_pending: false,
+                    #[cfg(unix)]
+                    directories_to_sync: rollout_directories_to_sync(&path)?,
                     meta: None,
                     cwd: cwd.clone(),
                     rollout_path: path,
@@ -1363,8 +1394,8 @@ fn page_from_filesystem_scan(
     sort_key: ThreadSortKey,
 ) -> ThreadsPage {
     match sort_direction {
-        SortDirection::Asc => page,
-        SortDirection::Desc => truncate_fs_page(page, page_size, sort_key),
+        SortDirection::Asc if sort_key != ThreadSortKey::RecencyAt => page,
+        SortDirection::Asc | SortDirection::Desc => truncate_fs_page(page, page_size, sort_key),
     }
 }
 
@@ -1415,6 +1446,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         git_origin_url,
         source,
         history_mode: _,
+        attached_to_thread_id,
         parent_thread_id,
         agent_nickname,
         agent_role,
@@ -1431,11 +1463,19 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         item.originator = originator;
     }
 
+    // A paginated fork's rollout starts with its own first turn. SQLite can hold a
+    // distinct preview inherited from the parent before that turn was written.
+    if item.preview.is_none()
+        || (item.history_mode == ThreadHistoryMode::Paginated
+            && preview
+                .as_deref()
+                .is_some_and(|preview| !preview.is_empty())
+            && preview != first_user_message)
+    {
+        item.preview = preview;
+    }
     if item.first_user_message.is_none() {
         item.first_user_message = first_user_message;
-    }
-    if item.preview.is_none() {
-        item.preview = preview;
     }
     item.section = section;
     item.project_id = project_id;
@@ -1457,6 +1497,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     if item.source.is_none() {
         item.source = source;
     }
+    item.attached_to_thread_id = item.attached_to_thread_id.or(attached_to_thread_id);
     if item.parent_thread_id.is_none() {
         item.parent_thread_id = parent_thread_id;
     }
@@ -1483,17 +1524,12 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn list_threads_from_files_desc(
     codex_home: &Path,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
-    model_providers: Option<&[String]>,
-    cwd_filters: Option<&[PathBuf]>,
-    default_provider: &str,
-    archived: bool,
+    config: ThreadListConfig<'_>,
     search_term: Option<&str>,
 ) -> std::io::Result<ThreadsPage> {
     if let Some(search_term) = search_term {
@@ -1509,11 +1545,7 @@ async fn list_threads_from_files_desc(
                 scan_page_size,
                 page_cursor.as_ref(),
                 sort_key,
-                allowed_sources,
-                model_providers,
-                cwd_filters,
-                default_provider,
-                archived,
+                config,
             )
             .await?;
             scanned_files = scanned_files.saturating_add(page.num_scanned_files);
@@ -1546,74 +1578,29 @@ async fn list_threads_from_files_desc(
         });
     }
 
-    list_threads_from_files_desc_unfiltered(
-        codex_home,
-        page_size,
-        cursor,
-        sort_key,
-        allowed_sources,
-        model_providers,
-        cwd_filters,
-        default_provider,
-        archived,
-    )
-    .await
+    list_threads_from_files_desc_unfiltered(codex_home, page_size, cursor, sort_key, config).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn list_threads_from_files_desc_unfiltered(
     codex_home: &Path,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
-    model_providers: Option<&[String]>,
-    cwd_filters: Option<&[PathBuf]>,
-    default_provider: &str,
-    archived: bool,
+    config: ThreadListConfig<'_>,
 ) -> std::io::Result<ThreadsPage> {
-    if archived {
-        let root = codex_home.join(ARCHIVED_SESSIONS_SUBDIR);
-        get_threads_in_root(
-            root,
-            page_size,
-            cursor,
-            sort_key,
-            ThreadListConfig {
-                allowed_sources,
-                model_providers,
-                cwd_filters,
-                default_provider,
-                layout: ThreadListLayout::Flat,
-            },
-        )
-        .await
-    } else {
-        get_threads(
-            codex_home,
-            page_size,
-            cursor,
-            sort_key,
-            allowed_sources,
-            model_providers,
-            cwd_filters,
-            default_provider,
-        )
-        .await
-    }
+    let root = codex_home.join(match config.layout {
+        ThreadListLayout::Flat => ARCHIVED_SESSIONS_SUBDIR,
+        ThreadListLayout::NestedByDate => SESSIONS_SUBDIR,
+    });
+    get_threads_in_root(root, page_size, cursor, sort_key, config).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn list_threads_from_files_asc(
     codex_home: &Path,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
-    model_providers: Option<&[String]>,
-    cwd_filters: Option<&[PathBuf]>,
-    default_provider: &str,
-    archived: bool,
+    config: ThreadListConfig<'_>,
     search_term: Option<&str>,
 ) -> std::io::Result<ThreadsPage> {
     let mut all_items = Vec::new();
@@ -1627,11 +1614,7 @@ async fn list_threads_from_files_asc(
             scan_page_size,
             page_cursor.as_ref(),
             sort_key,
-            allowed_sources,
-            model_providers,
-            cwd_filters,
-            default_provider,
-            archived,
+            config,
             /*search_term*/ None,
         )
         .await?;
@@ -1739,6 +1722,21 @@ fn precompute_new_rollout_path(
     Ok((path, timestamp))
 }
 
+#[cfg(unix)]
+fn rollout_directories_to_sync(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    // Creating the file changes its parent. Creating a date directory changes its parent too.
+    let mut directories = Vec::new();
+    if let Some(parent) = path.parent() {
+        for directory in parent.ancestors() {
+            directories.push(directory.to_owned());
+            if directory.try_exists()? {
+                break;
+            }
+        }
+    }
+    Ok(directories)
+}
+
 fn open_log_file(path: &Path) -> std::io::Result<File> {
     let refresh_modified_time = !compression::plain_rollout_path(path).try_exists()?;
     let path = compression::materialize_rollout_for_append_blocking(path)?;
@@ -1753,7 +1751,7 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
         .read(true)
         .append(true)
         .create(true)
-        .open(path)?;
+        .open(&path)?;
     if refresh_modified_time {
         refresh_rollout_modified_time(&file)?;
     }
@@ -1781,6 +1779,11 @@ struct RolloutWriterState {
     /// True until a newly created rollout is first materialized.
     deferred_creation: bool,
     pending_items: Vec<RolloutItem>,
+    /// A sealed V1 event requires a disk barrier, even if background append drained its item.
+    realtime_sync_pending: bool,
+    /// Directory entries that must reach disk before the first realtime seal is acknowledged.
+    #[cfg(unix)]
+    directories_to_sync: Vec<PathBuf>,
     meta: Option<SessionMeta>,
     cwd: PathBuf,
     rollout_path: PathBuf,
@@ -1790,6 +1793,9 @@ struct RolloutWriterState {
 
 impl RolloutWriterState {
     fn add_items(&mut self, items: Vec<RolloutItem>) {
+        self.realtime_sync_pending |= items
+            .iter()
+            .any(|item| item.realtime_observed_at_ms().is_some());
         self.pending_items.extend(items);
     }
 
@@ -1797,7 +1803,7 @@ impl RolloutWriterState {
         if self.is_deferred() {
             return;
         }
-        if let Err(err) = self.flush().await {
+        if let Err(err) = self.write_pending_with_recovery("append").await {
             self.enter_recovery_mode(&err);
         }
     }
@@ -1810,7 +1816,21 @@ impl RolloutWriterState {
         if self.is_deferred() && self.pending_items.is_empty() {
             return Ok(());
         }
-        self.write_pending_with_recovery("flush").await
+        self.write_pending_with_recovery("flush").await?;
+        if self.realtime_sync_pending
+            && let Some(writer) = self.writer.as_mut()
+        {
+            writer.file.sync_data().await?;
+            #[cfg(unix)]
+            {
+                for directory in &self.directories_to_sync {
+                    tokio::fs::File::open(directory).await?.sync_all().await?;
+                }
+                self.directories_to_sync.clear();
+            }
+            self.realtime_sync_pending = false;
+        }
+        Ok(())
     }
 
     async fn shutdown(&mut self) -> std::io::Result<()> {
@@ -1871,6 +1891,10 @@ impl RolloutWriterState {
             return Ok(());
         }
 
+        #[cfg(unix)]
+        if self.directories_to_sync.is_empty() {
+            self.directories_to_sync = rollout_directories_to_sync(&self.rollout_path)?;
+        }
         let file = open_log_file(self.rollout_path.as_path())?;
         self.writer = Some(JsonlWriter {
             file: tokio::fs::File::from_std(file),
@@ -2134,7 +2158,8 @@ impl From<codex_state::ThreadsPage> for ThreadsPage {
     }
 }
 
-fn thread_item_from_state_metadata(
+/// Projects a SQLite row into the rollout summary used by thread listings.
+pub fn thread_item_from_state_metadata(
     item: codex_state::ThreadMetadata,
     parent_thread_id: Option<ThreadId>,
 ) -> ThreadItem {
@@ -2157,6 +2182,7 @@ fn thread_item_from_state_metadata(
                 .unwrap_or(SessionSource::Unknown),
         ),
         history_mode: item.history_mode,
+        attached_to_thread_id: item.attached_thread_parent_id,
         parent_thread_id,
         agent_nickname: item.agent_nickname,
         agent_role: item.agent_role,

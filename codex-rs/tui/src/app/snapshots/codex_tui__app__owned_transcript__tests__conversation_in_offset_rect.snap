@@ -4,19 +4,19 @@ expression: normalize_snapshot_paths(screen)
 ---
 ····································
 ····································
-·····                          ·····
 ·····› Second prompt           ·····
 ·····                          ·····
 ·····                          ·····
 ·····• For the complete        ·····
 ·····  instructions see the    ·····
-·····  manual (https://        ·····
-·····  example.com/docs).      ·····
+·····  manual                  ·····
+·····  (https://example.com/doc·····
+·····  s).                     ·····
 ·····                          ·····
 ·····                          ·····
 ·····› preserved draft         ·····
 ·····                          ·····
-·····  gpt-test default · /tmp…·····
-·····                          ·····
+·····  gpt-test default · /tmp/·····
+·····  project                 ·····
 ····································
 ····································

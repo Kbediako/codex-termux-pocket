@@ -20,6 +20,7 @@ impl ChatComposer {
         attachments.set_remote_image_urls(draft.remote_image_urls.clone(), &mut textarea);
         attachments.reset_local_images(draft.local_image_paths, &mut textarea);
         ComposerDraftSnapshot {
+            vim_normal_mode: self.draft.textarea.is_vim_normal_mode(),
             text: draft.text,
             shell_mode: self
                 .config
@@ -47,7 +48,7 @@ impl ChatComposer {
             .preview_draft
             .get_or_insert_with(|| search.original_draft.clone());
         let preview = self.snapshot_draft();
-        let preview_vim_history = std::mem::take(&mut self.vim_history);
+        let preview_edit_history = std::mem::take(&mut self.edit_history);
         let mut preview_vim_state = VimPersistentState::default();
         self.draft
             .textarea
@@ -56,10 +57,10 @@ impl ChatComposer {
         self.draft
             .textarea
             .swap_vim_persistent_state(&mut search.original_vim_state);
-        self.vim_history = search.original_vim_history;
+        self.edit_history = search.original_edit_history;
         edit(self);
         search.original_draft = self.snapshot_draft();
-        search.original_vim_history = std::mem::take(&mut self.vim_history);
+        search.original_edit_history = std::mem::take(&mut self.edit_history);
         self.draft
             .textarea
             .swap_vim_persistent_state(&mut search.original_vim_state);
@@ -68,6 +69,6 @@ impl ChatComposer {
         self.draft
             .textarea
             .swap_vim_persistent_state(&mut preview_vim_state);
-        self.vim_history = preview_vim_history;
+        self.edit_history = preview_edit_history;
     }
 }

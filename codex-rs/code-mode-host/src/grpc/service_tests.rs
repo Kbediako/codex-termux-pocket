@@ -2,9 +2,13 @@ use super::GrpcCodeModeHost;
 use super::GrpcStream;
 use codex_code_mode_protocol::grpc as proto;
 use codex_code_mode_protocol::grpc::code_mode_host_server::CodeModeHost;
+use codex_code_mode_runtime::ToolPreload;
 use futures::FutureExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
+use std::time::Duration;
+use tokio::time::sleep;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Code;
 use tonic::Request;
 
@@ -15,12 +19,64 @@ pub(super) async fn open_session(
     (opened.session_id, stream)
 }
 
+#[tokio::test(start_paused = true)]
+async fn zero_interval_keeps_both_rpc_streams_quiet() {
+    let host = GrpcCodeModeHost::new();
+    let (session_id, mut lease) = open_session(&host).await;
+    let mut calls = host
+        .subscribe_to_tool_calls(Request::new(proto::SubscribeToToolCallsRequest {
+            session_id,
+            tool_names: Vec::new(),
+            heartbeat_interval_s: 0,
+        }))
+        .await
+        .expect("subscribe to tool calls")
+        .into_inner();
+
+    assert!(lease.next().now_or_never().is_none());
+    assert!(calls.next().now_or_never().is_none());
+    sleep(Duration::from_secs(121)).await;
+    assert!(lease.next().now_or_never().is_none());
+    assert!(calls.next().now_or_never().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_heartbeats_repeat_and_reset_after_traffic() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut stream = super::with_heartbeats(
+        Box::pin(UnboundedReceiverStream::new(rx)),
+        /*interval_s*/ 30,
+        || "heartbeat",
+    );
+    sleep(Duration::from_secs(29)).await;
+    tx.send(Ok("event")).unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap(), "event");
+
+    for _ in 0..2 {
+        sleep(Duration::from_secs(29)).await;
+        assert!(stream.next().now_or_never().is_none());
+        sleep(Duration::from_secs(2)).await;
+        let next = stream.next().now_or_never().expect("idle heartbeat due");
+        assert_eq!(next.transpose().unwrap(), Some("heartbeat"));
+    }
+    sleep(Duration::from_secs(31)).await;
+    tx.send(Err(tonic::Status::cancelled("closed"))).unwrap();
+    drop(tx);
+    assert_eq!(
+        stream.next().await.unwrap().unwrap_err().code(),
+        Code::Cancelled
+    );
+    assert!(stream.next().await.is_none());
+}
+
 async fn open_session_with_truncation(
     host: &GrpcCodeModeHost,
     output_truncation: Option<i32>,
 ) -> (proto::SessionOpened, GrpcStream<proto::SessionEvent>) {
     let mut stream = host
         .open_session(Request::new(proto::OpenSessionRequest {
+            heartbeat_interval_s: 0,
+            max_pending_delegate_calls: None,
             cell_execution_limits: None,
             output_truncation,
         }))
@@ -44,6 +100,7 @@ pub(super) fn execute_request(
     source: &str,
 ) -> proto::ExecuteRequest {
     proto::ExecuteRequest {
+        catalog_revision: None,
         session_id: session_id.to_string(),
         execution_id: execution_id.to_string(),
         tool_call_id: "outer-call".to_string(),
@@ -98,6 +155,58 @@ fn only_text(items: &[proto::ContentItem]) -> &str {
         panic!("expected one text item, got {items:?}");
     };
     &text.text
+}
+
+#[tokio::test]
+async fn preload_errors_preserve_other_sessions_on_the_host() {
+    let host = GrpcCodeModeHost::new().with_tool_preloads(&[
+        ToolPreload {
+            tool: "first",
+            tool_name: "first",
+            tool_namespace: None,
+            source: "const shared = 1;",
+        },
+        ToolPreload {
+            tool: "second",
+            tool_name: "second",
+            tool_namespace: None,
+            source: "const shared = 2;",
+        },
+    ]);
+    let (broken, _broken_lease) = open_session(&host).await;
+    let (healthy, _healthy_lease) = open_session(&host).await;
+    let mut request = execute_request(&broken, "broken", "text('never runs')");
+    request.enabled_tools = vec![tool("first"), tool("second")];
+    for (mut request, expected_content, expected_error) in [
+        (
+            request,
+            Vec::new(),
+            Some("failed to execute tool preload #2 for `second`".to_string()),
+        ),
+        (
+            execute_request(&healthy, "healthy", "text('still alive')"),
+            vec![proto::ContentItem {
+                item: Some(proto::content_item::Item::Text(proto::TextContent {
+                    text: "still alive".to_string(),
+                })),
+            }],
+            None,
+        ),
+    ] {
+        request.yield_time_ms = Some(60_000);
+        let (_, mut events) = execute_events(&host, request).await;
+        let event = events.next().await.unwrap().unwrap();
+        let Some(proto::execute_event::Event::Outcome(outcome)) = event.event else {
+            panic!("expected cell outcome");
+        };
+        let Some(proto::execution_outcome::Outcome::Completed(completed)) = outcome.outcome else {
+            panic!("expected cell completion");
+        };
+        assert_eq!(
+            (outcome.content_items, completed.error_text),
+            (expected_content, expected_error)
+        );
+    }
 }
 
 #[tokio::test]
@@ -210,6 +319,7 @@ async fn filtered_subscriptions_match_default_namespace_aliases() {
         let (session_id, _events) = open_session(&host).await;
         let mut subscription = host
             .subscribe_to_tool_calls(Request::new(proto::SubscribeToToolCallsRequest {
+                heartbeat_interval_s: 0,
                 session_id: session_id.clone(),
                 tool_names: vec![proto::ToolName {
                     name: "echo".to_string(),
@@ -276,6 +386,7 @@ async fn filtered_subscriptions_receive_ordered_calls_and_unary_completions() {
     let (session_id, mut session_events) = open_session(&host).await;
     let mut matching = host
         .subscribe_to_tool_calls(Request::new(proto::SubscribeToToolCallsRequest {
+            heartbeat_interval_s: 0,
             session_id: session_id.clone(),
             tool_names: vec![proto::ToolName {
                 name: "echo".to_string(),
@@ -287,6 +398,7 @@ async fn filtered_subscriptions_receive_ordered_calls_and_unary_completions() {
         .into_inner();
     let mut unrelated = host
         .subscribe_to_tool_calls(Request::new(proto::SubscribeToToolCallsRequest {
+            heartbeat_interval_s: 0,
             session_id: session_id.clone(),
             tool_names: vec![proto::ToolName {
                 name: "other".to_string(),
@@ -605,6 +717,8 @@ async fn unknown_output_truncation_is_rejected_before_opening_a_session() {
     let host = GrpcCodeModeHost::new();
     let result = host
         .open_session(Request::new(proto::OpenSessionRequest {
+            heartbeat_interval_s: 0,
+            max_pending_delegate_calls: None,
             cell_execution_limits: None,
             output_truncation: Some(42),
         }))

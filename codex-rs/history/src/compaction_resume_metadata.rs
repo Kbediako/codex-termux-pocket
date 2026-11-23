@@ -9,6 +9,8 @@ use codex_protocol::turn_input::TurnAttribution;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Resume metadata that is not represented by the companion records after a compaction.
 ///
@@ -16,9 +18,18 @@ use serde::Serialize;
 /// compactions that did not.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompactionResumeMetadata {
+    /// Next ordinal in the producing thread's seeded item ID sequence at this checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_item_ordinal: Option<u64>,
+    /// Immutable file references rejected before this checkpoint.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rejected_audio_file_ids: Arc<BTreeSet<String>>,
     /// Catalog owned by the producing thread; absent in older checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_tools: Option<Box<DynamicToolsSnapshot>>,
+    /// Thread clock floor retained when older history is omitted from resume context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_clock_floor_ms: Option<i64>,
     /// Selected runtime, including when the companion turn context is absent.
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Turn identity used to admit continuations after cold resume.

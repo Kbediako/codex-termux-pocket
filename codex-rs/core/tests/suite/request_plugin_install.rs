@@ -75,6 +75,12 @@ use wiremock::matchers::query_param;
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
 
+#[path = "request_plugin_install_runtime_auth.rs"]
+mod runtime_auth_tests;
+
+#[path = "request_plugin_install_skills.rs"]
+mod skills_tests;
+
 const TOOL_SEARCH_TOOL_NAME: &str = "tool_search";
 const LIST_AVAILABLE_PLUGINS_TO_INSTALL_TOOL_NAME: &str = "list_available_plugins_to_install";
 const REQUEST_PLUGIN_INSTALL_TOOL_NAME: &str = "request_plugin_install";
@@ -379,19 +385,27 @@ async fn resolve_install_elicitation(
     Ok(())
 }
 
-async fn mount_remote_calendar_recommendation(server: &wiremock::MockServer) {
+async fn mount_remote_calendar_recommendation(
+    server: &wiremock::MockServer,
+    installed: Arc<AtomicBool>,
+) {
     Mock::given(method("GET"))
         .and(path("/ps/plugins/suggested/codex"))
         .and(query_param("scope", "GLOBAL"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enabled": true,
-            "plugins": [{
-                "id": REMOTE_CALENDAR_PLUGIN_ID,
-                "name": "calendar",
-                "display_name": "Calendar"
-            }]
-        })))
-        .expect(1)
+        .and(query_param("includeInstalled", "false"))
+        .respond_with(move |_: &wiremock::Request| {
+            let plugins = if installed.load(Ordering::SeqCst) {
+                json!([])
+            } else {
+                json!([{
+                    "id": REMOTE_CALENDAR_PLUGIN_ID,
+                    "name": "calendar",
+                    "display_name": "Calendar"
+                }])
+            };
+            ResponseTemplate::new(200).set_body_json(json!({ "enabled": true, "plugins": plugins }))
+        })
+        .expect(2)
         .mount(server)
         .await;
     Mock::given(method("GET"))
@@ -449,6 +463,7 @@ async fn mount_remote_calendar_installed_plugins(server: &wiremock::MockServer) 
             },
             "enabled": true
         })]))
+        .expect(1..)
         .with_priority(1)
         .mount(server)
         .await;
@@ -784,6 +799,18 @@ async fn mcp_discovery_overlaps_endpoint_plugin_recommendations() -> Result<()> 
         response.requests().is_empty(),
         "sampling should wait for the complete MCP catalog"
     );
+    // Change the shared catalog after the step's recommendation request, while MCP is blocked.
+    Mock::given(method("GET"))
+        .and(path("/ps/plugins/suggested/codex"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": true, "plugins": []
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    test.thread_manager
+        .plugins_manager()
+        .clear_recommended_plugins_cache();
     test.fs()
         .write_file(
             &barrier,
@@ -804,6 +831,11 @@ async fn mcp_discovery_overlaps_endpoint_plugin_recommendations() -> Result<()> 
             .join("\n")
             .contains("github@openai-curated-remote"),
         "the completed request should preserve endpoint recommendations"
+    );
+    assert!(
+        tool_names(&request.body_json())
+            .iter()
+            .any(|name| name == REQUEST_PLUGIN_INSTALL_TOOL_NAME)
     );
     assert!(
         request
@@ -1537,7 +1569,8 @@ async fn run_remote_plugin_install_refresh_case(refreshed_tools: RefreshedAppsTo
         }
         RefreshedAppsTools::Missing => AppsTestServer::mount_without_tools(&server).await?,
     };
-    mount_remote_calendar_recommendation(&server).await;
+    let installed = Arc::new(AtomicBool::new(false));
+    mount_remote_calendar_recommendation(&server, Arc::clone(&installed)).await;
     let initial_remote_installed_plugins = mount_empty_remote_installed_plugins(&server).await;
 
     let install_call_id = "install-calendar";
@@ -1575,6 +1608,7 @@ async fn run_remote_plugin_install_refresh_case(refreshed_tools: RefreshedAppsTo
     let elicitation = start_install_turn(&test, "use Calendar").await?;
     mount_remote_calendar_installed_plugins(&server).await;
     drop(initial_remote_installed_plugins);
+    installed.store(true, Ordering::SeqCst);
     tools_available.store(
         matches!(refreshed_tools, RefreshedAppsTools::Available),
         Ordering::SeqCst,
@@ -1613,12 +1647,6 @@ async fn run_remote_plugin_install_refresh_case(refreshed_tools: RefreshedAppsTo
         completed,
         "the resumed router should reflect the refreshed Apps tools"
     );
-    assert!(
-        !tool_names(&requests[1].body_json())
-            .iter()
-            .any(|name| name == REQUEST_PLUGIN_INSTALL_TOOL_NAME),
-        "the refreshed installed-plugin cache should filter the cached recommendation"
-    );
     drop(requests);
     let current_config = test.codex.config().await;
     let _ = test
@@ -1629,6 +1657,26 @@ async fn run_remote_plugin_install_refresh_case(refreshed_tools: RefreshedAppsTo
         .await?;
     let requests = mock.requests();
     assert_eq!(requests.len(), 3);
+    let recommendation_blocks = |index: usize| {
+        requests[index]
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<recommended_plugins>"))
+            .collect::<Vec<_>>()
+    };
+    let initial = recommendation_blocks(0);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(
+        recommendation_blocks(2),
+        initial,
+        "refreshing recommendations must preserve the original block"
+    );
+    assert!(
+        !tool_names(&requests[2].body_json())
+            .iter()
+            .any(|name| name == REQUEST_PLUGIN_INSTALL_TOOL_NAME),
+        "the updated recommendations must stop offering to install Calendar"
+    );
     assert_eq!(
         requests[2]
             .tool_by_name(CALENDAR_NAMESPACE, CALENDAR_CREATE_EVENT_TOOL)

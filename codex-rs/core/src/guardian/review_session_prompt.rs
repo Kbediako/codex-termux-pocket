@@ -1,9 +1,11 @@
 //! Captures synchronous evidence once for the common preparation pass.
 //! Reviewer-history token measurement is needed only for captured images.
 
+use codex_guardian_context::ElasticSection;
 use codex_guardian_reviewer::GuardianPromptItems;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
@@ -20,7 +22,6 @@ use super::GuardianReviewSessionParams;
 use crate::context_manager::ContextManager;
 use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::resize_image;
-use crate::image_preparation::unified_image_budget_enabled;
 
 pub(super) async fn build_guardian_prompt_items(
     params: &GuardianReviewSessionParams,
@@ -31,16 +32,34 @@ pub(super) async fn build_guardian_prompt_items(
     mode: GuardianPromptMode,
     reviewed_node_repl_evidence_sequence: u64,
 ) -> anyhow::Result<GuardianPromptItems> {
-    let collected = collect_guardian_prompt_items_with_parent_turn(
+    let selected_tool_names = params
+        .spawn_config
+        .guardian_sync_elastic_budget
+        .as_ref()
+        .filter(|budget| {
+            budget
+                .sections
+                .contains_key(&ElasticSection::TranscriptSelectedExecResults)
+        })
+        .map_or(&[][..], |budget| budget.selected_exec_tool_names.as_slice());
+    let select_exec_output = |output: &ResponseItem| {
+        params
+            .parent_session
+            .services
+            .executed_tool_calls
+            .exec_output_matches(output, selected_tool_names)
+    };
+    let mut collected = collect_guardian_prompt_items_with_parent_turn(
         params.parent_session.as_ref(),
         history,
         Some(&params.parent_context),
         params.reasons.clone(),
         params.request.clone(),
-        mode,
+        (!selected_tool_names.is_empty()).then_some(&select_exec_output),
         reviewed_node_repl_evidence_sequence,
     )
     .await?;
+    collected.profile.transcript_format = params.spawn_config.guardian_transcript_mode;
     let context_window = model_info.resolved_context_window().map(|supported| {
         params
             .spawn_config
@@ -52,11 +71,7 @@ pub(super) async fn build_guardian_prompt_items(
     });
     let context_window =
         context_window.filter(|limit| *limit > 0 && model_info.origin != ModelOrigin::Synthetic);
-    let image_mode = if unified_image_budget_enabled(&params.spawn_config.features, model_info) {
-        ImagePreparationMode::UnifiedBudget
-    } else {
-        ImagePreparationMode::DetailBased
-    };
+    let image_mode = ImagePreparationMode::for_model(&params.spawn_config.features, model_info);
     let history_tokens = if context_window.is_some() && collected.sections.has_images() {
         let base_instructions = reviewer.session.get_base_instructions().await;
         reviewer_history
@@ -73,12 +88,12 @@ pub(super) async fn build_guardian_prompt_items(
     codex_guardian_reviewer::compose_guardian_prompt_with_preparation(
         collected.sections,
         &collected.profile,
-        collected.mode,
+        mode,
         collected.history_version,
         &collected.session_id,
         collected.node_repl_evidence_sequence,
         codex_guardian_context::SyncPreparation {
-            budgeting: codex_guardian_context::ContextBudgeting::Fixed,
+            budgeting: params.spawn_config.guardian_context_budgeting(),
             reviewer_history: reviewer_history.annotated_items(),
             context_window,
             history_tokens,
@@ -102,7 +117,7 @@ impl codex_guardian_context::SyncImagePreparer for ReviewImagePreparer<'_> {
         detail: &mut Option<ImageDetail>,
     ) -> Option<Cow<'image, ImageReference>> {
         *detail = match normalize_output_image_detail(self.model_info, *detail) {
-            _ if self.mode == ImagePreparationMode::UnifiedBudget => Some(ImageDetail::Original),
+            _ if self.mode.unified_budget => Some(ImageDetail::Original),
             Some(ImageDetail::Low) => Some(ImageDetail::High),
             detail => detail,
         };

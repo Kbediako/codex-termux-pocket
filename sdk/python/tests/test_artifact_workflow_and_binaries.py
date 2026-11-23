@@ -190,18 +190,16 @@ def test_root_format_driver_covers_all_formatter_groups(
         len(group.commands) for group in formatters
     ]
     sdk_uv_run_args = (
-        "uv",
-        "run",
-        "--frozen",
+        sys.executable,
+        "codex-rs/scripts/run_locked_python_tool.py",
         "--project",
         "sdk/python",
         "--only-group",
         "format",
     )
     scripts_uv_run_args = (
-        "uv",
-        "run",
-        "--frozen",
+        sys.executable,
+        "codex-rs/scripts/run_locked_python_tool.py",
         "--project",
         "scripts",
     )
@@ -562,11 +560,13 @@ def test_generated_audio_inputs_preserve_inline_and_file_shapes() -> None:
         ContentItem,
         FileIdUserInput1,
         InputAudioContentItem,
+        InputAudioFunctionCallOutputContentItem,
         UserInput,
     )
 
     audio_url = "data:audio/wav;base64,YXVkaW8="
     for model, wire in [
+        (InputAudioFunctionCallOutputContentItem, {"type": "input_audio", "audio_url": audio_url}),
         (AudioUserInput, {"type": "audio", "url": audio_url}),
         (InputAudioContentItem, {"type": "input_audio", "audio_url": audio_url}),
         (UserInput, {"type": "audio", "fileId": "file_audio"}),

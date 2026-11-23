@@ -8,9 +8,11 @@ use codex_config::ThreadConfigLoader;
 use codex_config::apply_default_gcp_auth;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::load_managed_requirements_state;
+use codex_core::GuardianPolicyLoader;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::McpLaunchCwds;
 use codex_exec_server::LOCAL_FS;
 use codex_features::feature_for_key;
 use codex_login::AuthManager;
@@ -23,6 +25,7 @@ use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_json_to_toml::json_to_toml;
+use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -49,6 +52,7 @@ pub(crate) struct ConfigManager {
     strict_config: bool,
     cloud_config_bundle: Arc<RwLock<CloudConfigBundleLoader>>,
     arg0_paths: Arg0DispatchPaths,
+    mcp_launch_cwds: Arc<McpLaunchCwds>,
     thread_config_loader: Arc<dyn ThreadConfigLoader>,
     network_policy: codex_http_client::NetworkPolicyController,
     local_network_policy: codex_http_client::NetworkPolicyController,
@@ -108,6 +112,7 @@ impl ConfigManager {
             strict_config,
             cloud_config_bundle: Arc::new(RwLock::new(cloud_config_bundle)),
             arg0_paths,
+            mcp_launch_cwds: Arc::default(),
             thread_config_loader,
             network_policy,
             local_network_policy: Default::default(),
@@ -115,6 +120,11 @@ impl ConfigManager {
             network_policy_snapshot: Arc::default(),
             mcp_ema_cancellation: Arc::default(),
         }
+    }
+
+    pub(crate) fn with_mcp_launch_cwds(mut self, cwds: McpLaunchCwds) -> Self {
+        self.mcp_launch_cwds = Arc::new(cwds);
+        self
     }
 
     pub(crate) fn codex_home(&self) -> &Path {
@@ -191,7 +201,7 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub(crate) fn update_managed_config_loader(
+    pub(crate) async fn update_managed_config_loader(
         &self,
         auth_manager: Arc<AuthManager>,
         config: &Config,
@@ -214,7 +224,8 @@ impl ConfigManager {
                 .http_client_factory()
                 .with_network_policy(self.local_network_policy.policy()),
             config.config_layer_stack.requirements_toml(),
-        );
+        )
+        .await;
         if let Ok(mut guard) = self.cloud_config_bundle.write() {
             guard.retire_ema_policy();
             *guard = loader;
@@ -283,7 +294,7 @@ impl ConfigManager {
         self.check_application_policy_load(&policy_load)?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
-        self.apply_arg0_paths(&mut config);
+        self.apply_process_settings(&mut config);
         config.config_layer_stack = config
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
@@ -309,7 +320,7 @@ impl ConfigManager {
         .await?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
-        self.apply_arg0_paths(&mut config);
+        self.apply_process_settings(&mut config);
         config.config_layer_stack = config
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
@@ -338,7 +349,7 @@ impl ConfigManager {
         .await?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
-        self.apply_arg0_paths(&mut config);
+        self.apply_process_settings(&mut config);
         config.config_layer_stack = config
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
@@ -429,30 +440,9 @@ impl ConfigManager {
             AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
                 .await
                 .map_err(std::io::Error::other)?;
-        self.update_managed_config_loader(auth, &bootstrap);
+        self.update_managed_config_loader(auth, &bootstrap).await;
         let config = self.load_latest_config(cwd).await;
         Ok(CloudStartupConfig { bootstrap, config })
-    }
-
-    /// Admits resumed threads and input only on the currently selected provider.
-    pub(crate) async fn check_thread_model_provider_for_input(
-        &self,
-        current: &Config,
-    ) -> std::io::Result<()> {
-        self.check_thread_model_provider(current).await?;
-        let configured = self
-            .load_latest_config(Some(current.cwd.to_path_buf()))
-            .await?;
-        if current.model_provider_id != configured.model_provider_id {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                ModelProviderError::ModelProviderMismatch {
-                    model_provider: current.model_provider_id.clone(),
-                    current_model_provider: configured.model_provider_id,
-                },
-            ));
-        }
-        Ok(())
     }
 
     /// Installs local policy before cloud access; failed policy loads block traffic while
@@ -499,7 +489,7 @@ impl ConfigManager {
             .await?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
-        self.apply_arg0_paths(&mut config);
+        self.apply_process_settings(&mut config);
         config.config_layer_stack = config
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
@@ -544,7 +534,7 @@ impl ConfigManager {
         &self,
         saved_provider: Option<&str>,
         request_overrides: Option<HashMap<String, serde_json::Value>>,
-        typesafe_overrides: ConfigOverrides,
+        mut typesafe_overrides: ConfigOverrides,
         cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
         let requested_provider = typesafe_overrides.model_provider.clone().or_else(|| {
@@ -554,11 +544,9 @@ impl ConfigManager {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         });
-        // Resolve the selection before the saved provider is applied as a resume override.
-        let current_provider = self
-            .load_latest_config(typesafe_overrides.cwd.clone().or_else(|| cwd.clone()))
-            .await
-            .map(|config| config.model_provider_id);
+        if let Some(saved) = saved_provider {
+            typesafe_overrides.model_provider = Some(saved.to_owned());
+        }
         self.load_with_validation(
             &self.current_cli_overrides(),
             request_overrides,
@@ -567,6 +555,7 @@ impl ConfigManager {
             |config, _overrides, layers| {
                 let requested_provider = requested_provider
                     .as_deref()
+                    .or(saved_provider)
                     .or(config.model_provider.as_deref())
                     .unwrap_or("openai");
                 // Validate the saved route even when a client sends a provider override.
@@ -597,20 +586,13 @@ impl ConfigManager {
                         ));
                     }
                 }
-                let current_provider = current_provider?;
-                for provider in [
-                    saved_provider.unwrap_or(requested_provider),
-                    requested_provider,
-                ] {
-                    if provider != current_provider {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            ModelProviderError::ModelProviderMismatch {
-                                model_provider: provider.to_owned(),
-                                current_model_provider: current_provider,
-                            },
-                        ));
-                    }
+                if let Some(saved) = saved_provider
+                    && saved != requested_provider
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Cannot change this thread's model provider from `{saved}` to `{requested_provider}` on resume."),
+                    ));
                 }
                 Ok(())
             },
@@ -729,7 +711,7 @@ impl ConfigManager {
         self.check_application_policy_load(&policy_load)?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
-        self.apply_arg0_paths(&mut config);
+        self.apply_process_settings(&mut config);
         config.config_layer_stack = config
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
@@ -793,9 +775,10 @@ impl ConfigManager {
         );
     }
 
-    fn apply_arg0_paths(&self, config: &mut Config) {
+    fn apply_process_settings(&self, config: &mut Config) {
         config.codex_self_exe = self.arg0_paths.codex_self_exe.clone();
         config.codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
+        config.mcp_launch_cwds = Arc::clone(&self.mcp_launch_cwds);
     }
 
     #[cfg(test)]
@@ -824,6 +807,27 @@ impl ConfigManager {
             LoaderOverrides::without_managed_config_for_tests(),
             CloudConfigBundleLoader::default(),
         )
+    }
+}
+
+impl GuardianPolicyLoader for ConfigManager {
+    fn load_guardian_policy_snapshot(
+        &self,
+        revision: u64,
+    ) -> BoxFuture<'_, std::io::Result<codex_config::GuardianPolicySnapshot>> {
+        Box::pin(async move {
+            let policy_load = self.refresh_application_network_policy().await?;
+            let snapshot = codex_config::loader::load_guardian_policy_snapshot(
+                LOCAL_FS.as_ref(),
+                &self.codex_home,
+                &self.loader_overrides,
+                &policy_load.cloud_config,
+                revision,
+            )
+            .await?;
+            self.check_application_policy_load(&policy_load)?;
+            Ok(snapshot)
+        })
     }
 }
 

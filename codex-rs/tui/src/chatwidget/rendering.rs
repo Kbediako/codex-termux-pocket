@@ -1,28 +1,50 @@
 //! Shared composer and live-history composition for inline and owned transcript surfaces.
 
-use super::provider_error::ProviderErrorNotice;
+use super::read_only::BlockedThreadView;
 use super::transcript::ActiveCellLayoutCache;
 use super::transcript::ActiveCellLayoutCacheKey;
 use super::*;
 use crate::keymap::KeymapContext;
+use crate::line_truncation::span_width;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::render::RectExt;
 use crate::terminal_hyperlinks::HyperlinkParagraph;
 use crate::wrapping::RtOptions;
+use crate::wrapping::adaptive_wrap_lines;
 use crate::wrapping::word_wrap_lines;
-use ratatui::style::Styled as _;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
 use std::cell::Cell;
 
-struct ExternalWriterNotice {
-    agents_navigation_key_available: bool,
-    transcript_hint: Option<crate::key_hint::ShortcutHint>,
+struct NewBackendControl<'a>(Line<'a>, Option<(usize, String)>);
+
+impl Renderable for NewBackendControl<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let mut line = self.0.clone();
+        if let Some((index, environment)) = &self.1 {
+            let reserved: usize = line.iter().map(span_width).sum();
+            let environment = truncate_line_with_ellipsis_if_overflow(
+                Line::from(environment.clone()),
+                usize::from(area.width).saturating_sub(reserved),
+            );
+            line.spans.splice(*index..*index, environment.spans);
+        }
+        Widget::render(line, area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
 }
 
-impl Renderable for ExternalWriterNotice {
+struct BlockedThreadNotice<'a> {
+    widget: &'a ChatWidget,
+    view: BlockedThreadView<'a>,
+}
+
+impl Renderable for BlockedThreadNotice<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let content_width = area.width.saturating_sub(/*rhs*/ 4);
-        let card_lines = self.card_lines(content_width);
+        let card_lines = self.card_lines(area.width.saturating_sub(/*rhs*/ 4));
         let card_height = (card_lines.len() as u16).saturating_add(/*rhs*/ 2);
         let card = Rect::new(area.x, area.y, area.width, card_height.min(area.height));
         Widget::render(
@@ -57,17 +79,59 @@ impl Renderable for ExternalWriterNotice {
     }
 }
 
-impl ExternalWriterNotice {
+impl BlockedThreadNotice<'_> {
     fn card_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let title: Line<'static> = vec![
-            "🔒".into(),
-            "  ".into(),
-            "This conversation is open in another app".bold(),
-        ]
-        .into();
+        match self.view {
+            BlockedThreadView::ProviderError(error) => {
+                let title = if self.can_continue()
+                    && matches!(
+                        error,
+                        codex_app_server_protocol::ModelProviderError::ModelProviderMismatch { .. }
+                    ) {
+                    "Continue in a new chat"
+                } else {
+                    error.title()
+                };
+                let mut lines = word_wrap_lines(
+                    &[Line::from(vec!["🔒  ".into(), title.bold()])],
+                    usize::from(width),
+                );
+                let mut description =
+                    vec![Line::from(self.widget.provider_error_message(error).dim())];
+                if let Some(remote) = self
+                    .widget
+                    .remote_connection
+                    .as_ref()
+                    .filter(|remote| !remote.is_local_daemon)
+                {
+                    description.push(Line::from(
+                        format!("Configuration on {}", remote.address).dim(),
+                    ));
+                }
+                lines.extend(adaptive_wrap_lines(
+                    &description,
+                    RtOptions::new(usize::from(width))
+                        .initial_indent("    ".into())
+                        .subsequent_indent("    ".into()),
+                ));
+                lines
+            }
+            BlockedThreadView::ReadOnly(reason) => Self::read_only_card_lines(reason, width),
+        }
+    }
+
+    fn read_only_card_lines(reason: ReadOnlyThread, width: u16) -> Vec<Line<'static>> {
+        let (prefix, title, indent) = match reason {
+            ReadOnlyThread::ExternalWriter => {
+                ("🔒  ", "This conversation is open in another app", "    ")
+            }
+            ReadOnlyThread::Archived => ("", "This thread was archived", ""),
+        };
+        let title: Line<'static> = vec![prefix.into(), title.bold()].into();
+        let (key, action) = reason.action();
         let retry: Line<'static> = vec![
-            Span::styled("r", crate::style::accent_style()),
-            " to retry".into(),
+            Span::styled(key, crate::style::accent_style()),
+            format!(" to {action}").into(),
         ]
         .into();
         let mut lines = word_wrap_lines(&[title], usize::from(width));
@@ -79,46 +143,78 @@ impl ExternalWriterNotice {
             lines.push(retry);
         }
         lines.extend(word_wrap_lines(
-            &[Line::from(
-                "Close it there and press R to continue here.".dim(),
-            )],
+            &[Line::from(reason.message().dim())],
             RtOptions::new(usize::from(width))
-                .initial_indent("    ".into())
-                .subsequent_indent("    ".into()),
+                .initial_indent(indent.into())
+                .subsequent_indent(indent.into()),
         ));
         lines
     }
 
+    fn can_continue(&self) -> bool {
+        self.widget.thread_id.is_some() && self.widget.current_rollout_path.is_some()
+    }
+
     fn footer_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut items = vec![
-            ("r".to_string(), "retry".to_string()),
-            ("f".to_string(), "fork".to_string()),
-        ];
-        let escape = crate::key_hint::plain(KeyCode::Esc).display_label();
-        let quit_keys = [
-            crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
-            crate::key_hint::plain(KeyCode::Char('q')).display_label(),
-        ];
-        let key = if self.agents_navigation_key_available {
-            let left = crate::key_hint::plain(KeyCode::Left).display_label();
-            format!("{left}/{escape}")
-        } else {
-            escape
-        };
-        items.push((key, "command center".to_string()));
-        items.push((quit_keys.join("/"), "exit".to_string()));
-        if let Some(hint) = self.transcript_hint {
-            items.push((hint.display_label(), "transcript".to_string()));
+        let mut items = Vec::new();
+        match self.view {
+            BlockedThreadView::ProviderError(_) => {
+                if self.can_continue() {
+                    items.push(("c".to_string(), "continue in new chat".to_string()));
+                }
+                items.push(("n".to_string(), "start fresh".to_string()));
+            }
+            BlockedThreadView::ReadOnly(reason) => {
+                let (key, action) = reason.action();
+                items.push((key.to_string(), action.to_string()));
+                if reason == ReadOnlyThread::ExternalWriter {
+                    items.push(("f".to_string(), "fork".to_string()));
+                }
+            }
         }
-        let mut spans = vec![" ".set_style(crate::style::footer_hint_label_style())];
-        for (idx, (key, label)) in items.into_iter().enumerate() {
-            if idx > 0 {
-                spans.push("   ".set_style(crate::style::footer_hint_label_style()));
+        let escape = crate::key_hint::plain(KeyCode::Esc).display_label();
+        let left = self
+            .widget
+            .blocked_thread_command_center_key()
+            .map(|key| key.display_label());
+        let command_center_key = match self.view {
+            BlockedThreadView::ReadOnly(_) => {
+                Some(left.map_or_else(|| escape.clone(), |left| format!("{left}/{escape}")))
+            }
+            BlockedThreadView::ProviderError(_) => left,
+        };
+        if let Some(key) = command_center_key {
+            items.push((key, "command center".to_string()));
+        }
+        match self.view {
+            BlockedThreadView::ProviderError(_) => items.push((escape, "other chats".to_string())),
+            BlockedThreadView::ReadOnly(_) => {
+                let quit_keys = [
+                    crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
+                    crate::key_hint::plain(KeyCode::Char('q')).display_label(),
+                ];
+                items.push((quit_keys.join("/"), "exit".to_string()));
+                if let Some(hint) = self.widget.bottom_pane.transcript_shortcut_hint() {
+                    items.push((hint.display_label(), "transcript".to_string()));
+                }
+            }
+        }
+        let (leading, separator) = match self.view {
+            BlockedThreadView::ProviderError(_) => ("", " · "),
+            BlockedThreadView::ReadOnly(_) => (" ", "   "),
+        };
+        let mut spans = vec![leading.into()];
+        for (index, (key, label)) in items.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(separator.into());
             }
             spans.extend(crate::key_hint::key_label_spans(&key));
-            spans.push(format!(" {label}").set_style(crate::style::footer_hint_label_style()));
+            spans.push(format!(" {label}").into());
         }
-        word_wrap_lines(&[Line::from(spans)], usize::from(width))
+        word_wrap_lines(
+            &[Line::from(spans).style(crate::style::footer_hint_label_style())],
+            usize::from(width),
+        )
     }
 }
 
@@ -239,6 +335,13 @@ impl ChatWidget {
     /// remain consistent. Owned transcripts reserve their shared hint row above the composer.
     pub(crate) fn bottom_pane_renderable<'a>(
         &'a self,
+        options: crate::bottom_pane::ComposerRenderOptions<'a>,
+    ) -> RenderableItem<'a> {
+        self.composer_pane_renderable(options)
+    }
+
+    fn composer_pane_renderable<'a>(
+        &'a self,
         mut options: crate::bottom_pane::ComposerRenderOptions<'a>,
     ) -> RenderableItem<'a> {
         if self.fork_in_progress {
@@ -247,33 +350,10 @@ impl ChatWidget {
                     /*top*/ 1, /*left*/ 2, /*bottom*/ 1, /*right*/ 2,
                 )),
             ))
-        } else if let Some(error) = &self.provider_error
+        } else if let Some(view) = self.blocked_thread_view()
             && !self.bottom_pane.has_active_view()
         {
-            let can_continue = self.thread_id.is_some() && self.current_rollout_path.is_some();
-            RenderableItem::Owned(Box::new(ProviderErrorNotice {
-                title: if can_continue
-                    && matches!(
-                        error,
-                        codex_app_server_protocol::ModelProviderError::ModelProviderMismatch { .. }
-                    ) {
-                    "Continue in a new chat"
-                } else {
-                    error.title()
-                },
-                message: self.provider_error_message(error),
-                can_continue,
-                configuration_location: self
-                    .remote_connection
-                    .as_ref()
-                    .filter(|remote| !remote.is_local_daemon)
-                    .map(|remote| format!("Configuration on {}", remote.address)),
-            }))
-        } else if self.external_writer_view && !self.bottom_pane.has_active_view() {
-            RenderableItem::Owned(Box::new(ExternalWriterNotice {
-                agents_navigation_key_available: self.agents_navigation_key_available(),
-                transcript_hint: self.bottom_pane.transcript_shortcut_hint(),
-            }))
+            RenderableItem::Owned(Box::new(BlockedThreadNotice { widget: self, view }))
         } else {
             let right_reserve = if self
                 .bottom_pane
@@ -291,19 +371,27 @@ impl ChatWidget {
             options.separate_status_line = options.command_popup_placement
                 != crate::bottom_pane::CommandPopupPlacement::AboveComposer;
             let bottom_pane = self.bottom_pane.backdrop_with_options(options);
-            let above_composer = if self.quick_dial_menu {
+            let above_composer = if self.quick_dial_menu && !options.floating_shortcuts {
                 RenderableItem::Owned(Box::new(self.quick_dial_hud()))
-            } else if let Some(pending) = &self.safety_recourse
-                && !self.bottom_pane.has_active_view()
-            {
-                RenderableItem::Borrowed(&pending.notice)
-            } else if let Some(backend) = self.visible_new_backend_control() {
-                let mut spans = vec!["  ".into(), backend.into()];
+            } else if let Some((cycle, environment)) = self.visible_new_backend_control() {
+                let mut spans = vec!["  ".into(), cycle.unwrap_or("Cloud").into()];
                 let keymap = self.bottom_pane.keymap();
-                if let Some(key) = keymap.primary_hint(KeymapContext::Global, "change_host") {
-                    spans.extend(["  ".into(), key.into(), " to cycle".dim()]);
+                if cycle.is_some()
+                    && let Some(key) = keymap.primary_hint(KeymapContext::Global, "change_host")
+                {
+                    spans.extend(["  ".into(), key.into(), " cycle".dim()]);
                 }
-                RenderableItem::Owned(Box::new(Paragraph::new(Line::from(spans))))
+                let environment = environment.map(|name| {
+                    spans.push(" - ".dim());
+                    let index = spans.len();
+                    if let Some(key) =
+                        keymap.primary_hint(KeymapContext::Global, "choose_cloud_environment")
+                    {
+                        spans.extend(["  ".into(), key.into(), " change".dim()]);
+                    }
+                    (index, name.to_owned())
+                });
+                RenderableItem::Owned(Box::new(NewBackendControl(Line::from(spans), environment)))
             } else {
                 return bottom_pane;
             };

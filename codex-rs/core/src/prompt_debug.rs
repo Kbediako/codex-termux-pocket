@@ -5,11 +5,13 @@ use codex_exec_server::ExecServerRuntimeOptions;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::UserInstructionsProvider;
 use codex_login::AuthManager;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 use tokio_util::sync::CancellationToken;
 
 use crate::ThreadStoreBuilder;
@@ -30,6 +32,7 @@ pub async fn build_prompt_input(
     extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
 ) -> CodexResult<Vec<ResponseItem>> {
+    let input = crate::codex_thread::resolve_client_inputs(input).await?;
     config.ephemeral = true;
 
     let auth_manager =
@@ -44,10 +47,15 @@ pub async fn build_prompt_input(
 
     let thread_store = ThreadStoreBuilder::from_config(&config, state_db.clone()).build();
     let installation_id = resolve_installation_id(&config.codex_home).await?;
-    let thread_manager = ThreadManager::new(
+    let startup = crate::build_startup_models(
         &config,
         Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, Arc::clone(&auth_manager)),
+        installation_id,
+        Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+    );
+    let thread_manager = ThreadManager::new(
+        &config,
+        startup,
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(
@@ -65,7 +73,6 @@ pub async fn build_prompt_input(
         crate::thread_manager::passthrough_image_store(),
         thread_store,
         crate::local_agent_graph_store_from_state_db(state_db.as_ref()),
-        installation_id,
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -81,9 +88,9 @@ pub async fn build_prompt_input(
     output
 }
 
-pub(crate) async fn build_prompt_input_from_session(
+async fn build_prompt_input_from_session(
     sess: &Arc<Session>,
-    input: Vec<UserInput>,
+    input: Vec<ResolvedUserInput>,
 ) -> CodexResult<Vec<ResponseItem>> {
     let turn_context = sess.new_default_turn().await;
     // Prompt debugging builds a standalone request without entering run_turn.
@@ -94,7 +101,7 @@ pub(crate) async fn build_prompt_input_from_session(
         .await?;
 
     if !input.is_empty() {
-        let response_item = sess.response_item_from_user_input(input);
+        let response_item = sess.response_item_from_user_input(&input);
         sess.record_conversation_items(
             turn_context.as_ref(),
             &step_context.settings.model_info,

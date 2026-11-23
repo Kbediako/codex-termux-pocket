@@ -1,5 +1,14 @@
+mod display;
+
+pub use display::AgentMessageDisplay;
+pub use display::AgentMessageDisplayVersion;
+pub use display::AnswerAnnotation;
+pub use display::AnswerReplacement;
+pub use display::BlockReason;
+pub use display::HelplineSubject;
+pub use display::TrustedContacts;
+
 use crate::AgentPath;
-use crate::ResponseItemId;
 use crate::ThreadId;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
@@ -151,6 +160,15 @@ pub struct AsyncUserInputQuestion {
     pub options: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+#[serde(from = "display::StoredModeration")]
+pub struct AgentMessageModeration {
+    pub moderated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display: Option<AgentMessageDisplay>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 /// Assistant-authored message payload used in turn-item streams.
 ///
@@ -158,6 +176,9 @@ pub struct AsyncUserInputQuestion {
 /// should use it when present, but retain legacy completion semantics when it
 /// is `None`.
 pub struct AgentMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub moderation: Option<AgentMessageModeration>,
     pub id: String,
     pub content: Vec<AgentMessageContent>,
     /// Optional phase metadata carried through from `ResponseItem::Message`.
@@ -459,6 +480,10 @@ pub enum McpAppDisplayMode {
 pub struct McpToolCallItem {
     pub id: String,
     pub server: String,
+    /// Registration scope, not necessarily the server's execution environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment_id: Option<String>,
     pub tool: String,
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -744,7 +769,7 @@ pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<Res
     Some(ResponseItem::Message {
         status: None,
         encrypted_content: None,
-        id: Some(ResponseItemId::new("msg")),
+        id: None,
         role: "user".to_string(),
         content,
         phase: None,
@@ -922,10 +947,9 @@ mod tests {
         ];
         let message = build_hook_prompt_message(&original).expect("hook prompt");
 
-        let ResponseItem::Message { id, content, .. } = message else {
+        let ResponseItem::Message { content, .. } = message else {
             panic!("expected hook prompt message");
         };
-        assert!(id.is_some_and(|id| id.starts_with("msg_")));
 
         let parsed = parse_hook_prompt_message(/*id*/ None, &content).expect("parsed hook prompt");
         assert_eq!(parsed.fragments, original);

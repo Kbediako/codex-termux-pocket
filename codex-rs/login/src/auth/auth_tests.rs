@@ -60,7 +60,9 @@ fn header_auth_exposes_a_valid_chatgpt_account_id() {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
 async fn cancelled_refresh_marks_only_started_exchanges_as_unsettled() -> anyhow::Result<()> {
+    let _access_token_guard = remove_access_token_env_var();
     let home = tempdir()?;
     write_auth_file(
         AuthFileParams {
@@ -1460,6 +1462,51 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
 }
 
 #[tokio::test]
+async fn provider_credentials_follow_the_primary_network_policy() {
+    let script = ProviderAuthScript::new(&["provider-key", "rotated-provider-key"]).unwrap();
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(policy.clone());
+    let mut primary = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("login-key"));
+    Arc::get_mut(&mut primary).unwrap().auth_route_config =
+        AuthRouteConfig::from_http_client_factory(factory);
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Restricted {
+            allowed_hosts: ["allowed.example".to_string()].into_iter().collect(),
+        },
+    ));
+
+    let provider =
+        AuthManager::external_bearer_with_runtime(script.auth_config(), primary.runtime_config());
+    let transport = provider.http_client_factory();
+    let allowed = "https://allowed.example/".parse().unwrap();
+    let blocked = "https://blocked.example/".parse().unwrap();
+    let permit = transport.network_policy().acquire(&allowed).unwrap();
+    assert_eq!(
+        provider.auth().await.unwrap().api_key(),
+        Some("provider-key"),
+    );
+    permit.check().unwrap();
+    let first_owner = provider.auth_owner();
+
+    provider.refresh_token().await.unwrap();
+    assert_eq!(
+        provider.auth_cached().unwrap().api_key(),
+        Some("rotated-provider-key"),
+    );
+    assert!(!first_owner.is_current());
+    permit.check().unwrap();
+    assert!(transport.network_policy().acquire(&allowed).is_ok());
+    assert!(transport.network_policy().acquire(&blocked).is_err());
+
+    primary.set_cached_auth(Some(CodexAuth::from_api_key("another-login-key")));
+    assert!(permit.check().is_err());
+    assert!(transport.network_policy().acquire(&allowed).is_err());
+}
+
+#[tokio::test]
 async fn external_bearer_only_auth_manager_uses_cached_provider_token() {
     let script = ProviderAuthScript::new(&["provider-token", "next-token"]).unwrap();
     let manager = AuthManager::external_bearer_only(script.auth_config());
@@ -1676,6 +1723,179 @@ async fn external_auth_keeps_cached_credentials_after_permanent_reload_failure()
     assert_eq!(external_auth.resolve_count.load(Ordering::SeqCst), 2);
 }
 
+struct RecoveringExternalAuth {
+    initial: CodexAuth,
+    recovered: CodexAuth,
+    resolve_count: AtomicUsize,
+}
+
+impl ExternalAuth for RecoveringExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        let attempt = self.resolve_count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            match attempt {
+                0 => Ok(self.initial.clone()),
+                1 => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "external credential exchange timed out",
+                )),
+                _ => Ok(self.recovered.clone()),
+            }
+        })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        self.resolve()
+    }
+}
+
+#[tokio::test]
+async fn external_auth_keeps_its_identity_through_a_transient_reload_failure() {
+    let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    let initial = CodexAuth::from_api_key("initial-token");
+    let recovered = CodexAuth::from_api_key("recovered-token");
+    manager
+        .set_external_auth(Arc::new(RecoveringExternalAuth {
+            initial: initial.clone(),
+            recovered,
+            resolve_count: AtomicUsize::new(0),
+        }))
+        .await
+        .expect("external auth should install");
+    let mut changes = manager.auth_change_state_receiver();
+    let mut revisions = manager.auth_change_receiver();
+    let initial_state = *changes.borrow_and_update();
+    let initial_revision = *revisions.borrow_and_update();
+
+    let retained = manager
+        .auth()
+        .await
+        .expect("cached auth should be retained");
+    assert_eq!(retained.api_key(), Some("initial-token"));
+    assert_eq!(*changes.borrow(), initial_state);
+    assert!(
+        !changes
+            .has_changed()
+            .expect("auth state sender remains alive")
+    );
+    assert_eq!(*revisions.borrow(), initial_revision);
+    assert!(
+        !revisions
+            .has_changed()
+            .expect("auth revision sender remains alive")
+    );
+    assert!(manager.refresh_failure_for_auth(&initial).is_none());
+
+    let recovered = manager.auth().await.expect("provider should recover");
+    assert_eq!(recovered.api_key(), Some("recovered-token"));
+    let cached = manager
+        .auth_cached()
+        .expect("recovered auth should be cached");
+    assert_eq!(cached.api_key(), Some("recovered-token"));
+    tokio::time::timeout(std::time::Duration::from_secs(5), changes.changed())
+        .await
+        .expect("recovery should notify auth state watchers")
+        .expect("auth state sender remains alive");
+    tokio::time::timeout(std::time::Duration::from_secs(5), revisions.changed())
+        .await
+        .expect("recovery should notify auth revision watchers")
+        .expect("auth revision sender remains alive");
+    assert!(changes.borrow().generation > initial_state.generation);
+    assert!(*revisions.borrow() > initial_revision);
+}
+
+#[tokio::test]
+async fn workspace_policy_change_rejects_pending_transient_auth_fallback() {
+    let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_ALLOWED.to_string()]));
+    manager
+        .set_external_auth(Arc::new(RecoveringExternalAuth {
+            initial: external_header_auth(Some(WORKSPACE_ID_ALLOWED)),
+            recovered: external_header_auth(Some(WORKSPACE_ID_SECOND_ALLOWED)),
+            resolve_count: AtomicUsize::new(0),
+        }))
+        .await
+        .expect("external auth should install");
+
+    let generation = manager.auth_change_state_receiver().borrow().generation;
+    let fallback = manager
+        .load_auth(/*cached_auth*/ None)
+        .await
+        .expect("external auth fallback should load");
+    assert_eq!(
+        fallback
+            .as_ref()
+            .and_then(CodexAuth::get_account_id)
+            .as_deref(),
+        Some(WORKSPACE_ID_ALLOWED)
+    );
+
+    // Change policy after the fallback was validated but before it can be published.
+    manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_SECOND_ALLOWED.to_string()]));
+    assert!(
+        manager
+            .publish_reloaded_auth(generation, fallback)
+            .is_none()
+    );
+
+    let recovered = manager
+        .auth()
+        .await
+        .expect("new workspace should be allowed");
+    assert_eq!(
+        recovered.get_account_id().as_deref(),
+        Some(WORKSPACE_ID_SECOND_ALLOWED)
+    );
+}
+
+#[tokio::test]
+async fn external_auth_does_not_reuse_disallowed_credentials_after_a_transient_failure() {
+    let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_ALLOWED.to_string()]));
+    let initial = external_header_auth(Some(WORKSPACE_ID_ALLOWED));
+    let recovered = external_header_auth(Some(WORKSPACE_ID_SECOND_ALLOWED));
+    manager
+        .set_external_auth(Arc::new(RecoveringExternalAuth {
+            initial,
+            recovered: recovered.clone(),
+            resolve_count: AtomicUsize::new(0),
+        }))
+        .await
+        .expect("external auth should install");
+
+    manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_SECOND_ALLOWED.to_string()]));
+
+    assert_eq!(manager.auth().await, None);
+    assert_eq!(manager.auth_cached(), None);
+    assert_eq!(manager.auth().await, Some(recovered));
+}
+
+#[tokio::test]
+#[serial_test::serial(codex_auth_env)]
+async fn failed_storage_reload_preserves_cached_identity() -> anyhow::Result<()> {
+    let _access_token = remove_access_token_env_var();
+    let home = tempdir()?;
+    let auth = CodexAuth::from_api_key("stored-key");
+    let manager =
+        AuthManager::from_auth_for_testing_with_home(auth.clone(), home.path().to_path_buf());
+    let initial = manager
+        .auth_change_state_for(&auth)
+        .expect("the cached credential has a source");
+    std::fs::create_dir(get_auth_file(home.path()))?;
+
+    assert!(
+        manager.reload_with_cached_auth().await.is_err(),
+        "the fixture must fail the storage read"
+    );
+    assert!(
+        !manager.reload().await,
+        "failed storage reads must not publish a logout"
+    );
+    assert_eq!(manager.auth_cached(), Some(auth.clone()));
+    assert_eq!(manager.auth_change_state_for(&auth), Some(initial));
+    Ok(())
+}
+
 #[tokio::test]
 async fn replacing_external_auth_clears_permanent_failure() {
     let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("seed"));
@@ -1730,6 +1950,13 @@ async fn external_auth_provider_can_install_headers() {
     headers.insert("x-external-auth", http::HeaderValue::from_static("enabled"));
     let auth = CodexAuth::Headers(AuthHeaders::new(headers));
     let codex_home = tempdir().expect("tempdir");
+    login_with_api_key(
+        codex_home.path(),
+        "stored-key",
+        AuthCredentialsStoreMode::Ephemeral,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
     let manager = AuthManager::new(
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
@@ -1746,6 +1973,7 @@ async fn external_auth_provider_can_install_headers() {
         .await
         .expect("external auth should install");
 
+    assert!(!manager.reload_with_cached_auth().await.unwrap());
     assert_eq!(manager.auth_cached(), Some(auth));
     assert!(
         manager

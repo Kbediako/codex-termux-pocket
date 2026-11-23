@@ -42,8 +42,8 @@ use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
 use codex_core_plugins::PluginMetricsSidecar;
 use codex_features::Feature;
+use codex_file_system::WindowsSandboxSelection;
 use codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
-use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::RemoteCredentialMasking;
 use codex_network_proxy::RemoteNetworkProxyConfig;
@@ -121,26 +121,6 @@ fn unified_exec_options(
     }
 }
 
-fn build_unified_exec_sandbox_command(
-    command: &[String],
-    cwd: &PathUri,
-    env: &HashMap<String, String>,
-    managed_network: Option<ManagedNetworkSandboxContext>,
-    additional_permissions: Option<AdditionalPermissionProfile>,
-) -> Result<SandboxCommand, ToolError> {
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| ToolError::Rejected("command args are empty".to_string()))?;
-    Ok(SandboxCommand {
-        program: program.clone().into(),
-        args: args.to_vec(),
-        cwd: cwd.clone(),
-        env: env.clone(),
-        managed_network,
-        additional_permissions,
-    })
-}
-
 impl<'a> UnifiedExecRuntime<'a> {
     /// Creates a runtime bound to the shared unified-exec process manager.
     pub fn new(manager: &'a UnifiedExecProcessManager) -> Self {
@@ -187,7 +167,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &UnifiedExecRequest<'_>) -> bool {
-        req.prepared.turn_environment.environment.is_remote() || req.shell_snapshot.is_some()
+        req.prepared.turn_environment.environment().is_remote() || req.shell_snapshot.is_some()
     }
 
     fn sandbox_cwd<'b>(&self, req: &'b UnifiedExecRequest<'_>) -> Option<&'b PathUri> {
@@ -263,7 +243,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             req.network.as_ref(),
             launch_sandbox_permissions,
         ));
-        let environment_is_remote = prepared.turn_environment.environment.is_remote();
+        let environment_is_remote = prepared.turn_environment.environment().is_remote();
         let credential_broker_available = !environment_is_remote
             && req.network.is_some()
             && ctx
@@ -359,7 +339,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
                             )
                         })?);
                 }
-                (env, None, launch.proxy.enabled.then_some(launch))
+                (env, None, Some(launch))
             }
             Some(network) => {
                 let child_environment = snapshot_credential_context
@@ -446,7 +426,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             ctx,
             &prepared.resolved.command,
             &prepared.cwd,
-            prepared.turn_environment.environment.as_ref(),
+            prepared.turn_environment.environment().as_ref(),
         )
         .await;
         if let Some(sidecar) = metrics_sidecar.as_ref() {
@@ -473,7 +453,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
         if ctx.session.enabled(Feature::LoginShellPackagePath)
             && prepared.resolved.shell.is_posix_login()
             && !explicit_env_overrides.contains_key("PATH")
-            && let Ok(info) = prepared.turn_environment.environment.info().await
+            && let Ok(info) = prepared.turn_environment.environment().info().await
             && let Some(command_with_path_prepends) =
                 prepared.resolved.shell.derive_exec_args_with_path_prepends(
                     &prepared.hook_command,
@@ -545,18 +525,28 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
         }
         // The executor selection is Disabled for non-Windows target paths, so this
         // preparation is a no-op for PowerShell on other platforms.
-        let command = prepare_powershell_command_for_windows_sandbox(
+        let windows_sandbox = executor_windows_sandbox_selection(
+            attempt.windows_sandbox_type,
+            attempt.windows_sandbox_level,
+            attempt.sandbox_cwd,
+        );
+        let mut command = prepare_powershell_command_for_windows_sandbox(
             &command,
             Some(&requested_shell.shell_type),
             attempt.sandbox_requested,
-            executor_windows_sandbox_selection(
-                attempt.windows_sandbox_type,
-                attempt.windows_sandbox_level,
-                attempt.sandbox_cwd,
-            ),
+            windows_sandbox,
             environment_is_remote,
         );
         let command = if matches!(requested_shell.shell_type, ShellType::PowerShell) {
+            if attempt.sandbox_requested
+                && windows_sandbox == WindowsSandboxSelection::Mxc
+                && let [_, .., flag, script] = command.as_mut_slice()
+                && flag.eq_ignore_ascii_case("-Command")
+            {
+                // Temporary workaround for https://github.com/PowerShell/PowerShell/issues/27899.
+                // Remove the prefix once supported PowerShell versions initialize $PWD under a denied ancestor.
+                script.insert_str(0, include_str!("../../../assets/tools/mxc_pwsh_cwd.ps1"));
+            }
             prefix_powershell_script_with_utf8(&command)
         } else {
             command
@@ -585,10 +575,11 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             prepared.permissions.additional_permissions.as_ref(),
             internal_permissions.as_ref(),
         );
+        let executor_managed = self.uses_executor_managed_process_sandbox(req);
         let permissions = TerminalPermissions::for_launch(
             &prepared.turn_environment,
             &ctx.step_context.turn,
-            if self.uses_executor_managed_process_sandbox(req) {
+            if executor_managed {
                 TerminalSandboxSource::Executor
             } else {
                 TerminalSandboxSource::Native
@@ -613,36 +604,55 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             permissions
         };
 
-        let command = build_unified_exec_sandbox_command(
-            &command,
-            &prepared.cwd,
-            &env,
-            managed_network_context,
-            additional_permissions,
-        )
-        .map_err(|error| match error {
-            ToolError::Rejected(_) => {
-                ToolError::Rejected("missing command line for PTY".to_string())
-            }
-            error @ ToolError::Codex(_) => error,
-        })?;
+        let Some((program, args)) = command.split_first() else {
+            return Err(ToolError::Rejected(
+                "missing command line for PTY".to_string(),
+            ));
+        };
         let options = unified_exec_options(attempt.network_denial_cancellation_token.clone());
+        let request = if executor_managed {
+            attempt
+                .env_for_exec_server(
+                    command,
+                    prepared.cwd.clone(),
+                    env,
+                    managed_network_context,
+                    network_proxy_launch,
+                    additional_permissions.as_ref(),
+                    options,
+                )
+                .await
+        } else {
+            let command = SandboxCommand {
+                program: program.as_str().into(),
+                args: args.to_vec(),
+                cwd: prepared.cwd.clone(),
+                env,
+                managed_network: managed_network_context,
+                additional_permissions,
+            };
+            attempt
+                .env_for(
+                    command,
+                    options,
+                    managed_network,
+                    Some(&prepared.turn_environment.selection.environment_id),
+                )
+                .await
+        }
+        .map_err(ToolError::Codex)?;
         let process = self
             .manager
             .open_session_with_exec_env(
                 req.process_id,
                 ctx,
-                command,
-                options,
-                attempt,
+                request,
                 managed_network,
-                network_proxy_launch,
-                /*environment_id*/ Some(&prepared.turn_environment.selection.environment_id),
                 req.exec_server_env_config.clone(),
                 req.shell_snapshot.clone(),
                 windows_sandbox_proxy_settings_mode,
                 prepared.tty,
-                prepared.turn_environment.environment.as_ref(),
+                prepared.turn_environment.environment().as_ref(),
             )
             .await;
         let mut process = with_launch_failure_events(process, prepared, ctx).await?;

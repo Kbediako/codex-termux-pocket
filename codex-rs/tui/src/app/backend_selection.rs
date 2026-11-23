@@ -2,15 +2,20 @@
 
 use super::backend_sessions::BackendSessions;
 use super::backend_sessions::SessionSlot;
+use super::cloud_switch_wait::ClipboardHandoff;
+use super::cloud_switch_wait::finish_failed_cloud_switch;
+use super::cloud_switch_wait::wait_for_cloud_switch;
 use super::resume_preparation::ResumeSource;
 use super::session_lifecycle::PreparedFreshSession;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
-use codex_app_server_protocol::ThreadItemPayload;
+use crate::startup_draft::StartupDraftPump;
+use futures::TryFutureExt;
 
 pub(super) enum NewBackendSession {
     Fresh { name: Option<String> },
     CarryDraft,
+    ChangeCloudEnvironment(Option<codex_app_server_client::SavedEnvironment>),
 }
 
 /// Host inputs for the new-thread preference. A cloud thread's cwd and credentials
@@ -76,6 +81,18 @@ impl BackendPreferenceContext {
 }
 
 impl App {
+    pub(super) fn remember_attached_host_project(&mut self, app_server: &AppServerSession) {
+        if !app_server.uses_remote_workspace()
+            && !crate::uses_remote_workspace_or_environment(
+                &self.app_server_target,
+                &self.environment_manager,
+            )
+        {
+            self.backend_preference_context.local_cwd =
+                Some(self.chat_widget.config_ref().cwd.to_path_buf());
+        }
+    }
+
     pub(super) async fn new_thread_host_preference(&self) -> Option<&str> {
         let defaults = &self.local_settings.tui.default_hosts;
         if defaults.is_empty() {
@@ -94,14 +111,18 @@ impl App {
             .filter(|owner| *owner != backends.displayed_owner())
     }
 
-    pub(super) fn can_cycle_conversation_backend(&self) -> bool {
-        self.voice_owner_thread_id().is_none()
-            && self.chat_widget.can_choose_new_backend()
-            && self
-                .current_displayed_thread_id()
-                .and_then(|id| self.thread_event_channels.get(&id))
-                .and_then(|channel| channel.store.try_lock().ok())
-                .is_some_and(|store| store.session.is_some() && store.latest_turn_id.is_none())
+    pub(super) fn backend_draft(&self) -> Option<ThreadId> {
+        if self.voice_owner_thread_id().is_some() || !self.chat_widget.can_choose_new_backend() {
+            return None;
+        }
+        let thread_id = self.current_displayed_thread_id()?;
+        let store = self
+            .thread_event_channels
+            .get(&thread_id)?
+            .store
+            .try_lock()
+            .ok()?;
+        (store.session.is_some() && store.latest_turn_id.is_none()).then_some(thread_id)
     }
 
     pub(super) async fn start_new_session_on_other_backend(
@@ -110,6 +131,33 @@ impl App {
         backends: &mut BackendSessions,
         owner: crate::backend_id::BackendId,
         session: NewBackendSession,
+    ) -> Result<(), String> {
+        let previous_thread = self.current_displayed_thread_id();
+        let mut fresh_draft = None;
+        let result = Box::pin(self.switch_to_new_backend_session(
+            tui,
+            backends,
+            owner,
+            session,
+            &mut fresh_draft,
+        ))
+        .await;
+        if let Some(draft) = fresh_draft {
+            let opened_new_session = self.current_displayed_thread_id() != previous_thread;
+            draft
+                .handoff_after_navigation(tui, &mut self.chat_widget, opened_new_session)
+                .await;
+        }
+        result
+    }
+
+    async fn switch_to_new_backend_session(
+        &mut self,
+        tui: &mut tui::Tui,
+        backends: &mut BackendSessions,
+        owner: crate::backend_id::BackendId,
+        session: NewBackendSession,
+        fresh_draft: &mut Option<StartupDraftPump>,
     ) -> Result<(), String> {
         let slot = backends
             .listening_slot(owner)
@@ -124,16 +172,24 @@ impl App {
         }
         let displayed_thread = self.current_displayed_thread_id();
         let outgoing_slot = backends.displayed;
+        let switching_backend = owner != backends.displayed_owner();
         if let Some(thread_id) = displayed_thread
             && self.active_turn_id_for_thread(thread_id).await.is_some()
         {
             return Err("Wait for the current turn to finish before switching.".into());
         }
-        let mut settings = backends
-            .settings
-            .get(&owner)
-            .cloned()
-            .ok_or("Connection settings are unavailable.")?;
+        let mut settings = if !switching_backend {
+            self.backend_settings()
+        } else {
+            backends
+                .settings
+                .get(&owner)
+                .cloned()
+                .ok_or("Connection settings are unavailable.")?
+        };
+        if settings.target == AppServerTarget::Cloud && self.chat_widget.thread_id().is_some() {
+            self.remember_attached_host_project(backends.session_at(outgoing_slot));
+        }
         let preference = if matches!(session, NewBackendSession::CarryDraft)
             && let Some(key) = backends.preference_key(slot)
         {
@@ -145,18 +201,54 @@ impl App {
             None
         };
         let user_config_path = self.local_settings.user_config_path.clone();
-        let (name, draft) = match session {
-            NewBackendSession::Fresh { name } => (name, None),
+        let responsive_cloud_switch = settings.target == AppServerTarget::Cloud
+            && !matches!(session, NewBackendSession::Fresh { .. });
+        let replacing_cloud_draft = matches!(session, NewBackendSession::ChangeCloudEnvironment(_));
+        let (name, mut draft, saved_environment) = match session {
+            NewBackendSession::Fresh { name } => {
+                *fresh_draft = Some(StartupDraftPump::for_new_session(
+                    tui,
+                    &settings.local_settings,
+                    settings.config.cwd.as_path(),
+                ));
+                (name, None, None)
+            }
             NewBackendSession::CarryDraft => (
                 self.chat_widget.thread_name(),
-                Some(self.chat_widget.composer_draft_snapshot()),
+                (!responsive_cloud_switch).then(|| self.chat_widget.composer_draft_snapshot()),
+                displayed_thread
+                    .and_then(|id| self.agents_overview.draft_cloud_environments.get(&id))
+                    .cloned(),
+            ),
+            NewBackendSession::ChangeCloudEnvironment(environment) => (
+                self.chat_widget.thread_name(),
+                None,
+                environment.map(|env| (owner, env)),
             ),
         };
+        self.cancel_cloud_inventory_refresh(backends.session_at(slot))
+            .await;
         let destination = backends.session_at_mut(slot);
+        let clipboard_after_bootstrap = if destination.remote_cwd_override().is_some() {
+            // An explicit remote directory can open the trust prompt after bootstrap.
+            ClipboardHandoff::SettleBeforeNextView
+        } else {
+            ClipboardHandoff::ContinueEditing
+        };
         let bootstrap = destination
             .bootstrap_for_new_thread(&settings.config)
-            .await
-            .map_err(|error| format!("Failed to prepare the new conversation: {error}"))?;
+            .map_err(|error| format!("Failed to prepare the new conversation: {error}"));
+        let Some(bootstrap) = if responsive_cloud_switch {
+            let events = tui.event_stream();
+            wait_for_cloud_switch(self, tui, bootstrap, events, clipboard_after_bootstrap).await
+        } else {
+            StartupDraftPump::run_during_navigation(fresh_draft.as_mut(), tui, bootstrap)
+                .await
+                .map(Some)
+        }?
+        else {
+            return Ok(());
+        };
         let destination_cwd = settings.config.cwd.to_path_buf();
         if let Err(control) = self
             .confirm_directory_trust_for_target(
@@ -171,42 +263,117 @@ impl App {
                         .map(|_| crate::onboarding::TrustCancelAction::CurrentTask),
                     ..Default::default()
                 },
-                /*startup_draft*/ None,
+                fresh_draft.as_mut(),
             )
             .await
         {
+            if responsive_cloud_switch {
+                let events = tui.event_stream();
+                if finish_failed_cloud_switch(self, tui, events)
+                    .await
+                    .is_break()
+                {
+                    return Ok(());
+                }
+            }
             if matches!(control, AppRunControl::Exit(_)) {
                 self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
             }
             return Ok(());
         }
-        let (config, local_settings) = self
-            .load_new_session_config_from(destination, &settings, destination_cwd)
+        let loaded = if fresh_draft.is_some() {
+            StartupDraftPump::run_during_navigation(
+                fresh_draft.as_mut(),
+                tui,
+                Box::pin(self.load_new_session_config_from(
+                    destination,
+                    &settings,
+                    destination_cwd,
+                    /*cloud_switch*/ None,
+                )),
+            )
             .await
-            .map_err(|error| format!("Failed to read new session defaults: {error}"))?;
-        let started = destination
-            .start_thread_with_session_start_source(
+        } else {
+            self.load_new_session_config_from(
+                destination,
+                &settings,
+                destination_cwd,
+                responsive_cloud_switch.then_some(&mut *tui),
+            )
+            .await
+        };
+        let Some((config, local_settings)) =
+            loaded.map_err(|error| format!("Failed to read new session defaults: {error}"))?
+        else {
+            return Ok(());
+        };
+        if let Some(draft) = fresh_draft.as_mut() {
+            draft.apply_settings(&local_settings, config.cwd.as_path());
+        }
+        let host_project_cwd = self.backend_preference_context.local_cwd.clone();
+        let cloud_start = match &saved_environment {
+            Some((backend, env)) if *backend == owner => {
+                crate::app_server_session::CloudThreadStart::Saved(env.id.clone())
+            }
+            _ => crate::app_server_session::CloudThreadStart::Project(host_project_cwd.as_deref()),
+        };
+        let start = destination
+            .start_thread_with_environment(
                 &local_settings,
                 &config,
                 /*session_start_source*/ None,
                 /*remote_cwd_override*/ None,
                 /*selected_profile*/ None,
+                cloud_start,
+            )
+            .map_err(|error| format!("Failed to start the new conversation: {error}"));
+        let Some(started) = if responsive_cloud_switch {
+            let events = tui.event_stream();
+            wait_for_cloud_switch(
+                self,
+                tui,
+                start,
+                events,
+                ClipboardHandoff::SettleBeforeNextView,
             )
             .await
-            .map_err(|error| format!("Failed to start the new conversation: {error}"))?;
-        // Clear before switching so a terminal error leaves the outgoing conversation usable.
-        tui.clear_for_thread_switch()
-            .map_err(|error| format!("Failed to open the new conversation: {error}"))?;
+        } else {
+            StartupDraftPump::run_during_navigation(fresh_draft.as_mut(), tui, start)
+                .await
+                .map(Some)
+        }?
+        else {
+            return Ok(());
+        };
+        if responsive_cloud_switch {
+            draft = Some(self.chat_widget.composer_draft_snapshot());
+        }
+        // A same-backend Cloud start already replaced the attachment. Clear on its first draw.
+        if switching_backend && let Err(error) = tui.clear_for_thread_switch() {
+            if responsive_cloud_switch {
+                let events = tui.event_stream();
+                if finish_failed_cloud_switch(self, tui, events)
+                    .await
+                    .is_break()
+                {
+                    return Ok(());
+                }
+            }
+            return Err(format!("Failed to open the new conversation: {error}"));
+        }
         let destination_thread = started.session.thread_id;
-        self.switch_backend_context(
-            backends,
-            slot,
-            started.session.thread_id,
-            settings.target,
-            config.cwd.to_path_buf(),
-            bootstrap,
-        )
-        .await;
+        let outgoing_has_queue = self.chat_widget.has_queued_follow_up_messages();
+        if switching_backend {
+            self.switch_backend_context(
+                backends,
+                slot,
+                started.session.thread_id,
+                settings.target,
+                config.cwd.to_path_buf(),
+                bootstrap,
+            )
+            .await;
+        }
         let destination = backends.session_at_mut(slot);
         self.adopt_fresh_session(
             tui,
@@ -216,12 +383,32 @@ impl App {
                 config,
                 local_settings,
             },
-            ThreadAttachPresentation::FreshAfterClear,
+            if switching_backend {
+                ThreadAttachPresentation::FreshAfterClear
+            } else {
+                ThreadAttachPresentation::FreshWithDraft
+            },
             /*initial_user_message*/ None,
             name,
         )
         .await;
-        backends.displayed = slot;
+        if replacing_cloud_draft
+            && let Some(source) = displayed_thread
+            && self.current_displayed_thread_id() == Some(destination_thread)
+        {
+            destination.move_staged_cloud_settings(source, destination_thread);
+            self.chat_widget.sync_service_tier_commands();
+        }
+        if let Some(environment) = saved_environment
+            && self.current_displayed_thread_id() == Some(destination_thread)
+        {
+            self.agents_overview
+                .draft_cloud_environments
+                .insert(destination_thread, environment);
+        }
+        if switching_backend {
+            backends.switch_displayed(slot, &mut self.agents_overview.input_states);
+        }
         if !backends.session_at_mut(slot).uses_remote_workspace()
             && self.current_displayed_thread_id() == Some(destination_thread)
         {
@@ -234,8 +421,16 @@ impl App {
             self.local_settings.tui.notification_settings.condition,
         );
         if let Some(draft) = draft {
-            self.chat_widget.restore_startup_draft(draft);
+            if responsive_cloud_switch {
+                self.chat_widget.restore_cloud_switch_draft(draft);
+            } else {
+                self.chat_widget.restore_startup_draft(draft);
+            }
+            // Another Cloud client may have started a turn on the source while we
+            // opened this environment. Keep that thread and its local input accessible.
             if let Some(thread_id) = displayed_thread
+                && !replacing_cloud_draft
+                && !outgoing_has_queue
                 && self.current_displayed_thread_id() == Some(destination_thread)
                 && self
                     .agents_overview
@@ -243,13 +438,16 @@ impl App {
                     .remove(&thread_id)
                     .is_some()
             {
-                self.agents_overview.input_states.remove(&thread_id);
+                let input_states = if switching_backend {
+                    backends.parked_inputs_mut(outgoing_slot)
+                } else {
+                    &mut self.agents_overview.input_states
+                };
+                input_states.remove(&thread_id);
                 self.remove_agents_overview_thread(thread_id);
-                if let Err(error) = backends
-                    .session_at_mut(outgoing_slot)
-                    .thread_unsubscribe(thread_id)
-                    .await
-                {
+                let outgoing = backends.session_at_mut(outgoing_slot);
+                self.cancel_cloud_inventory_refresh(outgoing).await;
+                if let Err(error) = outgoing.thread_unsubscribe(thread_id).await {
                     tracing::warn!(%error, "failed to unsubscribe replaced blank thread {thread_id}");
                 }
                 self.discard_thread_local_state(thread_id).await;
@@ -306,26 +504,37 @@ impl App {
         bootstrap: AppServerBootstrap,
     ) {
         let outgoing = backends.displayed_owner();
-        self.capture_session_inputs().await;
+        self.saved_openings.abandon();
+        self.capture_session_inputs(outgoing).await;
         for channel in self.thread_event_channels.values_mut() {
             channel.backend_id.get_or_insert(outgoing);
         }
         backends.settings.insert(outgoing, self.backend_settings());
-        self.detach_current_thread_for_navigation(
-            backends.session_at_mut(backends.displayed),
-            Some(thread_id),
-        )
-        .await;
+        let outgoing_session = backends.session_at_mut(backends.displayed);
+        self.detach_current_thread_for_navigation(outgoing_session, Some(thread_id))
+            .await;
         let destination = backends.session_at_mut(destination_slot);
         self.store_active_thread_receiver().await;
         self.clear_active_thread().await;
+        self.agents_overview.search_matches.clear();
         self.agents_overview.pending_usage = None;
+        self.reset_agents_overview_usage_for_backend_switch();
         self.agents_overview.usage_disabled = false;
         self.app_event_tx = AppEventSender::new(self.app_event_tx.app_event_tx.clone());
+        self.app_server_backend_id = Some(destination.backend_id());
         self.app_server_target = target;
+        self.refresh_transcript_document_links();
         self.reconnect = Default::default();
         if let Ok(mut state) = self.agents_overview.view_state.lock() {
             state.connection_notice = None;
+            state.has_more = self
+                .agents_overview
+                .has_more_for(&self.backend_registry, destination.backend_id());
+            state.refresh_failed = self
+                .agents_overview
+                .refresh_failed_backends
+                .contains(&destination.backend_id());
+            state.restart_history_search();
         }
         self.rate_limit_hard_stop_generation = self.rate_limit_hard_stop_generation.wrapping_add(1);
         self.rate_limit_refresh_state.invalidate_recovery();
@@ -334,17 +543,37 @@ impl App {
         self.bind_backend_workspace(destination, cwd);
         self.model_catalog = Arc::new(
             ModelCatalog::new(bootstrap.available_models)
+                .for_backend(destination.backend_id(), &mut self.provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
         self.feedback_audience = bootstrap.feedback_audience;
         self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         self.chat_widget.invalidate_security_setup();
+        self.chat_widget.forget_inherited_quota_provider();
         self.chat_widget.update_account_state(
             bootstrap.status_account_display,
             bootstrap.plan_type,
             bootstrap.has_chatgpt_account,
             matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
         );
+    }
+
+    pub(super) async fn cancel_cloud_inventory_refresh(&mut self, session: &AppServerSession) {
+        let owner = session.backend_id();
+        if (self
+            .agents_overview
+            .active_refresh
+            .is_some_and(|(_, backend)| backend == owner)
+            || self
+                .agents_overview
+                .pending_refresh_backends
+                .contains(&owner))
+            && matches!(session.request_handle(), AppServerRequestHandle::Cloud(_))
+            && let Some(task) = self.cancel_agents_overview_refresh(owner)
+        {
+            // The native worker can release a held list once its caller is dropped.
+            let _ = task.await;
+        }
     }
 
     pub(super) fn resume_backend_session<'a>(
@@ -357,7 +586,15 @@ impl App {
             let displayed_session = backends.displayed;
             let owner = target.backend_id;
             let outgoing = backends.displayed_owner();
+            if let Some(registered_owner) = self.backend_registry.owner(target.thread_id)
+                && let Err(error) = target.ensure_backend(registered_owner)
+            {
+                self.add_session_picker_error(error.to_string());
+                return Ok(AppRunControl::Continue);
+            }
             if owner == outgoing {
+                self.cancel_cloud_inventory_refresh(backends.session_at(displayed_session))
+                    .await;
                 return self
                     .apply_resume_picker_selection(
                         tui,
@@ -392,6 +629,7 @@ impl App {
                 return Ok(AppRunControl::Continue);
             };
             let destination = backends.session_at_mut(destination_slot);
+            self.cancel_cloud_inventory_refresh(destination).await;
             let bootstrap = match destination.bootstrap(&settings.config).await {
                 Ok(bootstrap) => bootstrap,
                 Err(error) => {
@@ -407,6 +645,8 @@ impl App {
                 Ok(prepared) => prepared,
                 Err(control) => return Ok(control),
             };
+            let handoff = self.chat_widget.pause_input_for_resume_handoff();
+            let _handoff = self.prepare_resume_handoff(tui, handoff).await?;
             self.switch_backend_context(
                 backends,
                 destination_slot,
@@ -416,31 +656,16 @@ impl App {
                 bootstrap,
             )
             .await;
+            backends.switch_displayed(destination_slot, &mut self.agents_overview.input_states);
             let destination = backends.session_at_mut(destination_slot);
-            let thread_id = target.thread_id;
-            if let Some(input) = self.agents_overview.input_states.get_mut(&thread_id) {
-                input.provider_error = None;
-                for item in prepared.thread.turns.iter().flat_map(Turn::item_payloads) {
-                    if let ThreadItemPayload::UserMessage {
-                        client_id: Some(id),
-                        ..
-                    } = item
-                    {
-                        input.pending_steers.retain(|steer| steer.client_id != *id);
-                    }
-                }
-            }
             let control = self
-                .activate_prepared_session(tui, destination, prepared)
+                .activate_prepared_session_after_clear(
+                    tui,
+                    destination,
+                    prepared,
+                    /*switched_backend*/ true,
+                )
                 .await?;
-            backends.displayed = destination_slot;
-            if let Some(mut input) = self.agents_overview.input_states.remove(&thread_id) {
-                let blank = self.agents_overview.blank_sessions.contains_key(&thread_id);
-                let settings = blank
-                    .then(|| input.pending_thread_settings.take())
-                    .flatten();
-                self.restore_session_draft(thread_id, input, settings).await;
-            }
             tui.frame_requester().schedule_frame();
             Ok(control)
         })

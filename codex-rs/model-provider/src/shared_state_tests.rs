@@ -18,8 +18,11 @@ use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::create_client_for_route;
+use codex_model_provider_info::GatewayOAuthConfig;
 use codex_model_provider_info::GatewayOAuthDelivery;
+use codex_model_provider_info::GatewayOAuthSettings;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OAuthCredentialsStore;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -67,18 +70,20 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
             name: "gateway_session".into(),
         },
     ] {
-        let config = GatewayOAuthConfig {
+        let config = GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "test".into(),
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
+            // Avoid spending the model discovery deadline on keyring-backed decryption.
+            credentials_store: OAuthCredentialsStore::File,
             delivery: delivery.clone(),
         };
         let info = ModelProviderInfo {
-            gateway_oauth: Some(config.clone()),
+            gateway_oauth: Some(GatewayOAuthConfig::OAuth(config)),
             ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
         };
         let mut primary_headers = HeaderMap::new();
@@ -98,7 +103,12 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
         );
         let provider = create_model_provider(info.clone(), Some(primary));
         assert!(Arc::ptr_eq(
-            &provider.gateway_auth_manager().unwrap().unwrap(),
+            &provider
+                .gateway_auth_manager()
+                .unwrap()
+                .unwrap()
+                .oauth_session()
+                .unwrap(),
             &manager,
         ));
         let models = provider.models_manager_without_cache(/*config_model_catalog*/ None);
@@ -106,7 +116,11 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
         models
             .raw_model_catalog(RefreshStrategy::Online, factory.clone())
             .await;
-        let (api, auth) = provider.api_provider_and_auth().await.unwrap();
+        let (api, resolved) = provider
+            .request_provider_and_auth(/*scope*/ None)
+            .await
+            .unwrap();
+        let auth = resolved.auth;
         let scoped = provider
             .api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -204,8 +218,9 @@ async fn gateway_preserves_runtime_auth_and_rejects_header_collisions() {
             home.path().to_path_buf(),
         );
         let info = ModelProviderInfo {
-            gateway_oauth: Some(GatewayOAuthConfig {
+            gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
                 authorization_url: format!("{}/authorize", server.uri()),
+                device_authorization_url: None,
                 token_url: format!("{}/token", server.uri()),
                 client_id: "client".into(),
                 resource: None,
@@ -216,7 +231,7 @@ async fn gateway_preserves_runtime_auth_and_rejects_header_collisions() {
                     name: "x-gateway-auth".into(),
                     scheme: "Bearer".into(),
                 },
-            }),
+            })),
             ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
         };
         let _gateway = seed_gateway_auth(
@@ -306,8 +321,9 @@ async fn gateway_refresh_preserves_primary_auth_and_hides_issuer_errors() {
             home.path().to_path_buf(),
         );
         let info = ModelProviderInfo {
-            gateway_oauth: Some(GatewayOAuthConfig {
+            gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
                 authorization_url: format!("{}/authorize", server.uri()),
+                device_authorization_url: None,
                 token_url: format!("{}/token?credential=query-secret", server.uri()),
                 client_id: "client".into(),
                 resource: None,
@@ -318,7 +334,7 @@ async fn gateway_refresh_preserves_primary_auth_and_hides_issuer_errors() {
                     name: "x-gateway-auth".into(),
                     scheme: "Bearer".into(),
                 },
-            }),
+            })),
             ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
         };
         let body = if succeeds {
@@ -401,19 +417,21 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
             codex_login::default_client::RESIDENCY_HEADER_NAME.to_string(),
             "us".into(),
         )])),
-        gateway_oauth: Some(GatewayOAuthConfig {
+        gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "client".into(),
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
+            // Keyring latency is outside the cache behavior under test.
+            credentials_store: OAuthCredentialsStore::File,
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
             },
-        }),
+        })),
         ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
     };
     let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
@@ -422,8 +440,10 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
         .models
         .remove(0);
     for resource in ["first", "second"] {
-        info.gateway_oauth.as_mut().unwrap().resource =
-            Some(format!("{}/{resource}", server.uri()));
+        let Some(GatewayOAuthConfig::OAuth(settings)) = &mut info.gateway_oauth else {
+            unreachable!()
+        };
+        settings.resource = Some(format!("{}/{resource}", server.uri()));
         model.slug = format!("catalog-{resource}");
         let _gateway = seed_gateway_auth(
             &info,
@@ -482,8 +502,9 @@ async fn models_observe_gateway_rotation(instance: ProviderInstance) {
     );
     let info = ModelProviderInfo {
         model_catalog_url: Some(format!("{}/models", server.uri()).into()),
-        gateway_oauth: Some(GatewayOAuthConfig {
+        gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "client".into(),
             resource: None,
@@ -494,7 +515,7 @@ async fn models_observe_gateway_rotation(instance: ProviderInstance) {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
             },
-        }),
+        })),
         ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
     };
     let gateway = seed_gateway_auth(
@@ -597,8 +618,9 @@ async fn gateway_setup_errors_are_reported_when_authentication_is_requested() {
 
     let server = MockServer::start().await;
     let mut info = ModelProviderInfo {
-        gateway_oauth: Some(GatewayOAuthConfig {
+        gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "client".into(),
             resource: None,
@@ -609,7 +631,7 @@ async fn gateway_setup_errors_are_reported_when_authentication_is_requested() {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
             },
-        }),
+        })),
         ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
     };
     let provider = create_model_provider(info.clone(), /*auth_manager*/ None);
@@ -641,7 +663,10 @@ async fn gateway_setup_errors_are_reported_when_authentication_is_requested() {
         "failed to create provider OAuth HTTP client"
     );
 
-    info.gateway_oauth.as_mut().unwrap().client_id.clear();
+    let Some(GatewayOAuthConfig::OAuth(settings)) = &mut info.gateway_oauth else {
+        unreachable!()
+    };
+    settings.client_id.clear();
     let primary = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("primary"));
     let error = create_model_provider(info, Some(primary))
         .api_auth()
@@ -664,21 +689,21 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
         home.path().to_path_buf(),
     );
     let info = ModelProviderInfo {
-        model_catalog_url: Some(format!("{}/models", server.uri()).into()),
-        gateway_oauth: Some(GatewayOAuthConfig {
+        name: "Gateway".to_string(),
+        base_url: Some(server.uri()),
+        model_catalog_url: Some(format!("{}/catalog", server.uri()).into()),
+        gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "client".into(),
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
-            delivery: GatewayOAuthDelivery::Header {
-                name: "x-gateway-auth".into(),
-                scheme: "Bearer".into(),
-            },
-        }),
-        ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
+            credentials_store: OAuthCredentialsStore::File,
+            delivery: GatewayOAuthDelivery::default(),
+        })),
+        ..Default::default()
     };
     let login_control = codex_login::GatewayLoginControl::for_runtime(&primary.runtime_config());
     login_control.require_explicit_login();
@@ -692,11 +717,13 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
     );
-    models.set_api_key_model_discovery_enabled(/*enabled*/ true);
+    // Only the gateway token should enable this fetch; the saved API key is unrelated.
+    models.set_api_key_model_discovery_enabled(/*enabled*/ false);
     let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
     let catalog = codex_models_manager::bundled_models_response().unwrap();
     Mock::given(method("GET"))
-        .and(path("/models"))
+        .and(path("/catalog"))
+        .and(wiremock::matchers::header("authorization", "Bearer first"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&catalog))
         .expect(1)
         .mount(&server)
@@ -732,7 +759,7 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
         home.path().to_path_buf(),
         /*config_model_catalog*/ None,
     );
-    restarted.set_api_key_model_discovery_enabled(/*enabled*/ true);
+    restarted.set_api_key_model_discovery_enabled(/*enabled*/ false);
     assert_eq!(
         restarted
             .raw_model_catalog(RefreshStrategy::Offline, factory)
@@ -750,8 +777,9 @@ async fn gateway_login_states_stop_request_retries() {
         home.path().to_path_buf(),
     );
     let info = ModelProviderInfo {
-        gateway_oauth: Some(GatewayOAuthConfig {
+        gateway_oauth: Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
             authorization_url: format!("{}/authorize", server.uri()),
+            device_authorization_url: None,
             token_url: format!("{}/token", server.uri()),
             client_id: "client".into(),
             resource: None,
@@ -762,7 +790,7 @@ async fn gateway_login_states_stop_request_retries() {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
             },
-        }),
+        })),
         ..ModelProviderInfo::create_openai_provider(Some(server.uri()))
     };
     let login_control = codex_login::GatewayLoginControl::for_runtime(&primary.runtime_config());
@@ -788,7 +816,8 @@ async fn gateway_login_states_stop_request_retries() {
     );
     let cancel = tokio::sync::Notify::new();
     let (url_tx, url_rx) = tokio::sync::oneshot::channel();
-    let login = gateway.login_with_browser(cancel.notified(), |_| {
+    let oauth = gateway.oauth_session().unwrap();
+    let login = oauth.login_with_browser(cancel.notified(), |_| {
         let _ = url_tx.send(());
     });
     let check = async {

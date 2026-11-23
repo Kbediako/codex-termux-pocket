@@ -1,3 +1,4 @@
+use crate::McpServerKey;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -61,7 +62,7 @@ async fn test_step(
     supports_sandbox_state_meta: bool,
 ) -> TestStep {
     let tool = ToolInfo {
-        server_name: SERVER_NAME.to_string(),
+        server_key: McpServerKey::unscoped(SERVER_NAME),
         supports_parallel_tool_calls: false,
         server_origin: None,
         callable_name: TOOL_NAME.to_string(),
@@ -107,12 +108,25 @@ async fn test_step(
         client_supports_network_policy_meta_capability: false,
         codex_apps_tools_cache_context: None,
     });
-    let clients = Arc::new(McpBindingClients::new(HashMap::from([(
-        SERVER_NAME.to_string(),
-        Arc::clone(&managed_client),
-    )])));
+    let clients = Arc::new(McpBindingClients::new(
+        HashMap::from([(
+            McpServerKey::unscoped(SERVER_NAME),
+            Arc::clone(&managed_client),
+        )]),
+        Vec::new(),
+    ));
     let connections = Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true));
     let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+    let mut catalog = config.mcp_server_catalog.to_builder();
+    catalog.register(crate::McpServerRegistration::from_config(
+        SERVER_NAME.to_string(),
+        serde_json::from_value(serde_json::json!({
+            "url": format!("https://{label}.example"),
+            "environment_id": format!("{label}-environment"),
+        }))
+        .expect("test server config"),
+    ));
+    config.mcp_server_catalog = catalog.build();
     config.host_cwd = config.host_cwd.join(label);
     config.environment_cwds.insert(
         codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
@@ -135,7 +149,7 @@ async fn test_step(
     };
     config
         .server_permissions
-        .insert(SERVER_NAME.to_string(), server_permissions);
+        .insert(McpServerKey::unscoped(SERVER_NAME), server_permissions);
     config
         .environment_use_mxc
         .insert(format!("{label}-environment"), label == "new");
@@ -148,6 +162,7 @@ async fn test_step(
         tool.clone(),
         McpServerMetadata {
             environment_id: format!("{label}-environment"),
+            server_key: McpServerKey::unscoped(SERVER_NAME),
             pollutes_memory: label == "old",
             origin: Some(McpServerOrigin::StreamableHttp(format!(
                 "https://{label}.example"
@@ -160,7 +175,10 @@ async fn test_step(
         label == "old",
     )
     .expect("test call should have a permission source");
-    let calls = HashMap::from([((SERVER_NAME.to_string(), TOOL_NAME.to_string()), prepared)]);
+    let calls = HashMap::from([(
+        (McpServerKey::unscoped(SERVER_NAME), TOOL_NAME.to_string()),
+        prepared,
+    )]);
 
     TestStep {
         step: Arc::new(McpBinding::new(
@@ -187,7 +205,7 @@ async fn prepared_call_keeps_captured_connection_and_authority_after_refresh() -
     .await;
     let old_call = old
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("old step should prepare the advertised tool");
     let old_connections = Arc::downgrade(&old.step.connections);
 
@@ -199,7 +217,7 @@ async fn prepared_call_keeps_captured_connection_and_authority_after_refresh() -
     .await;
     let new_call = new
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("new step should prepare the advertised tool");
 
     assert_eq!(
@@ -314,7 +332,7 @@ async fn prepared_call_does_not_reroute_after_captured_connection_closes() {
     .await;
     let old_call = old
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("old step should prepare the advertised tool");
     let new = test_step(
         "new",
@@ -350,12 +368,13 @@ async fn prepared_call_is_rejected_after_catalog_refresh() {
     .await;
     let prepared = step
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("step should prepare the advertised tool");
 
     step.tool_catalog
         .refresh(
             || async { Ok((step.step.tools().to_vec(), None, ())) },
+            || Some(()),
             |_, _, ()| {},
         )
         .await
@@ -385,11 +404,12 @@ async fn stale_prepared_call_does_not_run_preparation() {
     .await;
     let prepared = step
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("step should prepare the advertised tool");
     step.tool_catalog
         .refresh(
             || async { Ok((step.step.tools().to_vec(), None, ())) },
+            || Some(()),
             |_, _, ()| {},
         )
         .await
@@ -418,7 +438,7 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
     .await;
     let prepared = step
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("step should prepare the advertised tool");
     let preparation_started = Arc::new(Notify::new());
     let finish_preparation = Arc::new(Notify::new());
@@ -435,14 +455,23 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
     });
 
     preparation_started.notified().await;
+    let validation_reached = AtomicBool::new(false);
     let refresh = step.tool_catalog.refresh(
         || async { Ok((step.step.tools().to_vec(), None, ())) },
+        || {
+            validation_reached.store(true, Ordering::SeqCst);
+            Some(())
+        },
         |_, _, ()| {},
     );
     tokio::pin!(refresh);
     assert!(
         futures::poll!(&mut refresh).is_pending(),
         "catalog replacement must wait for irreversible call preparation"
+    );
+    assert!(
+        !validation_reached.load(Ordering::SeqCst),
+        "publication validation must not hold its guard while calls drain"
     );
     finish_preparation.notify_one();
     call.await
@@ -451,6 +480,7 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
     refresh
         .await
         .expect("catalog refresh should finish after preparation");
+    assert!(validation_reached.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
@@ -466,7 +496,7 @@ async fn sandbox_executable_requires_local_stdio_and_a_full_cli() -> anyhow::Res
     .await;
     let call = step
         .step
-        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .prepare_call(&McpServerKey::unscoped(SERVER_NAME), TOOL_NAME)
         .expect("prepared call");
     // Use a probe-capable CLI so remote/HTTP exclusions cannot pass merely
     // because the supplied executable lacks the sandbox capability.

@@ -3,6 +3,8 @@
 use std::borrow::Cow;
 
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::plain_output_text;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -72,7 +74,7 @@ pub fn truncate_mcp_tool_result(
     result: &CallToolResult,
     max_bytes: usize,
 ) -> Cow<'_, CallToolResult> {
-    let Ok(serialized) = serde_json::to_string(result) else {
+    let Ok(mut serialized) = serde_json::to_string(result) else {
         return Cow::Borrowed(result);
     };
     if serialized.len() <= max_bytes {
@@ -80,6 +82,26 @@ pub fn truncate_mcp_tool_result(
     }
 
     let meta = None;
+
+    // Keep plain output recognizable after truncation. Rich results retain their
+    // serialized preview so history can distinguish them from plain output.
+    if result.is_error != Some(true)
+        && result.structured_content.is_none()
+        && result.meta.is_none()
+        && let Some(blocks) = result
+            .content
+            .iter()
+            .map(plain_output_text)
+            .collect::<Option<Vec<_>>>()
+        && blocks.iter().any(|text| !text.is_empty())
+    {
+        serialized.clear();
+        serialized.push_str("Truncated tool output:");
+        for text in blocks {
+            serialized.push('\n');
+            serialized.push_str(text);
+        }
+    }
 
     let mut preview_budget = max_bytes;
     loop {
@@ -116,7 +138,7 @@ pub fn truncate_mcp_tool_result(
 pub fn truncate_function_output_payload(
     output: &mut FunctionCallOutputPayload,
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
 ) {
     match &mut output.body {
         FunctionCallOutputBody::Text(text) => *text = truncate_text(text, policy),
@@ -151,7 +173,7 @@ pub struct OutputBoundary {
 pub fn formatted_truncate_function_output_items_with_policy<'a>(
     items: impl Into<Cow<'a, [FunctionCallOutputContentItem]>>,
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
 ) -> Vec<FunctionCallOutputContentItem> {
     formatted_output(items.into(), policy, estimate_audio_token_count, &mut [])
 }
@@ -161,7 +183,7 @@ pub fn formatted_truncate_function_output_items_with_policy<'a>(
 pub fn formatted_output_at_token_boundaries<'a>(
     items: impl Into<Cow<'a, [FunctionCallOutputContentItem]>>,
     max_tokens: usize,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
     boundaries: &mut [OutputBoundary],
 ) -> Vec<FunctionCallOutputContentItem> {
     let items = items.into();
@@ -177,7 +199,7 @@ pub fn formatted_output_at_token_boundaries<'a>(
 fn formatted_output(
     items: Cow<'_, [FunctionCallOutputContentItem]>,
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
     boundaries: &mut [OutputBoundary],
 ) -> Vec<FunctionCallOutputContentItem> {
     let mut combined_len = 0;
@@ -221,7 +243,7 @@ fn formatted_output(
 pub fn truncate_function_output_items_with_policy(
     items: &[FunctionCallOutputContentItem],
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
 ) -> Vec<FunctionCallOutputContentItem> {
     truncate_output_items(
         Cow::Borrowed(items),
@@ -236,7 +258,7 @@ pub fn truncate_function_output_items_with_policy(
 pub fn mixed_output_at_token_boundaries<'a>(
     items: impl Into<Cow<'a, [FunctionCallOutputContentItem]>>,
     max_tokens: usize,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
     boundaries: &mut [OutputBoundary],
 ) -> Vec<FunctionCallOutputContentItem> {
     let items = items.into();
@@ -270,7 +292,7 @@ fn normalize_boundaries(
 fn truncate_output_items(
     items: Cow<'_, [FunctionCallOutputContentItem]>,
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
     boundaries: &mut [OutputBoundary],
 ) -> Vec<FunctionCallOutputContentItem> {
     match items {
@@ -289,13 +311,47 @@ fn truncate_output_items(
     }
 }
 
+/// Apply the mixed-output policy to owned, premeasured parts. Audio keeps its original
+/// token charge through truncation and storage. The charge for other parts is zero.
+pub fn truncate_measured_tool_output(
+    items: Vec<(FunctionCallOutputContentItem, usize)>,
+    policy: TruncationPolicy,
+) -> Vec<(FunctionCallOutputContentItem, usize)> {
+    truncate_measured_output_iter(
+        items
+            .into_iter()
+            .map(|(item, charge)| (Cow::Owned(item), charge)),
+        policy,
+        &mut [],
+        |item, charge| (item, charge),
+    )
+}
+
 fn truncate_output_iter<'a>(
     items: impl ExactSizeIterator<Item = Cow<'a, FunctionCallOutputContentItem>>,
     policy: TruncationPolicy,
-    estimate_audio_token_count: impl Fn(&str) -> usize,
+    estimate_audio_token_count: impl Fn(&AudioReference) -> usize,
     boundaries: &mut [OutputBoundary],
 ) -> Vec<FunctionCallOutputContentItem> {
-    let mut out: Vec<FunctionCallOutputContentItem> = Vec::with_capacity(items.len());
+    let measured = items.map(|item| {
+        let charge = match item.as_ref() {
+            FunctionCallOutputContentItem::InputAudio { audio } => {
+                estimate_audio_token_count(audio)
+            }
+            _ => 0,
+        };
+        (item, charge)
+    });
+    truncate_measured_output_iter(measured, policy, boundaries, |item, _| item)
+}
+
+fn truncate_measured_output_iter<'a, T>(
+    items: impl ExactSizeIterator<Item = (Cow<'a, FunctionCallOutputContentItem>, usize)>,
+    policy: TruncationPolicy,
+    boundaries: &mut [OutputBoundary],
+    emit: impl Fn(FunctionCallOutputContentItem, usize) -> T,
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(items.len());
     let mut remaining_budget = match policy {
         TruncationPolicy::Bytes(_) => policy.byte_budget(),
         TruncationPolicy::Tokens(_) => policy.token_budget(),
@@ -304,7 +360,7 @@ fn truncate_output_iter<'a>(
     let mut omitted_audio_items = 0usize;
     let mut next_boundary = 0;
 
-    for (index, item) in items.enumerate() {
+    for (index, (item, audio_tokens)) in items.enumerate() {
         let item_out = out.len();
         let item_policy = match policy {
             TruncationPolicy::Bytes(_) => TruncationPolicy::Bytes(remaining_budget),
@@ -332,7 +388,10 @@ fn truncate_output_iter<'a>(
                     if snippet.is_empty() {
                         omitted_text_items += 1;
                     } else {
-                        out.push(FunctionCallOutputContentItem::InputText { text: snippet });
+                        out.push(emit(
+                            FunctionCallOutputContentItem::InputText { text: snippet },
+                            0,
+                        ));
                     }
                     remaining_budget = 0;
                     false
@@ -340,11 +399,10 @@ fn truncate_output_iter<'a>(
             }
             FunctionCallOutputContentItem::InputImage { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
-            FunctionCallOutputContentItem::InputAudio { audio_url } => {
-                let token_cost = estimate_audio_token_count(audio_url);
+            FunctionCallOutputContentItem::InputAudio { .. } => {
                 let cost = match policy {
-                    TruncationPolicy::Bytes(_) => approx_bytes_for_tokens(token_cost),
-                    TruncationPolicy::Tokens(_) => token_cost,
+                    TruncationPolicy::Bytes(_) => approx_bytes_for_tokens(audio_tokens),
+                    TruncationPolicy::Tokens(_) => audio_tokens,
                 };
                 if cost <= remaining_budget {
                     remaining_budget = remaining_budget.saturating_sub(cost);
@@ -368,7 +426,7 @@ fn truncate_output_iter<'a>(
             next_boundary += 1;
         }
         if keep {
-            out.push(item.into_owned());
+            out.push(emit(item.into_owned(), audio_tokens));
         }
     }
     // End boundaries precede generated omission counts: counts are not original
@@ -379,14 +437,20 @@ fn truncate_output_iter<'a>(
     }
 
     if omitted_text_items > 0 {
-        out.push(FunctionCallOutputContentItem::InputText {
-            text: format!("[omitted {omitted_text_items} text items ...]"),
-        });
+        out.push(emit(
+            FunctionCallOutputContentItem::InputText {
+                text: format!("[omitted {omitted_text_items} text items ...]"),
+            },
+            0,
+        ));
     }
     if omitted_audio_items > 0 {
-        out.push(FunctionCallOutputContentItem::InputText {
-            text: format!("[omitted {omitted_audio_items} audio items ...]"),
-        });
+        out.push(emit(
+            FunctionCallOutputContentItem::InputText {
+                text: format!("[omitted {omitted_audio_items} audio items ...]"),
+            },
+            0,
+        ));
     }
     out
 }

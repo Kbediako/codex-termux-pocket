@@ -27,6 +27,14 @@ $$
 x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}
 $$
 
+$$
+I'=\frac{\widetilde{I}}{\rho}
+$$
+
+$$
+I'=\frac{\widetilde I}{\rho}
+$$
+
 $$\frac{1}{2}\frac{3}{4}$$
 
 $$
@@ -185,6 +193,37 @@ Inline: \(\sum_{i=1}^N x_i\), \(\underset{x\ge0}{\min} x\).",
             MathMode::Display
         ),
         None
+    );
+}
+
+#[test]
+fn unicode_math_underbrace() {
+    insta::assert_snapshot!(plain(
+        r"\[
+\varphi=\underbrace{(x\lor y\lor z)}_{C_1}\land\underbrace{(\neg x\lor y)}_{C_2}
+\]
+
+$$\underbrace{x}_{\text{term}}+\underbrace{xy}_{C_3}+\underbrace{x+y}_{C_4}$$
+
+$$\underbrace{a+bc}_{\text{total}}$$",
+        /*width*/ 80
+    ));
+    for source in [
+        r"\underbrace{x+y}",
+        r"\underbrace{x+y}_C",
+        r"\underbrace{}_{C}",
+        r"\underbrace{x}_{}",
+        r"\underbrace{\frac{x}{y}}_{C}",
+        r"\underbrace{x}_{\frac{a}{b}}",
+        r"\underbrace{\underbrace{x}_{a}}_{b}",
+    ] {
+        assert_eq!(render(source, MathMode::Display), None, "{source}");
+    }
+    assert_eq!(render(r"\underbrace{x}_{C}", MathMode::Inline), None);
+    let formula = r"$$\underbrace{abcdefghij}_{C_1}$$";
+    assert_eq!(
+        plain(formula, /*width*/ 12),
+        plain(&format!("`{formula}`"), /*width*/ 12)
     );
 }
 

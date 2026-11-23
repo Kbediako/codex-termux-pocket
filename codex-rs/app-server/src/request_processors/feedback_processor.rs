@@ -850,15 +850,14 @@ mod tests {
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
                     root_turn_id: None,
+                    direct_only_tool_namespaces: None,
                     disabled_plugin_ids: None,
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
                         .expect("absolute feedback rollout directory"),
                     approval_policy: codex_protocol::protocol::AskForApproval::Never,
                     approvals_reviewer: None,
-                    sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
-                    permission_profile: None,
+                    permission_profile: codex_protocol::models::PermissionProfile::read_only(),
                     active_permission_profile: None,
-                    file_system_sandbox_policy: None,
                     model: (*model).to_string(),
                     comp_hash: None,
                     collaboration_mode: None,

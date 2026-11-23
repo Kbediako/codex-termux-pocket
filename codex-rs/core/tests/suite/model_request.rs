@@ -1,6 +1,9 @@
 //! Output gates allow inference immediately, hold complete output, and cancel with the turn.
 use anyhow::Result;
+use codex_core::RequestCountry;
 use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::GuardianAssessment;
 use codex_extension_api::ModelRequestContributor;
@@ -10,8 +13,17 @@ use codex_extension_api::ModelResponseInterceptor;
 use codex_extension_api::ModelResponseStream;
 use codex_extension_api::ResponseEvent;
 use codex_features::Feature;
+use codex_login::CodexAuth;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -24,6 +36,7 @@ use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::time::Duration;
 use tokio::time::timeout;
@@ -120,6 +133,203 @@ impl Drop for Permit {
             self.gates.cancelled.add_permits(1);
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct BudgetCache(pub(super) Mutex<bool>);
+
+impl ModelRequestContributor for BudgetCache {
+    fn request(&self, _input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
+        None
+    }
+
+    fn budget_exhausted<'a>(&'a self, _thread_id: &'a str) -> ExtensionFuture<'a, bool> {
+        Box::pin(async { *self.0.lock().await })
+    }
+}
+
+#[tokio::test]
+#[test_case::test_case(false; "future settings only")]
+#[test_case::test_case(true; "live country update without model switching")]
+async fn country_settings_follow_step_and_turn_lifetimes(live_update: bool) -> Result<()> {
+    const CALL_ID: &str = "country-check";
+    let server = responses::start_mock_server().await;
+    let first = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("first"),
+            responses::ev_function_call(CALL_ID, "check_status", "{}"),
+            ev_completed("first"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config
+                .features
+                .disable(Feature::StepModelSwitching)
+                .expect("disable step model switching");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mut options = test.start_thread_options().await;
+    options.request_country = RequestCountry::from_iso_code("DE")?;
+    options.dynamic_tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "check_status".into(),
+        description: "Check status.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    })];
+    let thread = test.thread_manager.start_thread(options).await?.thread;
+    let message = || {
+        TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Check status.".into(),
+            text_elements: Vec::new(),
+        }])
+    };
+    let TurnInputSubmission::Started { turn_id, .. } =
+        thread.start_or_steer_turn(message()).await?
+    else {
+        panic!("expected a new turn");
+    };
+    wait_for_event(
+        &thread,
+        |event| matches!(event, EventMsg::DynamicToolCallRequest(call) if call.call_id == CALL_ID),
+    )
+    .await;
+    thread
+        .update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::from_iso_code("US")?),
+            ..Default::default()
+        })
+        .await?;
+    if live_update {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        thread
+            .submit(Op::TurnSettings {
+                turn_id: turn_id.clone(),
+                update: TurnSettingsUpdate {
+                    request_country: Some(RequestCountry::from_iso_code("JP")?),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await?;
+        assert_eq!(receiver.await?, TurnSettingsUpdateOutcome::Applied);
+    }
+    let continuation =
+        responses::mount_sse_once(&server, responses::sse_completed("continued")).await;
+    thread
+        .submit(Op::DynamicToolResponse {
+            id: CALL_ID.into(),
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: "ready".into(),
+                }],
+                success: true,
+            },
+        })
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let next = responses::mount_sse_once(&server, responses::sse_completed("next")).await;
+    thread.start_or_steer_turn(message()).await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let cleared = responses::mount_sse_once(&server, responses::sse_completed("cleared")).await;
+    let mut input = message();
+    input.thread_settings.request_country = Some(RequestCountry::UNKNOWN);
+    thread.start_or_steer_turn(input).await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        [
+            first.single_request(),
+            continuation.single_request(),
+            next.single_request(),
+            cleared.single_request()
+        ]
+        .map(|request| request.body_json().get("request_country").cloned()),
+        [
+            Some(json!("DE")),
+            Some(json!(if live_update { "JP" } else { "DE" })),
+            Some(json!("US")),
+            Some(json!(null))
+        ],
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[test_case::test_case(false; "budget available")]
+#[test_case::test_case(true; "budget exhausted")]
+async fn budget_is_checked_again_after_tool_call(exhausted: bool) -> Result<()> {
+    const CALL_ID: &str = "status-call";
+    const TOOL_NAME: &str = "check_status";
+    const TOOL_OUTPUT: &str = "Release ready.";
+
+    let server = responses::start_mock_server().await;
+    let model =
+        responses::mount_function_call_agent_response(&server, CALL_ID, "{}", TOOL_NAME).await;
+    let budget = Arc::new(BudgetCache::default());
+    let mut registry = ExtensionRegistryBuilder::new();
+    registry.model_request_contributor(budget.clone());
+    let mut builder = test_codex().with_extensions(Arc::new(registry.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    let mut options = test.start_thread_options().await;
+    options.dynamic_tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: TOOL_NAME.into(),
+        description: "Check the release status.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    })];
+    let thread = test.thread_manager.start_thread(options).await?.thread;
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Check the release status.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(
+        &thread,
+        |event| matches!(event, EventMsg::DynamicToolCallRequest(call) if call.call_id == CALL_ID),
+    )
+    .await;
+    *budget.0.lock().await = exhausted;
+    thread
+        .submit(Op::DynamicToolResponse {
+            id: CALL_ID.into(),
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: TOOL_OUTPUT.into(),
+                }],
+                success: true,
+            },
+        })
+        .await?;
+    let EventMsg::TurnComplete(completed) =
+        wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await
+    else {
+        unreachable!();
+    };
+    let request_count = responses::received_responses_requests(&server).await.len();
+    if exhausted {
+        assert_eq!(
+            completed.error.and_then(|error| error.codex_error_info),
+            Some(CodexErrorInfo::SessionBudgetExceeded)
+        );
+        assert_eq!(request_count, 1);
+    } else {
+        assert_eq!(completed.error, None);
+        assert_eq!(completed.last_agent_message.as_deref(), Some("done"));
+        assert_eq!(request_count, 2);
+        assert_eq!(
+            model
+                .completion
+                .single_request()
+                .function_call_output_content_and_success(CALL_ID),
+            Some((Some(TOOL_OUTPUT.into()), None))
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -361,5 +571,59 @@ async fn model_request_gates_websocket_output_but_not_warmup() -> Result<()> {
             .await
     );
     server.shutdown().await;
+    Ok(())
+}
+
+/// The same final answer carries the targeted public flag on completion and in legacy history.
+#[tokio::test]
+async fn final_answer_carries_its_moderation_decision() -> Result<()> {
+    use core_test_support::wait_for_event_match;
+    let server = responses::start_mock_server().await;
+    let mut answer = responses::ev_assistant_message("msg-42", "Answer");
+    answer["item"]["phase"] = json!("final_answer");
+    let display = json!({
+        "version": 1, "mode": "show", "trustedContacts": "skip",
+        "annotation": {"kind": "wellbeingHelpline", "subject": "answer"}
+    });
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            json!({"type":"response.metadata","metadata":{"openai_chatgpt_moderation_metadata":{
+                "final_answer_moderation":{"item_id":"msg-42","moderated":true,"display":display},
+                "generation":{"private":"classifier details"}
+            }}}),
+            answer,
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "test".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let item = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ItemCompleted(done) if done.item.id() == "msg-42" => Some(done.item.clone()),
+        _ => None,
+    })
+    .await;
+    let codex_protocol::items::TurnItem::AgentMessage(message) = item else {
+        panic!("expected assistant answer");
+    };
+    let public = serde_json::to_value(&message)?;
+    assert_eq!(
+        public["moderation"],
+        json!({"moderated": true,"display":display})
+    );
+    let [EventMsg::AgentMessage(legacy)] = &message.as_legacy_events()[..] else {
+        panic!("expected one legacy answer");
+    };
+    assert_eq!(
+        serde_json::to_value(&legacy.moderation)?,
+        json!({"item_id":"msg-42","moderated":true,"display":display})
+    );
     Ok(())
 }

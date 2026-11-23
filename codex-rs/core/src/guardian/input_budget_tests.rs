@@ -57,7 +57,13 @@ async fn finalization_exports_loss_totals_only_for_accepted_input(window: i64) {
         .collect();
     let mut input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: context.clone().into_user_inputs().unwrap(),
+        content: context
+            .clone()
+            .into_user_inputs()
+            .unwrap()
+            .into_iter()
+            .map(ResolvedUserInput::from_client)
+            .collect(),
         client_id: None,
     }];
     session
@@ -152,33 +158,49 @@ fn required_context(text: String) -> ComposedContext {
         kind: PlannedActionKind::Command { json: text },
         reason: None,
     };
-    let context = super::super::prompt::collect_guardian_context(
-        &Vec::<ResponseItem>::new(),
-        &ContextProfile::synchronous(),
-        /*root_conversation_candidates*/ None,
+    let profile = ContextProfile::synchronous();
+    let context =
+        super::super::prompt::collect_guardian_context(codex_guardian_context::SectionInput {
+            target: profile.target,
+            history: &[],
+            transcript: &profile.transcript,
+            is_selected_exec_output: None,
+            root_conversation: &[],
+            root_conversation_candidates: None,
+            trusted_user_answers: &[],
+            planned_action: Some(&action),
+            permissions: None,
+            previous_reviews: None,
+            trusted_tool: None,
+            trusted_skill_paths: &[],
+            images: None,
+            node_repl: None,
+        })
+        .expect("collect required context");
+    codex_guardian_context::prepare_context(
+        std::borrow::Cow::Owned(context),
+        &profile,
+        /*entry_number_offset*/ 0,
+        ContextPresentation::SyncFull {
+            session_id: "test-parent",
+        },
+        codex_guardian_context::ContextBudgeting::Fixed,
         &[],
-        Some(&action),
-        /*permissions*/ None,
-        /*node_repl*/ None,
     )
-    .expect("collect required context");
-    let transcript = ContextProfile::synchronous()
-        .prepare_transcript(context.transcript_entries(), /*entry_number_offset*/ 0);
-    context
-        .compose(
-            ContextPresentation::SyncFull {
-                session_id: "test-parent",
-            },
-            transcript,
-        )
-        .expect("compose required context")
+    .expect("prepare required context")
 }
 
 #[tokio::test]
 async fn cancelled_startup_does_not_record_unselected_review_evidence() {
     let (session, turn, events) = crate::session::tests::make_session_and_context_with_rx().await;
     let context = required_context("unselected review evidence ".repeat(/*n*/ 10_000));
-    let content = context.clone().into_user_inputs().unwrap();
+    let content = context
+        .clone()
+        .into_user_inputs()
+        .unwrap()
+        .into_iter()
+        .map(ResolvedUserInput::from_client)
+        .collect();
     session
         .services
         .thread_extension_data
@@ -262,7 +284,13 @@ async fn finalization_overflow_marks_the_reviewer_exhausted() {
     let context = required_context("required action".to_owned());
     let mut input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: context.clone().into_user_inputs().unwrap(),
+        content: context
+            .clone()
+            .into_user_inputs()
+            .unwrap()
+            .into_iter()
+            .map(ResolvedUserInput::from_client)
+            .collect(),
         client_id: None,
     }];
     session
@@ -308,10 +336,7 @@ async fn compacted_review_restores_originals_once_and_persists_the_request_prefi
         .record_user_prompt_and_emit_turn_item(
             &step.turn,
             &step.settings.model_info,
-            &[codex_protocol::user_input::UserInput::Text {
-                text: instruction.clone(),
-                text_elements: vec![],
-            }],
+            &[ResolvedUserInput::text(instruction.clone())],
             /*client_id*/ None,
             crate::session::UserInputMetadata {
                 acceptance_order: Some(0),
@@ -319,7 +344,8 @@ async fn compacted_review_restores_originals_once_and_persists_the_request_prefi
             },
             codex_thread_store::PersistContext::Standard,
         )
-        .await;
+        .await
+        .expect("record review input");
     let collected = super::super::prompt::collect_guardian_prompt_items_with_parent_turn(
         &session,
         super::super::prompt::GuardianTranscriptHistory::Retained(
@@ -337,43 +363,24 @@ async fn compacted_review_restores_originals_once_and_persists_the_request_prefi
             reason: None,
             permissions: Default::default(),
         },
-        super::super::prompt::GuardianPromptMode::Full,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
     .await
     .unwrap();
-    let context = codex_guardian_context::prepare_sync_context(
-        collected.sections,
+    let context = codex_guardian_context::prepare_context(
+        std::borrow::Cow::Owned(collected.sections),
         &collected.profile,
         /*entry_number_offset*/ 0,
         ContextPresentation::SyncFull {
             session_id: &collected.session_id,
         },
         budgeting,
+        &[],
     )
     .unwrap();
-    let elastic = (budgeting == ContextBudgeting::Elastic).then(|| {
-        let section = codex_guardian_context::ElasticSection::TrustedSkills;
-        let mut policy = codex_guardian_context::ElasticBudgetConfig::default();
-        policy.sections.insert(
-            section,
-            codex_guardian_context::ElasticSectionLimits::new(
-                /*min_total_section_tokens*/ 1, /*max_section_entry_tokens*/ 1,
-            )
-            .unwrap(),
-        );
-        let minimum = codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS
-            - usize::try_from(policy.total_minimum_tokens()).unwrap()
-            + 1;
-        policy.sections.insert(
-            section,
-            codex_guardian_context::ElasticSectionLimits::new(
-                minimum, /*max_section_entry_tokens*/ 1,
-            )
-            .unwrap(),
-        );
-        policy
-    });
+    let elastic = (budgeting == ContextBudgeting::Elastic)
+        .then(core_test_support::guardian::elastic_budget_config);
     step.turn.extension_data.insert(RetainedReviewContext {
         context: context.retained_instructions(),
         elastic,

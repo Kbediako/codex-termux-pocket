@@ -50,6 +50,8 @@ impl AgentsOverviewView {
             line(
                 if state.connection_notice.is_some() {
                     "Reconnecting…"
+                } else if state.history.is_some() {
+                    "No matching tasks"
                 } else if state.loading && self.rows.is_empty() {
                     "Loading tasks…"
                 } else if state.refresh_failed {
@@ -121,7 +123,15 @@ impl AgentsOverviewView {
                         },
                         style,
                     );
-                    let label = if state.loading {
+                    let label = if let Some(search) = &state.history {
+                        if search.loading {
+                            "Searching history…"
+                        } else if search.failed {
+                            "Show more (retry)"
+                        } else {
+                            "Show more matches"
+                        }
+                    } else if state.loading {
                         "Loading more…"
                     } else if state.refresh_failed {
                         "Show more (retry)"
@@ -160,6 +170,7 @@ impl AgentsOverviewView {
                     })
                     .count();
                 let total = (0..self.rows.len())
+                    .filter(|&i| state.includes_row(&self.rows[i]))
                     .filter(|&candidate| self.same_group(state.grouping, candidate, index))
                     .count();
                 let count = if count == total {
@@ -237,20 +248,25 @@ impl AgentsOverviewView {
             } else {
                 self.title_style(task.thread_id)
             };
-            let task_title = display_title(&task.thread);
+            let mut prefix = String::new();
+            if state.grouping == AgentsOverviewGrouping::Status && self.is_pinned(index) {
+                prefix.push_str("📌 ");
+            }
             // On narrow rows the result dot shares the only slot for the working or alert icon.
-            let task_title = if task.unread && !idle && status_area.is_empty() {
-                format!("{status}: {task_title}")
-            } else {
-                task_title.to_owned()
-            };
-            let task_title =
-                if state.grouping == AgentsOverviewGrouping::Status && self.is_pinned(index) {
-                    format!("📌 {task_title}")
-                } else {
-                    task_title
-                };
-            line(Line::from(task_title).style(title_style), title, buf);
+            if task.unread && !idle && status_area.is_empty() {
+                prefix.push_str(status);
+                prefix.push_str(": ");
+            }
+            let prefix = Span::from(prefix);
+            let task_title = Line::from(display_title(&task.thread).to_owned()).style(title_style);
+            let mut task_title = task.label_style.render(
+                task_title,
+                usize::from(title.width).saturating_sub(prefix.width()),
+            );
+            if !prefix.content.is_empty() {
+                task_title.spans.insert(0, prefix);
+            }
+            line(task_title, title, buf);
             line(Line::from(status).style(style), status_area, buf);
             if !updated.is_empty() {
                 let age = format_relative_time(

@@ -174,9 +174,23 @@ async fn active_patch_approval_pager_preserves_changes_and_accepts_once() -> Res
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server = start_config_write_test_app_server(&app).await?;
     enqueue_pending_patch(&mut app, thread_id).await?;
-    drain_pending_patch(&mut app, &mut tui).await?;
-
+    enable_side_retention(&mut app)?;
     tui.set_owned_screen(/*owned*/ true)?;
+    app.sidebar_mut().show(
+        sidebar::SidebarContent::Chooser,
+        sidebar::PaneFocus::Sidebar,
+    );
+    let narrow = Size::new(/*width*/ 80, /*height*/ 24);
+    assert!(side_frame(&mut app, &mut tui, narrow)?.contains("Open in sidebar"));
+    drain_pending_patch(&mut app, &mut tui).await?;
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Key(KeyCode::Enter.into()),
+    )
+    .await?;
+    assert!(app.chat_widget.has_active_modal());
+    assert!(!side_frame(&mut app, &mut tui, narrow)?.contains("Open in sidebar"));
     while let Ok(event) = rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
             app.insert_history_cell(&mut tui, cell);
@@ -327,6 +341,7 @@ async fn active_patch_approval_preserves_deferred_startup_protection() -> Result
                 thread_id.to_string(),
                 TURN_ID.to_string(),
                 ThreadItemPayload::AgentMessage {
+                    moderation: None,
                     id: "agent-1".to_string(),
                     text: "streaming".to_string(),
                     phase: None,

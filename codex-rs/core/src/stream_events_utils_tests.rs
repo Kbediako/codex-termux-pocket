@@ -315,7 +315,6 @@ async fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -
         step_context,
         turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
         tool_runtime,
-        defer_tool_dispatch: false,
         cancellation_token: CancellationToken::new(),
     }
 }
@@ -329,12 +328,14 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context)).await;
     let item = assistant_output_text("original assistant text");
 
-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
-        .await
-        .expect("assistant message should complete");
+    let output = handle_output_item_done(
+        &mut ctx, item, /*previously_active_item*/ None, /*moderation*/ None,
+    )
+    .await
+    .expect("assistant message should complete");
 
     assert_eq!(
-        output.last_agent_message.as_deref(),
+        output.last_agent_message.as_ref().map(|m| m.text.as_str()),
         Some("contributed assistant text")
     );
 }
@@ -362,9 +363,11 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
             "arguments": arguments.to_string(),
         }))
         .expect("direct input");
-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
-            .await
-            .expect("direct call should be handled");
+        let result = handle_output_item_done(
+            &mut ctx, call, /*previously_active_item*/ None, /*moderation*/ None,
+        )
+        .await
+        .expect("direct call should be handled");
         assert!(result.needs_follow_up);
         pending.push((
             arguments,
@@ -421,11 +424,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         }))
         .expect("direct input");
         pending.push(
-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
-                .await
-                .expect("direct call should be handled")
-                .tool_future
-                .expect("dispatched direct call"),
+            handle_output_item_done(
+                &mut ctx, call, /*previously_active_item*/ None, /*moderation*/ None,
+            )
+            .await
+            .expect("direct call should be handled")
+            .tool_future
+            .expect("dispatched direct call"),
         );
     }
     let current_config = session.get_config().await;
@@ -466,29 +471,46 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
     assert!(result.item.executed_tool_call_metadata().is_none());
 }
 
+#[test_case::test_case(false; "default_mode")]
+#[test_case::test_case(true; "plan_mode")]
 #[tokio::test]
-async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text() {
+async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text(plan_mode: bool) {
     let (mut session, turn_context) = make_session_and_context().await;
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
     builder.turn_item_contributor(Arc::new(RewriteAgentMessageContributor));
     session.services.extensions = Arc::new(builder.build());
     let turn_store = ExtensionData::new(turn_context.sub_id.clone());
-    let item = assistant_output_text("<oai-mem-citation>hidden only</oai-mem-citation>");
+    let mut item = assistant_output_text("<oai-mem-citation>hidden only</oai-mem-citation>");
+    let ResponseItem::Message {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut item
+    else {
+        panic!("expected assistant message");
+    };
+    internal_chat_message_metadata_passthrough
+        .get_or_insert_default()
+        .content_token_count = Some(23);
 
     let finalized = finalize_non_tool_response_item(
         &session,
         TurnItemContributorPolicy::Run(&turn_store),
         &item,
-        /*plan_mode*/ false,
+        plan_mode,
     )
     .await
     .expect("assistant message should parse");
 
     assert_eq!(
-        finalized.facts.last_agent_message.as_deref(),
+        finalized
+            .facts
+            .last_agent_message
+            .as_ref()
+            .map(|m| m.text.as_str()),
         Some("contributed assistant text")
     );
     assert!(finalized.facts.defers_mailbox_delivery_to_next_turn);
+    assert_eq!(finalized.content_token_count, Some(23));
 }
 
 #[test_case::test_case(MessagePhase::Commentary; "commentary")]
@@ -512,7 +534,11 @@ async fn finalized_turn_item_keeps_mailbox_open_for_nonterminal_text(phase: Mess
     .expect("assistant message should parse");
 
     assert_eq!(
-        finalized.facts.last_agent_message.as_deref(),
+        finalized
+            .facts
+            .last_agent_message
+            .as_ref()
+            .map(|m| m.text.as_str()),
         Some("contributed assistant text")
     );
     assert!(!finalized.facts.defers_mailbox_delivery_to_next_turn);

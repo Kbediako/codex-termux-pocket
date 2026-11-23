@@ -8,8 +8,10 @@ use codex_features::Features;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::RequestCountry;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
@@ -17,12 +19,15 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::TurnContextItem;
 use std::sync::Arc;
 
 /// Model and execution settings selected for an individual model step within
 /// a turn. A turn may contain several steps, each using its own captured settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StepSettings {
+    /// Trusted host country captured for requests issued with these settings.
+    pub(crate) request_country: RequestCountry,
     pub(crate) collaboration_mode: CollaborationMode,
     /// `None` follows the pinned model's default.
     pub(crate) reasoning_summary: Option<ReasoningSummary>,
@@ -53,6 +58,10 @@ pub(crate) struct ResolvedStepSettings {
 }
 
 impl ResolvedStepSettings {
+    pub(crate) fn request_country(&self) -> &RequestCountry {
+        &self.selected.request_country
+    }
+
     /// Derives request values from selected settings and pinned metadata.
     pub(super) fn new(
         selected: Arc<StepSettings>,
@@ -85,6 +94,15 @@ impl ResolvedStepSettings {
         self.reasoning_effort()
             .or(self.model_info.default_reasoning_level.as_ref())
             .cloned()
+    }
+
+    pub(super) fn active_collaboration_mode(
+        &self,
+        previous: Option<&TurnContextItem>,
+    ) -> Option<ModeKind> {
+        let mode = self.selected.collaboration_mode.mode;
+        (mode == ModeKind::Plan || previous.is_some_and(|item| item.collaboration_mode.is_some()))
+            .then_some(mode)
     }
 
     pub(crate) fn effective_collaboration_mode(&self) -> CollaborationMode {
@@ -215,6 +233,8 @@ impl ModelInfoOverrides {
 /// that full value for another. Merge the requested edits with each target.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StepSettingsUpdate {
+    /// Omission preserves the runtime country.
+    pub(crate) request_country: Option<RequestCountry>,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<Option<ReasoningEffort>>,
     /// A complete collaboration mode takes precedence over model and effort edits.
@@ -256,6 +276,9 @@ impl StepSettings {
         constraints: &StepSettingsConstraints<'_>,
     ) -> ConstraintResult<Self> {
         let mut next = self.clone();
+        if let Some(request_country) = &update.request_country {
+            next.request_country.clone_from(request_country);
+        }
         next.collaboration_mode = update.collaboration_mode.clone().unwrap_or_else(|| {
             self.collaboration_mode.with_updates(
                 update.model.clone(),

@@ -39,7 +39,6 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
         let cwd = repo_root.clone();
         let methods = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::clone(&methods);
-        let server_home = codex_home.path().to_path_buf();
         let server = tokio::spawn(async move {
             let mut clients = tokio::task::JoinSet::new();
             let trust_reads = Arc::new(AtomicUsize::new(0));
@@ -49,7 +48,6 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
                     .await
                     .expect("accept fake app-server client");
                 let cwd = cwd.clone();
-                let server_home = server_home.clone();
                 let methods = Arc::clone(&requests);
                 let trust_reads = Arc::clone(&trust_reads);
                 clients.spawn(async move {
@@ -70,13 +68,15 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
                     launch_thread["cwd"] = json!(cwd);
                     launch_thread["preview"] = json!("Launch-folder task");
                     launch_thread["updatedAt"] = json!(1);
+                    let mut pending_hooks = None;
+                    let mut saw_model_list = false;
                     while let Some(Ok(Message::Text(text))) = socket.next().await {
                         let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
                             continue;
                         };
                         methods.lock().unwrap().push(request.method.clone());
                         let result = match request.method.as_str() {
-                            "initialize" => json!({"userAgent": "trust-pty/0.0.0", "codexHome": server_home, "platformFamily": std::env::consts::FAMILY, "platformOs": std::env::consts::OS}),
+                            "initialize" => json!({"userAgent": "trust-pty"}),
                             "experimentalFeature/list" => json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
                                 "name": name, "stage": "stable", "displayName": null,
                                 "description": null, "announcement": null,
@@ -136,13 +136,21 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
                                 continue;
                             }
                         };
-                        socket
-                            .send(Message::Text(
-                                json!({"id": request.id, "result": result})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await?;
+                        let response = Message::Text(
+                            json!({"id": request.id, "result": result}).to_string().into(),
+                        );
+                        // Startup must request the catalog even while hooks/list is outstanding.
+                        if request.method == "hooks/list" && !saw_model_list {
+                            pending_hooks = Some(response);
+                            continue;
+                        }
+                        socket.send(response).await?;
+                        if request.method == "model/list" {
+                            saw_model_list = true;
+                            if let Some(hooks) = pending_hooks.take() {
+                                socket.send(hooks).await?;
+                            }
+                        }
                     }
                     Ok(())
                 });
@@ -160,6 +168,7 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
         };
         for (expected, input) in [
             (prompt, b"\x1b".as_slice()),
+            ("Launch-folder task", b"\x1b"),
             ("Launch-folder task", b"\x1b[Bn"),
             (prompt, b"\x1b"),
             ("n new", b"n"),
@@ -214,6 +223,13 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
         drop(terminal);
         server.abort();
         let methods = methods.lock().unwrap();
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "model/list")
+                .count(),
+            1
+        );
         let mutations: Vec<_> = methods
             .iter()
             .map(String::as_str)

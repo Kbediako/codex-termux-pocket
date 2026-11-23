@@ -138,7 +138,7 @@ impl App {
         &mut self,
         tui: &mut tui::Tui,
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
         result: std::result::Result<crate::chatwidget::ThreadUsageOutcome, String>,
     ) -> Result<()> {
         let may_update_status = match &result {
@@ -295,6 +295,11 @@ impl App {
     }
 
     pub(super) fn open_url_in_browser(&mut self, url: String) {
+        if let Some(thread_id) = crate::thread_links::thread_id(&url) {
+            self.app_event_tx
+                .send(AppEvent::OpenThreadLink { thread_id });
+            return;
+        }
         if let Err(err) = webbrowser::open(&url) {
             self.chat_widget
                 .add_error_message(format!("Failed to open browser for {url}: {err}"));
@@ -496,40 +501,15 @@ fn windows_desktop_app_launch_script(url: &str) -> String {
 $ErrorActionPreference = 'Stop'
 $url = {url}
 
-$package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue
+$package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue |
+    Where-Object {{ $_.PublisherId -in @('2p2nqsd0c76g0', '3k8sg7r9htsxt') }} |
+    Select-Object -First 1
 if ($null -eq $package) {{
     Write-Error 'Desktop app package is not installed'
     exit 1
 }}
 
-$manifest = Get-AppxPackageManifest -Package $package.PackageFullName
-$application = $manifest.Package.Applications.Application |
-    Where-Object {{
-        @($_.Extensions.Extension) | Where-Object {{
-            $_.Category -eq 'windows.protocol' -and $_.Protocol.Name -eq 'codex'
-        }}
-    }} |
-    Select-Object -First 1
-if ($null -eq $application -or [string]::IsNullOrWhiteSpace($application.Executable)) {{
-    Write-Error 'Desktop app package does not declare a codex protocol executable'
-    exit 1
-}}
-
-# Launch the package-declared protocol executable rather than an internal Electron shim.
-# Windows can deny direct starts of internal executables under WindowsApps.
-$exe = Join-Path $package.InstallLocation $application.Executable
-$appDir = Split-Path -Parent $exe
-$app = Join-Path $appDir 'resources\app.asar'
-if (-not (Test-Path $exe)) {{
-    Write-Error "Desktop app executable not found at $exe"
-    exit 1
-}}
-if (-not (Test-Path $app)) {{
-    Write-Error "Desktop app bundle not found at $app"
-    exit 1
-}}
-
-Start-Process -FilePath $exe -WorkingDirectory $appDir -ArgumentList @('resources\app.asar', $url)
+Start-Process -FilePath $url
 "#
     )
 }

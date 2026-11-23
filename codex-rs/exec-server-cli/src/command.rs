@@ -15,9 +15,11 @@ use codex_websocket_auth::WebsocketAuthArgs;
 
 use crate::config::load_exec_server_config;
 use crate::config::load_exec_server_remote_auth_provider;
+use crate::config::read_chatgpt_stdin_auth;
 use crate::exec_server_auth;
 use crate::exec_server_credential::ExecutorCredentialPipe;
 use crate::exec_server_telemetry;
+use crate::exec_server_telemetry::ParentLifetime;
 
 /// [EXPERIMENTAL] Run the standalone exec-server service.
 #[derive(Debug, Parser)]
@@ -39,6 +41,14 @@ pub struct ExecServerCommand {
     #[arg(long, value_name = "MODE", default_value = "isolate", global = true)]
     linux_sandbox_pid_namespace: codex_sandboxing::LinuxSandboxPidNamespace,
 
+    /// Route managed Linux sandbox TCP through the SOCKS proxy.
+    #[arg(long, global = true)]
+    linux_sandbox_transparent_tcp: bool,
+
+    /// Require this HTTP CONNECT proxy for raw TCP from the managed SOCKS listener.
+    #[arg(long, value_name = "HOST:PORT", global = true)]
+    tcp_upstream_proxy: Option<codex_exec_server::TcpUpstreamProxy>,
+
     /// Allow permitted private IP destinations to use the configured upstream proxy.
     /// If no valid upstream proxy applies to the request protocol, connect directly.
     /// Loopback stays local. This flag does not require upstream routing.
@@ -58,11 +68,7 @@ pub struct ExecServerCommand {
     request_dispatch_mode: codex_exec_server::RequestDispatchMode,
 
     /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`.
-    #[arg(
-        long = "listen",
-        value_name = "URL",
-        conflicts_with = "exec_server_remote"
-    )]
+    #[arg(long = "listen", value_name = "URL")]
     listen: Option<String>,
 
     #[command(flatten)]
@@ -106,6 +112,15 @@ pub struct ExecServerCommand {
     )]
     use_agent_identity_auth: bool,
 
+    /// Read one registration bearer from stdin.
+    #[arg(
+        long,
+        requires = "exec_server_remote",
+        conflicts_with_all = ["use_agent_identity_auth", "executor_credential_stdin", "aws_sigv4"],
+        global = true
+    )]
+    registration_bearer_stdin: bool,
+
     /// Read rotating executor credentials from stdin; exit when the pipe closes.
     #[arg(
         long = "executor-credential-stdin",
@@ -114,6 +129,18 @@ pub struct ExecServerCommand {
         global = true
     )]
     executor_credential_stdin: bool,
+
+    /// Read a ChatGPT access token from stdin for HTTPS registration.
+    #[arg(
+        long,
+        requires = "exec_server_remote",
+        conflicts_with_all = ["use_agent_identity_auth", "aws_sigv4", "executor_credential_stdin", "registration_bearer_stdin"]
+    )]
+    chatgpt_token_stdin: bool,
+
+    /// ChatGPT account ID. Must match the token's account claim when present.
+    #[arg(long, value_name = "ID", requires = "chatgpt_token_stdin")]
+    chatgpt_account_id: Option<String>,
 
     /// Sign Direct registration and WebSocket handshake requests with AWS SigV4.
     #[arg(long = "aws-sigv4", requires = "exec_server_remote", global = true)]
@@ -180,7 +207,9 @@ impl ExecServerCommand {
             arg0_paths.codex_linux_sandbox_exe.clone(),
         )?
         .with_linux_sandbox_pid_namespace(self.linux_sandbox_pid_namespace)
+        .with_linux_sandbox_transparent_tcp(self.linux_sandbox_transparent_tcp)
         .with_proxy_private_ips_via_upstream(self.proxy_private_ips_via_upstream);
+        runtime_paths.tcp_upstream_proxy = self.tcp_upstream_proxy.take();
         // Config loading below owns error handling (non-strict stdio can proceed
         // without config). Never retain other startup flags in the executor.
         if let Ok(overrides) = root_config_overrides.parse_overrides() {
@@ -194,30 +223,59 @@ impl ExecServerCommand {
             let environment_id = self.environment_id.take().ok_or_else(|| {
                 anyhow::anyhow!("--environment-id is required when --remote is set")
             })?;
-            let config =
-                load_exec_server_config(root_config_overrides, strict_config, enable_cloud_config)
-                    .await?;
+            let registration_auth = self
+                .registration_bearer_stdin
+                .then(codex_exec_server::registration_auth_from_stdin)
+                .transpose()?;
+            let stdin_auth = if self.chatgpt_token_stdin {
+                codex_http_client::validate_https_endpoint_url(&base_url, "ChatGPT token registry")
+                    .map_err(anyhow::Error::msg)?;
+                Some(read_chatgpt_stdin_auth(self.chatgpt_account_id.take())?)
+            } else {
+                None
+            };
+            let config = load_exec_server_config(
+                root_config_overrides,
+                strict_config,
+                enable_cloud_config,
+                stdin_auth.as_ref(),
+            );
+            let mut parent_lifetime = if self.exit_on_stdin_close && stdin_auth.is_some() {
+                ParentLifetime::MonitoredStdin(exec_server_telemetry::monitor_stdin_close())
+            } else if self.exit_on_stdin_close {
+                ParentLifetime::StdinPipe
+            } else {
+                ParentLifetime::Independent
+            };
+            let config = match &mut parent_lifetime {
+                ParentLifetime::MonitoredStdin(closed) => tokio::select! {
+                    biased;
+                    _ = closed => return Ok(()),
+                    config = config => config?,
+                },
+                ParentLifetime::StdinPipe | ParentLifetime::Independent => config.await?,
+            };
             let direct_transport = self.remote_transport == ExecServerRemoteTransport::Direct;
             // Configured exporters may contain account-wide credentials or client keys.
             // The scoped executor must not initialize those exporters.
             let telemetry_config = (!self.executor_credential_stdin).then_some(&config);
             let (_otel, telemetry) = exec_server_telemetry::init(telemetry_config);
             let mut credential_provider = None;
-            let mut parent_lifetime = if self.exit_on_stdin_close {
-                exec_server_telemetry::ParentLifetime::StdinPipe
-            } else {
-                exec_server_telemetry::ParentLifetime::Independent
-            };
             let auth_provider: codex_api::SharedAuthProvider = if self.executor_credential_stdin {
                 let ExecutorCredentialPipe {
                     provider,
                     parent_closed,
                 } = ExecutorCredentialPipe::from_stdin(environment_id.trim().to_string());
                 provider.wait_for_initial().await?;
-                parent_lifetime =
-                    exec_server_telemetry::ParentLifetime::MonitoredStdin(parent_closed);
+                parent_lifetime = ParentLifetime::MonitoredStdin(parent_closed);
                 credential_provider = Some(Arc::clone(&provider));
                 provider
+            } else if let Some(auth) = stdin_auth {
+                anyhow::ensure!(
+                    config.auth_config().allows_auth(&auth),
+                    "ChatGPT authentication is not permitted for this account"
+                );
+                codex_model_provider::auth_provider_from_auth(&auth)
             } else if self.aws_sigv4 {
                 exec_server_auth::aws_sigv4_auth_provider(
                     codex_aws_auth::AwsAuthConfig {
@@ -228,6 +286,8 @@ impl ExecServerCommand {
                     config.http_client_factory(),
                 )
                 .await?
+            } else if let Some(provider) = registration_auth {
+                provider
             } else {
                 load_exec_server_remote_auth_provider(
                     &config,
@@ -239,7 +299,13 @@ impl ExecServerCommand {
             let mut remote_config = codex_exec_server::RemoteEnvironmentConfig::new_with_transport(
                 base_url,
                 environment_id,
-                if direct_transport {
+                if let Some(listen) = self.listen.as_deref() {
+                    let address = listen
+                        .strip_prefix("ws://")
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("remote --listen requires ws://IP:PORT"))?;
+                    codex_exec_server::RemoteEnvironmentTransport::NoiseInbound(address)
+                } else if direct_transport {
                     codex_exec_server::RemoteEnvironmentTransport::Direct
                 } else {
                     codex_exec_server::RemoteEnvironmentTransport::Noise
@@ -247,8 +313,10 @@ impl ExecServerCommand {
                 auth_provider,
                 config.http_client_factory(),
             )?;
-            if self.executor_credential_stdin {
+            if self.executor_credential_stdin || self.registration_bearer_stdin {
                 remote_config = remote_config.with_executor_credential_auth()?;
+            } else if self.chatgpt_token_stdin {
+                remote_config = remote_config.with_registry_bearer_redaction();
             }
             if let Some(name) = self.name {
                 remote_config.name = name;
@@ -297,9 +365,13 @@ impl ExecServerCommand {
             }
             result
         } else {
-            let config_result =
-                load_exec_server_config(root_config_overrides, strict_config, enable_cloud_config)
-                    .await;
+            let config_result = load_exec_server_config(
+                root_config_overrides,
+                strict_config,
+                enable_cloud_config,
+                /*stdin_auth*/ None,
+            )
+            .await;
             let config = if strict_config {
                 Some(config_result?)
             } else {
@@ -331,7 +403,7 @@ impl ExecServerCommand {
                     self.request_dispatch_mode,
                     websocket_auth,
                 ),
-                exec_server_telemetry::ParentLifetime::Independent,
+                ParentLifetime::Independent,
                 exec_server_telemetry::ShutdownBehavior::Immediate,
             );
             run.await.map_err(anyhow::Error::from_boxed)
@@ -342,11 +414,32 @@ impl ExecServerCommand {
         self.remote.is_some()
             && self.command.is_none()
             && !self.executor_credential_stdin
+            && !self.registration_bearer_stdin
             && !self.aws_sigv4
             && !self.use_agent_identity_auth
     }
 
     fn validate_remote_transport(&self) -> anyhow::Result<()> {
+        // Clap checks global flag conflicts separately on either side of `forward`.
+        if self.registration_bearer_stdin && self.executor_credential_stdin {
+            anyhow::bail!(
+                "--registration-bearer-stdin cannot be used with --executor-credential-stdin"
+            );
+        }
+        anyhow::ensure!(
+            !self.chatgpt_token_stdin || self.command.is_none(),
+            "--chatgpt-token-stdin cannot be used with forward"
+        );
+        anyhow::ensure!(
+            self.remote.is_none()
+                || self.listen.is_none()
+                || (self.remote_transport == ExecServerRemoteTransport::Noise
+                    && self.command.is_none()
+                    && self.listen.as_deref().is_some_and(|s| s
+                        .strip_prefix("ws://")
+                        .is_some_and(|v| v.parse::<std::net::SocketAddr>().is_ok()))),
+            "remote --listen requires ws://IP:PORT, Noise transport, and no forward"
+        );
         match (self.remote_transport, self.aws_sigv4) {
             (ExecServerRemoteTransport::Noise, true) => {
                 anyhow::bail!("--aws-sigv4 requires --remote-transport direct");

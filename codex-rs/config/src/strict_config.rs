@@ -5,6 +5,7 @@ use crate::ConfigLayerStack;
 use crate::ConfigRequirementsToml;
 use crate::NetworkRequirementsToml;
 use crate::RequirementsLayerEntry;
+use crate::config_layer_source::status_line_provider_is_valid;
 use crate::config_toml::ConfigToml;
 use crate::diagnostics::ConfigDiagnosticSource;
 use crate::diagnostics::ConfigError;
@@ -22,6 +23,7 @@ use serde::de::DeserializeOwned;
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::fmt::Write;
+use std::io;
 use std::path::Path;
 use toml::Value as TomlValue;
 
@@ -226,6 +228,31 @@ fn push_ignored_path_segments(path: &serde_ignored::Path<'_>, segments: &mut Vec
     }
 }
 
+pub(crate) fn status_line_provider_warning(
+    config: &ConfigLayerStack,
+    strict_config: bool,
+) -> io::Result<Option<String>> {
+    let mut providers = config
+        .layers_high_to_low()
+        .filter(|layer| strict_config || layer.name.allows_status_line_provider())
+        .filter_map(|layer| Some((&layer.name, status_line_provider_is_valid(&layer.config)?)));
+    // Normal mode warns about the winning selection. Strict mode checks every source.
+    let selection = if strict_config {
+        providers.find(|(_, valid)| !valid)
+    } else {
+        providers.next()
+    };
+    let Some((source, false)) = selection else {
+        return Ok(None);
+    };
+    let source = bounded_label(&format_config_layer_source(source, CONFIG_TOML_FILE));
+    let message = format!("Invalid `tui.status_line_provider` in {source}.");
+    if strict_config {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    }
+    Ok(Some(format!("{message} Using the built-in status line.")))
+}
+
 pub(crate) fn ignored_config_warning(
     config: &ConfigLayerStack,
     requirements: &[RequirementsLayerEntry],
@@ -312,6 +339,15 @@ pub(crate) fn ignored_config_warning(
             .collect::<Vec<_>>()
             .as_slice()
         {
+            ["auto_review", "experimental_denial_reconsideration_prompt"] => {
+                " Remove auto_review.experimental_denial_reconsideration_prompt from config.toml; Guardian retries replay the original request without a reconsideration prompt."
+            }
+            ["auto_review", "experimental_policy_template"] => {
+                " Remove auto_review.experimental_policy_template from config.toml."
+            }
+            ["auto_review", "extra_policy"] => {
+                " To enforce additional Guardian rules, set guardian_extra_policy in managed requirements.toml."
+            }
             ["windows", "sandbox_private_desktop"] => {
                 " Remove windows.sandbox_private_desktop; legacy Windows sandboxes always use a private desktop."
             }

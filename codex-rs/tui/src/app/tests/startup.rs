@@ -932,11 +932,12 @@ async fn unattended_modals_survive_unfinished_terminal_input() -> Result<()> {
     crossterm::event::buffer_input(b"\rya")?;
     app.render_thread_snapshot(
         &mut tui,
-        &app_server,
+        &mut app_server,
         thread_id,
         snapshot,
         /*resume_restored_queue*/ false,
-    )?;
+    )
+    .await?;
     assert!(app.chat_widget.has_active_modal());
     let before = tui.terminal.previous_buffer().clone();
     let cursor = tui.terminal.last_known_cursor_pos;
@@ -1053,6 +1054,7 @@ async fn auto_declined_mcp_elicitations_do_not_leave_startup_quarantine_armed() 
             let request = ServerRequest::McpServerElicitationRequest {
                 request_id: AppServerRequestId::Integer(10),
                 params: McpServerElicitationRequestParams {
+                    environment_id: None,
                     thread_id: thread_id.to_string(),
                     turn_id: Some("turn-auth".to_string()),
                     server_name: "payments".to_string(),
@@ -1304,6 +1306,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
@@ -1320,7 +1323,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(temp_dir.path().join("not-yet-materialized.jsonl")),
-            cwd: session.cwd.clone(),
+            cwd: session.cwd.clone().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
@@ -1365,7 +1368,10 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
 
 #[tokio::test]
 async fn startup_thread_started_submits_queued_startup_input() {
-    let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let (mut app, mut events, mut op_rx) = make_test_app_with_channels().await;
+    set_chatgpt_auth(&mut app.chat_widget);
+    let model = "unlisted-model";
+    app.harness_overrides.model = Some(model.into());
     app.pending_startup_thread_start = true;
     app.chat_widget
         .set_queue_submissions_until_session_configured(/*queue*/ true);
@@ -1384,11 +1390,13 @@ async fn startup_thread_started_submits_queued_startup_input() {
     ))
     .await
     .expect("embedded app server");
-    let thread_id = ThreadId::new();
+    let mut session = test_thread_session(ThreadId::new(), test_path_buf("/tmp/project"));
+    session.model = model.into();
+    session.model_provider_id = "openai".into();
     app.handle_startup_thread_started(
         &mut app_server,
         Ok(AppServerStartedThread {
-            session: test_thread_session(thread_id, test_path_buf("/tmp/project")),
+            session,
             turns: Vec::new(),
             blocks_direct_input: false,
             task_tools_available: false,
@@ -1397,6 +1405,19 @@ async fn startup_thread_started_submits_queued_startup_input() {
     .await
     .expect("startup thread should attach");
 
+    let warnings: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) if !cell.warning_entries().is_empty() => {
+                Some(lines_to_single_string(&cell.display_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect();
+    insta::assert_snapshot!(warnings.join("\n"), @r"
+    ⚠ Your ChatGPT model list doesn't include `unlisted-model`. Check the spelling
+      or use /model to choose another model.
+    ");
+    assert_eq!(app.chat_widget.current_model(), model);
     match next_user_turn_op(&mut op_rx) {
         Op::UserTurn { items, .. } => assert_eq!(
             items,
@@ -1488,8 +1509,9 @@ async fn remote_overview_startup_hides_disabled_older_server_notice() -> Result<
             .remote_connection
             .as_ref()
             .expect("remote status")
-            .version,
-        "v2.0.0"
+            .version
+            .as_deref(),
+        Some("v2.0.0")
     );
     app.local_settings.tui.show_server_version_notice = true;
     app.refresh_server_version_overview_notice("2.1.0");
@@ -1525,6 +1547,7 @@ async fn startup_thread_started_discards_another_threads_buffered_events() {
     let other_thread_id = ThreadId::new();
     app.enqueue_primary_thread_notification(ServerNotification::McpServerStatusUpdated(
         McpServerStatusUpdatedNotification {
+            environment_id: None,
             thread_id: Some(other_thread_id.to_string()),
             name: "other".to_string(),
             status: McpServerStartupState::Starting,
@@ -1739,6 +1762,7 @@ async fn send_failed_mcp_startup(
         app_server,
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+                environment_id: None,
                 thread_id: Some(thread_id.to_string()),
                 name: "fixture".to_string(),
                 status: McpServerStartupState::Failed,
@@ -1908,12 +1932,12 @@ async fn ignore_same_thread_resume_allows_retrying_read_only_view() -> Result<()
             history_mode: None,
         })
     );
-    let app_server =
+    let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.render_thread_snapshot(
         &mut tui,
-        &app_server,
+        &mut app_server,
         thread_id,
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
@@ -1924,7 +1948,8 @@ async fn ignore_same_thread_resume_allows_retrying_read_only_view() -> Result<()
             input_state: None,
         },
         /*resume_restored_queue*/ false,
-    )?;
+    )
+    .await?;
     assert!(app.chat_widget.is_external_writer_view());
     assert!(!app.chat_widget.is_task_running_for_test());
     Ok(())
@@ -2057,117 +2082,125 @@ async fn provider_resume_retries_via_picker_preserve_fresh_errors_and_drafts() -
 }
 
 async fn check_provider_resume_retries(reopen_via: ProviderResumeRoute) -> Result<()> {
-    for provider_configured in [false, true] {
-        let mut app = Box::pin(make_test_app()).await;
-        let home = app.config.codex_home.clone();
-        let definition = "[model_providers.missing_provider]\nname = 'Saved provider'\nbase_url = 'http://127.0.0.1:12345/v1'\nwire_api = 'responses'\n";
-        let config = if provider_configured {
-            format!("[tui]\nresume_cwd = 'current'\n{definition}")
-        } else {
-            "[tui]\nresume_cwd = 'current'\n".to_string()
-        };
-        std::fs::write(home.join("config.toml"), config)?;
-        crate::legacy_core::config::set_project_trust_level(
+    let mut app = Box::pin(make_test_app()).await;
+    let home = app.config.codex_home.clone();
+    let definition = "[model_providers.missing_provider]\nname = 'Saved provider'\nbase_url = 'http://127.0.0.1:12345/v1'\nwire_api = 'responses'\n";
+    let config = "[tui]\nresume_cwd = 'current'\n";
+    std::fs::write(home.join("config.toml"), config)?;
+    crate::legacy_core::config::set_project_trust_level(
+        home.as_path(),
+        app.config.cwd.as_path(),
+        codex_protocol::config_types::TrustLevel::Trusted,
+    )
+    .map_err(std::io::Error::other)?;
+    let thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_rollout(
             home.as_path(),
-            app.config.cwd.as_path(),
-            codex_protocol::config_types::TrustLevel::Trusted,
+            "2025-01-05T12-00-00",
+            "2025-01-05T12:00:00Z",
+            "Saved provider history",
+            Some("missing_provider"),
+            /*git_info*/ None,
         )
-        .map_err(std::io::Error::other)?;
-        let thread_id = ThreadId::from_string(
-            &app_test_support::create_fake_rollout(
-                home.as_path(),
-                "2025-01-05T12-00-00",
-                "2025-01-05T12:00:00Z",
-                "Saved provider history",
-                Some("missing_provider"),
-                /*git_info*/ None,
-            )
-            .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?,
-        )?;
-        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        let target = crate::resume_picker::SessionTarget {
-            backend_id: server.backend_id(),
-            path: None,
-            thread_id,
-            cwd: None,
-            history_mode: None,
-        };
-        Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone())).await?;
-        assert!(app.chat_widget.has_provider_error());
-        assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
-        let turns = app.thread_event_channels[&thread_id]
-            .store
-            .lock()
-            .await
-            .snapshot()
-            .turns;
-        assert!(serde_json::to_string(&turns)?.contains("Saved provider history"));
-        assert!(!app.ignore_same_thread_resume(&target));
-        app.chat_widget
-            .apply_external_edit("Preserved draft".into());
-        for current_provider in ["other_provider", "missing_provider"] {
-            if !matches!(reopen_via, ProviderResumeRoute::SameThread) {
-                let other_id = ThreadId::from_string(
-                    &app_test_support::create_fake_rollout(
-                        home.as_path(),
-                        "2025-01-05T13-00-00",
-                        "2025-01-05T13:00:00Z",
-                        "Other chat",
-                        Some("openai"),
-                        /*git_info*/ None,
-                    )
-                    .expect("other chat"),
-                )?;
-                Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, other_id))
-                    .await?;
-                assert_eq!(app.chat_widget.thread_id(), Some(other_id));
-                assert!(
-                    app.agents_overview.input_states[&thread_id]
-                        .provider_error
-                        .is_some()
-                );
-            }
-            std::fs::write(
-                home.join("config.toml"),
-                format!(
-                    "model_provider = '{current_provider}'\n[tui]\nresume_cwd = 'current'\n{definition}\n{}",
-                    definition.replace("missing_provider", "other_provider")
-                ),
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?,
+    )?;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let target = crate::resume_picker::SessionTarget {
+        backend_id: server.backend_id(),
+        path: None,
+        thread_id,
+        cwd: None,
+        history_mode: None,
+    };
+    Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone())).await?;
+    assert!(app.chat_widget.has_provider_error());
+    assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+    let turns = app.thread_event_channels[&thread_id]
+        .store
+        .lock()
+        .await
+        .snapshot()
+        .turns;
+    assert!(serde_json::to_string(&turns)?.contains("Saved provider history"));
+    assert!(!app.ignore_same_thread_resume(&target));
+    app.chat_widget
+        .apply_external_edit("Preserved draft".into());
+    for provider_configured in [false, true] {
+        if !matches!(reopen_via, ProviderResumeRoute::SameThread) {
+            let other_id = ThreadId::from_string(
+                &app_test_support::create_fake_rollout(
+                    home.as_path(),
+                    "2025-01-05T13-00-00",
+                    "2025-01-05T13:00:00Z",
+                    "Other chat",
+                    Some("openai"),
+                    /*git_info*/ None,
+                )
+                .expect("other chat"),
             )?;
-            match reopen_via {
-                ProviderResumeRoute::Overview => {
-                    Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, thread_id))
-                        .await?;
-                }
-                ProviderResumeRoute::Picker => {
-                    Box::pin(app.apply_resume_picker_selection(
-                        &mut tui,
-                        &mut server,
-                        SessionSelection::Resume(target.clone()),
-                    ))
-                    .await?;
-                }
-                ProviderResumeRoute::SameThread => {
-                    Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone()))
-                        .await?;
-                }
-            }
-            let input = app.chat_widget.capture_thread_input_state().unwrap();
-            let expected_error = (current_provider != "missing_provider").then(|| {
-                codex_app_server_protocol::ModelProviderError::ModelProviderMismatch {
-                    model_provider: "missing_provider".into(),
-                    current_model_provider: current_provider.into(),
-                }
-            });
-            assert_eq!(input.provider_error, expected_error);
-            assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
-            assert_eq!(
-                app.chat_widget.composer_text_with_pending(),
-                "Preserved draft"
+            Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, other_id)).await?;
+            assert_eq!(app.chat_widget.thread_id(), Some(other_id));
+            assert!(
+                app.agents_overview.input_states[&thread_id]
+                    .provider_error
+                    .is_some()
             );
         }
-        server.shutdown().await?;
+        let saved_definition = if provider_configured { definition } else { "" };
+        std::fs::write(
+            home.join("config.toml"),
+            format!("model_provider = 'ollama'\n{config}{saved_definition}"),
+        )?;
+        match reopen_via {
+            ProviderResumeRoute::Overview => {
+                Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, thread_id))
+                    .await?;
+            }
+            ProviderResumeRoute::Picker => {
+                Box::pin(app.apply_resume_picker_selection(
+                    &mut tui,
+                    &mut server,
+                    SessionSelection::Resume(target.clone()),
+                ))
+                .await?;
+            }
+            ProviderResumeRoute::SameThread => {
+                Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone())).await?;
+            }
+        }
+        let input = app.chat_widget.capture_thread_input_state().unwrap();
+        let expected_error = (!provider_configured).then(|| {
+            codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
+                model_provider: "missing_provider".into(),
+            }
+        });
+        assert_eq!(input.provider_error, expected_error);
+        assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "Preserved draft"
+        );
+    }
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_switch_wait_applies_navigation_before_polling_terminal_input() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    app.config.features.enable(Feature::TuiMultiBackend)?;
+    let tui = crate::tui::test_support::make_test_tui()?;
+    while events.try_recv().is_ok() {}
+
+    for navigation in [
+        AppEvent::CycleNewConversationBackend,
+        AppEvent::ChooseNewSessionCheckout { name: None },
+    ] {
+        assert!(app.can_read_terminal_after_thread_switch(&tui, &events));
+        app.app_event_tx.send(navigation);
+        assert!(!app.can_read_terminal_after_thread_switch(&tui, &events));
+        assert!(events.try_recv().is_ok());
     }
     Ok(())
 }

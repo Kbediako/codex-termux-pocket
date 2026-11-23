@@ -19,6 +19,7 @@ mod original;
 #[path = "termux_read_only_seccomp.rs"]
 mod termux_read_only_seccomp;
 
+pub(crate) use original::ProxyRouting;
 pub(crate) use original::is_termux_prefix;
 
 pub(crate) fn apply_sandbox_policies_to_current_thread(
@@ -27,7 +28,7 @@ pub(crate) fn apply_sandbox_policies_to_current_thread(
     cwd: &Path,
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
-    proxy_routing_active: bool,
+    proxy_routing: Option<ProxyRouting>,
 ) -> Result<()> {
     match original::apply_sandbox_policies_to_current_thread(
         file_system_sandbox_policy,
@@ -35,7 +36,7 @@ pub(crate) fn apply_sandbox_policies_to_current_thread(
         cwd,
         apply_landlock_fs,
         managed_network,
-        proxy_routing_active,
+        proxy_routing,
     ) {
         Err(error)
             if apply_landlock_fs

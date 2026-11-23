@@ -135,6 +135,65 @@ class InstallShTest(unittest.TestCase):
             )
             self.assertTrue(os.access(host_path, os.X_OK))
 
+    def test_shell_lookup_after_adding_and_updating_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            for name in ["literal$HOME", r'quote" back\tslash and !tick`']:
+                install_dir = root / name
+                result, _ = run_installer_in(
+                    root,
+                    VERSION,
+                    install_dir=install_dir,
+                    metadata_json=metadata,
+                    archive_path=archive,
+                    checksum_path=checksum,
+                    force_macos=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+                env = {"HOME": str(root / "home"), "PATH": "/usr/bin:/bin"}
+                lookup = subprocess.check_output(
+                    ["/bin/sh", "-c", '. "$HOME/.profile" && command -v codex'],
+                    env=env,
+                    text=True,
+                )
+                self.assertEqual(lookup.rstrip("\n"), str(install_dir / "codex"))
+
+                instructions = result.stdout.split("Current terminal: ", 1)[1]
+                launched = subprocess.check_output(
+                    ["/bin/sh", "-c", instructions.splitlines()[0]], env=env, text=True
+                )
+                self.assertEqual(launched.strip(), f"codex-cli {VERSION}")
+
+    def test_noninteractive_install_detects_npm_by_shebang(self) -> None:
+        for launcher, is_npm in (
+            ("#!/usr/bin/env node\n", True),
+            ("\x7fELF\0#!/usr/bin/env node\n", False),
+        ):
+            with self.subTest(is_npm=is_npm), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                archive, checksum, metadata = create_package_release(root)
+                (root / "bin").mkdir()
+                write_executable(root / "bin" / "codex", launcher)
+
+                result, _ = run_installer_in(
+                    root,
+                    VERSION,
+                    metadata_json=metadata,
+                    archive_path=archive,
+                    checksum_path=checksum,
+                    force_macos=True,
+                    install_dir_on_path=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    "Leaving the existing npm-managed Codex installed" in result.stderr,
+                    is_npm,
+                )
+                self.assertEqual((root / "home" / ".profile").exists(), is_npm)
+
     def test_releases_latest_installs_verified_package_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -331,10 +390,32 @@ class InstallShTest(unittest.TestCase):
         function = "record_standalone_releases_in_use() {" + function + "\n}\n"
         function = function.replace("/usr/sbin/lsof ", "mock_lsof ")
         matches = "p123\nn/releases/active/bin/codex\n"
+        device = os.stat(tempfile.gettempdir()).st_dev
+        warning = (
+            "lsof: WARNING: can't stat() hfs file system {mount}\n"
+            "      Output information may be incomplete.\n"
+            '      assuming "dev={device}" from mount table\n'
+        )
+        unrelated = warning.format(mount="/Volumes/unrelated", device=f"{device + 1:x}")
         for status, output, error, expected in (
             (0, matches, "", 0),
             (1, "", "", 0),
             (1, matches, "", 0),
+            (1, matches, unrelated, 0),
+            (
+                1,
+                matches,
+                warning.format(mount="/Volumes/unrelated", device=f"00{device:X}"),
+                1,
+            ),
+            (
+                1,
+                matches,
+                warning.format(mount=tempfile.gettempdir(), device=f"{device + 1:x}"),
+                1,
+            ),
+            (1, matches, unrelated.rsplit("\n", 2)[0] + "\n", 1),
+            (1, matches, unrelated + "inspection failed\n", 1),
             (0, matches, "inspection failed\n", 1),
             (1, matches, "inspection failed\n", 1),
             (2, "", "", 1),
@@ -345,7 +426,7 @@ class InstallShTest(unittest.TestCase):
                     script = (
                         "set -eu\n"
                         "os=macos\n"
-                        "releases=/releases\n"
+                        f"releases={shlex.quote(temp_dir)}\n"
                         f"tmp_dir={shlex.quote(temp_dir)}\n"
                         # Avoid depending on other processes on the test host.
                         'ps() { printf "%s codex\\n" "$(id -u)"; }\n'
@@ -996,6 +1077,7 @@ def run_installer_in(
     release: str,
     *,
     installer_path: Path = INSTALL_SCRIPT,
+    install_dir: Path | None = None,
     metadata_failure: bool = False,
     metadata_json: str | None = None,
     releases_metadata_json: str | None = None,
@@ -1011,6 +1093,7 @@ def run_installer_in(
     fail_ps: bool = False,
     daemon_only: bool = False,
     manual_update: bool = False,
+    install_dir_on_path: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1138,11 +1221,15 @@ def run_installer_in(
 
     home = root / "home"
     home.mkdir(exist_ok=True)
+    install_dir = install_dir or root / "install-bin"
+    path = f"{bin_dir}:/usr/bin:/bin"
+    if install_dir_on_path:
+        path = f"{bin_dir}:{install_dir}:/usr/bin:/bin"
     env = os.environ.copy()
     env.update(
         {
             "CODEX_HOME": str(root / "codex-home"),
-            "CODEX_INSTALL_DIR": str(root / "install-bin"),
+            "CODEX_INSTALL_DIR": str(install_dir),
             "CODEX_NON_INTERACTIVE": "1",
             "CODEX_RELEASE": release,
             "CODEX_INSTALL_DAEMON_ONLY": "1" if daemon_only else "0",
@@ -1166,7 +1253,7 @@ def run_installer_in(
             "CODEX_TEST_RELEASES_MODE": releases_mode,
             "CODEX_TEST_REQUEST_LOG": str(request_log),
             "HOME": str(home),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PATH": path,
             "SHELL": "/bin/sh",
         }
     )

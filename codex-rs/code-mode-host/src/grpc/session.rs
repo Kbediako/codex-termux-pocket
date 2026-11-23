@@ -18,6 +18,7 @@ use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::grpc as proto;
 use codex_code_mode_protocol::host::MAX_PENDING_DELEGATE_CALLS;
 use codex_code_mode_runtime::InProcessCodeModeSession;
+use codex_code_mode_runtime::ToolPreload;
 use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
 use tokio::sync::OwnedSemaphorePermit;
@@ -54,6 +55,7 @@ pub(super) struct GrpcSession {
     events: EventSender,
     cells_changed: Notify,
     delegate_permits: Arc<Semaphore>,
+    client_delegate_permits: Arc<Semaphore>,
 }
 
 #[derive(Default)]
@@ -111,6 +113,8 @@ impl GrpcHostState {
     pub(super) fn open_session(
         self: &Arc<Self>,
         options: CodeModeSessionOptions,
+        max_pending_delegate_calls: usize,
+        tool_preloads: &'static [ToolPreload],
     ) -> Result<GrpcStream<proto::SessionEvent>, Status> {
         let id = Uuid::new_v4();
         let (events, receiver) = mpsc::channel(OUTGOING_CHANNEL_CAPACITY);
@@ -122,11 +126,14 @@ impl GrpcHostState {
             closed,
             Arc::clone(&self.delegate_permits),
             options,
+            max_pending_delegate_calls,
+            tool_preloads,
         );
         events
             .try_send(Ok(proto::SessionEvent {
                 event: Some(proto::session_event::Event::Opened(proto::SessionOpened {
                     session_id: id.to_string(),
+                    supports_catalog_revision: true,
                     output_truncation: match session.runtime.output_truncation() {
                         CodeModeOutputTruncation::Server => {
                             Some(proto::OutputTruncation::Server.into())
@@ -222,6 +229,8 @@ impl GrpcSession {
         closed: CancellationToken,
         delegate_permits: Arc<Semaphore>,
         options: CodeModeSessionOptions,
+        max_pending_delegate_calls: usize,
+        tool_preloads: &'static [ToolPreload],
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak: &Weak<Self>| {
             let failure_session = weak.clone();
@@ -233,15 +242,17 @@ impl GrpcSession {
             });
             Self {
                 id,
-                runtime: Arc::new(InProcessCodeModeSession::with_options(
+                runtime: Arc::new(InProcessCodeModeSession::with_options_and_tool_preloads(
                     options,
                     Some(failure_handler),
+                    tool_preloads,
                 )),
                 closed,
                 state: Mutex::new(SessionState::default()),
                 events,
                 cells_changed: Notify::new(),
                 delegate_permits,
+                client_delegate_permits: Arc::new(Semaphore::new(max_pending_delegate_calls)),
             }
         })
     }
@@ -420,10 +431,14 @@ impl GrpcSession {
         );
     }
 
-    pub(super) fn delegate_permit(&self) -> Result<OwnedSemaphorePermit, String> {
-        Arc::clone(&self.delegate_permits)
+    pub(super) fn delegate_permit(&self) -> Result<[OwnedSemaphorePermit; 2], String> {
+        let client = Arc::clone(&self.client_delegate_permits)
             .try_acquire_owned()
-            .map_err(|_| "code-mode host has too many pending delegate calls".to_string())
+            .map_err(|_| "code-mode session has too many pending delegate calls".to_string())?;
+        let host = Arc::clone(&self.delegate_permits)
+            .try_acquire_owned()
+            .map_err(|_| "code-mode host has too many pending delegate calls".to_string())?;
+        Ok([client, host])
     }
 
     pub(super) async fn send_event(

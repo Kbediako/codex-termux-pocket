@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value as JsonValue;
@@ -79,22 +80,18 @@ pub(crate) enum CellEvent {
     },
 }
 
+/// Ordered callback slots frozen for a cell. Sessions can share individual tool definitions.
+pub(crate) type ToolCatalog = Arc<[Arc<codex_code_mode_protocol::EnabledToolMetadata>]>;
+
 /// Transport-neutral input for creating a cell.
 ///
 /// The owning session assigns the cell ID when it admits the request.
 pub(crate) struct CreateCellRequest {
     pub(crate) output_truncation: codex_code_mode_protocol::CodeModeOutputTruncation,
     pub(crate) tool_call_id: String,
-    pub(crate) enabled_tools: Vec<ToolDefinition>,
+    pub(crate) enabled_tools: ToolCatalog,
+    pub(crate) tool_preloads: &'static [crate::ToolPreload],
     pub(crate) source: String,
-}
-
-/// Tool metadata exposed to code running inside a cell.
-pub(crate) struct ToolDefinition {
-    pub(crate) name: String,
-    pub(crate) tool_name: ToolName,
-    pub(crate) description: String,
-    pub(crate) kind: ToolKind,
 }
 
 /// A tool name with an optional namespace.

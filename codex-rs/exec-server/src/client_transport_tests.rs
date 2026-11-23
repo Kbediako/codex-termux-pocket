@@ -129,6 +129,7 @@ impl SequenceNoiseConnectProvider {
                 codex_http_client::OutboundProxyPolicy::ReqwestDefault,
             ),
             /*started*/ &mut None,
+            /*provisioning_deadline*/ &mut None,
         )
         .await
     }
@@ -161,6 +162,7 @@ impl NoiseRendezvousConnectProvider for SequenceNoiseConnectProvider {
 
 fn test_bundle(websocket_url: String) -> Result<NoiseRendezvousConnectBundle> {
     Ok(NoiseRendezvousConnectBundle {
+        http_headers: Default::default(),
         websocket_url,
         environment_id: "environment".to_string(),
         executor_registration_id: "registration".to_string(),
@@ -238,6 +240,35 @@ async fn noise_handshake_reports_disconnect_reason() -> Result<()> {
 }
 
 #[tokio::test]
+async fn noise_admission_headers_are_rejected_before_dialing_plaintext() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut bundle = test_bundle(format!("ws://{}", listener.local_addr()?))?;
+    bundle.http_headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("fake-token"),
+    );
+    let result = ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
+        bundle,
+        harness_identity: NoiseChannelIdentity::generate()?,
+        client_name: "test".to_string(),
+        connect_timeout: std::time::Duration::from_secs(1),
+        initialize_timeout: std::time::Duration::from_secs(1),
+        resume_session_id: None,
+        http_client_factory: codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    })
+    .await;
+    assert!(matches!(result, Err(ExecServerError::Protocol(_))));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn noise_handshake_uses_initialize_timeout() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let websocket_url = format!("ws://{}", listener.local_addr()?);
@@ -262,6 +293,7 @@ async fn noise_handshake_uses_initialize_timeout() -> Result<()> {
     let initialize_timeout = std::time::Duration::from_millis(1);
     let opened = ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
         bundle: NoiseRendezvousConnectBundle {
+            http_headers: Default::default(),
             websocket_url,
             environment_id: "environment".to_string(),
             executor_registration_id: "registration".to_string(),
@@ -415,6 +447,113 @@ async fn deferred_initialize_timeout_reports_configured_budget() {
     ));
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_startup_does_not_restart_exhausted_registry_retries() -> Result<()> {
+    let provider = Arc::new(SequenceNoiseConnectProvider::default());
+    for _ in 0..=INITIAL_REGISTRY_MAX_RETRIES {
+        provider.push_error(registry_error(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ));
+    }
+    let client = crate::client::LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::NoiseRendezvous {
+            provider: provider.clone(),
+            identity: NoiseChannelIdentity::generate()?,
+        },
+        codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    );
+    let started = tokio::time::Instant::now();
+    let (ready, first, second) =
+        tokio::join!(client.wait_until_ready(), client.get(), client.get());
+    assert!(ready.is_err());
+    assert!(first.is_err());
+    assert!(second.is_err());
+    assert_eq!(
+        provider.requested_keys().len(),
+        INITIAL_REGISTRY_MAX_RETRIES as usize + 1
+    );
+    assert!(started.elapsed() <= INITIAL_REGISTRY_OPERATION_TIMEOUT);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_retry_allows_registry_phase_to_finish_after_grace() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let provider = Arc::new(SequenceNoiseConnectProvider::default());
+    let bundle = test_bundle(format!("ws://{}", listener.local_addr()?))?;
+    provider.push_response(async move { Ok(bundle) });
+    provider.push_response(async {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Err(ExecServerError::Protocol(
+            "registry phase finished".to_string(),
+        ))
+    });
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let client = crate::client::LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::NoiseRendezvous {
+            provider: provider.clone(),
+            identity: NoiseChannelIdentity::generate()?,
+        },
+        codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    );
+    let error = client.get().await.err().expect("registry error");
+    assert!(
+        error.to_string().contains("registry phase finished"),
+        "{error}"
+    );
+    assert_eq!(provider.requested_keys().len(), 2);
+    server.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn initial_registry_auth_failure_remains_shared_by_readiness_and_get() -> Result<()> {
+    let provider = Arc::new(SequenceNoiseConnectProvider::default());
+    provider.push_error(ExecServerError::EnvironmentRegistryAuth(
+        "expired".to_string(),
+    ));
+    let client = crate::client::LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::NoiseRendezvous {
+            provider: provider.clone(),
+            identity: NoiseChannelIdentity::generate()?,
+        },
+        codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    );
+    assert!(
+        client
+            .wait_until_ready()
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("expired")
+    );
+    assert!(
+        client
+            .get()
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("expired")
+    );
+    assert_eq!(provider.requested_keys().len(), 1);
+    Ok(())
 }
 
 #[tokio::test(start_paused = true)]

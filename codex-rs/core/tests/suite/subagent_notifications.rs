@@ -1719,12 +1719,14 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         struct FailFirstClockRead(std::sync::atomic::AtomicBool);
 
         impl codex_core::TimeProvider for FailFirstClockRead {
-            fn current_time(&self, _thread_id: ThreadId) -> codex_core::TimeFuture<'_> {
+            fn current_time(
+                &self,
+                _thread_id: ThreadId,
+            ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
                 let already_read = self.0.swap(true, std::sync::atomic::Ordering::Relaxed);
-                Box::pin(async move {
-                    anyhow::ensure!(already_read, "parent clock unavailable");
-                    Ok(chrono::Utc::now())
-                })
+
+                anyhow::ensure!(already_read, "parent clock unavailable");
+                Ok(chrono::Utc::now())
             }
 
             fn sleep(
@@ -2006,14 +2008,21 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                 .as_ref()
                 .is_some_and(|history| !history.is_empty())
         );
+        let expected_window =
+            codex_protocol::ContextWindowId::parse(window_ids[1]).expect("UUIDv7 child window");
         assert_eq!(
             (
                 checkpoint.window_number,
-                checkpoint.first_window_id.as_deref(),
-                checkpoint.previous_window_id.as_deref(),
-                checkpoint.window_id.as_deref(),
+                checkpoint.first_window_id.as_ref(),
+                checkpoint.previous_window_id.as_ref(),
+                checkpoint.window_id.as_ref(),
             ),
-            (Some(0), Some(window_ids[1]), None, Some(window_ids[1]))
+            (
+                Some(0),
+                Some(&expected_window),
+                None,
+                Some(&expected_window)
+            )
         );
         assert!(
             child_request.has_message_with_input_texts("developer", |message| {

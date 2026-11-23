@@ -282,10 +282,7 @@ impl BottomPaneView for ExperimentalFeaturesView {
                 let mut count = 0;
                 for feature in features {
                     if feature.stage != ExperimentalFeatureStage::Beta
-                        || matches!(
-                            feature.name.as_str(),
-                            "daemon_auto_start" | "worktrees" | "realtime_conversation"
-                        )
+                        || matches!(feature.name.as_str(), "worktrees" | "realtime_conversation")
                     {
                         continue;
                     }
@@ -369,13 +366,6 @@ impl BottomPaneView for ExperimentalFeaturesView {
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
-        // After an attempted save, cancellation must remain possible even if the
-        // server rejects retries immediately. Explicit accept retries dirty keys.
-        if !self.unconfirmed.is_empty() {
-            self.save_special_controls();
-        } else {
-            self.save_changes();
-        }
         self.complete = true;
         CancellationEvent::Handled
     }
@@ -460,7 +450,7 @@ fn experimental_popup_hint_line(keymap: &ListKeymap) -> Line<'static> {
     if let Some(cancel) = keymap.primary_hint(ListAction::Cancel) {
         spans.push(" · ".into());
         spans.extend(cancel.spans());
-        spans.push(" save/close".into());
+        spans.push(" cancel".into());
     }
     Line::from(spans)
 }
